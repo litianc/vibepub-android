@@ -57,7 +57,7 @@ class AudioRecorder(private val context: Context) {
         return file
     }
 
-    suspend fun stop(): File = withContext(Dispatchers.IO) {
+    suspend fun stop(): Pair<File, Long> = withContext(Dispatchers.IO) {
         val file = checkNotNull(outputFile) { "No recording is active" }
         val activeRecorder = checkNotNull(recorder) { "No recording is active" }
         val startInst = checkNotNull(startTime)
@@ -123,7 +123,7 @@ class AudioRecorder(private val context: Context) {
         val finalFile = File(file.parent, finalName)
         file.renameTo(finalFile)
         
-        finalFile
+        Pair(finalFile, durationSecs * 1000L)
     }
 
     @SuppressLint("MissingPermission")

@@ -2,7 +2,7 @@ package cn.litianc.vibepub.ui.theme
 
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Typography
-import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextStyle
@@ -10,27 +10,22 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 
-val BackgroundColor = Color(0xFF000000)
-val SurfaceColor = Color(0xFF1C1C1E)
-val PrimaryRed = Color(0xFFE53935)
-val TextPrimary = Color(0xFFFFFFFF)
-val TextSecondary = Color(0xFF8E8E93)
-
-private val MinimalistDarkColors = darkColorScheme(
+private val VoiceDropLightColors = lightColorScheme(
     primary = PrimaryRed,
     onPrimary = Color.White,
     secondary = Color.White,
-    background = BackgroundColor,
-    surface = SurfaceColor,
-    onSurface = TextPrimary,
-    onSurfaceVariant = TextSecondary
+    background = CreamBackground,
+    surface = CardWhite,
+    onBackground = TextDarkGray,
+    onSurface = TextDarkGray,
+    onSurfaceVariant = TextSecondaryGray
 )
 
 val ModernTypography = Typography(
     displayLarge = TextStyle(
         fontFamily = FontFamily.SansSerif,
-        fontWeight = FontWeight.Bold,
-        fontSize = 32.sp
+        fontWeight = FontWeight.Thin,
+        fontSize = 80.sp
     ),
     titleLarge = TextStyle(
         fontFamily = FontFamily.SansSerif,
@@ -47,7 +42,7 @@ val ModernTypography = Typography(
 @Composable
 fun VibePubTheme(content: @Composable () -> Unit) {
     MaterialTheme(
-        colorScheme = MinimalistDarkColors,
+        colorScheme = VoiceDropLightColors,
         typography = ModernTypography,
         content = content,
     )

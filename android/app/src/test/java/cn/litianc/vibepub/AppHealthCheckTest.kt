@@ -30,13 +30,17 @@ class AppHealthCheckTest {
         // Open Settings
         composeTestRule.onNodeWithContentDescription("Settings").performClick()
 
-        // Clear it first
-        composeTestRule.onNodeWithText("FILES_TOKEN").performTextClearance()
+        // Click FILES_TOKEN row to open dialog
+        composeTestRule.onNodeWithText("FILES_TOKEN").performClick()
         
-        // Type into the UI
-        composeTestRule.onNodeWithText("FILES_TOKEN").performTextInput(testToken)
+        // Clear and type into the dialog's text field
+        composeTestRule.onNodeWithText("Token").performTextClearance()
+        composeTestRule.onNodeWithText("Token").performTextInput(testToken)
         
-        // Assert that the underlying SharedPreferences got updated immediately
+        // Click Save
+        composeTestRule.onNodeWithText("保存").performClick()
+        
+        // Assert that the underlying SharedPreferences got updated
         assertEquals(testToken, prefs.filesToken)
     }
 }

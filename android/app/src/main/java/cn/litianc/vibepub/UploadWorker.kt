@@ -43,6 +43,8 @@ class UploadWorker(
 
             val responseCode = connection.responseCode
             if (responseCode in 200..299) {
+                cn.litianc.vibepub.data.AppDatabase.getDatabase(applicationContext)
+                    .recordingDao().updateStatusByFilename(file.name, "TRANSCRIBED")
                 Result.success()
             } else if (responseCode >= 500) {
                 Result.retry()
