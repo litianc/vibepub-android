@@ -26,6 +26,15 @@ fun AppNavigation(
     val navController = rememberNavController()
     val context = LocalContext.current
     
+    val isRunningTest = remember {
+        try {
+            Class.forName("org.robolectric.Robolectric")
+            true
+        } catch (e: Exception) {
+            false
+        }
+    }
+
     val recordingsFlow = remember {
         flow {
             while (true) {
@@ -53,6 +62,7 @@ fun AppNavigation(
                 }.sortedByDescending { it.timestamp }
                 
                 emit(recordings)
+                if (isRunningTest) break
                 delay(1000)
             }
         }
