@@ -35,11 +35,9 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         preferences = AppPreferences(this)
         recorder = AudioRecorder(this)
-        database = AppDatabase.getDatabase(this)
-
         setContent {
             VibePubTheme {
-                VibePubApp(preferences, recorder, database)
+                VibePubApp(preferences, recorder)
             }
         }
     }
@@ -48,8 +46,7 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun VibePubApp(
     preferences: AppPreferences,
-    recorder: AudioRecorder,
-    database: AppDatabase
+    recorder: AudioRecorder
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -99,7 +96,7 @@ fun VibePubApp(
     }
 
     AppNavigation(
-        database = database,
+        preferences = preferences,
         onStartRecording = {
             if (isRecording) return@AppNavigation
             val audioGranted = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
@@ -122,15 +119,6 @@ fun VibePubApp(
                 withContext(Dispatchers.IO) {
                     runCatching {
                         val (file, duration) = recorder.stop()
-                        
-                        // Save to Room DB
-                        val entity = RecordingEntity(
-                            filename = file.name,
-                            durationMs = duration,
-                            timestamp = System.currentTimeMillis(),
-                            status = "UPLOADING"
-                        )
-                        database.recordingDao().insertRecording(entity)
                         
                         // Enqueue upload
                         enqueueUpload(file)
