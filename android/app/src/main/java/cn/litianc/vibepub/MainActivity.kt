@@ -18,25 +18,33 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.livedata.observeAsState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.work.Constraints
 import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import androidx.work.workDataOf
 import cn.litianc.vibepub.ui.theme.PrimaryRed
 import cn.litianc.vibepub.ui.theme.VibePubTheme
 import kotlinx.coroutines.launch
 import java.io.File
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
     private lateinit var preferences: AppPreferences
@@ -71,6 +79,11 @@ private fun VibePubScreen(
     
     var showSettings by remember { mutableStateOf(false) }
 
+    // Upload Queue UI State
+    val workManager = WorkManager.getInstance(context)
+    val uploadWorkInfos by workManager.getWorkInfosByTagLiveData("upload_job").observeAsState(emptyList())
+    val queueCount = uploadWorkInfos.count { it.state == WorkInfo.State.ENQUEUED || it.state == WorkInfo.State.RUNNING }
+
     fun enqueueUpload(file: File) {
         if (filesToken.isBlank()) {
             scope.launch {
@@ -91,6 +104,7 @@ private fun VibePubScreen(
             .build()
         val request = OneTimeWorkRequestBuilder<UploadWorker>()
             .setConstraints(constraints)
+            .addTag("upload_job")
             .setInputData(
                 workDataOf(
                     UploadWorker.KEY_FILE_PATH to file.absolutePath,
@@ -100,13 +114,11 @@ private fun VibePubScreen(
             )
             .build()
 
-        WorkManager.getInstance(context).enqueue(request)
-        scope.launch {
-            snackbarHostState.showSnackbar("录音已安全送达云端，AI 正在为您排版，请稍后前往微信草稿箱查看")
-        }
+        workManager.enqueue(request)
     }
 
     fun startRecording() {
+        if (isRecording) return
         runCatching {
             recorder.start()
             isRecording = true
@@ -118,25 +130,52 @@ private fun VibePubScreen(
     }
 
     fun stopRecording() {
-        runCatching {
-            val file = recorder.stop()
-            isRecording = false
-            enqueueUpload(file)
-        }.onFailure {
-            isRecording = false
-            scope.launch {
-                snackbarHostState.showSnackbar("Could not stop recording: ${it.message.orEmpty()}")
+        if (!isRecording) return
+        isRecording = false
+        scope.launch {
+            withContext(Dispatchers.IO + NonCancellable) {
+                runCatching {
+                    val file = recorder.stop()
+                    enqueueUpload(file)
+                }.onFailure {
+                    // Ignore failures on stop, e.g. if the recording was too short or broken
+                }
             }
         }
     }
 
-    val audioPermissionLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.RequestPermission(),
-    ) { granted ->
-        if (granted) {
+    val permissionsLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions(),
+    ) { results ->
+        val audioGranted = results[Manifest.permission.RECORD_AUDIO] == true
+        if (audioGranted) {
             startRecording()
         } else {
             scope.launch { snackbarHostState.showSnackbar("Microphone permission denied") }
+        }
+    }
+
+    // Lifecycle Observer for Auto-Start/Stop
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                val audioGranted = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+                if (audioGranted) {
+                    startRecording()
+                } else {
+                    permissionsLauncher.launch(arrayOf(
+                        Manifest.permission.RECORD_AUDIO,
+                        Manifest.permission.ACCESS_COARSE_LOCATION
+                    ))
+                }
+            } else if (event == Lifecycle.Event.ON_PAUSE) {
+                stopRecording()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
         }
     }
 
@@ -152,6 +191,14 @@ private fun VibePubScreen(
                     ) 
                 },
                 actions = {
+                    if (queueCount > 0) {
+                        Text(
+                            text = "↑ $queueCount",
+                            color = MaterialTheme.colorScheme.onSurface,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(end = 16.dp)
+                        )
+                    }
                     IconButton(onClick = { showSettings = true }) {
                         Icon(Icons.Filled.Settings, contentDescription = "Settings", tint = MaterialTheme.colorScheme.onSurface)
                     }
@@ -170,7 +217,7 @@ private fun VibePubScreen(
             contentAlignment = Alignment.Center
         ) {
             
-            // Apple Voice Memos style Record Button
+            // Apple Voice Memos style Record Button (Now purely visual / emergency stop)
             val innerSize by animateDpAsState(targetValue = if (isRecording) 48.dp else 72.dp)
             val cornerRadius by animateDpAsState(targetValue = if (isRecording) 8.dp else 36.dp)
 
@@ -184,14 +231,14 @@ private fun VibePubScreen(
                         if (isRecording) {
                             stopRecording()
                         } else {
-                            val granted = ContextCompat.checkSelfPermission(
-                                context,
-                                Manifest.permission.RECORD_AUDIO,
-                            ) == PackageManager.PERMISSION_GRANTED
-                            if (granted) {
+                            val audioGranted = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+                            if (audioGranted) {
                                 startRecording()
                             } else {
-                                audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                permissionsLauncher.launch(arrayOf(
+                                    Manifest.permission.RECORD_AUDIO,
+                                    Manifest.permission.ACCESS_COARSE_LOCATION
+                                ))
                             }
                         }
                     },
