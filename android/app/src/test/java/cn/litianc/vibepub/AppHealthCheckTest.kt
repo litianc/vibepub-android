@@ -31,7 +31,7 @@ class AppHealthCheckTest {
         composeTestRule.onNodeWithContentDescription("Settings").performClick()
 
         // Click FILES_TOKEN row to open dialog
-        composeTestRule.onNode(hasText("FILES_TOKEN", substring = true) and hasClickAction()).performClick()
+        composeTestRule.onNodeWithTag("FilesTokenItem", useUnmergedTree = true).performClick()
         
         // Clear and type into the dialog's text field
         composeTestRule.onNode(hasSetTextAction()).performTextClearance()

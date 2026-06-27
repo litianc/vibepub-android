@@ -18,6 +18,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import cn.litianc.vibepub.AppPreferences
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.platform.testTag
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -108,6 +109,7 @@ fun SettingsScreen(
                         },
                         title = "FILES_TOKEN",
                         subtitle = if (filesToken.isNotEmpty()) "已配置" else "未配置",
+                        modifier = Modifier.testTag("FilesTokenItem"),
                         onClick = { showTokenDialog = true }
                     )
                 }
@@ -174,10 +176,11 @@ fun SettingsItem(
     subtitle: String? = null,
     value: String? = null,
     valueColor: Color = MaterialTheme.colorScheme.onSurfaceVariant,
+    modifier: Modifier = Modifier,
     onClick: () -> Unit
 ) {
     Row(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .clickable(onClick = onClick)
             .semantics(mergeDescendants = true) {}
