@@ -1,9 +1,9 @@
 package cn.litianc.vibepub
 
-import android.Manifest
 import androidx.compose.ui.test.*
-import androidx.compose.ui.test.junit4.createAndroidComposeRule
-import androidx.test.rule.GrantPermissionRule
+import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.test.platform.app.InstrumentationRegistry
+import cn.litianc.vibepub.ui.screens.SettingsScreen
 import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
@@ -12,26 +12,20 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
-@Config(application = TestApplication::class)
+@Config(sdk = [34])
 class AppHealthCheckTest {
 
     @get:Rule
-    val composeTestRule = createAndroidComposeRule<MainActivity>()
-
-    @get:Rule
-    val grantPermissionRule: GrantPermissionRule =
-        GrantPermissionRule.grant(Manifest.permission.RECORD_AUDIO)
+    val composeTestRule = createComposeRule()
 
     @Test
     fun testPreferencesTwoWayBinding() {
-        val testToken = "test_token_123"
-        val prefs = AppPreferences(composeTestRule.activity)
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val prefs = AppPreferences(context)
+        val testToken = "TEST_TOKEN_${System.currentTimeMillis()}"
         
-        // Open Settings
-        composeTestRule.onNodeWithTag("SettingsButton").performClick()
-        
-        composeTestRule.waitUntil(timeoutMillis = 5000) {
-            composeTestRule.onAllNodesWithTag("FilesTokenItem").fetchSemanticsNodes().isNotEmpty()
+        composeTestRule.setContent {
+            SettingsScreen(onBackClick = {})
         }
 
         // Click FILES_TOKEN row to open dialog
@@ -45,10 +39,15 @@ class AppHealthCheckTest {
         composeTestRule.onNode(hasSetTextAction()).performTextClearance()
         composeTestRule.onNode(hasSetTextAction()).performTextInput(testToken)
         
-        // Click Save
+        // Click save
         composeTestRule.onNodeWithText("保存").performClick()
         
-        // Assert that the underlying SharedPreferences got updated
+        // Wait until dialog closes
+        composeTestRule.waitUntil(timeoutMillis = 5000) {
+            composeTestRule.onAllNodes(hasSetTextAction()).fetchSemanticsNodes().isEmpty()
+        }
+        
+        // Assert that the AppPreferences instance reflects the typed token
         assertEquals(testToken, prefs.filesToken)
     }
 }
