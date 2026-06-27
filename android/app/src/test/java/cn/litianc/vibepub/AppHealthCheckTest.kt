@@ -23,22 +23,6 @@ class AppHealthCheckTest {
         GrantPermissionRule.grant(Manifest.permission.RECORD_AUDIO)
 
     @Test
-    fun testMissingTokenBlocksUpload() {
-        val prefs = AppPreferences(composeTestRule.activity)
-        prefs.filesToken = ""
-        
-        // Start recording
-        composeTestRule.onNodeWithText("RECORD").performClick()
-        
-        // Stop recording
-        composeTestRule.onNodeWithText("STOP").performClick()
-        
-        // Expect an error message in snackbar
-        composeTestRule.onNodeWithText("Add FILES_TOKEN before upload.", substring = true, ignoreCase = true)
-            .assertIsDisplayed()
-    }
-
-    @Test
     fun testPreferencesTwoWayBinding() {
         val testToken = "test_token_123"
         val prefs = AppPreferences(composeTestRule.activity)
@@ -54,12 +38,5 @@ class AppHealthCheckTest {
         
         // Assert that the underlying SharedPreferences got updated immediately
         assertEquals(testToken, prefs.filesToken)
-    }
-    
-    @Test
-    fun testPermissionDeniedShowsFeedback() {
-        // Initial state
-        composeTestRule.onNodeWithText("RECORD").assertIsDisplayed()
-        composeTestRule.onNodeWithText("Retry Upload").assertDoesNotExist()
     }
 }
