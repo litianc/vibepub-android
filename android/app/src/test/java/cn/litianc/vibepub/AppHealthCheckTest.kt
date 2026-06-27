@@ -29,11 +29,17 @@ class AppHealthCheckTest {
         
         // Open Settings
         composeTestRule.onNodeWithContentDescription("Settings").performClick()
-        composeTestRule.waitForIdle()
+        
+        composeTestRule.waitUntil(timeoutMillis = 5000) {
+            composeTestRule.onAllNodesWithTag("FilesTokenItem").fetchSemanticsNodes().isNotEmpty()
+        }
 
         // Click FILES_TOKEN row to open dialog
         composeTestRule.onNodeWithTag("FilesTokenItem").performClick()
-        composeTestRule.waitForIdle()
+        
+        composeTestRule.waitUntil(timeoutMillis = 5000) {
+            composeTestRule.onAllNodes(hasSetTextAction()).fetchSemanticsNodes().isNotEmpty()
+        }
         
         // Clear and type into the dialog's text field
         composeTestRule.onNode(hasSetTextAction()).performTextClearance()
