@@ -20,6 +20,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.platform.testTag
 import cn.litianc.vibepub.data.RecordingEntity
 import cn.litianc.vibepub.ui.theme.IconLightRedBackground
 import cn.litianc.vibepub.ui.theme.PrimaryRed
@@ -57,7 +58,10 @@ fun HomeScreen(
                     }
                 },
                 actions = {
-                    IconButton(onClick = onSettingsClick) {
+                    IconButton(
+                        onClick = onSettingsClick,
+                        modifier = Modifier.testTag("SettingsButton")
+                    ) {
                         Icon(
                             imageVector = Icons.Default.Settings,
                             contentDescription = "Settings"

@@ -28,7 +28,7 @@ class AppHealthCheckTest {
         val prefs = AppPreferences(composeTestRule.activity)
         
         // Open Settings
-        composeTestRule.onNodeWithContentDescription("Settings").performClick()
+        composeTestRule.onNodeWithTag("SettingsButton").performClick()
         
         composeTestRule.waitUntil(timeoutMillis = 5000) {
             composeTestRule.onAllNodesWithTag("FilesTokenItem").fetchSemanticsNodes().isNotEmpty()
