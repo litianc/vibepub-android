@@ -23,7 +23,9 @@ import cn.litianc.vibepub.AppPreferences
 fun SettingsScreen(
     onBackClick: () -> Unit
 ) {
-    var filesToken by remember { mutableStateOf(AppPreferences.filesToken) }
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val preferences = remember { AppPreferences(context) }
+    var filesToken by remember { mutableStateOf(preferences.filesToken) }
     var showTokenDialog by remember { mutableStateOf(false) }
 
     Scaffold(
@@ -119,7 +121,7 @@ fun SettingsScreen(
             text = {
                 OutlinedTextField(
                     value = filesToken,
-                    onValueChange = { filesToken = it },
+                    onValueChange = { filesToken = it; preferences.filesToken = it },
                     label = { Text("Token") },
                     singleLine = true
                 )
@@ -127,7 +129,7 @@ fun SettingsScreen(
             confirmButton = {
                 TextButton(
                     onClick = {
-                        AppPreferences.filesToken = filesToken
+                        preferences.filesToken = filesToken
                         showTokenDialog = false
                     }
                 ) {

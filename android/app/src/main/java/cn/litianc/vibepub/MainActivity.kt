@@ -17,8 +17,6 @@ import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.workDataOf
-import cn.litianc.vibepub.data.AppDatabase
-import cn.litianc.vibepub.data.RecordingEntity
 import cn.litianc.vibepub.ui.navigation.AppNavigation
 import cn.litianc.vibepub.ui.theme.VibePubTheme
 import kotlinx.coroutines.Dispatchers
@@ -29,7 +27,6 @@ import java.io.File
 class MainActivity : ComponentActivity() {
     private lateinit var preferences: AppPreferences
     private lateinit var recorder: AudioRecorder
-    private lateinit var database: AppDatabase
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
