@@ -34,8 +34,8 @@ class AppHealthCheckTest {
         composeTestRule.onNodeWithText("FILES_TOKEN").performClick()
         
         // Clear and type into the dialog's text field
-        composeTestRule.onNodeWithText("Token").performTextClearance()
-        composeTestRule.onNodeWithText("Token").performTextInput(testToken)
+        composeTestRule.onNode(hasSetTextAction()).performTextClearance()
+        composeTestRule.onNode(hasSetTextAction()).performTextInput(testToken)
         
         // Click Save
         composeTestRule.onNodeWithText("保存").performClick()
