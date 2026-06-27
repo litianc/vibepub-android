@@ -1,8 +1,8 @@
 package cn.litianc.vibepub
 
 import androidx.compose.ui.test.*
-import androidx.compose.ui.test.junit4.createComposeRule
-import androidx.test.platform.app.InstrumentationRegistry
+import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.activity.ComponentActivity
 import cn.litianc.vibepub.ui.screens.SettingsScreen
 import org.junit.Assert.assertEquals
 import org.junit.Rule
@@ -16,11 +16,11 @@ import org.robolectric.annotation.Config
 class AppHealthCheckTest {
 
     @get:Rule
-    val composeTestRule = createComposeRule()
+    val composeTestRule = createAndroidComposeRule<ComponentActivity>()
 
     @Test
     fun testPreferencesTwoWayBinding() {
-        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val context = composeTestRule.activity
         val prefs = AppPreferences(context)
         val testToken = "TEST_TOKEN_${System.currentTimeMillis()}"
         
