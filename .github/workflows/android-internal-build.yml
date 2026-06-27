@@ -1,0 +1,74 @@
+name: Android Internal APK
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "android/**"
+      - ".github/workflows/android-internal-build.yml"
+  pull_request:
+    paths:
+      - "android/**"
+      - ".github/workflows/android-internal-build.yml"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.4.1"
+
+      - name: Run automated tests
+        run: gradle -p android :app:testDebugUnitTest
+
+      - name: Build debug APK
+        run: gradle -p android :app:assembleDebug
+
+      - name: Upload Test Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-report
+          path: android/app/build/reports/tests/testDebugUnitTest/
+          if-no-files-found: ignore
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vibepub-debug-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+
+      - name: Generate Tag Name
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        id: tag
+        run: echo "tag_name=build-$(date +'%Y%m%d-%H%M%S')-${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag_name }}
+          name: "Internal Build ${{ steps.tag.outputs.tag_name }}"
+          generate_release_notes: true
+          files: android/app/build/outputs/apk/debug/app-debug.apk

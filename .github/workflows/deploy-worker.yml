@@ -1,0 +1,39 @@
+name: Deploy Worker
+
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: infra/worker
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Set Secrets
+        if: env.GITHUB_PAT != ''
+        run: echo "$GITHUB_PAT" | npx wrangler secret put GITHUB_PAT
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          GITHUB_PAT: ${{ secrets.GITHUB_PAT }}
+
+      - name: Deploy
+        run: npx wrangler deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

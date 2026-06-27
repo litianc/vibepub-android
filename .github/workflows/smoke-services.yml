@@ -1,0 +1,98 @@
+name: Smoke External Services
+
+on:
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check GLM chat completions
+        env:
+          GLM_BASE_URL: ${{ secrets.GLM_BASE_URL }}
+          GLM_API_KEY: ${{ secrets.GLM_API_KEY }}
+          GLM_MODEL: ${{ secrets.GLM_MODEL }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import urllib.request
+
+          url = os.environ["GLM_BASE_URL"].rstrip("/") + "/chat/completions"
+          payload = {
+              "model": os.environ.get("GLM_MODEL") or "glm-5.2",
+              "messages": [{"role": "user", "content": "请只输出一行：OK"}],
+              "temperature": 0,
+              "max_tokens": 64,
+              "thinking": {"type": "disabled"},
+          }
+          req = urllib.request.Request(
+              url,
+              data=json.dumps(payload).encode("utf-8"),
+              headers={
+                  "Authorization": f"Bearer {os.environ['GLM_API_KEY']}",
+                  "Content-Type": "application/json",
+              },
+              method="POST",
+          )
+          with urllib.request.urlopen(req, timeout=30) as resp:
+              data = json.loads(resp.read().decode("utf-8", "replace"))
+          content = ((data.get("choices") or [{}])[0].get("message") or {}).get("content")
+          if content != "OK":
+              raise SystemExit(f"Unexpected GLM response: {content!r}")
+          print("GLM smoke check passed")
+          PY
+
+      - name: Check Volcengine ASR credentials
+        env:
+          VOLC_ASR_APPID: ${{ secrets.VOLC_ASR_APPID }}
+          VOLC_ASR_ACCESS_TOKEN: ${{ secrets.VOLC_ASR_ACCESS_TOKEN }}
+          VOLC_ASR_RESOURCE_ID: ${{ secrets.VOLC_ASR_RESOURCE_ID }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import uuid
+          import urllib.error
+          import urllib.request
+
+          configured_resource = os.environ.get("VOLC_ASR_RESOURCE_ID", "").strip()
+          resource_ids = [configured_resource] if configured_resource else [
+              "volc.bigasr.auc",
+              "volc.seedasr.auc",
+          ]
+
+          failures = []
+          for resource_id in resource_ids:
+              task_id = str(uuid.uuid4())
+              req = urllib.request.Request(
+                  "https://openspeech.bytedance.com/api/v3/auc/bigmodel/query",
+                  data=json.dumps({"task_id": task_id}).encode("utf-8"),
+                  headers={
+                      "X-Api-App-Key": os.environ["VOLC_ASR_APPID"],
+                      "X-Api-Access-Key": os.environ["VOLC_ASR_ACCESS_TOKEN"],
+                      "X-Api-Resource-Id": resource_id,
+                      "X-Api-Request-Id": task_id,
+                      "X-Api-Sequence": "-1",
+                      "Content-Type": "application/json",
+                  },
+                  method="POST",
+              )
+              try:
+                  with urllib.request.urlopen(req, timeout=30) as resp:
+                      status = resp.headers.get("X-Api-Status-Code", "")
+                      body = resp.read().decode("utf-8", "replace")
+                      http_status = resp.status
+              except urllib.error.HTTPError as error:
+                  status = error.headers.get("X-Api-Status-Code", "")
+                  body = error.read().decode("utf-8", "replace")
+                  http_status = error.code
+
+              if http_status not in (401, 403) and status not in {"40000001", "40000002", "40000003", "45000010"}:
+                  print(f"Volcengine ASR endpoint reachable for {resource_id}: http={http_status} status={status or 'none'}")
+                  break
+              failures.append(f"{resource_id}: http={http_status} status={status} body={body[:160]}")
+          else:
+              raise SystemExit("Volcengine auth rejected for all checked resource IDs: " + " | ".join(failures))
+          PY

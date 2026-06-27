@@ -1,0 +1,23 @@
+.omx/
+
+# Android / Gradle
+.gradle/
+**/build/
+local.properties
+
+# Node / Cloudflare Worker
+node_modules/
+.wrangler/
+.dev.vars
+
+# Generated secrets and signing material
+secrets/
+*.jks
+*.keystore
+*.p12
+
+# macOS / IDE
+.DS_Store
+.idea/
+*.iml
+.env
