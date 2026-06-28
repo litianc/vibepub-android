@@ -12,3 +12,8 @@ bucket_name = "vibepub-files"
 
 [vars]
 PUBLIC_BASE_URL = "https://vibepub.litianc.cn"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "vibepub-db"
+database_id = "00000000-0000-0000-0000-000000000000" # Placeholder, will need real ID in prod

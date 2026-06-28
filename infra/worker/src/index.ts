@@ -1,5 +1,6 @@
 export interface Env {
   FILES_BUCKET: R2Bucket;
+  DB: D1Database;
   FILES_TOKEN: string;
   PUBLIC_BASE_URL: string;
   GITHUB_PAT?: string;
@@ -33,6 +34,10 @@ export default {
 
     if (request.method === "GET" && url.pathname === "/api/uploads") {
       return listUploads(env, url);
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/recordings") {
+      return listRecordings(env);
     }
 
     if (request.method === "GET" && url.pathname.startsWith("/api/files/")) {
@@ -70,6 +75,21 @@ async function uploadAudio(request: Request, env: Env): Promise<Response> {
       uploadedAt,
     },
   });
+
+  // Default user ID for now since we have a single global auth token
+  const userId = "default_user";
+
+  // Insert into D1
+  try {
+    await env.DB.prepare(
+      `INSERT INTO recordings (user_id, filename, r2_key, status) VALUES (?, ?, ?, ?)`
+    )
+    .bind(userId, safeOriginalName, key, 'UPLOADED')
+    .run();
+  } catch (dbErr) {
+    console.error("Failed to insert into D1:", dbErr);
+    // Don't fail the upload just because D1 logging failed, though ideally we should
+  }
 
   // Fire and forget triggering of the GitHub Action Mining Job
   env.waitUntil(triggerGitHubAction(env).catch((e) => {
@@ -134,6 +154,22 @@ async function listUploads(env: Env, url: URL): Promise<Response> {
       customMetadata: object.customMetadata,
     })),
   });
+}
+
+async function listRecordings(env: Env): Promise<Response> {
+  const userId = "default_user";
+  try {
+    const { results } = await env.DB.prepare(
+      `SELECT id, filename, status, created_at, updated_at FROM recordings WHERE user_id = ? ORDER BY created_at DESC LIMIT 100`
+    )
+    .bind(userId)
+    .all();
+
+    return json({ recordings: results });
+  } catch (dbErr: any) {
+    console.error("Failed to fetch from D1:", dbErr);
+    return json({ error: "database_error", details: dbErr.message }, 500);
+  }
 }
 
 async function getFile(env: Env, encodedKey: string): Promise<Response> {

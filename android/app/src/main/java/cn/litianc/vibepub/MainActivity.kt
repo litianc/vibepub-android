@@ -130,6 +130,15 @@ fun VibePubApp(
                     runCatching {
                         val (file, duration) = recorder.stop()
                         
+                        // Insert into Room
+                        val entity = cn.litianc.vibepub.data.RecordingEntity(
+                            filename = file.name,
+                            durationMs = duration,
+                            timestamp = System.currentTimeMillis(),
+                            status = "UPLOADED"
+                        )
+                        cn.litianc.vibepub.data.AppDatabase.getDatabase(context).recordingDao().insert(entity)
+                        
                         // Enqueue upload
                         enqueueUpload(file)
                     }
