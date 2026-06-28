@@ -117,8 +117,8 @@ class AudioRecorder(private val context: Context) {
             }
         }
 
-        // VoiceDrop-YYYY-MM-DD-HHmmss-XmYYs-Day-TimeOfDay-City-District.m4a
-        val finalName = "VoiceDrop-$dateStr-$durationStr-$dayStr-$timeOfDay$locationStr.m4a"
+        // VibePub-YYYY-MM-DD-HHmmss-XmYYs-Day-TimeOfDay-City-District.m4a
+        val finalName = "VibePub-$dateStr-$durationStr-$dayStr-$timeOfDay$locationStr.m4a"
             .replace("--", "-") // Clean up empty locations if any
         val finalFile = File(file.parent, finalName)
         file.renameTo(finalFile)

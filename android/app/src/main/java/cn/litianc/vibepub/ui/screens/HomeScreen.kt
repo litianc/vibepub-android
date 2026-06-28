@@ -51,7 +51,7 @@ fun HomeScreen(
                         }
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = "VoiceDrop 口述",
+                            text = "VibePub 口述",
                             fontWeight = FontWeight.Bold,
                             fontSize = 18.sp
                         )

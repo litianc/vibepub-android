@@ -42,7 +42,7 @@ fun AppNavigation(
                 val files = dir.listFiles()?.toList() ?: emptyList()
                 val transcribed = preferences.transcribedFiles
                 val recordings = files.mapIndexed { index, file ->
-                    // filename: VoiceDrop-2026-06-27-223000-0m15s-Sat-Evening.m4a
+                    // filename: VibePub-2026-06-27-223000-0m15s-Sat-Evening.m4a
                     var durationMs = 0L
                     try {
                         val parts = file.name.split("-")

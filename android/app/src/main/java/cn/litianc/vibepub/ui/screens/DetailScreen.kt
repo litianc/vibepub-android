@@ -112,7 +112,7 @@ fun DetailScreen(
             
             // Mock Transcription text
             Text(
-                text = "Voice Drop 的第四个功能：VD 社区，以及三天 500 次 commit 的交代",
+                text = "VibePub 的第四个功能：VP 社区，以及三天 500 次 commit 的交代",
                 style = MaterialTheme.typography.headlineSmall,
                 fontWeight = FontWeight.Bold,
                 color = MaterialTheme.colorScheme.onSurface,
@@ -122,7 +122,7 @@ fun DetailScreen(
             Spacer(modifier = Modifier.height(8.dp))
             
             Text(
-                text = "6月23日 17:48 · Voice Drop 的第四个功能...",
+                text = "6月23日 17:48 · VibePub 的第四个功能...",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -130,7 +130,7 @@ fun DetailScreen(
             Spacer(modifier = Modifier.height(24.dp))
             
             Text(
-                text = "核心功能说到最后一个了——社区。\n\n不是所有写出来的文章都要发公众号的。公众号有每天一条的限制，很多东西发出去也未必合适。所以我在 Voice Drop 里单独做了一个 VD 社区，写完的文章可以主动分享进去，跟用同一个工具写东西的人互相看。\n\n为什么觉得这个有意义？我有一个不太说得清楚的直觉：用这种方式写文章的人，大概会有某种相似的小特质。说不清是什么，但应该在那儿。社区里碰到的人，大概率是这类人。",
+                text = "核心功能说到最后一个了——社区。\n\n不是所有写出来的文章都要发公众号的。公众号有每天一条的限制，很多东西发出去也未必合适。所以我在 VibePub 里单独做了一个 VP 社区，写完的文章可以主动分享进去，跟用同一个工具写东西的人互相看。\n\n为什么觉得这个有意义？我有一个不太说得清楚的直觉：用这种方式写文章的人，大概会有某种相似的小特质。说不清是什么，但应该在那儿。社区里碰到的人，大概率是这类人。",
                 style = MaterialTheme.typography.bodyLarge,
                 color = MaterialTheme.colorScheme.onSurface,
                 lineHeight = 28.sp
