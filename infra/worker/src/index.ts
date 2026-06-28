@@ -49,7 +49,7 @@ export default {
     }
 
     if (request.method === "GET" && url.pathname.startsWith("/api/transcripts/")) {
-      const filename = url.pathname.slice("/api/transcripts/".length);
+      const filename = safeDecodeURIComponent(url.pathname.slice("/api/transcripts/".length));
       const safeName = sanitizeFileName(filename).replace(/\.[^/.]+$/, ".json");
       return getFile(env, `transcripts/${safeName}`);
     }
@@ -83,13 +83,29 @@ async function uploadAudio(request: Request, env: Env, ctx: ExecutionContext): P
   // Default user ID for now since we have a single global auth token
   const userId = "default_user";
 
-  // Insert into D1
+  // Record the upload in D1. Update first so deploys stay compatible before the
+  // unique filename migration has been applied.
   try {
-    await env.DB.prepare(
-      `INSERT INTO recordings (user_id, filename, r2_key, status) VALUES (?, ?, ?, ?)`
+    const updated = await env.DB.prepare(
+      `
+      UPDATE recordings
+      SET r2_key = ?, status = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE user_id = ? AND filename = ?
+      `
     )
-    .bind(userId, safeOriginalName, key, 'UPLOADED')
+    .bind(key, 'UPLOADED', userId, safeOriginalName)
     .run();
+
+    if ((updated.meta.changes ?? 0) === 0) {
+      await env.DB.prepare(
+        `
+        INSERT INTO recordings (user_id, filename, r2_key, status)
+        VALUES (?, ?, ?, ?)
+        `
+      )
+      .bind(userId, safeOriginalName, key, 'UPLOADED')
+      .run();
+    }
   } catch (dbErr) {
     console.error("Failed to insert into D1:", dbErr);
     // Don't fail the upload just because D1 logging failed, though ideally we should
@@ -184,9 +200,9 @@ async function updateStatus(request: Request, env: Env): Promise<Response> {
       return json({ error: "missing_fields" }, 400);
     }
     await env.DB.prepare(
-      `UPDATE recordings SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE filename = ?`
+      `UPDATE recordings SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ? AND filename = ?`
     )
-    .bind(status, filename)
+    .bind(status, "default_user", filename)
     .run();
     return json({ ok: true });
   } catch (e: any) {
@@ -196,7 +212,7 @@ async function updateStatus(request: Request, env: Env): Promise<Response> {
 }
 
 async function getFile(env: Env, encodedKey: string): Promise<Response> {
-  const key = decodeURIComponent(encodedKey);
+  const key = safeDecodeURIComponent(encodedKey);
 
   if (!key || key.includes("..")) {
     return json({ error: "invalid_key" }, 400);
@@ -231,6 +247,14 @@ function sanitizeFileName(name: string): string {
     .replace(/\s+/g, "-")
     .replace(/[^a-zA-Z0-9._-]/g, "")
     .slice(0, 120) || "recording.m4a";
+}
+
+function safeDecodeURIComponent(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
 }
 
 function clamp(value: number, min: number, max: number): number {

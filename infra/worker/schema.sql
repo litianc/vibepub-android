@@ -11,7 +11,8 @@ CREATE TABLE recordings (
     article_content TEXT,
     wechat_url TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(user_id, filename)
 );
 
 CREATE INDEX idx_recordings_user_id ON recordings(user_id);

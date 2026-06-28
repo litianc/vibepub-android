@@ -18,11 +18,17 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import cn.litianc.vibepub.data.RecordingEntity
+import cn.litianc.vibepub.AppPreferences
+import cn.litianc.vibepub.data.AppDatabase
 import cn.litianc.vibepub.ui.theme.PrimaryRed
 import java.io.File
+import java.net.HttpURLConnection
+import java.net.URL
+import java.net.URLEncoder
 import org.json.JSONObject
 import androidx.compose.ui.platform.LocalContext
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -120,12 +126,20 @@ fun DetailScreen(
                 try {
                     val dir = File(context.filesDir, "recordings")
                     val jsonFile = File(dir, filename.replace(".m4a", ".json"))
+                    if (!jsonFile.exists()) {
+                        fetchTranscript(context, filename)?.let { jsonText ->
+                            dir.mkdirs()
+                            jsonFile.writeText(jsonText)
+                        }
+                    }
+
                     if (jsonFile.exists()) {
                         val jsonString = jsonFile.readText()
                         val json = JSONObject(jsonString)
                         articleTitle = json.optString("articleTitle", "转录完成")
                         articleContent = json.optString("articleContent", json.optString("rawText", "未能获取转录内容"))
                         rawText = json.optString("rawText", "")
+                        markRecordingCompleted(context, filename)
                     }
                 } catch (e: Exception) {
                     e.printStackTrace()
@@ -163,3 +177,38 @@ fun DetailScreen(
         }
     }
 }
+
+private suspend fun fetchTranscript(context: android.content.Context, filename: String): String? =
+    withContext(Dispatchers.IO) {
+        val prefs = AppPreferences(context)
+        val token = prefs.filesToken
+        if (token.isBlank()) return@withContext null
+
+        try {
+            val encodedFilename = URLEncoder.encode(filename, "UTF-8").replace("+", "%20")
+            val endpoint = URL("${prefs.apiBaseUrl.trimEnd('/')}/api/transcripts/$encodedFilename")
+            val connection = (endpoint.openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 10_000
+                readTimeout = 10_000
+                setRequestProperty("Authorization", "Bearer $token")
+            }
+
+            if (connection.responseCode in 200..299) {
+                connection.inputStream.bufferedReader().use { it.readText() }
+            } else {
+                null
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+private suspend fun markRecordingCompleted(context: android.content.Context, filename: String) =
+    withContext(Dispatchers.IO) {
+        val dao = AppDatabase.getDatabase(context).recordingDao()
+        val entity = dao.getRecordingByFilename(filename)
+        if (entity != null && entity.status != "COMPLETED") {
+            dao.insert(entity.copy(status = "COMPLETED"))
+        }
+    }

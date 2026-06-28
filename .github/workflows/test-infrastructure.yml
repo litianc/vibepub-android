@@ -1,0 +1,34 @@
+name: Test Infrastructure
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "scripts/**"
+      - "docs/android-*.md"
+      - ".github/workflows/test-infrastructure.yml"
+  pull_request:
+    paths:
+      - "scripts/**"
+      - "docs/android-*.md"
+      - ".github/workflows/test-infrastructure.yml"
+
+jobs:
+  shell:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Check shell script syntax
+        run: find scripts -name '*.sh' -print0 | xargs -0 -n1 bash -n
+
+      - name: Check help commands
+        run: |
+          scripts/android-device-visual-test.sh --help >/dev/null
+          scripts/check-android-device-ready.sh --help >/dev/null
+          scripts/download-latest-android-apk.sh --help >/dev/null
+          scripts/run-android-device-smoke.sh --help >/dev/null

@@ -8,6 +8,7 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
+import java.net.URLEncoder
 import cn.litianc.vibepub.data.AppDatabase
 import cn.litianc.vibepub.data.RecordingEntity
 import org.json.JSONObject
@@ -45,6 +46,7 @@ class SyncWorker(
                     for (i in 0 until recordingsArray.length()) {
                         val recObj = recordingsArray.getJSONObject(i)
                         val filename = recObj.optString("filename")
+                        if (filename.isBlank()) continue
                         val existing = dao.getRecordingByFilename(filename)
                         val d1Status = recObj.optString("status", "UPLOADED")
                         if (existing == null) {
@@ -54,7 +56,7 @@ class SyncWorker(
                                 timestamp = System.currentTimeMillis(), // use current for now
                                 status = d1Status
                             ))
-                        } else if (existing.status != d1Status) {
+                        } else if (existing.status != d1Status && existing.status != "COMPLETED") {
                             dao.insert(existing.copy(status = d1Status))
                         }
                     }
@@ -64,19 +66,16 @@ class SyncWorker(
             e.printStackTrace()
         }
 
-        // Now process files that are UPLOADED in Room and fetch transcripts
-        // Wait, we need to get from Room. But Flow doesn't return a single list easily in Worker.
-        // Let's add a non-Flow query to DAO or just list files for simplicity.
-        // Actually, we can just list files, find .m4a, and check if they need transcript.
-        val files = dir.listFiles()?.filter { it.name.endsWith(".m4a") }?.toList() ?: emptyList()
+        val recordings = dao.getAllRecordings()
 
         var allSuccess = true
 
-        for (file in files) {
-            val jsonFile = File(dir, file.name.replace(".m4a", ".json"))
+        for (recording in recordings) {
+            val jsonFile = File(dir, recording.filename.replace(".m4a", ".json"))
             if (!jsonFile.exists()) {
                 try {
-                    val endpoint = URL("${apiBaseUrl.trimEnd('/')}/api/transcripts/${file.name}")
+                    val encodedFilename = URLEncoder.encode(recording.filename, "UTF-8").replace("+", "%20")
+                    val endpoint = URL("${apiBaseUrl.trimEnd('/')}/api/transcripts/$encodedFilename")
                     val connection = (endpoint.openConnection() as HttpURLConnection).apply {
                         requestMethod = "GET"
                         connectTimeout = 10_000
@@ -87,13 +86,9 @@ class SyncWorker(
                     val responseCode = connection.responseCode
                     if (responseCode in 200..299) {
                         val jsonText = connection.inputStream.bufferedReader().use { it.readText() }
+                        dir.mkdirs()
                         jsonFile.writeText(jsonText)
-                        
-                        // Update Room status
-                        val entity = dao.getRecordingByFilename(file.name)
-                        if (entity != null) {
-                            dao.insert(entity.copy(status = "COMPLETED"))
-                        }
+                        dao.insert(recording.copy(status = "COMPLETED"))
                     } else if (responseCode == 404) {
                         // Not ready yet
                     } else {
@@ -104,9 +99,8 @@ class SyncWorker(
                 }
             } else {
                 // Ensure room reflects COMPLETED
-                val entity = dao.getRecordingByFilename(file.name)
-                if (entity != null && entity.status != "COMPLETED") {
-                    dao.insert(entity.copy(status = "COMPLETED"))
+                if (recording.status != "COMPLETED") {
+                    dao.insert(recording.copy(status = "COMPLETED"))
                 }
             }
         }
