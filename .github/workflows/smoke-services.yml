@@ -117,3 +117,41 @@ jobs:
               body = error.read().decode("utf-8", "replace")
               raise SystemExit(f"Volcengine ASR v1 HTTP {error.code}: {body}")
           PY
+
+      - name: Check WeChat Proxy and Token
+        env:
+          WECHAT_APP_ID: ${{ secrets.WECHAT_APP_ID }}
+          WECHAT_APP_SECRET: ${{ secrets.WECHAT_APP_SECRET }}
+          WECHAT_PROXY: ${{ secrets.WECHAT_PROXY }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import urllib.request
+          import urllib.error
+
+          appid = os.environ.get("WECHAT_APP_ID")
+          secret = os.environ.get("WECHAT_APP_SECRET")
+          proxy = os.environ.get("WECHAT_PROXY")
+
+          if not appid or not secret or not proxy:
+              print("Skipping WeChat smoke check due to missing secrets")
+              raise SystemExit(0)
+
+          proxy = proxy.rstrip("/")
+          url = f"{proxy}/cgi-bin/token?grant_type=client_credential&appid={appid}&secret={secret}"
+
+          try:
+              with urllib.request.urlopen(url, timeout=30) as resp:
+                  body = resp.read().decode("utf-8", "replace")
+                  data = json.loads(body)
+                  if "access_token" in data:
+                      print("WeChat proxy reachable and token acquired.")
+                  else:
+                      raise SystemExit(f"WeChat token failed: {body}")
+          except urllib.error.HTTPError as error:
+              body = error.read().decode("utf-8", "replace")
+              raise SystemExit(f"WeChat proxy HTTP {error.code}: {body}")
+          except urllib.error.URLError as error:
+              raise SystemExit(f"WeChat proxy connection failed: {error.reason}")
+          PY
