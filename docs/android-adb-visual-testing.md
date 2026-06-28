@@ -51,6 +51,8 @@ called "USB debugging (Security settings)" or `USB 调试（安全设置）` /
 
 If APK install fails with `INSTALL_FAILED_USER_RESTRICTED`, enable `USB 安装`
 or "Install via USB" in Developer options.
+If reset/uninstall fails with `DELETE_FAILED_INTERNAL_ERROR`, manually remove
+the app on the phone or enable the same USB install/security options.
 
 ## Run A Visual Test
 

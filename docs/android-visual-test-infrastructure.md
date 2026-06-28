@@ -53,6 +53,9 @@ Developer options item named "USB debugging (Security settings)" or
 `USB 调试（安全设置）` / `允许通过 USB 调试修改权限或模拟点击`.
 If install fails with `INSTALL_FAILED_USER_RESTRICTED`, also enable `USB 安装`
 or "Install via USB".
+If uninstall/reset fails with `DELETE_FAILED_INTERNAL_ERROR`, remove the app
+manually on the phone or enable the same USB install/security options before
+running deterministic tests.
 
 The default `AUTOMATION_MODE=debug-broadcast` does not require simulated tap
 permission. It uses debug-only test receivers that are not packaged into release
