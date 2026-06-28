@@ -1,4 +1,4 @@
-import { S3Client, ListObjectsV2Command, GetObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
+import { S3Client, ListObjectsV2Command, GetObjectCommand, DeleteObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
 
 const CLOUDFLARE_ACCOUNT_ID = process.env.CLOUDFLARE_ACCOUNT_ID!;
 const R2_ACCESS_KEY_ID = process.env.R2_ACCESS_KEY_ID!;
@@ -49,6 +49,16 @@ export async function deleteFile(key: string): Promise<void> {
   const command = new DeleteObjectCommand({
     Bucket: BUCKET_NAME,
     Key: key,
+  });
+  await s3.send(command);
+}
+
+export async function uploadTranscript(key: string, data: string): Promise<void> {
+  const command = new PutObjectCommand({
+    Bucket: BUCKET_NAME,
+    Key: key,
+    Body: data,
+    ContentType: "application/json",
   });
   await s3.send(command);
 }

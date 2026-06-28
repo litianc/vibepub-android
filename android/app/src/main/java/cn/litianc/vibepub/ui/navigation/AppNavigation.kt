@@ -39,8 +39,7 @@ fun AppNavigation(
         flow {
             while (true) {
                 val dir = File(context.filesDir, "recordings")
-                val files = dir.listFiles()?.toList() ?: emptyList()
-                val transcribed = preferences.transcribedFiles
+                val files = dir.listFiles()?.filter { it.name.endsWith(".m4a") }?.toList() ?: emptyList()
                 val recordings = files.mapIndexed { index, file ->
                     // filename: VibePub-2026-06-27-223000-0m15s-Sat-Evening.m4a
                     var durationMs = 0L
@@ -57,7 +56,8 @@ fun AppNavigation(
                     }
                     
                     val timestamp = file.lastModified()
-                    val status = if (transcribed.contains(file.name)) "TRANSCRIBED" else "UPLOADED"
+                    val hasJson = File(dir, file.name.replace(".m4a", ".json")).exists()
+                    val status = if (hasJson) "TRANSCRIBED" else "UPLOADED"
                     RecordingEntity(index, file.name, durationMs, timestamp, status)
                 }.sortedByDescending { it.timestamp }
                 
@@ -78,7 +78,7 @@ fun AppNavigation(
                     navController.navigate("recording")
                 },
                 onRecordingClick = { recording ->
-                    navController.navigate("detail/${recording.id}")
+                    navController.navigate("detail/${recording.filename}")
                 }
             )
         }
@@ -98,10 +98,10 @@ fun AppNavigation(
             )
         }
         
-        composable("detail/{id}") { backStackEntry ->
-            val idStr = backStackEntry.arguments?.getString("id")
+        composable("detail/{filename}") { backStackEntry ->
+            val filename = backStackEntry.arguments?.getString("filename") ?: ""
             DetailScreen(
-                recordingId = idStr?.toIntOrNull() ?: 0,
+                filename = filename,
                 onBackClick = { navController.popBackStack() }
             )
         }

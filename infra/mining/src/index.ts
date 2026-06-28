@@ -1,4 +1,4 @@
-import { listUnprocessedFiles, downloadFile, deleteFile } from "./r2.js";
+import { listUnprocessedFiles, downloadFile, deleteFile, uploadTranscript } from "./r2.js";
 import { transcribeAudio } from "./asr.js";
 import { processAudioText, generateCoverImageBuffer } from "./llm.js";
 import { getAccessToken, publishDraft } from "./wechat.js";
@@ -57,6 +57,15 @@ async function main() {
       console.log("Publishing to WeChat Drafts...");
       const mediaId = await publishDraft(wxToken, article.title, article.content, coverBuffer);
       console.log(`Successfully published draft! Media ID: ${mediaId}`);
+      
+      // 6.5 Save Transcript JSON to R2
+      const jsonKey = fileKey.replace("inbox/", "transcripts/").replace(/\.[^/.]+$/, ".json");
+      console.log(`Saving transcript JSON to ${jsonKey}...`);
+      await uploadTranscript(jsonKey, JSON.stringify({
+        rawText,
+        articleTitle: article.title,
+        articleContent: article.content
+      }));
       
       // 7. Cleanup: Delete processed file from R2
       console.log("Cleaning up processed file from R2...");

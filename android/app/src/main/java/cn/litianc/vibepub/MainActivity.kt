@@ -15,6 +15,8 @@ import androidx.lifecycle.lifecycleScope
 import androidx.work.Constraints
 import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.PeriodicWorkRequestBuilder
+import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.WorkManager
 import androidx.work.workDataOf
 import cn.litianc.vibepub.ui.navigation.AppNavigation
@@ -32,6 +34,17 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         preferences = AppPreferences(this)
         recorder = AudioRecorder(this)
+        
+        // Schedule SyncWorker
+        val workManager = WorkManager.getInstance(this)
+        val syncRequest = PeriodicWorkRequestBuilder<SyncWorker>(15, java.util.concurrent.TimeUnit.MINUTES)
+            .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
+            .build()
+        workManager.enqueueUniquePeriodicWork("sync_transcripts", ExistingPeriodicWorkPolicy.KEEP, syncRequest)
+        
+        // Also run once immediately on startup
+        workManager.enqueue(OneTimeWorkRequestBuilder<SyncWorker>().build())
+
         setContent {
             VibePubTheme {
                 VibePubApp(preferences, recorder)

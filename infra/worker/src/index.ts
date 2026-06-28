@@ -39,6 +39,12 @@ export default {
       return getFile(env, url.pathname.slice("/api/files/".length));
     }
 
+    if (request.method === "GET" && url.pathname.startsWith("/api/transcripts/")) {
+      const filename = url.pathname.slice("/api/transcripts/".length);
+      const safeName = sanitizeFileName(filename).replace(/\.[^/.]+$/, ".json");
+      return getFile(env, `transcripts/${safeName}`);
+    }
+
     return json({ error: "not_found" }, 404);
   },
 };
@@ -51,7 +57,10 @@ async function uploadAudio(request: Request, env: Env): Promise<Response> {
   const originalName = request.headers.get("x-file-name") || "recording.m4a";
   const safeOriginalName = sanitizeFileName(originalName);
   const uploadedAt = new Date().toISOString();
-  const key = `inbox/${uploadedAt.replace(/[:.]/g, "-")}-${safeOriginalName}`;
+  const keyPrefix = safeOriginalName.startsWith("VibePub-") || safeOriginalName.startsWith("VoiceDrop-") 
+    ? "" 
+    : `${uploadedAt.replace(/[:.]/g, "-")}-`;
+  const key = `inbox/${keyPrefix}${safeOriginalName}`;
   const contentType = request.headers.get("content-type") || "audio/mp4";
 
   await env.FILES_BUCKET.put(key, request.body, {

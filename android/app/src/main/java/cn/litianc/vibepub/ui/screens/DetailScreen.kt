@@ -20,13 +20,14 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import cn.litianc.vibepub.data.RecordingEntity
 import cn.litianc.vibepub.ui.theme.PrimaryRed
-import java.text.SimpleDateFormat
-import java.util.*
+import java.io.File
+import org.json.JSONObject
+import androidx.compose.ui.platform.LocalContext
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DetailScreen(
-    recordingId: Int, // Ideally pass the entity or fetch it, assuming it's passed or mocked for now
+    filename: String,
     onBackClick: () -> Unit
 ) {
     Scaffold(
@@ -110,9 +111,29 @@ fun DetailScreen(
             
             Spacer(modifier = Modifier.height(24.dp))
             
-            // Mock Transcription text
+            val context = LocalContext.current
+            var articleTitle by remember { mutableStateOf("正在获取云端转录...") }
+            var articleContent by remember { mutableStateOf("音频已上传，云端正在为您精心转录和排版中，请稍候并下拉刷新或重新进入本页。") }
+            var rawText by remember { mutableStateOf("") }
+            
+            LaunchedEffect(filename) {
+                try {
+                    val dir = File(context.filesDir, "recordings")
+                    val jsonFile = File(dir, filename.replace(".m4a", ".json"))
+                    if (jsonFile.exists()) {
+                        val jsonString = jsonFile.readText()
+                        val json = JSONObject(jsonString)
+                        articleTitle = json.optString("articleTitle", "转录完成")
+                        articleContent = json.optString("articleContent", json.optString("rawText", "未能获取转录内容"))
+                        rawText = json.optString("rawText", "")
+                    }
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
+            
             Text(
-                text = "VibePub 的第四个功能：VP 社区，以及三天 500 次 commit 的交代",
+                text = articleTitle,
                 style = MaterialTheme.typography.headlineSmall,
                 fontWeight = FontWeight.Bold,
                 color = MaterialTheme.colorScheme.onSurface,
@@ -121,16 +142,18 @@ fun DetailScreen(
             
             Spacer(modifier = Modifier.height(8.dp))
             
-            Text(
-                text = "6月23日 17:48 · VibePub 的第四个功能...",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
+            if (rawText.isNotEmpty()) {
+                Text(
+                    text = "原始识别结果: ${rawText.take(50)}...",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
             
             Spacer(modifier = Modifier.height(24.dp))
             
             Text(
-                text = "核心功能说到最后一个了——社区。\n\n不是所有写出来的文章都要发公众号的。公众号有每天一条的限制，很多东西发出去也未必合适。所以我在 VibePub 里单独做了一个 VP 社区，写完的文章可以主动分享进去，跟用同一个工具写东西的人互相看。\n\n为什么觉得这个有意义？我有一个不太说得清楚的直觉：用这种方式写文章的人，大概会有某种相似的小特质。说不清是什么，但应该在那儿。社区里碰到的人，大概率是这类人。",
+                text = articleContent,
                 style = MaterialTheme.typography.bodyLarge,
                 color = MaterialTheme.colorScheme.onSurface,
                 lineHeight = 28.sp
