@@ -1,5 +1,6 @@
 package cn.litianc.vibepub.ui.navigation
 
+import android.net.Uri
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.LocalContext
@@ -42,7 +43,7 @@ fun AppNavigation(
                     navController.navigate("recording")
                 },
                 onRecordingClick = { recording ->
-                    navController.navigate("detail/${recording.filename}")
+                    navController.navigate("detail/${Uri.encode(recording.filename)}")
                 }
             )
         }

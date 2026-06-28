@@ -3,6 +3,7 @@ package cn.litianc.vibepub
 import android.content.Context
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
+import cn.litianc.vibepub.data.AppDatabase
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -43,7 +44,11 @@ class UploadWorker(
 
             val responseCode = connection.responseCode
             if (responseCode in 200..299) {
-                AppPreferences(applicationContext).markAsTranscribed(file.name)
+                val dao = AppDatabase.getDatabase(applicationContext).recordingDao()
+                val entity = dao.getRecordingByFilename(file.name)
+                if (entity != null && entity.status != "COMPLETED") {
+                    dao.insert(entity.copy(status = "UPLOADED"))
+                }
                 Result.success()
             } else if (responseCode >= 500) {
                 Result.retry()

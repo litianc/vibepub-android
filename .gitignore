@@ -16,6 +16,11 @@ secrets/
 *.keystore
 *.p12
 
+# Generated test evidence and downloaded APKs
+artifacts/android-device-visual/
+artifacts/apk/
+artifacts/vibepub-debug-apk/
+
 # macOS / IDE
 .DS_Store
 .idea/

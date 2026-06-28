@@ -1,9 +1,13 @@
 package cn.litianc.vibepub.data
 
 import androidx.room.Entity
+import androidx.room.Index
 import androidx.room.PrimaryKey
 
-@Entity(tableName = "recordings")
+@Entity(
+    tableName = "recordings",
+    indices = [Index(value = ["filename"], unique = true)]
+)
 data class RecordingEntity(
     @PrimaryKey(autoGenerate = true) val id: Int = 0,
     val filename: String,

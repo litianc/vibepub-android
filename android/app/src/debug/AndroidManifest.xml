@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application>
+        <receiver
+            android:name=".debug.DebugRecordingControlReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="cn.litianc.vibepub.DEBUG_START_RECORDING" />
+                <action android:name="cn.litianc.vibepub.DEBUG_STOP_RECORDING" />
+            </intent-filter>
+        </receiver>
+
+        <activity
+            android:name=".debug.DebugLatestRecordingActivity"
+            android:exported="true" />
+    </application>
+
+</manifest>
