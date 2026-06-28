@@ -64,8 +64,8 @@ async function main() {
       try {
         rawText = await transcribeAudio(audioBuffer, ext || 'm4a');
       } catch (e: any) {
-        console.error("ASR failed, using mock transcript due to permission blockage:", e.message);
-        rawText = "哎，那个今天天气挺好的，我想说说那个什么来着……对，就是产品规划这事儿，我觉得吧，不能太死板，得有那种，那种流动性，你懂吧？就是走到哪算哪，但是大方向不能错。很多时候计划赶不上变化，别整那些虚头巴脑的PPT，直接上手做，做完扔给用户看，挨骂就改，不挨骂就继续加功能，对，就这么简单粗暴。";
+        console.error("ASR failed:", e.message);
+        throw e;
       }
       
       console.log(`Raw Transcript: ${rawText.substring(0, 50)}...`);
