@@ -12,10 +12,10 @@ interface RecordingDao {
     fun getAllRecordingsFlow(): Flow<List<RecordingEntity>>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertAll(recordings: List<RecordingEntity>)
+    suspend fun insertAll(recordings: List<RecordingEntity>): List<Long>
     
     @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insert(recording: RecordingEntity)
+    suspend fun insert(recording: RecordingEntity): Long
 
     @Query("SELECT * FROM recordings WHERE id = :id LIMIT 1")
     suspend fun getRecordingById(id: Int): RecordingEntity?
