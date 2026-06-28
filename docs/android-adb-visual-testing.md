@@ -91,6 +91,7 @@ The script will:
 
 - install the APK
 - grant runtime permissions where possible
+- force the `RECORD_AUDIO` appops back to `allow` when the device supports it
 - start VibePub
 - capture a launch screenshot
 - record the real phone screen
@@ -113,7 +114,9 @@ device testing, the lightweight approach is acoustic automation:
 2. The Mac plays your prepared audio file through the speaker.
 3. The phone microphone records that sound.
 4. ADB stops recording through the debug-only control receiver.
-5. ADB captures the home screen, opens the first recording, captures detail,
+5. The standard wrapper waits for the upload to appear in the backend, triggers
+   `mining-job.yml`, and waits for the recording to become `COMPLETED`.
+6. ADB captures the home screen, opens the first recording, captures detail,
    records the screen, and exports logcat.
 
 Run:
@@ -127,6 +130,16 @@ AUDIO_FILE=/path/to/prepared-audio.wav \
 AUTOMATION_MODE=debug-broadcast \
 RESET_APP_DATA=true \
 RECORD_SECONDS=45 \
+scripts/android-device-visual-test.sh /path/to/app-debug.apk
+```
+
+For the one-command smoke path, `scripts/run-android-device-smoke.sh` enables
+that mining wait by default. Direct `android-device-visual-test.sh` runs keep
+`TRIGGER_MINING_JOB=false` unless you opt in:
+
+```bash
+TRIGGER_MINING_JOB=true \
+AUDIO_FILE=/path/to/prepared-audio.wav \
 scripts/android-device-visual-test.sh /path/to/app-debug.apk
 ```
 

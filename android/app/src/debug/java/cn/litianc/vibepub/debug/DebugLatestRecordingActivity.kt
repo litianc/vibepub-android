@@ -1,6 +1,7 @@
 package cn.litianc.vibepub.debug
 
 import android.os.Bundle
+import android.content.Intent
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.material3.Text
@@ -17,6 +18,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 class DebugLatestRecordingActivity : ComponentActivity() {
+    companion object {
+        const val EXTRA_FILENAME = "filename"
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -28,11 +33,16 @@ class DebugLatestRecordingActivity : ComponentActivity() {
 
                 LaunchedEffect(Unit) {
                     filename = withContext(Dispatchers.IO) {
-                        AppDatabase.getDatabase(context)
-                            .recordingDao()
-                            .getAllRecordings()
-                            .firstOrNull()
-                            ?.filename
+                        val requestedFilename = intent.getStringExtra(EXTRA_FILENAME).orEmpty()
+                        if (requestedFilename.isNotBlank()) {
+                            requestedFilename
+                        } else {
+                            AppDatabase.getDatabase(context)
+                                .recordingDao()
+                                .getAllRecordings()
+                                .firstOrNull()
+                                ?.filename
+                        }
                     }
                     loaded = true
                 }
@@ -47,5 +57,11 @@ class DebugLatestRecordingActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        recreate()
     }
 }

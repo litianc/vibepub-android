@@ -17,6 +17,9 @@ Environment:
   API_BASE_URL     Backend URL. Defaults to https://vibepub.litianc.cn.
   FILES_TOKEN      Backend token. Falls back to secrets/files-token.txt.
   SKIP_INSTALL     Use APK already installed on phone. Default: false.
+  TRIGGER_MINING_JOB
+                   Trigger and wait for mining-job.yml before final detail
+                   assertion. Default: true.
 
 When no APK path is passed, the latest successful GitHub Actions debug APK is
 downloaded through scripts/download-latest-android-apk.sh.
@@ -63,4 +66,7 @@ SKIP_INSTALL="${SKIP_INSTALL:-false}" \
 RECORD_SECONDS="${RECORD_SECONDS:-70}" \
 POST_STOP_WAIT_SECONDS="${POST_STOP_WAIT_SECONDS:-10}" \
 DETAIL_WAIT_SECONDS="${DETAIL_WAIT_SECONDS:-12}" \
+TRIGGER_MINING_JOB="${TRIGGER_MINING_JOB:-true}" \
+MINING_WAIT_SECONDS="${MINING_WAIT_SECONDS:-300}" \
+BACKEND_COMPLETION_WAIT_SECONDS="${BACKEND_COMPLETION_WAIT_SECONDS:-90}" \
 "$ROOT_DIR/scripts/android-device-visual-test.sh" "$APK_PATH"

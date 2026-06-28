@@ -17,8 +17,11 @@ The standard test path is:
 5. Start recording through the debug-only ADB control receiver.
 6. Play a prepared audio sample from the Mac speaker.
 7. Stop recording through the debug-only ADB control receiver.
-8. Capture home/detail screenshots, UI dump, and logcat.
-9. Store evidence under `artifacts/android-device-visual/`.
+8. Wait for the upload to appear in `/api/recordings`.
+9. Trigger and wait for `mining-job.yml` when `TRIGGER_MINING_JOB=true`.
+10. Reopen the latest recording detail page, then capture screenshots, UI dump,
+    and logcat.
+11. Store evidence under `artifacts/android-device-visual/`.
 
 Final end-to-end acceptance is stricter than producing visual evidence. Use
 `docs/e2e-acceptance-runbook.md` before declaring the recording-to-transcript
@@ -90,6 +93,12 @@ Required for upload/transcript checks:
 - `FILES_TOKEN`
 - `API_BASE_URL`, normally `https://vibepub.litianc.cn`
 
+Required for fully automated transcript completion checks:
+
+- `gh` logged in to GitHub.
+- A token with `workflow` permission for `litianc/vibepub-android`.
+- GitHub Actions secrets configured for the mining job.
+
 Recommended:
 
 - Store local secrets outside git, for example `secrets/device-test.env`.
@@ -154,7 +163,10 @@ scripts/run-android-device-smoke.sh
 It loads `secrets/device-test.env` when present, otherwise it falls back to
 `secrets/files-token.txt` and `https://vibepub.litianc.cn`. It downloads the
 latest successful debug APK unless an APK path is passed as the first argument.
-It also runs `scripts/check-android-device-ready.sh` before recording.
+It also runs `scripts/check-android-device-ready.sh` before recording. By
+default it sets `TRIGGER_MINING_JOB=true`, so after the phone upload appears in
+the backend it dispatches `mining-job.yml`, waits for completion, and only then
+asserts the Android detail page.
 
 Check the connected phone without running the full smoke:
 

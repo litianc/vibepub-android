@@ -18,10 +18,20 @@ SKIP_INSTALL="${SKIP_INSTALL:-false}"
 START_DELAY_SECONDS="${START_DELAY_SECONDS:-1}"
 POST_STOP_WAIT_SECONDS="${POST_STOP_WAIT_SECONDS:-5}"
 DETAIL_WAIT_SECONDS="${DETAIL_WAIT_SECONDS:-8}"
+TRIGGER_MINING_JOB="${TRIGGER_MINING_JOB:-false}"
+MINING_WORKFLOW_ID="${MINING_WORKFLOW_ID:-mining-job.yml}"
+MINING_WORKFLOW_REF="${MINING_WORKFLOW_REF:-main}"
+MINING_WAIT_SECONDS="${MINING_WAIT_SECONDS:-240}"
+BACKEND_UPLOAD_WAIT_SECONDS="${BACKEND_UPLOAD_WAIT_SECONDS:-90}"
+BACKEND_COMPLETION_WAIT_SECONDS="${BACKEND_COMPLETION_WAIT_SECONDS:-60}"
+FORCE_RECORD_AUDIO_APPOPS="${FORCE_RECORD_AUDIO_APPOPS:-true}"
 DEBUG_START_ACTION="cn.litianc.vibepub.DEBUG_START_RECORDING"
 DEBUG_STOP_ACTION="cn.litianc.vibepub.DEBUG_STOP_RECORDING"
 SCREENRECORD_PID=""
 DETAIL_STATUS="not_checked"
+BACKEND_RECORDING_STATUS=""
+LATEST_RECORDING_FILENAME=""
+EXPECTED_DURATION_TEXT=""
 
 usage() {
   cat <<EOF
@@ -41,6 +51,22 @@ Environment:
                   Fail if API_BASE_URL/FILES_TOKEN injection fails. Default: true.
   AUTOMATION_MODE debug-broadcast or ui-tap. Default: debug-broadcast.
   SKIP_INSTALL    Use the APK already installed on the phone. Default: false.
+  TRIGGER_MINING_JOB
+                  Trigger and wait for GitHub Actions mining-job.yml after the
+                  phone upload appears in the backend. Default: false.
+  MINING_WORKFLOW_ID
+                  GitHub Actions workflow to dispatch. Default: mining-job.yml.
+  MINING_WORKFLOW_REF Git ref for workflow_dispatch. Default: main.
+  MINING_WAIT_SECONDS Max seconds to wait for the workflow. Default: 240.
+  BACKEND_UPLOAD_WAIT_SECONDS
+                  Max seconds to wait for /api/recordings to show the upload.
+                  Default: 90.
+  BACKEND_COMPLETION_WAIT_SECONDS
+                  Max seconds to wait for backend status COMPLETED after mining.
+                  Default: 60.
+  FORCE_RECORD_AUDIO_APPOPS
+                  Also set RECORD_AUDIO appops to allow after permission grant.
+                  Default: true.
   PACKAGE_NAME    Android package. Default: cn.litianc.vibepub.
   ACTIVITY_NAME   Launch activity. Default: .MainActivity.
   RECORD_TAP_X/Y  Optional override for the home record button tap.
@@ -98,6 +124,16 @@ evaluate_detail_result() {
     return 1
   fi
 
+  if grep -Eq "&lt;/?(p|h[1-6]|br|div|ul|ol|li)([[:space:]][^&]*)?&gt;" "$xml_file"; then
+    DETAIL_STATUS="raw_html"
+    return 1
+  fi
+
+  if [[ -n "$EXPECTED_DURATION_TEXT" ]] && ! grep -q "text=\"$EXPECTED_DURATION_TEXT\"" "$xml_file"; then
+    DETAIL_STATUS="duration_mismatch"
+    return 1
+  fi
+
   if grep -q "原始识别结果\\|转录完成" "$xml_file"; then
     DETAIL_STATUS="completed"
     return 0
@@ -111,6 +147,10 @@ cleanup() {
   if [[ -n "${SCREENRECORD_PID:-}" ]]; then
     kill "$SCREENRECORD_PID" >/dev/null 2>&1 || true
     adb_shell pkill -f screenrecord >/dev/null 2>&1 || true
+  fi
+
+  if [[ -d "${OUT_DIR:-}" && ! -f "$OUT_DIR/logcat.txt" ]]; then
+    adb logcat -d > "$OUT_DIR/logcat.txt" 2>/dev/null || true
   fi
 }
 
@@ -163,6 +203,223 @@ EOF
     cat "$OUT_DIR/debug-device-test-status.json" >&2
   fi
   exit 1
+}
+
+recording_filename_from_debug_status() {
+  if [[ ! -f "$OUT_DIR/debug-device-test-status.json" ]]; then
+    return 1
+  fi
+
+  sed -n 's/.*"filename"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+    "$OUT_DIR/debug-device-test-status.json" | head -n 1
+}
+
+recording_duration_text_from_debug_status() {
+  local duration_ms
+  if [[ ! -f "$OUT_DIR/debug-device-test-status.json" ]]; then
+    return 1
+  fi
+
+  duration_ms="$(sed -n 's/.*"durationMs"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
+    "$OUT_DIR/debug-device-test-status.json" | head -n 1)"
+  if [[ -z "$duration_ms" ]]; then
+    return 1
+  fi
+
+  printf '%d:%02d\n' "$((duration_ms / 60000))" "$(((duration_ms % 60000) / 1000))"
+}
+
+fetch_backend_recording_status() {
+  local filename="$1"
+  local api_base="${API_BASE_URL:-https://vibepub.litianc.cn}"
+  local response_file="$OUT_DIR/recordings-api.json"
+  local object_line
+
+  if [[ -z "$FILES_TOKEN" ]]; then
+    return 1
+  fi
+
+  if ! curl -fsS \
+    -H "Authorization: Bearer $FILES_TOKEN" \
+    "$api_base/api/recordings" > "$response_file.tmp"; then
+    rm -f "$response_file.tmp"
+    return 1
+  fi
+  mv "$response_file.tmp" "$response_file"
+
+  object_line="$(tr '\n' ' ' < "$response_file" \
+    | sed 's/[[:space:]]//g' \
+    | tr '{' '\n' \
+    | grep -F "\"filename\":\"$filename\"" \
+    | head -n 1 || true)"
+  if [[ -z "$object_line" ]]; then
+    return 1
+  fi
+
+  printf '%s\n' "$object_line" | sed -n 's/.*"status":"\([^"]*\)".*/\1/p' | head -n 1
+}
+
+wait_for_backend_recording() {
+  local filename="$1"
+  local deadline=$((SECONDS + BACKEND_UPLOAD_WAIT_SECONDS))
+  local status
+
+  while (( SECONDS < deadline )); do
+    status="$(fetch_backend_recording_status "$filename" || true)"
+    if [[ -n "$status" ]]; then
+      BACKEND_RECORDING_STATUS="$status"
+      printf '%s\n' "$status" > "$OUT_DIR/backend-recording-status.txt"
+      return 0
+    fi
+    sleep 5
+  done
+
+  cat >&2 <<EOF
+Timed out waiting for the phone upload to appear in backend recordings.
+
+Filename:
+  $filename
+
+Check:
+  $OUT_DIR/logcat.txt
+  $OUT_DIR/debug-device-test-status.json
+EOF
+  return 1
+}
+
+wait_for_backend_completion() {
+  local filename="$1"
+  local wait_seconds="$2"
+  local deadline=$((SECONDS + wait_seconds))
+  local status
+
+  while (( SECONDS < deadline )); do
+    status="$(fetch_backend_recording_status "$filename" || true)"
+    if [[ -n "$status" ]]; then
+      BACKEND_RECORDING_STATUS="$status"
+      printf '%s\n' "$status" > "$OUT_DIR/backend-recording-status.txt"
+      case "$status" in
+        COMPLETED)
+          return 0
+          ;;
+        FAILED)
+          echo "Backend marked the recording as FAILED: $filename" >&2
+          return 1
+          ;;
+      esac
+    fi
+    sleep 5
+  done
+
+  return 1
+}
+
+latest_workflow_dispatch_run_id() {
+  gh run list \
+    --workflow "$MINING_WORKFLOW_ID" \
+    --event workflow_dispatch \
+    --limit 1 \
+    --json databaseId \
+    --jq '.[0].databaseId // ""' 2>/dev/null || true
+}
+
+trigger_and_wait_for_mining_job() {
+  local previous_run_id="$1"
+  local run_id=""
+  local deadline=$((SECONDS + MINING_WAIT_SECONDS))
+  local run_tsv status conclusion run_url
+
+  echo "Triggering GitHub Actions workflow: $MINING_WORKFLOW_ID ($MINING_WORKFLOW_REF)"
+  if ! gh workflow run "$MINING_WORKFLOW_ID" --ref "$MINING_WORKFLOW_REF" \
+    > "$OUT_DIR/mining-workflow-dispatch.txt" 2>&1; then
+    cat "$OUT_DIR/mining-workflow-dispatch.txt" >&2
+    return 1
+  fi
+
+  while (( SECONDS < deadline )); do
+    run_id="$(latest_workflow_dispatch_run_id)"
+    if [[ -n "$run_id" && "$run_id" != "$previous_run_id" ]]; then
+      break
+    fi
+    sleep 3
+  done
+
+  if [[ -z "$run_id" || "$run_id" == "$previous_run_id" ]]; then
+    echo "Could not find the dispatched mining workflow run." >&2
+    return 1
+  fi
+
+  printf '%s\n' "$run_id" > "$OUT_DIR/mining-run-id.txt"
+  echo "Waiting for mining workflow run: $run_id"
+
+  while (( SECONDS < deadline )); do
+    run_tsv="$(gh run view "$run_id" \
+      --json status,conclusion,url \
+      --jq '[.status, (.conclusion // ""), .url] | @tsv' 2>/dev/null || true)"
+    if [[ -n "$run_tsv" ]]; then
+      printf '%s\n' "$run_tsv" > "$OUT_DIR/mining-run-status.tsv"
+      status="$(printf '%s\n' "$run_tsv" | awk -F '\t' '{ print $1 }')"
+      conclusion="$(printf '%s\n' "$run_tsv" | awk -F '\t' '{ print $2 }')"
+      run_url="$(printf '%s\n' "$run_tsv" | awk -F '\t' '{ print $3 }')"
+      printf '%s\n' "$run_url" > "$OUT_DIR/mining-run-url.txt"
+
+      if [[ "$status" == "completed" ]]; then
+        gh run view "$run_id" --log > "$OUT_DIR/mining-run.log" 2>"$OUT_DIR/mining-run-log.err" || true
+        if [[ "$conclusion" == "success" ]]; then
+          return 0
+        fi
+        echo "Mining workflow completed with conclusion: $conclusion" >&2
+        gh run view "$run_id" --log-failed > "$OUT_DIR/mining-run-failed.log" 2>/dev/null || true
+        return 1
+      fi
+    fi
+    sleep 5
+  done
+
+  echo "Timed out waiting for mining workflow to finish." >&2
+  return 1
+}
+
+maybe_run_mining_job_for_latest_recording() {
+  local filename="$1"
+  local previous_run_id
+
+  if ! truthy "$TRIGGER_MINING_JOB"; then
+    return 0
+  fi
+
+  if [[ -z "$filename" ]]; then
+    echo "Cannot trigger mining job because no recording filename was captured." >&2
+    return 1
+  fi
+
+  require_cmd gh
+  require_cmd curl
+
+  if [[ -z "$FILES_TOKEN" ]]; then
+    echo "TRIGGER_MINING_JOB=true requires FILES_TOKEN." >&2
+    return 1
+  fi
+
+  echo "Waiting for backend upload record: $filename"
+  wait_for_backend_recording "$filename"
+
+  if [[ "$BACKEND_RECORDING_STATUS" == "COMPLETED" ]]; then
+    echo "Backend recording is already COMPLETED."
+    return 0
+  fi
+
+  if [[ "$BACKEND_RECORDING_STATUS" == "PROCESSING" ]]; then
+    echo "Backend recording is already PROCESSING; waiting for completion."
+    wait_for_backend_completion "$filename" "$MINING_WAIT_SECONDS"
+    return $?
+  fi
+
+  previous_run_id="$(latest_workflow_dispatch_run_id)"
+  printf '%s\n' "$previous_run_id" > "$OUT_DIR/mining-previous-run-id.txt"
+
+  trigger_and_wait_for_mining_job "$previous_run_id"
+  wait_for_backend_completion "$filename" "$BACKEND_COMPLETION_WAIT_SECONDS"
 }
 
 screen_width() {
@@ -330,6 +587,12 @@ echo "Granting permissions where possible..."
 adb_shell pm grant "$PACKAGE_NAME" android.permission.RECORD_AUDIO >/dev/null 2>&1 || true
 adb_shell pm grant "$PACKAGE_NAME" android.permission.ACCESS_COARSE_LOCATION >/dev/null 2>&1 || true
 adb_shell pm grant "$PACKAGE_NAME" android.permission.POST_NOTIFICATIONS >/dev/null 2>&1 || true
+if truthy "$FORCE_RECORD_AUDIO_APPOPS"; then
+  adb_shell cmd appops set "$PACKAGE_NAME" RECORD_AUDIO allow >/dev/null 2>&1 || true
+  adb_shell appops set "$PACKAGE_NAME" RECORD_AUDIO allow >/dev/null 2>&1 || true
+fi
+adb_shell dumpsys package "$PACKAGE_NAME" > "$OUT_DIR/package-after-permissions.txt" 2>&1 || true
+adb_shell appops get "$PACKAGE_NAME" RECORD_AUDIO > "$OUT_DIR/appops-record-audio.txt" 2>&1 || true
 
 write_app_preferences
 
@@ -343,6 +606,9 @@ adb_shell screencap -p /sdcard/vibepub-launch.png
 adb pull /sdcard/vibepub-launch.png "$OUT_DIR/01-launch.png" >/dev/null
 
 if [[ -n "$AUDIO_FILE" ]]; then
+  LATEST_RECORDING_FILENAME=""
+  EXPECTED_DURATION_TEXT=""
+
   if [[ "$AUTOMATION_MODE" == "ui-tap" ]] && ! supports_adb_tap; then
     cat > "$OUT_DIR/blocker-adb-input.txt" <<EOF
 ADB input tap is blocked by the connected Android device.
@@ -413,6 +679,14 @@ EOF
     echo "Stopping recording through debug broadcast..."
     adb_shell am broadcast -a "$DEBUG_STOP_ACTION" -p "$PACKAGE_NAME" > "$OUT_DIR/debug-stop-broadcast.txt"
     require_debug_status "STOPPED|STOPPED_WITHOUT_UPLOAD_TOKEN" "stop"
+    LATEST_RECORDING_FILENAME="$(recording_filename_from_debug_status || true)"
+    EXPECTED_DURATION_TEXT="$(recording_duration_text_from_debug_status || true)"
+    if [[ -n "$LATEST_RECORDING_FILENAME" ]]; then
+      printf '%s\n' "$LATEST_RECORDING_FILENAME" > "$OUT_DIR/latest-recording-filename.txt"
+    fi
+    if [[ -n "$EXPECTED_DURATION_TEXT" ]]; then
+      printf '%s\n' "$EXPECTED_DURATION_TEXT" > "$OUT_DIR/expected-duration-text.txt"
+    fi
   else
     echo "Tapping stop..."
     adb_shell input tap "$stop_tap_x" "$stop_tap_y"
@@ -423,9 +697,20 @@ EOF
   adb_shell screencap -p /sdcard/vibepub-after-record.png
   adb pull /sdcard/vibepub-after-record.png "$OUT_DIR/02-after-record.png" >/dev/null
 
+  if truthy "$TRIGGER_MINING_JOB"; then
+    maybe_run_mining_job_for_latest_recording "$LATEST_RECORDING_FILENAME"
+  fi
+
   echo "Opening first recording..."
   if [[ "$AUTOMATION_MODE" == "debug-broadcast" ]]; then
-    adb_shell am start -n "$PACKAGE_NAME/.debug.DebugLatestRecordingActivity" > "$OUT_DIR/open-latest-detail.txt"
+    if [[ -n "$LATEST_RECORDING_FILENAME" ]]; then
+      adb_shell am start \
+        -n "$PACKAGE_NAME/.debug.DebugLatestRecordingActivity" \
+        --es filename "$LATEST_RECORDING_FILENAME" \
+        > "$OUT_DIR/open-latest-detail.txt"
+    else
+      adb_shell am start -n "$PACKAGE_NAME/.debug.DebugLatestRecordingActivity" > "$OUT_DIR/open-latest-detail.txt"
+    fi
   else
     adb_shell input tap "$first_item_tap_x" "$first_item_tap_y"
   fi
@@ -484,6 +769,11 @@ cat > "$OUT_DIR/checklist.md" <<EOF
 - Reset app data: \`$RESET_APP_DATA\`
 - Automation mode: \`$AUTOMATION_MODE\`
 - Skip install: \`$SKIP_INSTALL\`
+- Trigger mining job: \`$TRIGGER_MINING_JOB\`
+- Latest recording filename: \`${LATEST_RECORDING_FILENAME:-not_captured}\`
+- Expected duration text: \`${EXPECTED_DURATION_TEXT:-not_checked}\`
+- Backend recording status: \`${BACKEND_RECORDING_STATUS:-not_checked}\`
+- Mining workflow run: \`$(if [[ -f "$OUT_DIR/mining-run-url.txt" ]]; then cat "$OUT_DIR/mining-run-url.txt"; else printf 'not_run'; fi)\`
 
 Review:
 

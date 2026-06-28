@@ -21,6 +21,7 @@ import androidx.compose.ui.unit.sp
 import cn.litianc.vibepub.AppPreferences
 import cn.litianc.vibepub.data.AppDatabase
 import cn.litianc.vibepub.ui.theme.PrimaryRed
+import android.text.Html
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
@@ -131,10 +132,10 @@ fun DetailScreen(
                         val transcript = loadTranscript(context, filename)
                         if (transcript != null) {
                             articleTitle = transcript.optString("articleTitle", "转录完成")
-                            articleContent = transcript.optString(
+                            articleContent = renderArticleText(transcript.optString(
                                 "articleContent",
                                 transcript.optString("rawText", "未能获取转录内容"),
-                            )
+                            ))
                             rawText = transcript.optString("rawText", "")
                             markRecordingCompleted(context, filename)
                             return@LaunchedEffect
@@ -210,6 +211,16 @@ private fun formatDuration(durationMs: Long): String {
     val minutes = totalSeconds / 60
     val seconds = totalSeconds % 60
     return "%d:%02d".format(minutes, seconds)
+}
+
+internal fun renderArticleText(content: String): String {
+    val text = Html.fromHtml(content, Html.FROM_HTML_MODE_LEGACY)
+        .toString()
+        .lines()
+        .map { it.trim() }
+        .filter { it.isNotEmpty() }
+        .joinToString("\n\n")
+    return text.ifBlank { content }
 }
 
 private suspend fun loadTranscript(context: android.content.Context, filename: String): JSONObject? =
