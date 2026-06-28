@@ -16,6 +16,7 @@ Environment:
   AUDIO_FILE       Test audio file. Defaults to the standard speaker sample.
   API_BASE_URL     Backend URL. Defaults to https://vibepub.litianc.cn.
   FILES_TOKEN      Backend token. Falls back to secrets/files-token.txt.
+  SKIP_INSTALL     Use APK already installed on phone. Default: false.
 
 When no APK path is passed, the latest successful GitHub Actions debug APK is
 downloaded through scripts/download-latest-android-apk.sh.
@@ -58,6 +59,7 @@ API_BASE_URL="${API_BASE_URL:-https://vibepub.litianc.cn}" \
 FILES_TOKEN="$FILES_TOKEN" \
 AUTOMATION_MODE="${AUTOMATION_MODE:-debug-broadcast}" \
 RESET_APP_DATA="${RESET_APP_DATA:-true}" \
+SKIP_INSTALL="${SKIP_INSTALL:-false}" \
 RECORD_SECONDS="${RECORD_SECONDS:-70}" \
 POST_STOP_WAIT_SECONDS="${POST_STOP_WAIT_SECONDS:-10}" \
 DETAIL_WAIT_SECONDS="${DETAIL_WAIT_SECONDS:-12}" \

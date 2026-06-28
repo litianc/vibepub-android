@@ -81,6 +81,12 @@ To check whether the phone is ready before a full run:
 scripts/check-android-device-ready.sh /path/to/app-debug.apk
 ```
 
+If the phone blocks ADB installation, manually install the debug APK and run:
+
+```bash
+SKIP_INSTALL=true RESET_APP_DATA=false scripts/run-android-device-smoke.sh /path/to/app-debug.apk
+```
+
 The script will:
 
 - install the APK

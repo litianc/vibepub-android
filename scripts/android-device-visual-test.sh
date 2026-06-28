@@ -14,6 +14,7 @@ FILES_TOKEN="${FILES_TOKEN:-}"
 RESET_APP_DATA="${RESET_APP_DATA:-false}"
 REQUIRE_PREFS_INJECTION="${REQUIRE_PREFS_INJECTION:-true}"
 AUTOMATION_MODE="${AUTOMATION_MODE:-debug-broadcast}"
+SKIP_INSTALL="${SKIP_INSTALL:-false}"
 START_DELAY_SECONDS="${START_DELAY_SECONDS:-1}"
 POST_STOP_WAIT_SECONDS="${POST_STOP_WAIT_SECONDS:-5}"
 DETAIL_WAIT_SECONDS="${DETAIL_WAIT_SECONDS:-8}"
@@ -38,6 +39,7 @@ Environment:
   REQUIRE_PREFS_INJECTION
                   Fail if API_BASE_URL/FILES_TOKEN injection fails. Default: true.
   AUTOMATION_MODE debug-broadcast or ui-tap. Default: debug-broadcast.
+  SKIP_INSTALL    Use the APK already installed on the phone. Default: false.
   PACKAGE_NAME    Android package. Default: cn.litianc.vibepub.
   ACTIVITY_NAME   Launch activity. Default: .MainActivity.
   RECORD_TAP_X/Y  Optional override for the home record button tap.
@@ -209,9 +211,13 @@ if [[ -n "$AUDIO_FILE" ]]; then
 fi
 
 if [[ ! -f "$APK_PATH" ]]; then
-  echo "APK not found: $APK_PATH" >&2
-  echo "Download the APK from GitHub Actions, or build it in CI first." >&2
-  exit 1
+  if truthy "$SKIP_INSTALL"; then
+    echo "APK not found locally, but SKIP_INSTALL=true; using installed app on device."
+  else
+    echo "APK not found: $APK_PATH" >&2
+    echo "Download the APK from GitHub Actions, or build it in CI first." >&2
+    exit 1
+  fi
 fi
 
 mkdir -p "$OUT_DIR"
@@ -246,6 +252,12 @@ adb devices > "$OUT_DIR/adb-devices.txt"
 adb_shell getprop ro.product.model > "$OUT_DIR/device-model.txt" || true
 adb_shell getprop ro.build.version.release > "$OUT_DIR/android-version.txt" || true
 
+if truthy "$SKIP_INSTALL" && truthy "$RESET_APP_DATA"; then
+  echo "RESET_APP_DATA=true cannot be used with SKIP_INSTALL=true." >&2
+  echo "Install a fresh APK manually first, then rerun with RESET_APP_DATA=false." >&2
+  exit 1
+fi
+
 if truthy "$RESET_APP_DATA"; then
   echo "Uninstalling existing app for deterministic test run..."
   if ! adb uninstall "$PACKAGE_NAME" > "$OUT_DIR/uninstall-for-reset.txt" 2>&1; then
@@ -256,11 +268,18 @@ if truthy "$RESET_APP_DATA"; then
   fi
 fi
 
-echo "Installing APK: $APK_PATH"
-if ! adb install -r "$APK_PATH" > "$OUT_DIR/install.txt" 2>&1; then
-  cat "$OUT_DIR/install.txt" >&2
-  if grep -q "INSTALL_FAILED_USER_RESTRICTED" "$OUT_DIR/install.txt"; then
-    cat >&2 <<EOF
+if truthy "$SKIP_INSTALL"; then
+  echo "Skipping APK install; using package already installed on the phone."
+  adb_shell dumpsys package "$PACKAGE_NAME" > "$OUT_DIR/installed-package.txt" 2>&1 || {
+    echo "Package is not installed on the phone: $PACKAGE_NAME" >&2
+    exit 1
+  }
+else
+  echo "Installing APK: $APK_PATH"
+  if ! adb install -r "$APK_PATH" > "$OUT_DIR/install.txt" 2>&1; then
+    cat "$OUT_DIR/install.txt" >&2
+    if grep -q "INSTALL_FAILED_USER_RESTRICTED" "$OUT_DIR/install.txt"; then
+      cat >&2 <<EOF
 
 The phone blocked APK installation from adb.
 
@@ -275,8 +294,9 @@ Chinese labels may be:
 
 Then reconnect USB if needed and rerun the script.
 EOF
+    fi
+    exit 1
   fi
-  exit 1
 fi
 
 echo "Granting permissions where possible..."
@@ -429,6 +449,7 @@ cat > "$OUT_DIR/checklist.md" <<EOF
 - API base URL: \`${API_BASE_URL:-app default}\`
 - Reset app data: \`$RESET_APP_DATA\`
 - Automation mode: \`$AUTOMATION_MODE\`
+- Skip install: \`$SKIP_INSTALL\`
 
 Review:
 

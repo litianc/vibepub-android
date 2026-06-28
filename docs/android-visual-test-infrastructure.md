@@ -158,6 +158,13 @@ Check the connected phone without running the full smoke:
 scripts/check-android-device-ready.sh /path/to/app-debug.apk
 ```
 
+If the phone blocks ADB installation but you manually install the debug APK on
+the phone first, run the smoke against the installed app:
+
+```bash
+SKIP_INSTALL=true RESET_APP_DATA=false scripts/run-android-device-smoke.sh /path/to/app-debug.apk
+```
+
 Expanded form:
 
 ```bash

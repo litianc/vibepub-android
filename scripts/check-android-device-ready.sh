@@ -7,6 +7,7 @@ APK_PATH="${1:-}"
 RUN_ID="$(date +'%Y%m%d-%H%M%S')"
 OUT_DIR="${OUT_DIR:-$ROOT_DIR/artifacts/android-device-readiness/$RUN_ID}"
 REQUIRE_TAP="${REQUIRE_TAP:-false}"
+SKIP_INSTALL="${SKIP_INSTALL:-false}"
 
 usage() {
   cat <<EOF
@@ -17,6 +18,7 @@ Environment:
   PACKAGE_NAME  Android package. Default: cn.litianc.vibepub.
   OUT_DIR       Readiness report directory.
   REQUIRE_TAP   Also require adb input tap support. Default: false.
+  SKIP_INSTALL  Skip install check and inspect installed package. Default: false.
 
 Checks whether a USB-connected Android phone is ready for the VibePub
 real-device smoke lane.
@@ -93,7 +95,13 @@ if [[ -n "$APK_PATH" ]]; then
   else
     check_pass "APK file exists"
 
-    if adb install -r -t "$APK_PATH" > "$OUT_DIR/install.txt" 2>&1; then
+    if truthy "$SKIP_INSTALL"; then
+      if adb shell dumpsys package "$PACKAGE_NAME" > "$OUT_DIR/installed-package.txt" 2>&1; then
+        check_pass "package is already installed on the phone"
+      else
+        check_fail "package is already installed on the phone"
+      fi
+    elif adb install -r -t "$APK_PATH" > "$OUT_DIR/install.txt" 2>&1; then
       check_pass "ADB can install the APK"
     else
       check_fail "ADB can install the APK"
