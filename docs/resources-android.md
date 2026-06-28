@@ -76,10 +76,15 @@ Configured:
 Still needed:
 
 - confirm the AppID/Access Token are granted for the ASR resource used by the mining job
+- add account-level OpenAPI secrets if we want the activation step to be automated:
+  `VOLCENGINE_ACCESS_KEY_ID`, `VOLCENGINE_SECRET_ACCESS_KEY`, optional
+  `VOLCENGINE_REGION`
+- confirm the Volcengine speech service `BlueprintID` for the desired
+  `ResourceID`
 - current smoke result: `401`, `code=45000010`, `requested grant not found in SaaS storage`
 - current fallback resource IDs: `volc.bigasr.auc`, `volc.seedasr.auc`
 
-Recommended account action: in the Volcengine console, open the ASR application/key that produced this AppID and Access Token, then grant or subscribe it to "语音识别大模型 / 大模型录音文件识别". If the console shows a different Resource ID, add it as GitHub secret `VOLC_ASR_RESOURCE_ID`.
+Recommended account action: in the Volcengine console, open the ASR application/key that produced this AppID and Access Token, then grant or subscribe it to "语音识别大模型 / 大模型录音文件识别". If the console shows a different Resource ID, add it as GitHub secret `VOLC_ASR_RESOURCE_ID`. Once the account-level AK/SK and BlueprintID are available, run the manual GitHub Actions workflow `Volcengine Speech Service`; it checks `ServiceStatus`, calls `ActivateService` when needed, and then runs the ASR smoke test against the same resource.
 
 Completion checklist: `docs/e2e-acceptance-runbook.md`.
 

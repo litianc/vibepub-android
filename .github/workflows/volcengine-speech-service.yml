@@ -1,0 +1,54 @@
+name: Volcengine Speech Service
+
+on:
+  workflow_dispatch:
+    inputs:
+      project_name:
+        description: Volcengine project name
+        required: true
+        default: default
+      blueprint_id:
+        description: Speech service BlueprintID from Volcengine console/API Explorer
+        required: true
+      resource_id:
+        description: Speech service ResourceID to activate and smoke test
+        required: true
+        default: volc.seedasr.auc
+
+jobs:
+  activate-and-smoke:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: 'infra/mining/package-lock.json'
+
+      - name: Install mining dependencies
+        working-directory: infra/mining
+        run: npm ci
+
+      - name: Activate or verify Volcengine speech service
+        working-directory: infra/mining
+        env:
+          VOLCENGINE_ACCESS_KEY_ID: ${{ secrets.VOLCENGINE_ACCESS_KEY_ID }}
+          VOLCENGINE_SECRET_ACCESS_KEY: ${{ secrets.VOLCENGINE_SECRET_ACCESS_KEY }}
+          VOLCENGINE_REGION: ${{ secrets.VOLCENGINE_REGION || 'cn-beijing' }}
+          VOLCENGINE_PROJECT_NAME: ${{ inputs.project_name }}
+          VOLC_SPEECH_BLUEPRINT_ID: ${{ inputs.blueprint_id }}
+          VOLC_SPEECH_RESOURCE_ID: ${{ inputs.resource_id }}
+        run: npm run volc:speech-service
+
+      - name: Smoke test the activated ASR resource
+        working-directory: infra/mining
+        env:
+          VOLC_ASR_APPID: ${{ secrets.VOLC_ASR_APPID }}
+          VOLC_ASR_ACCESS_TOKEN: ${{ secrets.VOLC_ASR_ACCESS_TOKEN }}
+          VOLC_ASR_RESOURCE_ID: ${{ inputs.resource_id }}
+        run: npm run smoke:asr

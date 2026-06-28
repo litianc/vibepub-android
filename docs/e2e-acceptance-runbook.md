@@ -20,11 +20,34 @@ Required account action:
 
 1. Open the Volcengine console for the app/key behind `VOLC_ASR_APPID` and
    `VOLC_ASR_ACCESS_TOKEN`.
-2. Grant or subscribe it to BigModel ASR / 大模型录音文件识别.
-3. Confirm the resource ID. The app tries both documented BigModel ASR resource
-   IDs, `volc.bigasr.auc` and `volc.seedasr.auc`, when
-   `VOLC_ASR_RESOURCE_ID` is not set. If the console shows a different ID, set
-   GitHub secret `VOLC_ASR_RESOURCE_ID`.
+2. Confirm the BigModel ASR service `BlueprintID` and `ResourceID` for the
+   account/project. The app tries both documented BigModel ASR resource IDs,
+   `volc.bigasr.auc` and `volc.seedasr.auc`, when `VOLC_ASR_RESOURCE_ID` is not
+   set. If the console shows a different ID, set GitHub secret
+   `VOLC_ASR_RESOURCE_ID`.
+3. Add account-level Volcengine OpenAPI secrets to GitHub Actions:
+   `VOLCENGINE_ACCESS_KEY_ID`, `VOLCENGINE_SECRET_ACCESS_KEY`, and optional
+   `VOLCENGINE_REGION` (defaults to `cn-beijing`).
+4. Run the manual workflow:
+
+   ```bash
+   gh workflow run volcengine-speech-service.yml \
+     --ref main \
+     -f project_name=default \
+     -f blueprint_id=<console-blueprint-id> \
+     -f resource_id=volc.seedasr.auc
+   ```
+
+   The workflow calls `ServiceStatus`, calls `ActivateService` only when the
+   service is not already active, then runs the production ASR smoke check
+   against the same `resource_id`.
+
+Useful Volcengine references:
+
+- Console ASR: <https://console.volcengine.com/speech/new/experience/asr>
+- Cross-service auth: <https://console.volcengine.com/rtc/aigc/iam>
+- `ActivateService`: <https://api.volcengine.com/api-explorer?serviceCode=speech_saas_prod&version=2025-05-20&action=ActivateService>
+- `ServiceStatus`: <https://api.volcengine.com/api-explorer?serviceCode=speech_saas_prod&version=2025-05-20&action=ServiceStatus>
 
 ## Required Gates
 

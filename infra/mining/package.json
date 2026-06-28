@@ -18,6 +18,7 @@
   "scripts": {
     "start": "tsx src/index.ts",
     "smoke:asr": "tsx src/smoke_asr.ts",
+    "volc:speech-service": "tsx src/activate_speech_service.ts",
     "test": "vitest run"
   }
 }
