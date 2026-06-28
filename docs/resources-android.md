@@ -75,8 +75,13 @@ Runtime model contract:
 | Vendor/API | Volcengine Doubao Big Model ASR v3 |
 | Code path | `infra/mining/src/asr.ts` |
 | Request `model_name` | `bigmodel` |
+| Confirmed Resource ID | `volc.seedasr.auc` |
+| Confirmed BlueprintID | `10065` |
 | Default Resource ID fallback order | `volc.bigasr.auc`, then `volc.seedasr.auc` |
 | Override Resource ID secret | `VOLC_ASR_RESOURCE_ID` |
+| Audio input contract | Publicly reachable `audio.url`; R2 objects use short-lived presigned GET URLs |
+| Submit success signal | Empty body with `X-Api-Status-Code: 20000000` |
+| Query transcript path | `result.text` |
 
 Configured:
 
@@ -90,22 +95,12 @@ GitHub Actions secret contract:
 | `VOLC_ASR_APPID` | Yes | App ID used by the ASR submit/query API. |
 | `VOLC_ASR_ACCESS_TOKEN` | Yes | Access token used by the ASR submit/query API. |
 | `VOLC_ASR_RESOURCE_ID` | No | Pins the ASR Resource ID. If omitted, the mining job tries the fallback IDs above. |
+| `VOLC_ASR_SMOKE_R2_KEY` | No | R2 object key for a real smoke-test audio clip. |
+| `VOLC_ASR_SMOKE_AUDIO_URL` | No | Optional public audio URL for ASR smoke tests. Takes precedence over `VOLC_ASR_SMOKE_R2_KEY`. |
+| `VOLC_ASR_SMOKE_AUDIO_FORMAT` | No | Smoke audio format. Defaults to `mp3`. |
 | `VOLCENGINE_ACCESS_KEY_ID` | Only for automation | Account-level OpenAPI AK for the `Volcengine Speech Service` workflow. The script also accepts `VOLC_ACCESS_KEY_ID`. |
 | `VOLCENGINE_SECRET_ACCESS_KEY` | Only for automation | Account-level OpenAPI SK for the `Volcengine Speech Service` workflow. The script also accepts `VOLC_SECRET_ACCESS_KEY`. |
 | `VOLCENGINE_REGION` | No | OpenAPI region for service activation. Defaults to `cn-beijing`. |
-
-Still needed:
-
-- confirm the AppID/Access Token are granted for the ASR resource used by the mining job
-- add account-level OpenAPI secrets if we want the activation step to be automated:
-  `VOLCENGINE_ACCESS_KEY_ID`, `VOLCENGINE_SECRET_ACCESS_KEY`, optional
-  `VOLCENGINE_REGION`
-- confirm the Volcengine speech service `BlueprintID` for the desired
-  `ResourceID`
-- current smoke result: `401`, `code=45000010`, `requested grant not found in SaaS storage`
-- current fallback resource IDs: `volc.bigasr.auc`, `volc.seedasr.auc`
-
-Recommended account action: in the Volcengine console, open the ASR application/key that produced this AppID and Access Token, then grant or subscribe it to "语音识别大模型 / 大模型录音文件识别". If the console shows a different Resource ID, add it as GitHub secret `VOLC_ASR_RESOURCE_ID`. Once the account-level AK/SK and BlueprintID are available, run the manual GitHub Actions workflow `Volcengine Speech Service`; it checks `ServiceStatus`, calls `ActivateService` when needed, and then runs the ASR smoke test against the same resource.
 
 Completion checklist: `docs/e2e-acceptance-runbook.md`.
 

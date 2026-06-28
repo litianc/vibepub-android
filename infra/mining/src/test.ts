@@ -1,9 +1,10 @@
 import fs from "fs";
+import http from "http";
 import path from "path";
 
 // Run this script using: node --env-file=.env --import tsx src/test.ts
 
-import { transcribeAudio } from "./asr.js";
+import { transcribeAudioUrl } from "./asr.js";
 import { generateCoverImageBuffer, processAudioText } from "./llm.js";
 import { getAccessToken, publishDraft } from "./wechat.js";
 
@@ -21,7 +22,7 @@ async function runTests() {
       const ext = path.extname(testAudioPath).slice(1) || 'm4a';
       console.log(`Sending ${audioBuffer.length} bytes to Volcengine ASR...`);
       
-      const rawText = await transcribeAudio(audioBuffer, ext);
+      const rawText = await withLocalAudioUrl(audioBuffer, ext, url => transcribeAudioUrl(url, ext));
       console.log("✅ ASR Success! Transcript:");
       console.log(rawText);
       
@@ -77,3 +78,36 @@ async function runTests() {
 }
 
 runTests();
+
+async function withLocalAudioUrl<T>(
+  audioBuffer: Buffer,
+  format: string,
+  run: (url: string) => Promise<T>,
+): Promise<T> {
+  const contentType = format === "mp3" ? "audio/mpeg" : `audio/${format}`;
+  const server = http.createServer((request, response) => {
+    if (request.url !== "/audio") {
+      response.writeHead(404).end();
+      return;
+    }
+    response.writeHead(200, {
+      "content-type": contentType,
+      "content-length": String(audioBuffer.length),
+    });
+    response.end(audioBuffer);
+  });
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "0.0.0.0", resolve);
+    });
+    const address = server.address();
+    if (!address || typeof address === "string") {
+      throw new Error("Local audio server did not bind to a TCP port.");
+    }
+    return await run(`http://127.0.0.1:${address.port}/audio`);
+  } finally {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
+}

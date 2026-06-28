@@ -3,38 +3,33 @@
 This runbook defines the evidence required before calling the VibePub Android
 recording-to-transcript flow fully debugged.
 
-## Current Blocker
+## Current ASR Contract
 
-The Android recording and upload path is working, but production ASR is not
-authorized.
+The Android recording and upload path is working. Production ASR is configured
+for Volcengine Doubao recording-file recognition 2.0:
 
-Observed production ASR failure:
+- `AppID`: `6270463764`
+- `BlueprintID`: `10065`
+- `ResourceID`: `volc.seedasr.auc`
+- Product doc: <https://www.volcengine.com/docs/6561/1354868?lang=zh>
 
-- Workflow: `Smoke External Services`
-- Step: `Check Volcengine BigModel ASR v3 credentials`
-- HTTP status: `401`
-- API status code: `45000010`
-- API message: `load grant: requested grant not found in SaaS storage`
+Important protocol details:
 
-Required account action:
+- The standard HTTP submit API requires a publicly reachable audio URL in
+  `audio.url`; it does not accept the prior base64 `audio.data` payload.
+- A successful submit returns an empty response body. Success is indicated by
+  response header `X-Api-Status-Code: 20000000`.
+- Query responses return transcript text at `result.text`.
+- Smoke tests must use a real audio URL. The current GitHub secret
+  `VOLC_ASR_SMOKE_R2_KEY` points to the uploaded test clip in R2.
 
-1. Open the Volcengine console for the app/key behind `VOLC_ASR_APPID` and
-   `VOLC_ASR_ACCESS_TOKEN`.
-2. Confirm the BigModel ASR service `BlueprintID` and `ResourceID` for the
-   account/project. The app tries both documented BigModel ASR resource IDs,
-   `volc.bigasr.auc` and `volc.seedasr.auc`, when `VOLC_ASR_RESOURCE_ID` is not
-   set. If the console shows a different ID, set GitHub secret
-   `VOLC_ASR_RESOURCE_ID`.
-3. Add account-level Volcengine OpenAPI secrets to GitHub Actions:
-   `VOLCENGINE_ACCESS_KEY_ID`, `VOLCENGINE_SECRET_ACCESS_KEY`, and optional
-   `VOLCENGINE_REGION` (defaults to `cn-beijing`).
-4. Run the manual workflow:
+If service activation needs to be re-run, use:
 
    ```bash
    gh workflow run volcengine-speech-service.yml \
      --ref main \
      -f project_name=default \
-     -f blueprint_id=<console-blueprint-id> \
+     -f blueprint_id=10065 \
      -f resource_id=volc.seedasr.auc
    ```
 

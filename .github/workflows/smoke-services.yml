@@ -54,9 +54,15 @@ jobs:
       - name: Check Volcengine BigModel ASR v3 credentials
         working-directory: infra/mining
         env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           VOLC_ASR_APPID: ${{ secrets.VOLC_ASR_APPID }}
           VOLC_ASR_ACCESS_TOKEN: ${{ secrets.VOLC_ASR_ACCESS_TOKEN }}
           VOLC_ASR_RESOURCE_ID: ${{ secrets.VOLC_ASR_RESOURCE_ID }}
+          VOLC_ASR_SMOKE_AUDIO_URL: ${{ secrets.VOLC_ASR_SMOKE_AUDIO_URL }}
+          VOLC_ASR_SMOKE_R2_KEY: ${{ secrets.VOLC_ASR_SMOKE_R2_KEY || 'inbox/speaker_boundary_18_48s.mp3' }}
+          VOLC_ASR_SMOKE_AUDIO_FORMAT: ${{ secrets.VOLC_ASR_SMOKE_AUDIO_FORMAT || 'mp3' }}
         run: npm run smoke:asr
 
       - name: Check WeChat Proxy and Token

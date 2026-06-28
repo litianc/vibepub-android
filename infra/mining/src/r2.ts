@@ -1,4 +1,5 @@
 import { S3Client, ListObjectsV2Command, GetObjectCommand, DeleteObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
+import crypto from "crypto";
 
 const CLOUDFLARE_ACCOUNT_ID = process.env.CLOUDFLARE_ACCOUNT_ID!;
 const R2_ACCESS_KEY_ID = process.env.R2_ACCESS_KEY_ID!;
@@ -45,6 +46,40 @@ export async function downloadFile(key: string): Promise<Buffer> {
   });
 }
 
+export async function createPresignedDownloadUrl(key: string, expiresInSeconds = 900): Promise<string> {
+  const host = `${CLOUDFLARE_ACCOUNT_ID}.r2.cloudflarestorage.com`;
+  const now = new Date();
+  const amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, "");
+  const dateStamp = amzDate.slice(0, 8);
+  const credentialScope = `${dateStamp}/auto/s3/aws4_request`;
+  const canonicalUri = `/${encodePathSegment(BUCKET_NAME)}/${key.split("/").map(encodePathSegment).join("/")}`;
+  const query: Record<string, string> = {
+    "X-Amz-Algorithm": "AWS4-HMAC-SHA256",
+    "X-Amz-Credential": `${R2_ACCESS_KEY_ID}/${credentialScope}`,
+    "X-Amz-Date": amzDate,
+    "X-Amz-Expires": String(expiresInSeconds),
+    "X-Amz-SignedHeaders": "host",
+  };
+  const canonicalQuery = toCanonicalQuery(query);
+  const canonicalRequest = [
+    "GET",
+    canonicalUri,
+    canonicalQuery,
+    `host:${host}\n`,
+    "host",
+    "UNSIGNED-PAYLOAD",
+  ].join("\n");
+  const stringToSign = [
+    "AWS4-HMAC-SHA256",
+    amzDate,
+    credentialScope,
+    sha256Hex(canonicalRequest),
+  ].join("\n");
+  const signature = hmacHex(getSigningKey(R2_SECRET_ACCESS_KEY, dateStamp, "auto", "s3"), stringToSign);
+
+  return `https://${host}${canonicalUri}?${canonicalQuery}&X-Amz-Signature=${signature}`;
+}
+
 export async function deleteFile(key: string): Promise<void> {
   const command = new DeleteObjectCommand({
     Bucket: BUCKET_NAME,
@@ -61,4 +96,34 @@ export async function uploadTranscript(key: string, data: string): Promise<void>
     ContentType: "application/json",
   });
   await s3.send(command);
+}
+
+function encodePathSegment(value: string): string {
+  return encodeURIComponent(value).replace(/[!*'()]/g, char => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
+}
+
+function toCanonicalQuery(query: Record<string, string>): string {
+  return Object.keys(query)
+    .sort()
+    .map(key => `${encodePathSegment(key)}=${encodePathSegment(query[key])}`)
+    .join("&");
+}
+
+function sha256Hex(value: string): string {
+  return crypto.createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+function hmac(key: string | Buffer, value: string): Buffer {
+  return crypto.createHmac("sha256", key).update(value, "utf8").digest();
+}
+
+function hmacHex(key: string | Buffer, value: string): string {
+  return hmac(key, value).toString("hex");
+}
+
+function getSigningKey(secret: string, dateStamp: string, region: string, service: string): Buffer {
+  const kDate = hmac(`AWS4${secret}`, dateStamp);
+  const kRegion = hmac(kDate, region);
+  const kService = hmac(kRegion, service);
+  return hmac(kService, "aws4_request");
 }

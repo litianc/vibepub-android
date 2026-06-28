@@ -1,5 +1,5 @@
-import { listUnprocessedFiles, downloadFile, deleteFile, uploadTranscript } from "./r2.js";
-import { transcribeAudio } from "./asr.js";
+import { listUnprocessedFiles, createPresignedDownloadUrl, deleteFile, uploadTranscript } from "./r2.js";
+import { transcribeAudioUrl } from "./asr.js";
 import { processAudioText, generateCoverImageBuffer } from "./llm.js";
 import { getAccessToken, publishDraft } from "./wechat.js";
 import path from "path";
@@ -78,17 +78,16 @@ async function main() {
       
       await updateStatus(filename, "PROCESSING");
       
-      // 3. Download audio
-      console.log("Downloading audio from R2...");
-      const audioBuffer = await downloadFile(fileKey);
-      
+      // 3. Build a short-lived R2 URL for Volcengine ASR.
+      console.log("Creating temporary audio URL from R2...");
+      const audioUrl = await createPresignedDownloadUrl(fileKey);
       const ext = path.extname(fileKey).slice(1);
       
       // 4. ASR: Speech to text
       console.log("Transcribing audio via Volcengine ASR...");
       let rawText = "";
       try {
-        rawText = await transcribeAudio(audioBuffer, ext || 'm4a');
+        rawText = await transcribeAudioUrl(audioUrl, ext || 'm4a');
       } catch (e: any) {
         console.error("ASR failed:", e.message);
         throw e;

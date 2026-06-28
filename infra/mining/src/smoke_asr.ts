@@ -1,4 +1,5 @@
-import { submitBigModelAsrTask } from "./asr.js";
+import { transcribeAudioUrl } from "./asr.js";
+import { createPresignedDownloadUrl } from "./r2.js";
 
 function buildAsrFailureHint(error: any) {
   const apiStatusCode = error?.response?.headers?.["x-api-status-code"];
@@ -15,12 +16,21 @@ function buildAsrFailureHint(error: any) {
 }
 
 async function main() {
-  const silentAudio = Buffer.alloc(32_000);
-  const taskId = await submitBigModelAsrTask(silentAudio, "wav");
-  if (!taskId) {
-    throw new Error("ASR smoke check did not return a task id.");
+  let audioUrl = process.env.VOLC_ASR_SMOKE_AUDIO_URL?.trim();
+  const r2Key = process.env.VOLC_ASR_SMOKE_R2_KEY?.trim();
+  if (!audioUrl && r2Key) {
+    audioUrl = await createPresignedDownloadUrl(r2Key);
   }
-  console.log("Volcengine BigModel ASR v3 smoke check passed.");
+  if (!audioUrl) {
+    console.log("Skipping Volcengine BigModel ASR v3 smoke check because no smoke audio URL or R2 key is configured.");
+    return;
+  }
+  const format = process.env.VOLC_ASR_SMOKE_AUDIO_FORMAT?.trim() || "mp3";
+  const text = await transcribeAudioUrl(audioUrl, format);
+  if (!text.trim()) {
+    throw new Error("ASR smoke check returned an empty transcript.");
+  }
+  console.log(`Volcengine BigModel ASR v3 smoke check passed. Transcript length: ${text.length}`);
 }
 
 main().catch((error) => {
