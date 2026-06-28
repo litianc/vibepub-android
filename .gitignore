@@ -18,6 +18,7 @@ secrets/
 
 # Generated test evidence and downloaded APKs
 artifacts/android-device-visual/
+artifacts/android-device-readiness/
 artifacts/apk/
 artifacts/vibepub-debug-apk/
 

@@ -75,6 +75,12 @@ For the standard VibePub smoke test, prefer:
 scripts/run-android-device-smoke.sh
 ```
 
+To check whether the phone is ready before a full run:
+
+```bash
+scripts/check-android-device-ready.sh /path/to/app-debug.apk
+```
+
 The script will:
 
 - install the APK

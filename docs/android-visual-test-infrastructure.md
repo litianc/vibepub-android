@@ -150,6 +150,13 @@ scripts/run-android-device-smoke.sh
 It loads `secrets/device-test.env` when present, otherwise it falls back to
 `secrets/files-token.txt` and `https://vibepub.litianc.cn`. It downloads the
 latest successful debug APK unless an APK path is passed as the first argument.
+It also runs `scripts/check-android-device-ready.sh` before recording.
+
+Check the connected phone without running the full smoke:
+
+```bash
+scripts/check-android-device-ready.sh /path/to/app-debug.apk
+```
 
 Expanded form:
 

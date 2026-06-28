@@ -51,6 +51,8 @@ if [[ ! -f "${AUDIO_FILE:-$DEFAULT_AUDIO_FILE}" ]]; then
   exit 1
 fi
 
+"$ROOT_DIR/scripts/check-android-device-ready.sh" "$APK_PATH"
+
 AUDIO_FILE="${AUDIO_FILE:-$DEFAULT_AUDIO_FILE}" \
 API_BASE_URL="${API_BASE_URL:-https://vibepub.litianc.cn}" \
 FILES_TOKEN="$FILES_TOKEN" \
