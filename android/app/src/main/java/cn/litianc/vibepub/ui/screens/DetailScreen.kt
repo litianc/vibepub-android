@@ -217,9 +217,9 @@ internal fun renderArticleText(content: String): String {
     val text = Html.fromHtml(content, Html.FROM_HTML_MODE_LEGACY)
         .toString()
         .lines()
-        .map { it.trim() }
-        .filter { it.isNotEmpty() }
-        .joinToString("\n\n")
+        .joinToString("\n") { it.trim() }
+        .replace(Regex("\n{3,}"), "\n\n")
+        .trim()
     return text.ifBlank { content }
 }
 

@@ -21,6 +21,7 @@ artifacts/android-device-visual/
 artifacts/android-device-readiness/
 artifacts/android-db-inspect/
 artifacts/apk/
+artifacts/ci-test-report-*/
 artifacts/vibepub-debug-apk/
 
 # macOS / IDE
