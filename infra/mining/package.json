@@ -17,6 +17,7 @@
   },
   "scripts": {
     "start": "tsx src/index.ts",
+    "smoke:asr": "tsx src/smoke_asr.ts",
     "test": "vitest run"
   }
 }
