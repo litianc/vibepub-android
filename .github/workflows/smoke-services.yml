@@ -119,6 +119,7 @@ jobs:
           PY
 
       - name: Check WeChat Proxy and Token
+        if: always()
         env:
           WECHAT_APP_ID: ${{ secrets.WECHAT_APP_ID }}
           WECHAT_APP_SECRET: ${{ secrets.WECHAT_APP_SECRET }}
