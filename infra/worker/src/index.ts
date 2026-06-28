@@ -13,7 +13,7 @@ const corsHeaders = {
 };
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     if (request.method === "OPTIONS") {
       return new Response(null, { headers: corsHeaders });
     }
@@ -29,7 +29,7 @@ export default {
     }
 
     if (request.method === "POST" && url.pathname === "/api/uploads") {
-      return uploadAudio(request, env);
+      return uploadAudio(request, env, ctx);
     }
 
     if (request.method === "GET" && url.pathname === "/api/uploads") {
@@ -54,7 +54,7 @@ export default {
   },
 };
 
-async function uploadAudio(request: Request, env: Env): Promise<Response> {
+async function uploadAudio(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   if (!request.body) {
     return json({ error: "missing_body" }, 400);
   }
@@ -92,7 +92,7 @@ async function uploadAudio(request: Request, env: Env): Promise<Response> {
   }
 
   // Fire and forget triggering of the GitHub Action Mining Job
-  env.waitUntil(triggerGitHubAction(env).catch((e) => {
+  ctx.waitUntil(triggerGitHubAction(env).catch((e) => {
     console.error("Failed to trigger GitHub Action:", e);
   }));
 
