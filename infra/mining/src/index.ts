@@ -28,6 +28,7 @@ async function updateStatus(filename: string, status: string) {
 
 async function main() {
   console.log("Starting VibePub Mining Job...");
+  let failedCount = 0;
 
   // 1. Check for new audio files
   console.log("Fetching unprocessed files from R2...");
@@ -108,6 +109,7 @@ async function main() {
       
       console.log(`Finished processing: ${fileKey}`);
     } catch (e) {
+      failedCount += 1;
       console.error(`Failed to process ${fileKey}:`, e);
       // We do not delete the file on failure, so it will be retried next time
       const filename = path.basename(fileKey);
@@ -115,6 +117,10 @@ async function main() {
     }
   }
   
+  if (failedCount > 0) {
+    throw new Error(`Mining Job failed to process ${failedCount} file(s).`);
+  }
+
   console.log("\nMining Job completed successfully.");
 }
 

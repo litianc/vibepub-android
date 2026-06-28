@@ -21,6 +21,7 @@ DETAIL_WAIT_SECONDS="${DETAIL_WAIT_SECONDS:-8}"
 DEBUG_START_ACTION="cn.litianc.vibepub.DEBUG_START_RECORDING"
 DEBUG_STOP_ACTION="cn.litianc.vibepub.DEBUG_STOP_RECORDING"
 SCREENRECORD_PID=""
+DETAIL_STATUS="not_checked"
 
 usage() {
   cat <<EOF
@@ -78,6 +79,32 @@ pull_if_exists() {
   if adb_shell test -f "$remote" >/dev/null 2>&1; then
     adb pull "$remote" "$local_path" >/dev/null
   fi
+}
+
+evaluate_detail_result() {
+  local xml_file="$1"
+  if [[ ! -f "$xml_file" ]]; then
+    DETAIL_STATUS="missing_ui_dump"
+    return 1
+  fi
+
+  if grep -q "转录失败" "$xml_file"; then
+    DETAIL_STATUS="failed"
+    return 1
+  fi
+
+  if grep -q "正在获取云端转录\\|正在转录" "$xml_file"; then
+    DETAIL_STATUS="pending"
+    return 1
+  fi
+
+  if grep -q "原始识别结果\\|转录完成" "$xml_file"; then
+    DETAIL_STATUS="completed"
+    return 0
+  fi
+
+  DETAIL_STATUS="unknown"
+  return 1
 }
 
 cleanup() {
@@ -435,6 +462,13 @@ adb pull /sdcard/vibepub-final.png "$OUT_DIR/final.png" >/dev/null
 pull_if_exists /sdcard/vibepub-visual-test.mp4 "$OUT_DIR/vibepub-visual-test.mp4"
 adb_shell uiautomator dump /sdcard/vibepub-window.xml >/dev/null 2>&1 || true
 pull_if_exists /sdcard/vibepub-window.xml "$OUT_DIR/window.xml"
+if [[ -n "$AUDIO_FILE" ]]; then
+  if evaluate_detail_result "$OUT_DIR/window.xml"; then
+    echo "Transcript detail assertion: completed"
+  else
+    echo "Transcript detail assertion: $DETAIL_STATUS" >&2
+  fi
+fi
 
 echo "Collecting logs..."
 adb logcat -d > "$OUT_DIR/logcat.txt" || true
@@ -459,7 +493,26 @@ Review:
 - [ ] No duplicate 0-second rows appear for the same time.
 - [ ] \`03-detail.png\` or \`final.png\` shows transcript/article content after processing finishes.
 - [ ] \`logcat.txt\` has no obvious upload/sync/transcript errors.
+
+Automated assertion:
+
+- Transcript detail status: \`$DETAIL_STATUS\`
 EOF
+
+if [[ -n "$AUDIO_FILE" && "$DETAIL_STATUS" != "completed" ]]; then
+  case "$DETAIL_STATUS" in
+    failed)
+      echo "Transcript processing failed; see final.png, window.xml, and logcat.txt." >&2
+      ;;
+    pending)
+      echo "Transcript was still pending at the end of the smoke test." >&2
+      ;;
+    *)
+      echo "Transcript assertion did not complete: $DETAIL_STATUS" >&2
+      ;;
+  esac
+  exit 1
+fi
 
 echo
 echo "Done."
