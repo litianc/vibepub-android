@@ -68,10 +68,31 @@ Decision: keep the original VoiceDrop-compatible Volcengine ASR path.
 
 Status: configured as GitHub Actions secrets, but smoke check is blocked by Volcengine authorization.
 
+Runtime model contract:
+
+| Item | Value |
+| --- | --- |
+| Vendor/API | Volcengine Doubao Big Model ASR v3 |
+| Code path | `infra/mining/src/asr.ts` |
+| Request `model_name` | `bigmodel` |
+| Default Resource ID fallback order | `volc.bigasr.auc`, then `volc.seedasr.auc` |
+| Override Resource ID secret | `VOLC_ASR_RESOURCE_ID` |
+
 Configured:
 
 - `VOLC_ASR_APPID`
 - `VOLC_ASR_ACCESS_TOKEN`
+
+GitHub Actions secret contract:
+
+| Secret | Required | Purpose |
+| --- | --- | --- |
+| `VOLC_ASR_APPID` | Yes | App ID used by the ASR submit/query API. |
+| `VOLC_ASR_ACCESS_TOKEN` | Yes | Access token used by the ASR submit/query API. |
+| `VOLC_ASR_RESOURCE_ID` | No | Pins the ASR Resource ID. If omitted, the mining job tries the fallback IDs above. |
+| `VOLCENGINE_ACCESS_KEY_ID` | Only for automation | Account-level OpenAPI AK for the `Volcengine Speech Service` workflow. The script also accepts `VOLC_ACCESS_KEY_ID`. |
+| `VOLCENGINE_SECRET_ACCESS_KEY` | Only for automation | Account-level OpenAPI SK for the `Volcengine Speech Service` workflow. The script also accepts `VOLC_SECRET_ACCESS_KEY`. |
+| `VOLCENGINE_REGION` | No | OpenAPI region for service activation. Defaults to `cn-beijing`. |
 
 Still needed:
 
