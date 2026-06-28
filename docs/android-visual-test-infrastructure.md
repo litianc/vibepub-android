@@ -20,6 +20,10 @@ The standard test path is:
 8. Capture home/detail screenshots, UI dump, and logcat.
 9. Store evidence under `artifacts/android-device-visual/`.
 
+Final end-to-end acceptance is stricter than producing visual evidence. Use
+`docs/e2e-acceptance-runbook.md` before declaring the recording-to-transcript
+flow fully debugged.
+
 ## What You Need To Provide
 
 ### 1. A Dedicated Android Test Phone
