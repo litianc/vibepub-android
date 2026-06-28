@@ -4,6 +4,10 @@ plugins {
     id("com.google.devtools.ksp")
 }
 
+ksp {
+    arg("room.generateKotlin", "true")
+}
+
 android {
     namespace = "cn.litianc.vibepub"
     compileSdk = 36
