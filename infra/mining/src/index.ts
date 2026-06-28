@@ -4,6 +4,31 @@ import { processAudioText, generateCoverImageBuffer } from "./llm.js";
 import { getAccessToken, publishDraft } from "./wechat.js";
 import path from "path";
 
+function describeError(error: unknown): Record<string, unknown> {
+  if (typeof error !== "object" || error === null) {
+    return { message: String(error) };
+  }
+
+  const maybeAxios = error as {
+    message?: string;
+    code?: string;
+    response?: {
+      status?: number;
+      headers?: Record<string, string | string[] | undefined>;
+      data?: unknown;
+    };
+  };
+
+  return {
+    message: maybeAxios.message,
+    code: maybeAxios.code,
+    httpStatus: maybeAxios.response?.status,
+    apiStatusCode: maybeAxios.response?.headers?.["x-api-status-code"],
+    apiMessage: maybeAxios.response?.headers?.["x-api-message"],
+    responseData: maybeAxios.response?.data,
+  };
+}
+
 async function updateStatus(filename: string, status: string) {
   const url = `${process.env.PUBLIC_BASE_URL}/api/internal/status`;
   const token = process.env.FILES_TOKEN;
@@ -110,7 +135,7 @@ async function main() {
       console.log(`Finished processing: ${fileKey}`);
     } catch (e) {
       failedCount += 1;
-      console.error(`Failed to process ${fileKey}:`, e);
+      console.error(`Failed to process ${fileKey}:`, describeError(e));
       // We do not delete the file on failure, so it will be retried next time
       const filename = path.basename(fileKey);
       await updateStatus(filename, "FAILED");

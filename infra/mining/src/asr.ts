@@ -1,25 +1,56 @@
 import axios from "axios";
 import { randomUUID } from "crypto";
 
-const VOLC_ASR_APPID = process.env.VOLC_ASR_APPID!;
-const VOLC_ASR_ACCESS_TOKEN = process.env.VOLC_ASR_ACCESS_TOKEN!;
-const VOLC_ASR_RESOURCE_ID = process.env.VOLC_ASR_RESOURCE_ID || "volc.bigasr.auc"; // Default to bigasr
+const SUBMIT_URL = "https://openspeech.bytedance.com/api/v3/auc/bigmodel/submit";
+const QUERY_URL = "https://openspeech.bytedance.com/api/v3/auc/bigmodel/query";
+
+type AsrConfig = {
+  appId: string;
+  accessToken: string;
+  resourceId: string;
+};
 
 async function sleep(ms: number) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-export async function transcribeAudio(audioBuffer: Buffer, format: string = 'm4a'): Promise<string> {
-  const submitUrl = "https://openspeech.bytedance.com/api/v3/auc/bigmodel/submit";
-  
-  const reqId = randomUUID();
-  const headers = {
-    "Content-Type": "application/json",
-    "X-Api-App-Key": VOLC_ASR_APPID,
-    "X-Api-Access-Key": VOLC_ASR_ACCESS_TOKEN,
-    "X-Api-Resource-Id": VOLC_ASR_RESOURCE_ID,
-    "X-Api-Request-Id": reqId
+function getAsrConfig(): AsrConfig {
+  const appId = process.env.VOLC_ASR_APPID?.trim();
+  const accessToken = process.env.VOLC_ASR_ACCESS_TOKEN?.trim();
+  const resourceId = process.env.VOLC_ASR_RESOURCE_ID?.trim() || "volc.bigasr.auc";
+
+  const missing = [
+    ["VOLC_ASR_APPID", appId],
+    ["VOLC_ASR_ACCESS_TOKEN", accessToken],
+  ]
+    .filter(([, value]) => !value)
+    .map(([name]) => name);
+
+  if (missing.length > 0) {
+    throw new Error(`Missing ASR environment variables: ${missing.join(", ")}`);
+  }
+
+  return {
+    appId: appId!,
+    accessToken: accessToken!,
+    resourceId,
   };
+}
+
+function buildHeaders(requestId: string) {
+  const config = getAsrConfig();
+  return {
+    "Content-Type": "application/json",
+    "X-Api-App-Key": config.appId,
+    "X-Api-Access-Key": config.accessToken,
+    "X-Api-Resource-Id": config.resourceId,
+    "X-Api-Request-Id": requestId,
+  };
+}
+
+export async function submitBigModelAsrTask(audioBuffer: Buffer, format: string = "m4a"): Promise<string> {
+  const reqId = randomUUID();
+  const headers = buildHeaders(reqId);
 
   const submitPayload = {
     user: {
@@ -40,7 +71,7 @@ export async function transcribeAudio(audioBuffer: Buffer, format: string = 'm4a
   };
 
   console.log("Submitting to Doubao Big Model ASR v3...");
-  const submitResponse = await axios.post(submitUrl, submitPayload, { headers });
+  const submitResponse = await axios.post(SUBMIT_URL, submitPayload, { headers });
 
   if (submitResponse.data.resp?.code !== 1000) {
     throw new Error(`Volcengine ASR Submit failed: ${JSON.stringify(submitResponse.data)}`);
@@ -48,18 +79,19 @@ export async function transcribeAudio(audioBuffer: Buffer, format: string = 'm4a
   
   const taskId = submitResponse.data.resp.id;
   console.log(`Task submitted successfully. Task ID: ${taskId}`);
+  return taskId;
+}
+
+export async function transcribeAudio(audioBuffer: Buffer, format: string = 'm4a'): Promise<string> {
+  const taskId = await submitBigModelAsrTask(audioBuffer, format);
   
   // Polling
-  const queryUrl = "https://openspeech.bytedance.com/api/v3/auc/bigmodel/query";
-  const queryHeaders = {
-    ...headers,
-    "X-Api-Request-Id": taskId // the task ID becomes the request ID for query
-  };
+  const queryHeaders = buildHeaders(taskId);
 
   for (let i = 0; i < 60; i++) { // Poll for up to 5 minutes (60 * 5s)
     await sleep(5000);
     console.log(`Polling task ${taskId}...`);
-    const queryResponse = await axios.post(queryUrl, {}, { headers: queryHeaders });
+    const queryResponse = await axios.post(QUERY_URL, {}, { headers: queryHeaders });
     const data = queryResponse.data;
     
     if (data.resp?.code === 1000) {

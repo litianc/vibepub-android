@@ -64,7 +64,7 @@ export async function generateCoverImageBuffer(prompt: string): Promise<Buffer> 
     prompt: prompt,
   });
 
-  const imageUrl = response.data[0]?.url;
+  const imageUrl = response.data?.[0]?.url;
   if (!imageUrl) {
     throw new Error("Failed to generate image, no URL returned.");
   }
