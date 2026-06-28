@@ -28,6 +28,7 @@ import java.net.URLEncoder
 import org.json.JSONObject
 import androidx.compose.ui.platform.LocalContext
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -79,6 +80,12 @@ fun DetailScreen(
                 .padding(padding)
                 .padding(horizontal = 16.dp)
         ) {
+            val context = LocalContext.current
+            var durationText by remember { mutableStateOf("--:--") }
+            var articleTitle by remember { mutableStateOf("正在获取云端转录...") }
+            var articleContent by remember { mutableStateOf("音频已上传，云端正在为您精心转录和排版中，请稍候并下拉刷新或重新进入本页。") }
+            var rawText by remember { mutableStateOf("") }
+
             // Player Card
             Card(
                 modifier = Modifier.fillMaxWidth(),
@@ -109,7 +116,7 @@ fun DetailScreen(
                         Spacer(modifier = Modifier.height(8.dp))
                         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                             Text("00:00", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            Text("3m10s", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(durationText, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     }
                 }
@@ -117,32 +124,42 @@ fun DetailScreen(
             
             Spacer(modifier = Modifier.height(24.dp))
             
-            val context = LocalContext.current
-            var articleTitle by remember { mutableStateOf("正在获取云端转录...") }
-            var articleContent by remember { mutableStateOf("音频已上传，云端正在为您精心转录和排版中，请稍候并下拉刷新或重新进入本页。") }
-            var rawText by remember { mutableStateOf("") }
-            
             LaunchedEffect(filename) {
-                try {
-                    val dir = File(context.filesDir, "recordings")
-                    val jsonFile = File(dir, filename.replace(".m4a", ".json"))
-                    if (!jsonFile.exists()) {
-                        fetchTranscript(context, filename)?.let { jsonText ->
-                            dir.mkdirs()
-                            jsonFile.writeText(jsonText)
+                repeat(12) { attempt ->
+                    try {
+                        durationText = loadRecordingDurationText(context, filename)
+                        val transcript = loadTranscript(context, filename)
+                        if (transcript != null) {
+                            articleTitle = transcript.optString("articleTitle", "转录完成")
+                            articleContent = transcript.optString(
+                                "articleContent",
+                                transcript.optString("rawText", "未能获取转录内容"),
+                            )
+                            rawText = transcript.optString("rawText", "")
+                            markRecordingCompleted(context, filename)
+                            return@LaunchedEffect
                         }
+
+                        val status = fetchRecordingStatus(context, filename)
+                        if (status == "FAILED") {
+                            articleTitle = "转录失败"
+                            articleContent = "云端处理这段录音时失败了，请稍后重试或重新录制。"
+                            updateRecordingStatus(context, filename, status)
+                            return@LaunchedEffect
+                        }
+
+                        if (status.isNotBlank()) {
+                            updateRecordingStatus(context, filename, status)
+                            articleTitle = when (status) {
+                                "PROCESSING" -> "正在转录..."
+                                else -> "正在获取云端转录..."
+                            }
+                        }
+                    } catch (e: Exception) {
+                        e.printStackTrace()
                     }
 
-                    if (jsonFile.exists()) {
-                        val jsonString = jsonFile.readText()
-                        val json = JSONObject(jsonString)
-                        articleTitle = json.optString("articleTitle", "转录完成")
-                        articleContent = json.optString("articleContent", json.optString("rawText", "未能获取转录内容"))
-                        rawText = json.optString("rawText", "")
-                        markRecordingCompleted(context, filename)
-                    }
-                } catch (e: Exception) {
-                    e.printStackTrace()
+                    if (attempt < 11) delay(5_000)
                 }
             }
             
@@ -178,6 +195,41 @@ fun DetailScreen(
     }
 }
 
+private suspend fun loadRecordingDurationText(context: android.content.Context, filename: String): String =
+    withContext(Dispatchers.IO) {
+        val durationMs = AppDatabase.getDatabase(context)
+            .recordingDao()
+            .getRecordingByFilename(filename)
+            ?.durationMs
+            ?: return@withContext "--:--"
+        formatDuration(durationMs)
+    }
+
+private fun formatDuration(durationMs: Long): String {
+    val totalSeconds = (durationMs / 1000).coerceAtLeast(0)
+    val minutes = totalSeconds / 60
+    val seconds = totalSeconds % 60
+    return "%d:%02d".format(minutes, seconds)
+}
+
+private suspend fun loadTranscript(context: android.content.Context, filename: String): JSONObject? =
+    withContext(Dispatchers.IO) {
+        val dir = File(context.filesDir, "recordings")
+        val jsonFile = File(dir, filename.replace(".m4a", ".json"))
+        if (!jsonFile.exists()) {
+            fetchTranscript(context, filename)?.let { jsonText ->
+                dir.mkdirs()
+                jsonFile.writeText(jsonText)
+            }
+        }
+
+        if (jsonFile.exists()) {
+            JSONObject(jsonFile.readText())
+        } else {
+            null
+        }
+    }
+
 private suspend fun fetchTranscript(context: android.content.Context, filename: String): String? =
     withContext(Dispatchers.IO) {
         val prefs = AppPreferences(context)
@@ -204,11 +256,47 @@ private suspend fun fetchTranscript(context: android.content.Context, filename: 
         }
     }
 
+private suspend fun fetchRecordingStatus(context: android.content.Context, filename: String): String =
+    withContext(Dispatchers.IO) {
+        val prefs = AppPreferences(context)
+        val token = prefs.filesToken
+        if (token.isBlank()) return@withContext ""
+
+        try {
+            val endpoint = URL("${prefs.apiBaseUrl.trimEnd('/')}/api/recordings")
+            val connection = (endpoint.openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 10_000
+                readTimeout = 10_000
+                setRequestProperty("Authorization", "Bearer $token")
+            }
+
+            if (connection.responseCode in 200..299) {
+                val body = connection.inputStream.bufferedReader().use { it.readText() }
+                val recordings = JSONObject(body).optJSONArray("recordings")
+                if (recordings != null) {
+                    for (i in 0 until recordings.length()) {
+                        val recording = recordings.getJSONObject(i)
+                        if (recording.optString("filename") == filename) {
+                            return@withContext recording.optString("status")
+                        }
+                    }
+                }
+            }
+            ""
+        } catch (_: Exception) {
+            ""
+        }
+    }
+
 private suspend fun markRecordingCompleted(context: android.content.Context, filename: String) =
+    updateRecordingStatus(context, filename, "COMPLETED")
+
+private suspend fun updateRecordingStatus(context: android.content.Context, filename: String, status: String) =
     withContext(Dispatchers.IO) {
         val dao = AppDatabase.getDatabase(context).recordingDao()
         val entity = dao.getRecordingByFilename(filename)
-        if (entity != null && entity.status != "COMPLETED") {
-            dao.insert(entity.copy(status = "COMPLETED"))
+        if (entity != null && entity.status != status) {
+            dao.insert(entity.copy(status = status))
         }
     }
