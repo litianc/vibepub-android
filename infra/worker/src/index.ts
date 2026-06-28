@@ -40,6 +40,10 @@ export default {
       return listRecordings(env);
     }
 
+    if (request.method === "PUT" && url.pathname === "/api/internal/status") {
+      return updateStatus(request, env);
+    }
+
     if (request.method === "GET" && url.pathname.startsWith("/api/files/")) {
       return getFile(env, url.pathname.slice("/api/files/".length));
     }
@@ -169,6 +173,25 @@ async function listRecordings(env: Env): Promise<Response> {
   } catch (dbErr: any) {
     console.error("Failed to fetch from D1:", dbErr);
     return json({ error: "database_error", details: dbErr.message }, 500);
+  }
+}
+
+async function updateStatus(request: Request, env: Env): Promise<Response> {
+  try {
+    const body: any = await request.json();
+    const { filename, status } = body;
+    if (!filename || !status) {
+      return json({ error: "missing_fields" }, 400);
+    }
+    await env.DB.prepare(
+      `UPDATE recordings SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE filename = ?`
+    )
+    .bind(status, filename)
+    .run();
+    return json({ ok: true });
+  } catch (e: any) {
+    console.error("Failed to update status:", e);
+    return json({ error: "update_failed", details: e.message }, 500);
   }
 }
 
