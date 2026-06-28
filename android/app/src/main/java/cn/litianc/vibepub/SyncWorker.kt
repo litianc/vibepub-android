@@ -46,13 +46,16 @@ class SyncWorker(
                         val recObj = recordingsArray.getJSONObject(i)
                         val filename = recObj.optString("filename")
                         val existing = dao.getRecordingByFilename(filename)
+                        val d1Status = recObj.optString("status", "UPLOADED")
                         if (existing == null) {
                             dao.insert(RecordingEntity(
                                 filename = filename,
                                 durationMs = 0L,
                                 timestamp = System.currentTimeMillis(), // use current for now
-                                status = recObj.optString("status", "UPLOADED")
+                                status = d1Status
                             ))
+                        } else if (existing.status != d1Status) {
+                            dao.insert(existing.copy(status = d1Status))
                         }
                     }
                 }
@@ -89,7 +92,7 @@ class SyncWorker(
                         // Update Room status
                         val entity = dao.getRecordingByFilename(file.name)
                         if (entity != null) {
-                            dao.insert(entity.copy(status = "TRANSCRIBED"))
+                            dao.insert(entity.copy(status = "COMPLETED"))
                         }
                     } else if (responseCode == 404) {
                         // Not ready yet
@@ -100,10 +103,10 @@ class SyncWorker(
                     allSuccess = false
                 }
             } else {
-                // Ensure room reflects TRANSCRIBED
+                // Ensure room reflects COMPLETED
                 val entity = dao.getRecordingByFilename(file.name)
-                if (entity != null && entity.status != "TRANSCRIBED") {
-                    dao.insert(entity.copy(status = "TRANSCRIBED"))
+                if (entity != null && entity.status != "COMPLETED") {
+                    dao.insert(entity.copy(status = "COMPLETED"))
                 }
             }
         }

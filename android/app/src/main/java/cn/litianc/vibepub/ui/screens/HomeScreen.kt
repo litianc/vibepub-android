@@ -147,7 +147,7 @@ fun RecordingCard(recording: RecordingEntity, onClick: () -> Unit) {
     val secs = (recording.durationMs % 60000) / 1000
     val durationString = "${mins}m${secs}s"
     
-    val isTranscribed = recording.status == "TRANSCRIBED"
+    val isTranscribed = recording.status == "TRANSCRIBED" || recording.status == "COMPLETED"
 
     Card(
         modifier = Modifier
