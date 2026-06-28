@@ -77,7 +77,7 @@ Still needed:
 
 - confirm the AppID/Access Token are granted for the ASR resource used by the mining job
 - current smoke result: `401`, `code=45000010`, `requested grant not found in SaaS storage`
-- current default resource ID: `volc.bigasr.auc`
+- current fallback resource IDs: `volc.bigasr.auc`, `volc.seedasr.auc`
 
 Recommended account action: in the Volcengine console, open the ASR application/key that produced this AppID and Access Token, then grant or subscribe it to "语音识别大模型 / 大模型录音文件识别". If the console shows a different Resource ID, add it as GitHub secret `VOLC_ASR_RESOURCE_ID`.
 

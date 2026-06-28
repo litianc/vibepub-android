@@ -21,8 +21,10 @@ Required account action:
 1. Open the Volcengine console for the app/key behind `VOLC_ASR_APPID` and
    `VOLC_ASR_ACCESS_TOKEN`.
 2. Grant or subscribe it to BigModel ASR / 大模型录音文件识别.
-3. Confirm the resource ID. The app defaults to `volc.bigasr.auc`; if the
-   console shows a different ID, set GitHub secret `VOLC_ASR_RESOURCE_ID`.
+3. Confirm the resource ID. The app tries both documented BigModel ASR resource
+   IDs, `volc.bigasr.auc` and `volc.seedasr.auc`, when
+   `VOLC_ASR_RESOURCE_ID` is not set. If the console shows a different ID, set
+   GitHub secret `VOLC_ASR_RESOURCE_ID`.
 
 ## Required Gates
 
