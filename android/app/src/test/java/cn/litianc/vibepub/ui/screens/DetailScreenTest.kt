@@ -68,4 +68,30 @@ class DetailScreenTest {
         assertFalse(summary.items.first { it.label == "正文" }.ready)
         assertFalse(summary.items.first { it.label == "公众号草稿" }.ready)
     }
+
+    @Test
+    fun articleExportTextIncludesPublishingMetadataAndSources() {
+        val text = buildArticleExportText(
+            articleTitle = "整理好的文章",
+            articleContent = "正文内容",
+            rawText = "原始识别",
+            statusLabel = "已成文",
+            wechatDraftId = "MEDIA_ID_123",
+            filename = "VibePub-test.m4a",
+            createdAtMs = 1_771_000_000_000L,
+        )
+
+        assertTrue(text.contains("# 整理好的文章"))
+        assertTrue(text.contains("- 处理状态：已成文"))
+        assertTrue(text.contains("- 公众号草稿：MEDIA_ID_123"))
+        assertTrue(text.contains("正文内容"))
+        assertTrue(text.contains("原始识别"))
+    }
+
+    @Test
+    fun exportFileNameRemovesUnsafeCharacters() {
+        val fileName = exportFileName("标题/带:非法*字符?", "fallback.m4a")
+
+        assertEquals("标题-带-非法-字符-.txt", fileName)
+    }
 }

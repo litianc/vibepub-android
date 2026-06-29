@@ -25,6 +25,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
@@ -65,6 +66,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.media3.common.MediaItem
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.core.content.FileProvider
 import cn.litianc.vibepub.data.AppDatabase
 import cn.litianc.vibepub.data.RecordingEntity
 import cn.litianc.vibepub.data.RecordingStatus
@@ -77,6 +79,9 @@ import cn.litianc.vibepub.ui.theme.PrimaryRed
 import kotlinx.coroutines.delay
 import org.json.JSONObject
 import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 internal data class ArticleReviewItem(
     val label: String,
@@ -168,6 +173,15 @@ fun DetailScreen(
             append("\n\n")
             append(articleContent)
         }
+        val exportText = buildArticleExportText(
+            articleTitle = articleTitle,
+            articleContent = articleContent,
+            rawText = rawText,
+            statusLabel = currentRecording.statusLabel(),
+            wechatDraftId = wechatDraftId,
+            filename = currentRecording.filename,
+            createdAtMs = currentRecording.timestamp,
+        )
 
         Column(
             modifier = Modifier
@@ -209,6 +223,8 @@ fun DetailScreen(
                 articleTitle = articleTitle,
                 articleContent = articleContent,
                 shareText = shareText,
+                exportText = exportText,
+                exportFileName = exportFileName(articleTitle, currentRecording.filename),
             )
             Spacer(modifier = Modifier.height(20.dp))
 
@@ -454,6 +470,8 @@ private fun ActionRow(
     articleTitle: String,
     articleContent: String,
     shareText: String,
+    exportText: String,
+    exportFileName: String,
 ) {
     val context = LocalContext.current
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -487,6 +505,16 @@ private fun ActionRow(
             Spacer(modifier = Modifier.width(6.dp))
             Text("分享")
         }
+        OutlinedButton(
+            onClick = { shareArticleExport(context, exportFileName, exportText) },
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("ExportArticlePackageButton"),
+        ) {
+            Icon(Icons.Default.Description, contentDescription = null, modifier = Modifier.size(16.dp))
+            Spacer(modifier = Modifier.width(6.dp))
+            Text("导出材料包")
+        }
     }
 }
 
@@ -503,6 +531,22 @@ private fun shareArticle(context: Context, text: String) {
     context.startActivity(Intent.createChooser(intent, "分享文章"))
 }
 
+private fun shareArticleExport(context: Context, fileName: String, text: String) {
+    val exportDir = File(context.cacheDir, "article_exports").apply { mkdirs() }
+    val exportFile = File(exportDir, fileName)
+    exportFile.writeText(text)
+    val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", exportFile)
+    val intent = Intent(Intent.ACTION_SEND).apply {
+        type = "text/plain"
+        putExtra(Intent.EXTRA_STREAM, uri)
+        putExtra(Intent.EXTRA_SUBJECT, fileName.removeSuffix(".txt"))
+        putExtra(Intent.EXTRA_TEXT, "VibePub 文章材料包：${fileName.removeSuffix(".txt")}")
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        clipData = ClipData.newUri(context.contentResolver, fileName, uri)
+    }
+    context.startActivity(Intent.createChooser(intent, "导出文章材料包"))
+}
+
 internal fun renderArticleText(content: String): String {
     val text = Html.fromHtml(content, Html.FROM_HTML_MODE_LEGACY)
         .toString()
@@ -511,6 +555,45 @@ internal fun renderArticleText(content: String): String {
         .replace(Regex("\n{3,}"), "\n\n")
         .trim()
     return text.ifBlank { content }
+}
+
+internal fun buildArticleExportText(
+    articleTitle: String,
+    articleContent: String,
+    rawText: String,
+    statusLabel: String,
+    wechatDraftId: String,
+    filename: String,
+    createdAtMs: Long,
+): String {
+    val createdAt = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date(createdAtMs))
+    return buildString {
+        appendLine("# $articleTitle")
+        appendLine()
+        appendLine("## 发布状态")
+        appendLine("- 处理状态：$statusLabel")
+        appendLine("- 公众号草稿：${wechatDraftId.ifBlank { "未同步草稿 ID" }}")
+        appendLine("- 原始文件：$filename")
+        appendLine("- 创建时间：$createdAt")
+        appendLine()
+        appendLine("## 正文")
+        appendLine(articleContent.ifBlank { "正文暂未生成" })
+        appendLine()
+        appendLine("## 原始识别")
+        appendLine(rawText.ifBlank { "原始识别暂未同步" })
+    }.trimEnd()
+}
+
+internal fun exportFileName(articleTitle: String, filename: String): String {
+    val base = articleTitle
+        .ifBlank { filename }
+        .replace(Regex("[\\\\/:*?\"<>|\\n\\r\\t]+"), "-")
+        .replace(Regex("\\s+"), " ")
+        .trim()
+        .ifBlank { "VibePub-article" }
+        .take(48)
+        .trim()
+    return "$base.txt"
 }
 
 internal fun buildArticleReviewSummary(
