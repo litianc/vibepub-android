@@ -96,6 +96,7 @@ class SyncWorker(
                             .ifBlank { recObj.optString("mediaId", "") }
                             .blankToNull()
                         val wechatUrl = recObj.wechatUrlOrNull()
+                        val processingStage = recObj.processingStageOrNull()
                         if (existing == null) {
                             dao.insert(RecordingEntity(
                                 filename = filename,
@@ -109,6 +110,7 @@ class SyncWorker(
                                 completedAt = if (d1Status == RecordingStatus.COMPLETED) System.currentTimeMillis() else null,
                                 wechatDraftId = wechatDraftId,
                                 wechatUrl = wechatUrl,
+                                processingStage = processingStage,
                             ))
                         } else if (existing.status != RecordingStatus.COMPLETED.value || d1Status == RecordingStatus.COMPLETED) {
                             val nextStatus = when {
@@ -131,6 +133,7 @@ class SyncWorker(
                                     },
                                     wechatDraftId = wechatDraftId ?: existing.wechatDraftId,
                                     wechatUrl = wechatUrl ?: existing.wechatUrl,
+                                    processingStage = processingStage ?: existing.processingStage,
                                 ),
                             )
                         }
@@ -183,6 +186,7 @@ class SyncWorker(
                                 completedAt = recording.completedAt ?: System.currentTimeMillis(),
                                 wechatDraftId = transcript.wechatDraftIdOrNull() ?: recording.wechatDraftId,
                                 wechatUrl = transcript.wechatUrlOrNull() ?: recording.wechatUrl,
+                                processingStage = transcript.processingStageOrNull() ?: "COMPLETED",
                             ),
                         )
                     } else {
@@ -197,6 +201,7 @@ class SyncWorker(
                                     recording.copy(
                                         status = RecordingStatus.FAILED.value,
                                         lastError = "FILES_TOKEN 无效或没有权限，无法同步转录结果",
+                                        processingStage = recording.processingStage,
                                     ),
                                 )
                                 allSuccess = false
@@ -223,6 +228,7 @@ class SyncWorker(
                             completedAt = recording.completedAt ?: System.currentTimeMillis(),
                             wechatDraftId = transcript?.wechatDraftIdOrNull() ?: recording.wechatDraftId,
                             wechatUrl = transcript?.wechatUrlOrNull() ?: recording.wechatUrl,
+                            processingStage = transcript?.processingStageOrNull() ?: "COMPLETED",
                         ),
                     )
                 }
@@ -264,6 +270,12 @@ class SyncWorker(
     private fun JSONObject.wechatUrlOrNull(): String? {
         return optString("wechatUrl", "")
             .ifBlank { optString("wechat_url", "") }
+            .blankToNull()
+    }
+
+    private fun JSONObject.processingStageOrNull(): String? {
+        return optString("processingStage", "")
+            .ifBlank { optString("processing_stage", "") }
             .blankToNull()
     }
 }

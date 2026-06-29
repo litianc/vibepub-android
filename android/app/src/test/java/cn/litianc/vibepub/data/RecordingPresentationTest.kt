@@ -70,6 +70,46 @@ class RecordingPresentationTest {
     }
 
     @Test
+    fun serverProcessingStageDrivesVisibleWorkflowPosition() {
+        val drafting = RecordingEntity(
+            filename = "VibePub-test.m4a",
+            durationMs = 1_000L,
+            timestamp = 1L,
+            status = RecordingStatus.PROCESSING.value,
+            articleTitle = "整理好的文章",
+            rawTextPreview = "原始识别结果",
+            processingStage = "DRAFTING",
+        )
+
+        val steps = drafting.workflowSteps()
+
+        assertEquals("生成草稿中", drafting.statusLabel())
+        assertTrue(drafting.statusDetail().contains("微信公众号草稿"))
+        assertEquals("第 6/7 步", drafting.workflowProgressLabel())
+        assertEquals(WorkflowStepState.DONE, steps[4].state)
+        assertEquals(WorkflowStepState.CURRENT, steps[5].state)
+    }
+
+    @Test
+    fun serverFailureStageBlocksTheMatchingWorkflowStep() {
+        val recording = RecordingEntity(
+            filename = "VibePub-test.m4a",
+            durationMs = 1_000L,
+            timestamp = 1L,
+            status = RecordingStatus.FAILED.value,
+            processingStage = "ASR",
+            lastError = "服务返回空转录结果",
+        )
+
+        val steps = recording.workflowSteps()
+
+        assertEquals("第 4/7 步", recording.workflowProgressLabel())
+        assertEquals(WorkflowStepState.DONE, steps[2].state)
+        assertEquals(WorkflowStepState.BLOCKED, steps[3].state)
+        assertEquals(WorkflowStepState.PENDING, steps[4].state)
+    }
+
+    @Test
     fun completedArticleWaitsForDraftInfo() {
         val recording = RecordingEntity(
             filename = "VibePub-test.m4a",

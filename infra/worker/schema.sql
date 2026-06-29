@@ -9,6 +9,7 @@ CREATE TABLE recordings (
     raw_text TEXT,
     article_title TEXT,
     article_content TEXT,
+    processing_stage TEXT,
     wechat_url TEXT,
     wechat_draft_id TEXT,
     error_message TEXT,

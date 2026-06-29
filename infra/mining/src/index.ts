@@ -55,6 +55,7 @@ type StatusMetadata = {
   rawText?: string;
   articleTitle?: string;
   articleContent?: string;
+  processingStage?: string;
   wechatUrl?: string;
   wechatDraftId?: string;
   errorMessage?: string;
@@ -104,11 +105,12 @@ async function main() {
 
   // Process files one by one (could also be parallelized if needed)
   for (const fileKey of files) {
+    let processingStage = "QUEUED";
     try {
       console.log(`\n--- Processing file: ${fileKey} ---`);
       const filename = path.basename(fileKey);
       
-      await updateStatus(filename, "PROCESSING");
+      await updateStatus(filename, "PROCESSING", { processingStage });
       
       // 3. Build a short-lived R2 URL for Volcengine ASR.
       console.log("Creating temporary audio URL from R2...");
@@ -116,6 +118,8 @@ async function main() {
       const ext = path.extname(fileKey).slice(1);
       
       // 4. ASR: Speech to text
+      processingStage = "ASR";
+      await updateStatus(filename, "PROCESSING", { processingStage });
       console.log("Transcribing audio via Volcengine ASR...");
       let rawText = "";
       try {
@@ -130,16 +134,25 @@ async function main() {
       if (!rawText || rawText.trim().length === 0) {
         console.log("Transcript was empty. Skipping.");
         await deleteFile(fileKey);
-        await updateStatus(filename, "FAILED", { errorMessage: "转录结果为空" });
+        await updateStatus(filename, "FAILED", { processingStage, errorMessage: "转录结果为空" });
         continue;
       }
 
       // 5. LLM: Style Distillation
+      processingStage = "REWRITING";
+      await updateStatus(filename, "PROCESSING", { processingStage, rawText });
       console.log("Running Style Distillation via GLM...");
       const article = await processAudioText(rawText);
       console.log(`Generated Article Title: ${article.title}`);
       
       // 5.5 LLM: Image Generation
+      processingStage = "DRAFTING";
+      await updateStatus(filename, "PROCESSING", {
+        processingStage,
+        rawText,
+        articleTitle: article.title,
+        articleContent: article.content,
+      });
       console.log(`Generating cover image with prompt: ${article.imagePrompt}`);
       const coverBuffer = await generateCoverImageBuffer(article.imagePrompt);
       
@@ -155,6 +168,7 @@ async function main() {
         rawText,
         articleTitle: article.title,
         articleContent: article.content,
+        processingStage: "COMPLETED",
         wechatDraftId: mediaId,
       }));
       
@@ -166,6 +180,7 @@ async function main() {
         rawText,
         articleTitle: article.title,
         articleContent: article.content,
+        processingStage: "COMPLETED",
         wechatDraftId: mediaId,
       });
       
@@ -173,7 +188,10 @@ async function main() {
     } catch (e) {
       console.error(`Failed to process ${fileKey}:`, describeError(e));
       const filename = path.basename(fileKey);
-      await updateStatus(filename, "FAILED", { errorMessage: getErrorMessage(e).slice(0, 500) });
+      await updateStatus(filename, "FAILED", {
+        processingStage,
+        errorMessage: getErrorMessage(e).slice(0, 500),
+      });
 
       if (isPermanentAudioFailure(e) && shouldCleanupPermanentAudioFailures()) {
         console.warn(`Deleting permanently invalid audio file from R2 inbox: ${fileKey}`);

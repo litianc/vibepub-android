@@ -22,4 +22,5 @@ data class RecordingEntity(
     val completedAt: Long? = null,
     val wechatDraftId: String? = null,
     val wechatUrl: String? = null,
+    val processingStage: String? = null,
 )

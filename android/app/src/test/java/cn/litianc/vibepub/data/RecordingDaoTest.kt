@@ -75,4 +75,22 @@ class RecordingDaoTest {
         assertEquals("MEDIA_ID_123", recording?.wechatDraftId)
         assertEquals("https://mp.weixin.qq.com/draft", recording?.wechatUrl)
     }
+
+    @Test
+    fun persistsProcessingStageMetadata() = runBlocking {
+        val dao = database.recordingDao()
+        dao.insert(
+            RecordingEntity(
+                filename = "stage.m4a",
+                durationMs = 32_000L,
+                timestamp = 1L,
+                status = RecordingStatus.PROCESSING.value,
+                processingStage = "DRAFTING",
+            ),
+        )
+
+        val recording = dao.getRecordingByFilename("stage.m4a")
+
+        assertEquals("DRAFTING", recording?.processingStage)
+    }
 }
