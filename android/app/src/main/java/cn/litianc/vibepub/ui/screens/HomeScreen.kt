@@ -42,6 +42,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -349,11 +350,22 @@ fun RecordingCard(
     val dateString = SimpleDateFormat("M月d日 · HH:mm", Locale.getDefault()).format(Date(recording.timestamp))
     val status = recording.status.asRecordingStatus()
     var showWorkflowHelp by remember { mutableStateOf(false) }
+    var showDeleteConfirm by remember { mutableStateOf(false) }
 
     if (showWorkflowHelp) {
         WorkflowHelpDialog(
             recording = recording,
             onDismiss = { showWorkflowHelp = false },
+        )
+    }
+    if (showDeleteConfirm) {
+        DeleteRecordingDialog(
+            recording = recording,
+            onDismiss = { showDeleteConfirm = false },
+            onConfirm = {
+                showDeleteConfirm = false
+                onDeleteRecording()
+            },
         )
     }
 
@@ -466,7 +478,11 @@ fun RecordingCard(
                             Text("重试")
                         }
                     }
-                    OutlinedButton(onClick = onDeleteRecording, contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)) {
+                    OutlinedButton(
+                        onClick = { showDeleteConfirm = true },
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                        modifier = Modifier.testTag("DeleteRecordingButton"),
+                    ) {
                         Icon(Icons.Default.Delete, contentDescription = null, modifier = Modifier.size(16.dp))
                         Spacer(modifier = Modifier.width(4.dp))
                         Text("删除")
@@ -475,6 +491,52 @@ fun RecordingCard(
             }
         }
     }
+}
+
+@Composable
+private fun DeleteRecordingDialog(
+    recording: RecordingEntity,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit,
+) {
+    AlertDialog(
+        modifier = Modifier.testTag("DeleteRecordingDialog"),
+        onDismissRequest = onDismiss,
+        title = { Text("删除这条录音？") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    "将从本机移除录音记录、音频文件和本地结果文件。",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    recording.displayTitle(),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = onConfirm,
+                modifier = Modifier.testTag("ConfirmDeleteRecordingButton"),
+            ) {
+                Text("删除", color = MaterialTheme.colorScheme.error)
+            }
+        },
+        dismissButton = {
+            TextButton(
+                onClick = onDismiss,
+                modifier = Modifier.testTag("CancelDeleteRecordingButton"),
+            ) {
+                Text("取消")
+            }
+        },
+    )
 }
 
 @Composable

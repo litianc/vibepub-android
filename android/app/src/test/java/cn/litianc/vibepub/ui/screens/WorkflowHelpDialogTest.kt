@@ -6,10 +6,12 @@ import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onNodeWithTag
 import cn.litianc.vibepub.data.RecordingEntity
 import cn.litianc.vibepub.data.RecordingStatus
+import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -109,6 +111,42 @@ class WorkflowHelpDialogTest {
         composeTestRule.onNodeWithText("第 4/7 步").assertIsDisplayed()
         composeTestRule.onNodeWithTag("WorkflowHelpButton").assertIsDisplayed()
         composeTestRule.onAllNodesWithText("云端正在进行语音识别。").assertCountEquals(0)
+    }
+
+    @Test
+    fun recordingCardRequiresConfirmationBeforeDeleting() {
+        var deleteCount = 0
+        composeTestRule.setContent {
+            RecordingCard(
+                recording = RecordingEntity(
+                    filename = "VibePub-test.m4a",
+                    durationMs = 42_000L,
+                    timestamp = 1L,
+                    status = RecordingStatus.COMPLETED.value,
+                    articleTitle = "一篇已经成文的录音",
+                ),
+                onClick = {},
+                onRetryUpload = {},
+                onDeleteRecording = { deleteCount++ },
+            )
+        }
+
+        composeTestRule.onNodeWithTag("DeleteRecordingButton").performClick()
+        composeTestRule.onNodeWithTag("DeleteRecordingDialog").assertIsDisplayed()
+        composeTestRule.onNodeWithText("删除这条录音？").assertIsDisplayed()
+        composeTestRule.onNodeWithText("一篇已经成文的录音").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("CancelDeleteRecordingButton").performClick()
+
+        composeTestRule.runOnIdle {
+            assertEquals(0, deleteCount)
+        }
+
+        composeTestRule.onNodeWithTag("DeleteRecordingButton").performClick()
+        composeTestRule.onNodeWithTag("ConfirmDeleteRecordingButton").performClick()
+
+        composeTestRule.runOnIdle {
+            assertEquals(1, deleteCount)
+        }
     }
 
     @Test
