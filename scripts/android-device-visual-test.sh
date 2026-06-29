@@ -105,6 +105,20 @@ install_apk() {
     return 0
   fi
 
+  if grep -q "INSTALL_FAILED_UPDATE_INCOMPATIBLE" "$OUT_DIR/install.txt"; then
+    cat "$OUT_DIR/install.txt" >&2
+    cat >&2 <<EOF
+
+The installed package has a different debug signature. Uninstalling it and
+retrying because this is a deterministic smoke run.
+EOF
+    adb uninstall "$PACKAGE_NAME" > "$OUT_DIR/install-uninstall-incompatible.txt" 2>&1 || true
+    if adb install -r "$apk_path" > "$OUT_DIR/install-after-uninstall.txt" 2>&1; then
+      return 0
+    fi
+    cp "$OUT_DIR/install-after-uninstall.txt" "$OUT_DIR/install.txt"
+  fi
+
   if ! grep -q "INSTALL_FAILED_USER_RESTRICTED" "$OUT_DIR/install.txt"; then
     cat "$OUT_DIR/install.txt" >&2
     return 1
@@ -326,12 +340,12 @@ import_audio_fixture_to_app() {
   if [[ -z "$source_ext" || "$source_ext" == "$source_file" ]]; then
     source_ext="audio"
   fi
-  remote_path="files/debug-input/audio-fixture.$source_ext"
+  remote_path="debug-input/audio-fixture.$source_ext"
 
   echo "Pushing audio fixture into app private storage..." >&2
   adb push "$source_file" /data/local/tmp/vibepub-audio-fixture \
     > "$OUT_DIR/debug-audio-push.txt"
-  adb shell "run-as '$PACKAGE_NAME' sh -c 'mkdir -p files/debug-input && cat > \"$remote_path\"' < /data/local/tmp/vibepub-audio-fixture" \
+  adb shell "run-as '$PACKAGE_NAME' sh -c 'mkdir -p files/debug-input && cat > \"files/$remote_path\"' < /data/local/tmp/vibepub-audio-fixture" \
     > "$OUT_DIR/debug-audio-import-copy.txt" 2>&1
   adb_shell rm -f /data/local/tmp/vibepub-audio-fixture >/dev/null 2>&1 || true
 
@@ -480,6 +494,10 @@ trigger_and_wait_for_mining_job() {
         fi
         echo "Mining workflow completed with conclusion: $conclusion" >&2
         gh run view "$run_id" --log-failed > "$OUT_DIR/mining-run-failed.log" 2>/dev/null || true
+        if wait_for_backend_completion "$LATEST_RECORDING_FILENAME" "$BACKEND_COMPLETION_WAIT_SECONDS"; then
+          echo "Target recording completed even though the mining workflow failed."
+          return 0
+        fi
         return 1
       fi
     fi

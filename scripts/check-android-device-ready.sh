@@ -45,6 +45,14 @@ install_apk() {
     return 0
   fi
 
+  if grep -q "INSTALL_FAILED_UPDATE_INCOMPATIBLE" "$OUT_DIR/install.txt"; then
+    adb uninstall "$PACKAGE_NAME" > "$OUT_DIR/install-uninstall-incompatible.txt" 2>&1 || true
+    if adb install -r -t "$apk_path" > "$OUT_DIR/install-after-uninstall.txt" 2>&1; then
+      return 0
+    fi
+    cp "$OUT_DIR/install-after-uninstall.txt" "$OUT_DIR/install.txt"
+  fi
+
   if ! grep -q "INSTALL_FAILED_USER_RESTRICTED" "$OUT_DIR/install.txt"; then
     return 1
   fi

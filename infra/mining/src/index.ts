@@ -41,6 +41,8 @@ function isPermanentAudioFailure(error: unknown): boolean {
   return (
     message.includes("invalid audio format") ||
     message.includes("audio convert failed") ||
+    message.includes("no valid speech") ||
+    message.includes("normal silence audio") ||
     message.includes("invalid argument")
   );
 }
