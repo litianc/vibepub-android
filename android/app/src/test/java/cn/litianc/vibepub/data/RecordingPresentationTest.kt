@@ -96,6 +96,40 @@ class RecordingPresentationTest {
     }
 
     @Test
+    fun productStageAliasesDriveVisibleWorkflowPosition() {
+        val article = RecordingEntity(
+            filename = "VibePub-article.m4a",
+            durationMs = 1_000L,
+            timestamp = 1L,
+            status = RecordingStatus.PROCESSING.value,
+            processingStage = "article",
+        )
+        val articleReady = article.copy(processingStage = "ARTICLE_READY")
+        val wechat = article.copy(processingStage = "wechat")
+        val failed = article.copy(
+            status = RecordingStatus.FAILED.value,
+            processingStage = "failed",
+            lastError = "云端处理失败",
+        )
+
+        assertEquals("正在成文", article.statusLabel())
+        assertEquals("第 5/7 步", article.workflowProgressLabel())
+        assertEquals(WorkflowStepState.CURRENT, article.workflowSteps()[4].state)
+
+        assertEquals("生成草稿中", articleReady.statusLabel())
+        assertEquals("第 6/7 步", articleReady.workflowProgressLabel())
+        assertEquals(WorkflowStepState.DONE, articleReady.workflowSteps()[4].state)
+        assertEquals(WorkflowStepState.CURRENT, articleReady.workflowSteps()[5].state)
+
+        assertEquals("生成草稿中", wechat.statusLabel())
+        assertEquals("第 6/7 步", wechat.workflowProgressLabel())
+        assertTrue(wechat.workflowNextActionLabel().contains("等待公众号草稿创建"))
+
+        assertEquals("第 5/7 步", failed.workflowProgressLabel())
+        assertEquals(WorkflowStepState.BLOCKED, failed.workflowSteps()[4].state)
+    }
+
+    @Test
     fun serverFailureStageBlocksTheMatchingWorkflowStep() {
         val recording = RecordingEntity(
             filename = "VibePub-test.m4a",
@@ -112,6 +146,25 @@ class RecordingPresentationTest {
         assertEquals(WorkflowStepState.DONE, steps[2].state)
         assertEquals(WorkflowStepState.BLOCKED, steps[3].state)
         assertEquals(WorkflowStepState.PENDING, steps[4].state)
+    }
+
+    @Test
+    fun serverDraftFailureStageBlocksWechatDraftStepWithoutSpecificErrorText() {
+        val recording = RecordingEntity(
+            filename = "VibePub-test.m4a",
+            durationMs = 1_000L,
+            timestamp = 1L,
+            status = RecordingStatus.FAILED.value,
+            processingStage = "DRAFT_FAILED",
+            lastError = "Request failed with status code 502",
+        )
+
+        val steps = recording.workflowSteps()
+
+        assertEquals("第 6/7 步", recording.workflowProgressLabel())
+        assertEquals(WorkflowStepState.DONE, steps[4].state)
+        assertEquals(WorkflowStepState.BLOCKED, steps[5].state)
+        assertEquals(WorkflowStepState.PENDING, steps[6].state)
     }
 
     @Test

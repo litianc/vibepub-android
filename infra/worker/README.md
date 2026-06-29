@@ -15,7 +15,10 @@ Cloudflare Worker API for Android audio uploads.
 `created_at`, `updated_at`, optional `article_title`, `raw_text_preview`,
 `processing_stage`, `wechat_url`, `wechat_draft_id`, and `error_message`.
 `processing_stage` is a narrow progress hint for the current pipeline step:
-`QUEUED`, `ASR`, `REWRITING`, `DRAFTING`, `COMPLETED`, or `FAILED`.
+`QUEUED`, `ASR`, `REWRITING`, `DRAFTING`, `ARTICLE_READY`,
+`COMPLETED`, or `FAILED`.
+`ARTICLE_READY` means the article has been generated and saved for Android
+review while the WeChat draft step is still pending.
 `DRAFT_FAILED` means the article is ready and consumable but WeChat draft
 creation failed after article generation.
 
