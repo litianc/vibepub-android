@@ -51,6 +51,11 @@ called "USB debugging (Security settings)" or `USB 调试（安全设置）` /
 
 If APK install fails with `INSTALL_FAILED_USER_RESTRICTED`, enable `USB 安装`
 or "Install via USB" in Developer options.
+On HyperOS 3 tablets the long "允许通过 USB 调试修改权限或模拟点击" text may appear
+as the summary under `USB调试（安全设置）`; the row title is the setting to look
+for. During APK installs, HyperOS may also show a timed `USB安装提示` dialog.
+`scripts/install-latest-android-apk.sh` and `scripts/check-android-device-ready.sh`
+auto-tap `继续安装` while `adb install` is waiting.
 If reset/uninstall fails with `DELETE_FAILED_INTERNAL_ERROR`, manually remove
 the app on the phone or enable the same USB install/security options.
 
@@ -78,6 +83,12 @@ app:
 
 ```bash
 ANDROID_SERIAL=192.168.31.72:42327 scripts/install-latest-android-apk.sh
+```
+
+Equivalent explicit serial form:
+
+```bash
+scripts/install-latest-android-apk.sh --serial 192.168.31.72:42327
 ```
 
 For the standard VibePub smoke test, prefer:

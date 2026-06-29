@@ -10,6 +10,9 @@ REQUIRE_TAP="${REQUIRE_TAP:-false}"
 SKIP_INSTALL="${SKIP_INSTALL:-false}"
 CHECK_APK_INSTALL="${CHECK_APK_INSTALL:-true}"
 REQUIRE_UNLOCKED="${REQUIRE_UNLOCKED:-false}"
+AUTO_CONFIRM_USB_INSTALL_PROMPT="${AUTO_CONFIRM_USB_INSTALL_PROMPT:-true}"
+AUTO_TAP_USB_INSTALL_PROMPT_FALLBACK="${AUTO_TAP_USB_INSTALL_PROMPT_FALLBACK:-true}"
+USB_INSTALL_PROMPT_TIMEOUT_SECONDS="${USB_INSTALL_PROMPT_TIMEOUT_SECONDS:-20}"
 
 usage() {
   cat <<EOF
@@ -26,6 +29,15 @@ Environment:
                 device-only preflight. Default: true.
   REQUIRE_UNLOCKED
                 Fail if the device appears locked. Default: false.
+  AUTO_CONFIRM_USB_INSTALL_PROMPT
+                Tap HyperOS/MIUI "继续安装" USB install prompts while adb
+                install is waiting. Default: true.
+  AUTO_TAP_USB_INSTALL_PROMPT_FALLBACK
+                Repeatedly tap the expected "继续安装" dialog coordinate while
+                waiting, because HyperOS can auto-reject before UI dumps
+                observe the prompt. Default: true.
+  USB_INSTALL_PROMPT_TIMEOUT_SECONDS
+                Prompt watcher timeout. Default: 20.
 
 Checks whether a USB-connected Android phone is ready for the VibePub
 real-device smoke lane.
@@ -45,16 +57,86 @@ adb_shell() {
   adb shell "$@"
 }
 
+current_display_size() {
+  local display_size
+
+  display_size="$(adb_shell dumpsys window displays 2>/dev/null \
+    | sed -n 's/.*cur=\([0-9][0-9]*\)x\([0-9][0-9]*\).*/\1x\2/p' \
+    | head -n 1)"
+  if [[ -z "$display_size" ]]; then
+    display_size="$(adb_shell dumpsys display 2>/dev/null \
+      | sed -n 's/.*mOverrideDisplayInfo=.*real \([0-9][0-9]*\) x \([0-9][0-9]*\).*/\1x\2/p' \
+      | head -n 1)"
+  fi
+  if [[ -z "$display_size" ]]; then
+    display_size="$(adb_shell wm size 2>/dev/null | awk -F': ' '/Physical size/ { print $2; exit }')"
+  fi
+
+  echo "$display_size"
+}
+
+tap_usb_install_prompt_until() {
+  local label="$1"
+  local watched_pid="$2"
+
+  if ! truthy "$AUTO_CONFIRM_USB_INSTALL_PROMPT"; then
+    return 0
+  fi
+
+  local deadline=$((SECONDS + USB_INSTALL_PROMPT_TIMEOUT_SECONDS))
+  local tap_file="$OUT_DIR/${label}-usb-install-prompt-tap.txt"
+  local screen_size width height fallback_x fallback_y
+
+  screen_size="$(current_display_size)"
+  width="${screen_size%x*}"
+  height="${screen_size#*x}"
+  if [[ "$width" =~ ^[0-9]+$ && "$height" =~ ^[0-9]+$ ]]; then
+    fallback_x="${USB_INSTALL_PROMPT_TAP_X:-$((width * 42 / 100))}"
+    fallback_y="${USB_INSTALL_PROMPT_TAP_Y:-$((height * 64 / 100))}"
+  else
+    fallback_x="${USB_INSTALL_PROMPT_TAP_X:-1266}"
+    fallback_y="${USB_INSTALL_PROMPT_TAP_Y:-1203}"
+  fi
+
+  while kill -0 "$watched_pid" >/dev/null 2>&1 && (( SECONDS < deadline )); do
+    if truthy "$AUTO_TAP_USB_INSTALL_PROMPT_FALLBACK"; then
+      adb_shell input tap "$fallback_x" "$fallback_y" >> "$tap_file" 2>&1 || true
+      echo "Fallback-tapped expected HyperOS USB install prompt at $fallback_x,$fallback_y" >> "$tap_file"
+    fi
+    sleep 0.15
+  done
+}
+
+run_with_usb_install_prompt_taps() {
+  local label="$1"
+  local output_file="$2"
+  shift 2
+
+  "$@" > "$output_file" 2>&1 &
+  local install_pid=$!
+  tap_usb_install_prompt_until "$label" "$install_pid"
+  wait "$install_pid"
+}
+
 install_apk() {
   local apk_path="$1"
 
-  if adb install -r -t "$apk_path" > "$OUT_DIR/install.txt" 2>&1; then
+  adb_shell input keyevent KEYCODE_HOME >/dev/null 2>&1 || true
+  sleep 0.3
+
+  if run_with_usb_install_prompt_taps \
+    "install" \
+    "$OUT_DIR/install.txt" \
+    adb install -r -t -g "$apk_path"; then
     return 0
   fi
 
   if grep -q "INSTALL_FAILED_UPDATE_INCOMPATIBLE" "$OUT_DIR/install.txt"; then
     adb uninstall "$PACKAGE_NAME" > "$OUT_DIR/install-uninstall-incompatible.txt" 2>&1 || true
-    if adb install -r -t "$apk_path" > "$OUT_DIR/install-after-uninstall.txt" 2>&1; then
+    if run_with_usb_install_prompt_taps \
+      "install-after-uninstall" \
+      "$OUT_DIR/install-after-uninstall.txt" \
+      adb install -r -t -g "$apk_path"; then
       return 0
     fi
     cp "$OUT_DIR/install-after-uninstall.txt" "$OUT_DIR/install.txt"
@@ -66,8 +148,10 @@ install_apk() {
 
   adb push "$apk_path" /data/local/tmp/vibepub-app-debug.apk \
     > "$OUT_DIR/install-fallback-push.txt" 2>&1
-  adb_shell pm install -r -t -g /data/local/tmp/vibepub-app-debug.apk \
-    > "$OUT_DIR/install-fallback-pm.txt" 2>&1
+  run_with_usb_install_prompt_taps \
+    "install-fallback-pm" \
+    "$OUT_DIR/install-fallback-pm.txt" \
+    adb shell pm install -r -t -g /data/local/tmp/vibepub-app-debug.apk
 }
 
 mkdir -p "$OUT_DIR"

@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PACKAGE_NAME="${PACKAGE_NAME:-cn.litianc.vibepub}"
 ACTIVITY_NAME="${ACTIVITY_NAME:-.MainActivity}"
-APK_PATH="${1:-}"
+APK_PATH=""
 RUN_ID="$(date +'%Y%m%d-%H%M%S')"
 OUT_DIR="${OUT_DIR:-$ROOT_DIR/artifacts/android-install/$RUN_ID}"
 START_APP="${START_APP:-true}"
@@ -13,7 +13,8 @@ REQUIRE_UNLOCKED="${REQUIRE_UNLOCKED:-true}"
 usage() {
   cat <<EOF
 Usage:
-  scripts/install-latest-android-apk.sh [path/to/app-debug.apk]
+  scripts/install-latest-android-apk.sh [path/to/app-debug.apk] [--serial adb-serial]
+  scripts/install-latest-android-apk.sh --serial adb-serial [path/to/app-debug.apk]
 
 Environment:
   ANDROID_SERIAL    Optional adb device serial, recommended when multiple
@@ -38,6 +39,49 @@ truthy() {
   [[ "${1:-}" == "true" || "${1:-}" == "1" || "${1:-}" == "yes" ]]
 }
 
+adb_cmd() {
+  if [[ -n "${ANDROID_SERIAL:-}" ]]; then
+    adb -s "$ANDROID_SERIAL" "$@"
+  else
+    adb "$@"
+  fi
+}
+
+while [[ "$#" -gt 0 ]]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --serial)
+      if [[ -z "${2:-}" ]]; then
+        echo "--serial requires an adb device serial" >&2
+        exit 1
+      fi
+      export ANDROID_SERIAL="$2"
+      shift 2
+      ;;
+    --serial=*)
+      export ANDROID_SERIAL="${1#--serial=}"
+      shift
+      ;;
+    -*)
+      echo "Unknown option: $1" >&2
+      usage >&2
+      exit 1
+      ;;
+    *)
+      if [[ -n "$APK_PATH" && "$APK_PATH" != "$1" ]]; then
+        echo "Unexpected extra argument: $1" >&2
+        usage >&2
+        exit 1
+      fi
+      APK_PATH="$1"
+      shift
+      ;;
+  esac
+done
+
 if [[ -z "$APK_PATH" ]]; then
   APK_PATH="$("$ROOT_DIR/scripts/download-latest-android-apk.sh" | tail -n 1)"
 fi
@@ -60,9 +104,9 @@ OUT_DIR="$OUT_DIR/readiness" \
 
 if truthy "$START_APP"; then
   echo "Starting $PACKAGE_NAME/$ACTIVITY_NAME..."
-  adb shell am start -n "$PACKAGE_NAME/$ACTIVITY_NAME" > "$OUT_DIR/start-app.txt"
-  adb shell screencap -p /sdcard/vibepub-installed-launch.png >/dev/null 2>&1 || true
-  adb pull /sdcard/vibepub-installed-launch.png "$OUT_DIR/launch.png" >/dev/null 2>&1 || true
+  adb_cmd shell am start -n "$PACKAGE_NAME/$ACTIVITY_NAME" > "$OUT_DIR/start-app.txt"
+  adb_cmd shell screencap -p /sdcard/vibepub-installed-launch.png >/dev/null 2>&1 || true
+  adb_cmd pull /sdcard/vibepub-installed-launch.png "$OUT_DIR/launch.png" >/dev/null 2>&1 || true
 fi
 
 cat > "$OUT_DIR/summary.md" <<EOF

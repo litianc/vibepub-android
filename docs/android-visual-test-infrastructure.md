@@ -76,6 +76,10 @@ Developer options item named "USB debugging (Security settings)" or
 `USB 调试（安全设置）` / `允许通过 USB 调试修改权限或模拟点击`.
 If install fails with `INSTALL_FAILED_USER_RESTRICTED`, also enable `USB 安装`
 or "Install via USB".
+On HyperOS 3 tablets, the long "允许通过 USB 调试修改权限或模拟点击" wording can be
+the summary under the `USB调试（安全设置）` row. The install scripts also
+auto-confirm the timed `USB安装提示` dialog by tapping `继续安装` while `adb install`
+is running.
 If uninstall/reset fails with `DELETE_FAILED_INTERNAL_ERROR`, remove the app
 manually on the phone or enable the same USB install/security options before
 running deterministic tests.
