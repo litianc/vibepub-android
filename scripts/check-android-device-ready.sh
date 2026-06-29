@@ -53,8 +53,16 @@ truthy() {
   [[ "${1:-}" == "true" || "${1:-}" == "1" || "${1:-}" == "yes" ]]
 }
 
+adb_cmd() {
+  if [[ -n "${ANDROID_SERIAL:-}" ]]; then
+    adb -s "$ANDROID_SERIAL" "$@"
+  else
+    adb "$@"
+  fi
+}
+
 adb_shell() {
-  adb shell "$@"
+  adb_cmd shell "$@"
 }
 
 current_display_size() {
@@ -121,7 +129,7 @@ run_with_usb_install_prompt_taps() {
 install_apk() {
   local apk_path="$1"
 
-  adb devices -l > "$OUT_DIR/adb-devices-before-install.txt" || true
+  adb_cmd devices -l > "$OUT_DIR/adb-devices-before-install.txt" || true
 
   adb_shell input keyevent KEYCODE_HOME >/dev/null 2>&1 || true
   sleep 0.3
@@ -129,16 +137,16 @@ install_apk() {
   if run_with_usb_install_prompt_taps \
     "install" \
     "$OUT_DIR/install.txt" \
-    adb install -r -t -g "$apk_path"; then
+    adb_cmd install -r -t -g "$apk_path"; then
     return 0
   fi
 
   if grep -q "INSTALL_FAILED_UPDATE_INCOMPATIBLE" "$OUT_DIR/install.txt"; then
-    adb uninstall "$PACKAGE_NAME" > "$OUT_DIR/install-uninstall-incompatible.txt" 2>&1 || true
+    adb_cmd uninstall "$PACKAGE_NAME" > "$OUT_DIR/install-uninstall-incompatible.txt" 2>&1 || true
     if run_with_usb_install_prompt_taps \
       "install-after-uninstall" \
       "$OUT_DIR/install-after-uninstall.txt" \
-      adb install -r -t -g "$apk_path"; then
+      adb_cmd install -r -t -g "$apk_path"; then
       return 0
     fi
     cp "$OUT_DIR/install-after-uninstall.txt" "$OUT_DIR/install.txt"
@@ -148,12 +156,12 @@ install_apk() {
     return 1
   fi
 
-  adb push "$apk_path" /data/local/tmp/vibepub-app-debug.apk \
+  adb_cmd push "$apk_path" /data/local/tmp/vibepub-app-debug.apk \
     > "$OUT_DIR/install-fallback-push.txt" 2>&1
   run_with_usb_install_prompt_taps \
     "install-fallback-pm" \
     "$OUT_DIR/install-fallback-pm.txt" \
-    adb shell pm install -r -t -g /data/local/tmp/vibepub-app-debug.apk
+    adb_cmd shell pm install -r -t -g /data/local/tmp/vibepub-app-debug.apk
 }
 
 mkdir -p "$OUT_DIR"
@@ -186,8 +194,8 @@ if ! command -v adb >/dev/null 2>&1; then
 fi
 check_pass "adb is installed"
 
-adb start-server >/dev/null
-adb devices -l > "$OUT_DIR/adb-devices.txt"
+adb_cmd start-server >/dev/null
+adb_cmd devices -l > "$OUT_DIR/adb-devices.txt"
 if [[ -n "${ANDROID_SERIAL:-}" ]]; then
   device_count="$(awk -v serial="$ANDROID_SERIAL" 'NR > 1 && $1 == serial && $2 == "device" { count++ } END { print count + 0 }' "$OUT_DIR/adb-devices.txt")"
 else
@@ -201,13 +209,13 @@ else
 fi
 
 if [[ "$device_count" -ge 1 ]]; then
-  adb shell getprop ro.product.model > "$OUT_DIR/device-model.txt" || true
-  adb shell getprop ro.build.version.release > "$OUT_DIR/android-version.txt" || true
+  adb_shell getprop ro.product.model > "$OUT_DIR/device-model.txt" || true
+  adb_shell getprop ro.build.version.release > "$OUT_DIR/android-version.txt" || true
   check_pass "device properties captured"
 
-  adb shell input keyevent KEYCODE_WAKEUP >/dev/null 2>&1 || true
-  adb shell dumpsys power > "$OUT_DIR/power.txt" 2>&1 || true
-  adb shell dumpsys window > "$OUT_DIR/window.txt" 2>&1 || true
+  adb_shell input keyevent KEYCODE_WAKEUP >/dev/null 2>&1 || true
+  adb_shell dumpsys power > "$OUT_DIR/power.txt" 2>&1 || true
+  adb_shell dumpsys window > "$OUT_DIR/window.txt" 2>&1 || true
   if grep -Eq 'mDreamingLockscreen=true|mShowingLockscreen=true|mInputRestricted=true|isStatusBarKeyguard=true' \
     "$OUT_DIR/power.txt" "$OUT_DIR/window.txt"; then
     device_locked=true
@@ -221,7 +229,7 @@ if [[ "$device_count" -ge 1 ]]; then
   fi
 fi
 
-if adb shell input tap 1 1 > "$OUT_DIR/input-tap.txt" 2>&1; then
+if adb_shell input tap 1 1 > "$OUT_DIR/input-tap.txt" 2>&1; then
   check_pass "adb input tap is allowed"
 else
   if truthy "$REQUIRE_TAP"; then
@@ -244,12 +252,12 @@ elif [[ -n "$APK_PATH" ]]; then
       echo "  - Unlock the phone/tablet, keep the screen awake, then rerun." >> "$report"
       echo "  - APK install and run-as checks were skipped to avoid HyperOS/MIUI install restrictions while locked." >> "$report"
     elif truthy "$SKIP_INSTALL"; then
-      if adb shell dumpsys package "$PACKAGE_NAME" > "$OUT_DIR/installed-package.txt" 2>&1; then
+      if adb_shell dumpsys package "$PACKAGE_NAME" > "$OUT_DIR/installed-package.txt" 2>&1; then
         check_pass "package is already installed on the phone"
       else
         check_fail "package is already installed on the phone"
       fi
-      if adb shell run-as "$PACKAGE_NAME" id > "$OUT_DIR/run-as.txt" 2>&1; then
+      if adb_shell run-as "$PACKAGE_NAME" id > "$OUT_DIR/run-as.txt" 2>&1; then
         check_pass "run-as works for debug preference injection"
       else
         check_fail "run-as works for debug preference injection"
@@ -270,7 +278,7 @@ elif [[ -n "$APK_PATH" ]]; then
         fi
       fi
 
-      if adb shell run-as "$PACKAGE_NAME" id > "$OUT_DIR/run-as.txt" 2>&1; then
+      if adb_shell run-as "$PACKAGE_NAME" id > "$OUT_DIR/run-as.txt" 2>&1; then
         check_pass "run-as works for debug preference injection"
       else
         check_fail "run-as works for debug preference injection"

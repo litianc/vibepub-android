@@ -71,18 +71,30 @@ All gates must pass before declaring the flow complete.
 3. Real-device Android smoke:
 
    ```bash
-   SKIP_INSTALL=true RESET_APP_DATA=false \
+   ANDROID_SERIAL=<device-serial> SKIP_INSTALL=true RESET_APP_DATA=false \
      scripts/run-android-device-smoke.sh artifacts/apk/latest/app-debug.apk
    ```
 
    Required evidence in `artifacts/android-device-visual/<run>/`:
 
-   - `debug-device-test-status.json` shows one stopped recording with non-zero
+   - `acceptance-report.txt` has every line checked (`[x]`).
+   - `debug-device-test-status.json` shows one imported recording with non-zero
      duration.
+   - `local-recording-row.json` shows exactly one Room row for the tested
+     filename, non-zero duration, status `COMPLETED`, title, and raw-text
+     preview.
+   - `recordings-api.json` has exactly one object for the tested filename, with
+     status `COMPLETED`, `article_title`, `raw_text_preview`, and
+     terminal `processing_stage` (`COMPLETED` with a draft reference, or
+     `DRAFT_FAILED` with `error_message`).
+   - `local-transcript.json` has `articleTitle`, `rawText`, `articleContent`,
+     and a terminal processing stage (`COMPLETED`, `DRAFT_FAILED`, or
+     `ARTICLE_READY`). When the stage is `COMPLETED`, it must include a WeChat
+     draft reference.
    - `window.xml` and `checklist.md` report `Transcript detail status:
      completed`.
-   - `02-after-record.png` or `final.png` shows only one new item for the
-     recording attempt.
+   - `window-all.xml` shows the review card, copy/share/export actions, status
+     help entry, expected duration, and no escaped raw HTML tags.
    - `logcat.txt` has no obvious upload, sync, transcript, database, or crash
      errors.
 
@@ -93,7 +105,9 @@ All gates must pass before declaring the flow complete.
      https://vibepub.litianc.cn/api/recordings
    ```
 
-   Required evidence: the tested filename has status `COMPLETED`.
+   Required evidence: the tested filename has status `COMPLETED`, plus
+   `article_title`, `raw_text_preview`, terminal `processing_stage`, and either
+   a draft reference or a visible draft failure/error field.
 
 ## Anti-False-Success Rules
 
@@ -103,5 +117,6 @@ All gates must pass before declaring the flow complete.
   marking the recording `FAILED`.
 - Do not accept a visual smoke run that exits before `Transcript detail status`
   is `completed`.
+- Do not accept a visual smoke run whose `Acceptance status` is not `passed`.
 - Do not accept old transcript fixtures or dummy recordings as proof for a new
   recording attempt.
