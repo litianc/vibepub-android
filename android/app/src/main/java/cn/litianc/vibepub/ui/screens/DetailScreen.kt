@@ -30,6 +30,7 @@ import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.TaskAlt
 import androidx.compose.material.icons.filled.Upload
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -76,6 +77,18 @@ import cn.litianc.vibepub.ui.theme.PrimaryRed
 import kotlinx.coroutines.delay
 import org.json.JSONObject
 import java.io.File
+
+internal data class ArticleReviewItem(
+    val label: String,
+    val value: String,
+    val ready: Boolean,
+)
+
+internal data class ArticleReviewSummary(
+    val title: String,
+    val nextStep: String,
+    val items: List<ArticleReviewItem>,
+)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -140,6 +153,16 @@ fun DetailScreen(
         val rawText = transcript?.optString("rawText", "")?.ifBlank { currentRecording.rawTextPreview.orEmpty() }.orEmpty()
         val articleContent = transcript?.optString("articleContent", "")?.ifBlank { rawText }?.let(::renderArticleText)
             ?: currentRecording.statusDetail()
+        val wechatDraftId = transcript?.optString("wechatDraftId", "").orEmpty()
+            .ifBlank { transcript?.optString("mediaId", "").orEmpty() }
+            .ifBlank { transcript?.optString("wechat_draft_id", "").orEmpty() }
+        val reviewSummary = buildArticleReviewSummary(
+            status = currentRecording.status.asRecordingStatus(),
+            articleTitle = articleTitle,
+            articleContent = articleContent,
+            rawText = rawText,
+            wechatDraftId = wechatDraftId,
+        )
         val shareText = buildString {
             append(articleTitle)
             append("\n\n")
@@ -157,7 +180,6 @@ fun DetailScreen(
             Spacer(modifier = Modifier.height(18.dp))
             StatusCard(
                 recording = currentRecording,
-                transcript = transcript,
                 onRefresh = onRefresh,
                 onRetryUpload = { onRetryUpload(currentRecording) },
             )
@@ -180,6 +202,8 @@ fun DetailScreen(
                 )
             }
 
+            Spacer(modifier = Modifier.height(16.dp))
+            ArticleReviewCard(summary = reviewSummary)
             Spacer(modifier = Modifier.height(16.dp))
             ActionRow(
                 articleTitle = articleTitle,
@@ -288,7 +312,6 @@ private fun AudioPlayerCard(recording: RecordingEntity) {
 @Composable
 private fun StatusCard(
     recording: RecordingEntity,
-    transcript: JSONObject?,
     onRefresh: () -> Unit,
     onRetryUpload: () -> Unit,
 ) {
@@ -345,16 +368,6 @@ private fun StatusCard(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            if (status == RecordingStatus.COMPLETED) {
-                val draft = transcript?.optString("wechatDraftId", "").orEmpty()
-                    .ifBlank { transcript?.optString("mediaId", "").orEmpty() }
-                Spacer(modifier = Modifier.height(6.dp))
-                Text(
-                    if (draft.isBlank()) "微信公众号草稿：已由云端处理" else "微信公众号草稿：$draft",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
             Spacer(modifier = Modifier.height(10.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(onClick = onRefresh) {
@@ -370,6 +383,68 @@ private fun StatusCard(
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun ArticleReviewCard(summary: ArticleReviewSummary) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("ArticleReviewCard"),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        shape = RoundedCornerShape(12.dp),
+    ) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Default.TaskAlt,
+                    contentDescription = null,
+                    tint = PrimaryRed,
+                    modifier = Modifier.size(20.dp),
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(summary.title, fontWeight = FontWeight.SemiBold)
+            }
+            Text(
+                summary.nextStep,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            summary.items.forEach { item ->
+                ArticleReviewItemRow(item = item)
+            }
+        }
+    }
+}
+
+@Composable
+private fun ArticleReviewItemRow(item: ArticleReviewItem) {
+    val color = if (item.ready) Color(0xFF2E7D32) else Color(0xFFF9A825)
+    Row(verticalAlignment = Alignment.Top) {
+        Box(
+            modifier = Modifier
+                .padding(top = 4.dp)
+                .size(8.dp)
+                .clip(CircleShape)
+                .background(color),
+        )
+        Spacer(modifier = Modifier.width(10.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                item.label,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.Medium,
+            )
+            Text(
+                item.value,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }
@@ -436,6 +511,54 @@ internal fun renderArticleText(content: String): String {
         .replace(Regex("\n{3,}"), "\n\n")
         .trim()
     return text.ifBlank { content }
+}
+
+internal fun buildArticleReviewSummary(
+    status: RecordingStatus,
+    articleTitle: String,
+    articleContent: String,
+    rawText: String,
+    wechatDraftId: String,
+): ArticleReviewSummary {
+    val hasTitle = articleTitle.isNotBlank() && !articleTitle.contains("录音片段")
+    val contentChars = articleContent.trim().length
+    val hasArticle = status == RecordingStatus.COMPLETED && contentChars >= 80
+    val hasRawText = rawText.isNotBlank()
+    val hasDraft = status == RecordingStatus.COMPLETED && wechatDraftId.isNotBlank()
+
+    val nextStep = when {
+        status != RecordingStatus.COMPLETED -> "文章还在生成中，完成后这里会变成发布前检查清单。"
+        hasDraft -> "草稿已创建。下一步到公众号后台打开草稿，再做最后一眼人工确认。"
+        hasArticle -> "文章已生成，但还没拿到公众号草稿 ID。可以先复制正文，或刷新等待草稿状态。"
+        else -> "流程显示完成，但正文还不完整。请刷新同步，或检查诊断信息后重试。"
+    }
+
+    return ArticleReviewSummary(
+        title = "公众号草稿审核",
+        nextStep = nextStep,
+        items = listOf(
+            ArticleReviewItem(
+                label = "标题",
+                value = if (hasTitle) articleTitle else "等待云端生成更合适的标题",
+                ready = hasTitle,
+            ),
+            ArticleReviewItem(
+                label = "正文",
+                value = if (hasArticle) "约 $contentChars 字，可复制或分享" else "正文还未完整生成",
+                ready = hasArticle,
+            ),
+            ArticleReviewItem(
+                label = "原始识别",
+                value = if (hasRawText) "已保留，可用于核对口述原意" else "暂未同步到原始识别结果",
+                ready = hasRawText,
+            ),
+            ArticleReviewItem(
+                label = "公众号草稿",
+                value = if (hasDraft) wechatDraftId else "等待云端创建草稿或返回草稿 ID",
+                ready = hasDraft,
+            ),
+        ),
+    )
 }
 
 private fun loadLocalTranscript(context: Context, filename: String): JSONObject? {
