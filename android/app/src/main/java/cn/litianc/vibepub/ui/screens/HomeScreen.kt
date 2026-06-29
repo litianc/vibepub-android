@@ -45,7 +45,9 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -81,6 +83,7 @@ import cn.litianc.vibepub.data.workflowProgressLabel
 import cn.litianc.vibepub.data.workflowSteps
 import cn.litianc.vibepub.ui.theme.IconLightRedBackground
 import cn.litianc.vibepub.ui.theme.PrimaryRed
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -89,6 +92,9 @@ import java.util.Locale
 internal data class HomeSyncNotice(
     val message: String,
 )
+
+private const val HOME_REFRESH_FINISH_DELAY_MS = 450L
+private const val HOME_REFRESH_TIMEOUT_MS = 3_500L
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -104,6 +110,26 @@ fun HomeScreen(
 ) {
     val recordings by recordingsFlow.collectAsState(initial = emptyList())
     val syncNotice = homeSyncNotice(recordings, lastSyncAtMs)
+    var isRefreshing by remember { mutableStateOf(false) }
+    var refreshStartedSyncAtMs by remember { mutableStateOf<Long?>(null) }
+
+    fun requestRefresh() {
+        refreshStartedSyncAtMs = lastSyncAtMs
+        isRefreshing = true
+        onRefresh()
+    }
+
+    LaunchedEffect(isRefreshing, lastSyncAtMs, refreshStartedSyncAtMs) {
+        if (!isRefreshing) return@LaunchedEffect
+        val startedAt = refreshStartedSyncAtMs
+        if (shouldFinishHomeRefresh(startedAt, lastSyncAtMs)) {
+            delay(HOME_REFRESH_FINISH_DELAY_MS)
+            isRefreshing = false
+        } else {
+            delay(HOME_REFRESH_TIMEOUT_MS)
+            isRefreshing = false
+        }
+    }
 
     Scaffold(
         topBar = {
@@ -127,7 +153,7 @@ fun HomeScreen(
                     }
                 },
                 actions = {
-                    IconButton(onClick = onRefresh, modifier = Modifier.testTag("RefreshButton")) {
+                    IconButton(onClick = { requestRefresh() }, modifier = Modifier.testTag("RefreshButton")) {
                         Icon(Icons.Default.Refresh, contentDescription = "Refresh")
                     }
                     IconButton(onClick = onSettingsClick, modifier = Modifier.testTag("SettingsButton")) {
@@ -155,60 +181,70 @@ fun HomeScreen(
         floatingActionButtonPosition = androidx.compose.material3.FabPosition.Center,
         containerColor = MaterialTheme.colorScheme.background,
     ) { padding ->
-        Column(
+        PullToRefreshBox(
+            isRefreshing = isRefreshing,
+            onRefresh = { requestRefresh() },
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding),
         ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 10.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column {
-                    Text("我的录音", fontWeight = FontWeight.Bold)
-                    Text(
-                        "${recordings.size} 条 · ${lastSyncLabel(lastSyncAtMs)}",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+            Column(modifier = Modifier.fillMaxSize()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 10.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column {
+                        Text("我的录音", fontWeight = FontWeight.Bold)
+                        Text(
+                            "${recordings.size} 条 · ${lastSyncLabel(lastSyncAtMs)}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    OutlinedButton(onClick = { requestRefresh() }) {
+                        Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("同步")
+                    }
+                }
+
+                if (syncNotice != null) {
+                    SyncNoticeCard(
+                        notice = syncNotice,
+                        onRefresh = { requestRefresh() },
                     )
                 }
-                OutlinedButton(onClick = onRefresh) {
-                    Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text("同步")
-                }
-            }
 
-            if (syncNotice != null) {
-                SyncNoticeCard(
-                    notice = syncNotice,
-                    onRefresh = onRefresh,
-                )
-            }
-
-            if (recordings.isEmpty()) {
-                EmptyHome(onRecordClick = onRecordClick)
-            } else {
-                LazyColumn(
-                    modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 112.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    items(recordings, key = { it.filename }) { recording ->
-                        RecordingCard(
-                            recording = recording,
-                            onClick = { onRecordingClick(recording) },
-                            onRetryUpload = { onRetryUpload(recording) },
-                            onDeleteRecording = { onDeleteRecording(recording) },
-                        )
+                if (recordings.isEmpty()) {
+                    EmptyHome(onRecordClick = onRecordClick)
+                } else {
+                    LazyColumn(
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 112.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        items(recordings, key = { it.filename }) { recording ->
+                            RecordingCard(
+                                recording = recording,
+                                onClick = { onRecordingClick(recording) },
+                                onRetryUpload = { onRetryUpload(recording) },
+                                onDeleteRecording = { onDeleteRecording(recording) },
+                            )
+                        }
                     }
                 }
             }
         }
     }
+}
+
+internal fun shouldFinishHomeRefresh(refreshStartedSyncAtMs: Long?, lastSyncAtMs: Long): Boolean {
+    return refreshStartedSyncAtMs != null &&
+        lastSyncAtMs > 0L &&
+        lastSyncAtMs != refreshStartedSyncAtMs
 }
 
 internal fun homeSyncNotice(

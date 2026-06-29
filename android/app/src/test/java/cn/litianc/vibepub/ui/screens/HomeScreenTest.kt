@@ -8,6 +8,14 @@ import org.junit.Test
 
 class HomeScreenTest {
     @Test
+    fun shouldFinishHomeRefreshOnlyWhenSyncTimestampChangesToValidValue() {
+        assertEquals(false, shouldFinishHomeRefresh(null, lastSyncAtMs = 10_000L))
+        assertEquals(false, shouldFinishHomeRefresh(10_000L, lastSyncAtMs = 10_000L))
+        assertEquals(false, shouldFinishHomeRefresh(10_000L, lastSyncAtMs = 0L))
+        assertEquals(true, shouldFinishHomeRefresh(10_000L, lastSyncAtMs = 12_000L))
+    }
+
+    @Test
     fun lastSyncLabelShowsMissingSyncPlainly() {
         assertEquals("最近同步：尚未同步", lastSyncLabel(0L, nowMs = 10_000L))
     }
