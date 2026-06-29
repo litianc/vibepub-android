@@ -26,6 +26,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.SyncProblem
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Upload
 import androidx.compose.material3.AlertDialog
@@ -84,6 +85,10 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+internal data class HomeSyncNotice(
+    val message: String,
+)
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HomeScreen(
@@ -97,6 +102,7 @@ fun HomeScreen(
     onRecordingClick: (RecordingEntity) -> Unit,
 ) {
     val recordings by recordingsFlow.collectAsState(initial = emptyList())
+    val syncNotice = homeSyncNotice(recordings, lastSyncAtMs)
 
     Scaffold(
         topBar = {
@@ -175,6 +181,13 @@ fun HomeScreen(
                 }
             }
 
+            if (syncNotice != null) {
+                SyncNoticeCard(
+                    notice = syncNotice,
+                    onRefresh = onRefresh,
+                )
+            }
+
             if (recordings.isEmpty()) {
                 EmptyHome(onRecordClick = onRecordClick)
             } else {
@@ -197,6 +210,35 @@ fun HomeScreen(
     }
 }
 
+internal fun homeSyncNotice(
+    recordings: List<RecordingEntity>,
+    lastSyncAtMs: Long,
+    nowMs: Long = System.currentTimeMillis(),
+): HomeSyncNotice? {
+    if (recordings.isEmpty()) return null
+    if (lastSyncAtMs <= 0L) {
+        return HomeSyncNotice("还没有和云端同步过，点同步检查上传和处理进度。")
+    }
+
+    val elapsedMs = (nowMs - lastSyncAtMs).coerceAtLeast(0L)
+    val hasActiveCloudWork = recordings.any { recording ->
+        when (recording.status.asRecordingStatus()) {
+            RecordingStatus.UPLOADING,
+            RecordingStatus.UPLOADED,
+            RecordingStatus.PROCESSING -> true
+            RecordingStatus.LOCAL_RECORDED,
+            RecordingStatus.COMPLETED,
+            RecordingStatus.FAILED -> false
+        }
+    }
+
+    return if (hasActiveCloudWork && elapsedMs >= STALE_ACTIVE_SYNC_MS) {
+        HomeSyncNotice("云端状态已 ${syncAgeLabel(elapsedMs)} 没有更新，点同步确认处理是否完成。")
+    } else {
+        null
+    }
+}
+
 internal fun lastSyncLabel(lastSyncAtMs: Long, nowMs: Long = System.currentTimeMillis()): String {
     if (lastSyncAtMs <= 0L) return "最近同步：尚未同步"
     val elapsedSeconds = ((nowMs - lastSyncAtMs).coerceAtLeast(0L) / 1000L).toInt()
@@ -205,6 +247,60 @@ internal fun lastSyncLabel(lastSyncAtMs: Long, nowMs: Long = System.currentTimeM
         elapsedSeconds < 3600 -> "最近同步：${elapsedSeconds / 60} 分钟前"
         elapsedSeconds < 86_400 -> "最近同步：${elapsedSeconds / 3600} 小时前"
         else -> "最近同步：${elapsedSeconds / 86_400} 天前"
+    }
+}
+
+private fun syncAgeLabel(elapsedMs: Long): String {
+    val elapsedMinutes = (elapsedMs / 60_000L).coerceAtLeast(1L)
+    return when {
+        elapsedMinutes < 60L -> "${elapsedMinutes} 分钟"
+        elapsedMinutes < 24L * 60L -> "${elapsedMinutes / 60L} 小时"
+        else -> "${elapsedMinutes / (24L * 60L)} 天"
+    }
+}
+
+@Composable
+private fun SyncNoticeCard(
+    notice: HomeSyncNotice,
+    onRefresh: () -> Unit,
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 2.dp)
+            .testTag("HomeSyncNotice"),
+        colors = CardDefaults.cardColors(containerColor = IconLightRedBackground),
+        shape = RoundedCornerShape(10.dp),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                Icons.Default.SyncProblem,
+                contentDescription = null,
+                tint = PrimaryRed,
+                modifier = Modifier.size(20.dp),
+            )
+            Spacer(modifier = Modifier.width(10.dp))
+            Text(
+                text = notice.message,
+                modifier = Modifier.weight(1f),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            Text(
+                text = "同步",
+                modifier = Modifier
+                    .clip(RoundedCornerShape(6.dp))
+                    .clickable(onClick = onRefresh)
+                    .padding(horizontal = 8.dp, vertical = 5.dp),
+                style = MaterialTheme.typography.labelMedium,
+                color = PrimaryRed,
+                fontWeight = FontWeight.SemiBold,
+            )
+        }
     }
 }
 
@@ -507,3 +603,5 @@ private fun statusColor(status: RecordingStatus): Color {
         RecordingStatus.LOCAL_RECORDED -> Color(0xFF607D8B)
     }
 }
+
+private const val STALE_ACTIVE_SYNC_MS = 10L * 60L * 1000L
