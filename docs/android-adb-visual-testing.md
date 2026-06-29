@@ -56,6 +56,10 @@ as the summary under `USB调试（安全设置）`; the row title is the setting
 for. During APK installs, HyperOS may also show a timed `USB安装提示` dialog.
 `scripts/install-latest-android-apk.sh` and `scripts/check-android-device-ready.sh`
 auto-tap `继续安装` while `adb install` is waiting.
+If wireless debugging still returns `INSTALL_FAILED_USER_RESTRICTED` after those
+switches are enabled, connect the tablet with a USB data cable for installation,
+or install the APK manually first and rerun smoke tests with
+`SKIP_INSTALL=true RESET_APP_DATA=false`.
 If reset/uninstall fails with `DELETE_FAILED_INTERNAL_ERROR`, manually remove
 the app on the phone or enable the same USB install/security options.
 
@@ -167,6 +171,11 @@ TRIGGER_MINING_JOB=true \
 AUDIO_FILE=/path/to/prepared-audio.wav \
 scripts/android-device-visual-test.sh /path/to/app-debug.apk
 ```
+
+Mining dispatch uses the current git branch by default, which keeps
+`target_filename` and branch-local mining fixes active during dogfood testing.
+Set `MINING_WORKFLOW_REF=main` only when you specifically want to test the
+production workflow definition.
 
 If you specifically want an acoustic microphone test, set
 `DEBUG_AUDIO_MODE=speaker`, use a quiet room, put the phone near the Mac

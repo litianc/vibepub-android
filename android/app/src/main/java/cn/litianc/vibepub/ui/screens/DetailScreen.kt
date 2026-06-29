@@ -81,6 +81,7 @@ import cn.litianc.vibepub.data.currentWorkflowStep
 import cn.litianc.vibepub.data.displayLabel
 import cn.litianc.vibepub.data.displayTitle
 import cn.litianc.vibepub.data.durationLabel
+import cn.litianc.vibepub.data.hasDraftFailureMessage
 import cn.litianc.vibepub.data.statusDetail
 import cn.litianc.vibepub.data.statusLabel
 import cn.litianc.vibepub.data.workflowCycleLabel
@@ -194,6 +195,11 @@ fun DetailScreen(
         val wechatUrl = transcript?.optString("wechatUrl", "").orEmpty()
             .ifBlank { transcript?.optString("wechat_url", "").orEmpty() }
             .ifBlank { currentRecording.wechatUrl.orEmpty() }
+        val draftError = if (currentRecording.hasDraftFailureMessage()) {
+            currentRecording.lastError.orEmpty().ifBlank { currentRecording.statusDetail() }
+        } else {
+            ""
+        }
         val reviewSummary = buildArticleReviewSummary(
             status = currentRecording.status.asRecordingStatus(),
             articleTitle = articleTitle,
@@ -201,6 +207,7 @@ fun DetailScreen(
             rawText = rawText,
             wechatDraftId = wechatDraftId,
             wechatUrl = wechatUrl,
+            draftError = draftError,
         )
         val draftAction = buildWeChatDraftAction(
             wechatDraftId = wechatDraftId,
@@ -787,6 +794,7 @@ internal fun buildArticleReviewSummary(
     rawText: String,
     wechatDraftId: String,
     wechatUrl: String,
+    draftError: String = "",
 ): ArticleReviewSummary {
     val hasTitle = articleTitle.isNotBlank() && !articleTitle.contains("录音片段")
     val contentChars = articleContent.trim().length
@@ -794,10 +802,12 @@ internal fun buildArticleReviewSummary(
     val hasRawText = rawText.isNotBlank()
     val draftReference = wechatDraftId.ifBlank { wechatUrl }
     val hasDraft = status == RecordingStatus.COMPLETED && draftReference.isNotBlank()
+    val draftFailed = status == RecordingStatus.COMPLETED && draftError.isNotBlank()
 
     val nextStep = when {
         status != RecordingStatus.COMPLETED -> "文章还在生成中，完成后这里会变成发布前检查清单。"
         hasDraft -> "草稿已创建。下一步到公众号后台打开草稿，再做最后一眼人工确认。"
+        draftFailed && hasArticle -> "文章已生成，但公众号草稿创建失败。可以先复制正文，稍后再重试草稿。"
         hasArticle -> "文章已生成，但还没拿到公众号草稿信息。可以先复制正文，或刷新等待草稿状态。"
         else -> "流程显示完成，但正文还不完整。请刷新同步，或检查诊断信息后重试。"
     }
@@ -823,7 +833,11 @@ internal fun buildArticleReviewSummary(
             ),
             ArticleReviewItem(
                 label = "公众号草稿",
-                value = if (hasDraft) draftReference else "等待云端创建草稿或返回草稿信息",
+                value = when {
+                    hasDraft -> draftReference
+                    draftFailed -> draftError
+                    else -> "等待云端创建草稿或返回草稿信息"
+                },
                 ready = hasDraft,
             ),
         ),

@@ -66,6 +66,18 @@ internal fun parseDurationMsFromRecordingFilename(filename: String): Long? {
     return ((minutes * 60) + seconds) * 1_000
 }
 
+internal fun mergedTranscriptError(
+    existingError: String?,
+    transcriptError: String?,
+    hasDraftReference: Boolean,
+): String? {
+    return when {
+        hasDraftReference -> null
+        !transcriptError.isNullOrBlank() -> transcriptError
+        else -> existingError?.trim()?.ifBlank { null }
+    }
+}
+
 class SyncWorker(
     appContext: Context,
     params: WorkerParameters,
@@ -213,6 +225,9 @@ class SyncWorker(
                         dir.mkdirs()
                         jsonFile.writeText(jsonText)
                         val transcript = JSONObject(jsonText)
+                        val transcriptProcessingStage = transcript.processingStageOrNull() ?: "COMPLETED"
+                        val transcriptWechatDraftId = transcript.wechatDraftIdOrNull()
+                        val transcriptWechatUrl = transcript.wechatUrlOrNull()
                         dao.insert(
                             recording.copy(
                                 status = RecordingStatus.COMPLETED.value,
@@ -221,11 +236,15 @@ class SyncWorker(
                                     .take(80)
                                     .blankToNull()
                                     ?: recording.rawTextPreview,
-                                lastError = null,
+                                lastError = mergedTranscriptError(
+                                    existingError = recording.lastError,
+                                    transcriptError = transcript.errorMessageOrNull(),
+                                    hasDraftReference = transcriptWechatDraftId != null || transcriptWechatUrl != null,
+                                ),
                                 completedAt = recording.completedAt ?: System.currentTimeMillis(),
-                                wechatDraftId = transcript.wechatDraftIdOrNull() ?: recording.wechatDraftId,
-                                wechatUrl = transcript.wechatUrlOrNull() ?: recording.wechatUrl,
-                                processingStage = transcript.processingStageOrNull() ?: "COMPLETED",
+                                wechatDraftId = transcriptWechatDraftId ?: recording.wechatDraftId,
+                                wechatUrl = transcriptWechatUrl ?: recording.wechatUrl,
+                                processingStage = transcriptProcessingStage,
                             ),
                         )
                     } else {
@@ -258,16 +277,23 @@ class SyncWorker(
                     val transcript = runCatching { JSONObject(jsonFile.readText()) }.getOrNull()
                     val transcriptTitle = transcript?.optString("articleTitle", "").orEmpty().blankToNull()
                     val transcriptPreview = transcript?.optString("rawText", "").orEmpty().take(80).blankToNull()
+                    val transcriptProcessingStage = transcript?.processingStageOrNull() ?: "COMPLETED"
+                    val transcriptWechatDraftId = transcript?.wechatDraftIdOrNull()
+                    val transcriptWechatUrl = transcript?.wechatUrlOrNull()
                     dao.insert(
                         recording.copy(
                             status = RecordingStatus.COMPLETED.value,
                             articleTitle = transcriptTitle ?: recording.articleTitle,
                             rawTextPreview = transcriptPreview ?: recording.rawTextPreview,
-                            lastError = null,
+                            lastError = mergedTranscriptError(
+                                existingError = recording.lastError,
+                                transcriptError = transcript?.errorMessageOrNull(),
+                                hasDraftReference = transcriptWechatDraftId != null || transcriptWechatUrl != null,
+                            ),
                             completedAt = recording.completedAt ?: System.currentTimeMillis(),
-                            wechatDraftId = transcript?.wechatDraftIdOrNull() ?: recording.wechatDraftId,
-                            wechatUrl = transcript?.wechatUrlOrNull() ?: recording.wechatUrl,
-                            processingStage = transcript?.processingStageOrNull() ?: "COMPLETED",
+                            wechatDraftId = transcriptWechatDraftId ?: recording.wechatDraftId,
+                            wechatUrl = transcriptWechatUrl ?: recording.wechatUrl,
+                            processingStage = transcriptProcessingStage,
                         ),
                     )
                 }
@@ -315,6 +341,12 @@ class SyncWorker(
     private fun JSONObject.processingStageOrNull(): String? {
         return optString("processingStage", "")
             .ifBlank { optString("processing_stage", "") }
+            .blankToNull()
+    }
+
+    private fun JSONObject.errorMessageOrNull(): String? {
+        return optString("errorMessage", "")
+            .ifBlank { optString("error_message", "") }
             .blankToNull()
     }
 }

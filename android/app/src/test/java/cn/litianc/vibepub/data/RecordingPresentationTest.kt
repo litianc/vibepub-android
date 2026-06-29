@@ -132,6 +132,28 @@ class RecordingPresentationTest {
     }
 
     @Test
+    fun completedArticleCanReportDraftFailureWithoutLosingArticleState() {
+        val recording = RecordingEntity(
+            filename = "VibePub-test.m4a",
+            durationMs = 1_000L,
+            timestamp = 1L,
+            status = RecordingStatus.COMPLETED.value,
+            articleTitle = "整理好的文章",
+            processingStage = "DRAFT_FAILED",
+            lastError = "公众号草稿创建失败：Request failed with status code 502",
+        )
+
+        val steps = recording.workflowSteps()
+
+        assertEquals("已成文", recording.statusLabel())
+        assertTrue(recording.statusDetail().contains("公众号草稿创建失败"))
+        assertEquals("第 6/7 步", recording.workflowProgressLabel())
+        assertEquals(WorkflowStepState.DONE, steps[4].state)
+        assertEquals(WorkflowStepState.CURRENT, steps[5].state)
+        assertTrue(recording.hasDraftFailureMessage())
+    }
+
+    @Test
     fun completedDraftMovesToManualPublishConfirmation() {
         val recording = RecordingEntity(
             filename = "VibePub-test.m4a",

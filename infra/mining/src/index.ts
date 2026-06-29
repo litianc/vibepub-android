@@ -64,6 +64,15 @@ type StatusMetadata = {
   errorMessage?: string;
 };
 
+type ArticleResult = Awaited<ReturnType<typeof processAudioText>>;
+
+type TranscriptMetadata = {
+  processingStage: string;
+  wechatDraftId?: string;
+  wechatUrl?: string;
+  errorMessage?: string;
+};
+
 export function filterTargetFiles(files: string[], targetFilename?: string): string[] {
   const target = targetFilename?.trim();
   if (!target) {
@@ -94,7 +103,86 @@ async function updateStatus(filename: string, status: string, metadata: StatusMe
   }
 }
 
-async function main() {
+function transcriptJsonKey(fileKey: string): string {
+  return fileKey.replace("inbox/", "transcripts/").replace(/\.[^/.]+$/, ".json");
+}
+
+export function buildArticleTranscriptPayload(
+  rawText: string,
+  article: ArticleResult,
+  metadata: TranscriptMetadata,
+): Record<string, string | undefined> {
+  return {
+    rawText,
+    articleTitle: article.title,
+    articleContent: article.content,
+    processingStage: metadata.processingStage,
+    wechatDraftId: metadata.wechatDraftId,
+    wechatUrl: metadata.wechatUrl,
+    errorMessage: metadata.errorMessage,
+  };
+}
+
+async function saveArticleTranscript(
+  fileKey: string,
+  rawText: string,
+  article: ArticleResult,
+  metadata: TranscriptMetadata,
+): Promise<void> {
+  const jsonKey = transcriptJsonKey(fileKey);
+  console.log(`Saving transcript JSON to ${jsonKey}...`);
+  await uploadTranscript(jsonKey, JSON.stringify(buildArticleTranscriptPayload(rawText, article, metadata)));
+}
+
+function buildDraftFailureMessage(error: unknown): string {
+  const message = getErrorMessage(error).slice(0, 450);
+  return `公众号草稿创建失败：${message}`;
+}
+
+async function completeWithArticleOnly(
+  fileKey: string,
+  filename: string,
+  rawText: string,
+  article: ArticleResult,
+  error: unknown,
+  transcriptAlreadySaved: boolean,
+): Promise<boolean> {
+  const errorMessage = buildDraftFailureMessage(error);
+  let transcriptSaved = transcriptAlreadySaved;
+
+  try {
+    await saveArticleTranscript(fileKey, rawText, article, {
+      processingStage: "DRAFT_FAILED",
+      errorMessage,
+    });
+    transcriptSaved = true;
+  } catch (transcriptError) {
+    console.error("Failed to save article transcript after draft failure:", describeError(transcriptError));
+  }
+
+  if (!transcriptSaved) {
+    return false;
+  }
+
+  await updateStatus(filename, "COMPLETED", {
+    rawText,
+    articleTitle: article.title,
+    articleContent: article.content,
+    processingStage: "DRAFT_FAILED",
+    errorMessage,
+  });
+
+  console.warn(`Article is ready but WeChat draft failed for ${fileKey}: ${errorMessage}`);
+  console.log("Cleaning up processed file from R2 after saving article result...");
+  try {
+    await deleteFile(fileKey);
+  } catch (deleteError) {
+    console.warn("Article result was saved, but failed to delete the original inbox file:", describeError(deleteError));
+  }
+  return true;
+}
+
+export async function main() {
   console.log("Starting VibePub Mining Job...");
   let failedCount = 0;
   let permanentFailedCount = 0;
@@ -120,16 +208,16 @@ async function main() {
     console.log(`Found ${files.length} file(s) to process.`);
   }
 
-  // 2. Obtain WeChat Access Token early to fail fast if config is wrong
-  console.log("Getting WeChat Access Token...");
-  const wxToken = await getAccessToken();
-
   // Process files one by one (could also be parallelized if needed)
   for (const fileKey of files) {
     let processingStage = "QUEUED";
+    const filename = path.basename(fileKey);
+    let rawText = "";
+    let article: ArticleResult | undefined;
+    let articleTranscriptSaved = false;
+
     try {
       console.log(`\n--- Processing file: ${fileKey} ---`);
-      const filename = path.basename(fileKey);
       
       await updateStatus(filename, "PROCESSING", { processingStage });
       
@@ -142,7 +230,6 @@ async function main() {
       processingStage = "ASR";
       await updateStatus(filename, "PROCESSING", { processingStage });
       console.log("Transcribing audio via Volcengine ASR...");
-      let rawText = "";
       try {
         rawText = await transcribeAudioUrl(audioUrl, ext || 'm4a');
       } catch (e: any) {
@@ -163,7 +250,7 @@ async function main() {
       processingStage = "REWRITING";
       await updateStatus(filename, "PROCESSING", { processingStage, rawText });
       console.log("Running Style Distillation via GLM...");
-      const article = await processAudioText(rawText);
+      article = await processAudioText(rawText);
       console.log(`Generated Article Title: ${article.title}`);
       
       // 5.5 LLM: Image Generation
@@ -174,28 +261,42 @@ async function main() {
         articleTitle: article.title,
         articleContent: article.content,
       });
+      await saveArticleTranscript(fileKey, rawText, article, {
+        processingStage: "ARTICLE_READY",
+      });
+      articleTranscriptSaved = true;
+
       console.log(`Generating cover image with prompt: ${article.imagePrompt}`);
       const coverBuffer = await generateCoverImageBuffer(article.imagePrompt);
       
       // 6. WeChat: Publish Draft
+      console.log("Getting WeChat Access Token...");
+      const wxToken = await getAccessToken();
       console.log("Publishing to WeChat Drafts...");
       const mediaId = await publishDraft(wxToken, article.title, article.content, coverBuffer);
       console.log(`Successfully published draft! Media ID: ${mediaId}`);
       
       // 6.5 Save Transcript JSON to R2
-      const jsonKey = fileKey.replace("inbox/", "transcripts/").replace(/\.[^/.]+$/, ".json");
-      console.log(`Saving transcript JSON to ${jsonKey}...`);
-      await uploadTranscript(jsonKey, JSON.stringify({
-        rawText,
-        articleTitle: article.title,
-        articleContent: article.content,
-        processingStage: "COMPLETED",
-        wechatDraftId: mediaId,
-      }));
+      try {
+        await saveArticleTranscript(fileKey, rawText, article, {
+          processingStage: "COMPLETED",
+          wechatDraftId: mediaId,
+        });
+        articleTranscriptSaved = true;
+      } catch (transcriptError) {
+        console.error("Draft was created, but failed to update transcript JSON:", describeError(transcriptError));
+        if (!articleTranscriptSaved) {
+          throw transcriptError;
+        }
+      }
       
       // 7. Cleanup: Delete processed file from R2
       console.log("Cleaning up processed file from R2...");
-      await deleteFile(fileKey);
+      try {
+        await deleteFile(fileKey);
+      } catch (deleteError) {
+        console.warn("Draft was created, but failed to delete the original inbox file:", describeError(deleteError));
+      }
       
       await updateStatus(filename, "COMPLETED", {
         rawText,
@@ -208,7 +309,21 @@ async function main() {
       console.log(`Finished processing: ${fileKey}`);
     } catch (e) {
       console.error(`Failed to process ${fileKey}:`, describeError(e));
-      const filename = path.basename(fileKey);
+
+      if (article && rawText.trim().length > 0 && processingStage === "DRAFTING") {
+        const recovered = await completeWithArticleOnly(
+          fileKey,
+          filename,
+          rawText,
+          article,
+          e,
+          articleTranscriptSaved,
+        );
+        if (recovered) {
+          continue;
+        }
+      }
+
       await updateStatus(filename, "FAILED", {
         processingStage,
         errorMessage: getErrorMessage(e).slice(0, 500),

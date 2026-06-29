@@ -195,12 +195,24 @@ private fun RecordingEntity.processingStatusLabel(): String {
 private fun RecordingEntity.completedStatusDetail(): String {
     return when {
         hasWechatDraftReference() -> "文章已生成，公众号草稿也已准备好。"
+        hasDraftFailureMessage() -> "文章已生成，但公众号草稿创建失败。可以先复制正文，稍后再重试草稿。"
         else -> "文章已生成，正在等待公众号草稿信息同步。"
     }
 }
 
 private fun RecordingEntity.hasWechatDraftReference(): Boolean {
     return wechatDraftId?.isNotBlank() == true || wechatUrl?.isNotBlank() == true
+}
+
+fun RecordingEntity.hasDraftFailureMessage(): Boolean {
+    val error = lastError.orEmpty().lowercase(Locale.ROOT)
+    val stage = processingStageKey()
+    return stage == "DRAFT_FAILED" ||
+        stage == "WECHAT_FAILED" ||
+        error.contains("微信") ||
+        error.contains("公众号") ||
+        error.contains("草稿") ||
+        error.contains("wechat")
 }
 
 fun WorkflowStepState.displayLabel(): String {

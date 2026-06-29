@@ -121,6 +121,8 @@ run_with_usb_install_prompt_taps() {
 install_apk() {
   local apk_path="$1"
 
+  adb devices -l > "$OUT_DIR/adb-devices-before-install.txt" || true
+
   adb_shell input keyevent KEYCODE_HOME >/dev/null 2>&1 || true
   sleep 0.3
 
@@ -259,6 +261,11 @@ elif [[ -n "$APK_PATH" ]]; then
         check_fail "ADB can install the APK"
         if grep -q "INSTALL_FAILED_USER_RESTRICTED" "$OUT_DIR/install.txt"; then
           echo "  - Enable USB 安装 / Install via USB on the phone." >> "$report"
+          if grep -Eq '^[^[:space:]]+:[0-9]+[[:space:]]+device|_adb-tls-connect\._tcp[[:space:]]+device' \
+            "$OUT_DIR/adb-devices-before-install.txt" 2>/dev/null; then
+            echo "  - This device is connected through wireless debugging; HyperOS can still reject APK installs over wireless ADB even when USB 安装 is enabled." >> "$report"
+            echo "  - Connect the tablet by USB for installation, or install the APK manually first and rerun with SKIP_INSTALL=true RESET_APP_DATA=false." >> "$report"
+          fi
           echo "  - Fallback pm install also failed; see install-fallback-pm.txt if present." >> "$report"
         fi
       fi
@@ -283,6 +290,11 @@ If install or reset is blocked, enable these Developer options:
 - USB 安装 / Install via USB
 - USB 调试（安全设置） / USB debugging (Security settings)
 - 允许通过 USB 调试修改权限或模拟点击
+
+On HyperOS/MIUI, wireless debugging can still return
+\`INSTALL_FAILED_USER_RESTRICTED\` for APK installs even when those switches are
+enabled. If that happens, use a USB data connection for installation, or install
+the APK manually and rerun smoke tests with \`SKIP_INSTALL=true RESET_APP_DATA=false\`.
 
 Default VibePub automation uses \`AUTOMATION_MODE=debug-broadcast\`, so tap
 injection is optional. ADB install and debug \`run-as\` are still required for

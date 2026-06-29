@@ -60,4 +60,28 @@ class SyncWorkerTest {
             parseDurationMsFromRecordingFilename("VibePub-2026-06-29-160846-0m6s-Mon-Afternoon-Beijing-Chaoyang.m4a"),
         )
     }
+
+    @Test
+    fun keepsDraftErrorWhenTranscriptDoesNotRepeatIt() {
+        assertEquals(
+            "公众号草稿创建失败：502",
+            mergedTranscriptError(
+                existingError = "公众号草稿创建失败：502",
+                transcriptError = null,
+                hasDraftReference = false,
+            ),
+        )
+    }
+
+    @Test
+    fun clearsDraftErrorWhenDraftReferenceArrives() {
+        assertEquals(
+            null,
+            mergedTranscriptError(
+                existingError = "公众号草稿创建失败：502",
+                transcriptError = null,
+                hasDraftReference = true,
+            ),
+        )
+    }
 }

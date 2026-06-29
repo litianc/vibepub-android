@@ -57,6 +57,25 @@ class DetailScreenTest {
     }
 
     @Test
+    fun reviewSummaryShowsDraftFailureWhileKeepingArticleReady() {
+        val summary = buildArticleReviewSummary(
+            status = RecordingStatus.COMPLETED,
+            articleTitle = "一篇整理好的文章",
+            articleContent = "这是一段已经整理好的正文。".repeat(12),
+            rawText = "原始识别文本",
+            wechatDraftId = "",
+            wechatUrl = "",
+            draftError = "公众号草稿创建失败：Request failed with status code 502",
+        )
+
+        assertTrue(summary.nextStep.contains("公众号草稿创建失败"))
+        assertTrue(summary.items.first { it.label == "正文" }.ready)
+        val draftItem = summary.items.first { it.label == "公众号草稿" }
+        assertFalse(draftItem.ready)
+        assertTrue(draftItem.value.contains("502"))
+    }
+
+    @Test
     fun reviewSummaryMarksDraftReadyWhenOnlyUrlExists() {
         val summary = buildArticleReviewSummary(
             status = RecordingStatus.COMPLETED,

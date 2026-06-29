@@ -28,7 +28,8 @@ DETAIL_WAIT_SECONDS="${DETAIL_WAIT_SECONDS:-8}"
 DETAIL_SCROLL_PAGES="${DETAIL_SCROLL_PAGES:-3}"
 TRIGGER_MINING_JOB="${TRIGGER_MINING_JOB:-false}"
 MINING_WORKFLOW_ID="${MINING_WORKFLOW_ID:-mining-job.yml}"
-MINING_WORKFLOW_REF="${MINING_WORKFLOW_REF:-main}"
+DEFAULT_MINING_WORKFLOW_REF="$(git -C "$ROOT_DIR" branch --show-current 2>/dev/null || true)"
+MINING_WORKFLOW_REF="${MINING_WORKFLOW_REF:-${DEFAULT_MINING_WORKFLOW_REF:-main}}"
 MINING_WAIT_SECONDS="${MINING_WAIT_SECONDS:-240}"
 BACKEND_UPLOAD_WAIT_SECONDS="${BACKEND_UPLOAD_WAIT_SECONDS:-90}"
 BACKEND_COMPLETION_WAIT_SECONDS="${BACKEND_COMPLETION_WAIT_SECONDS:-60}"
@@ -76,7 +77,8 @@ Environment:
                   phone upload appears in the backend. Default: false.
   MINING_WORKFLOW_ID
                   GitHub Actions workflow to dispatch. Default: mining-job.yml.
-  MINING_WORKFLOW_REF Git ref for workflow_dispatch. Default: main.
+  MINING_WORKFLOW_REF Git ref for workflow_dispatch. Default: current git branch,
+                  falling back to main outside a branch checkout.
   MINING_WAIT_SECONDS Max seconds to wait for the workflow. Default: 240.
   DETAIL_WAIT_SECONDS
                   Seconds to wait after opening recording detail. Default: 8.
