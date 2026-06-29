@@ -408,10 +408,11 @@ internal fun formatDiagnostics(
     latest: RecordingEntity?,
 ): String {
     val latestStep = latest?.currentWorkflowStep()
-    val latestDraftReference = latest?.wechatDraftId
-        ?.ifBlank { latest.wechatUrl.orEmpty() }
-        ?.ifBlank { "无" }
-        ?: "无"
+    val latestDraftReference = latest?.let { recording ->
+        recording.wechatDraftId.orEmpty()
+            .ifBlank { recording.wechatUrl.orEmpty() }
+            .ifBlank { "无" }
+    } ?: "无"
     return """
     App: VibePub $appVersion
     Device ID: $deviceId
