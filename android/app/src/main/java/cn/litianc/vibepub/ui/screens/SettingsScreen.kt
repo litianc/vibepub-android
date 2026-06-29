@@ -1,6 +1,11 @@
 package cn.litianc.vibepub.ui.screens
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.os.Build
+import android.provider.Settings
+import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -64,6 +69,7 @@ import androidx.compose.ui.unit.dp
 import cn.litianc.vibepub.AppPreferences
 import cn.litianc.vibepub.BuildConfig
 import cn.litianc.vibepub.data.AppDatabase
+import cn.litianc.vibepub.data.RecordingEntity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -241,6 +247,11 @@ fun SettingsScreen(
                     Text("关闭")
                 }
             },
+            dismissButton = {
+                TextButton(onClick = { copyDiagnostics(context, diagnostics) }) {
+                    Text("复制诊断")
+                }
+            },
         )
     }
 }
@@ -350,23 +361,57 @@ private suspend fun testBackendConnection(apiBaseUrl: String, filesToken: String
         }
     }
 
+private fun copyDiagnostics(context: Context, diagnostics: String) {
+    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+    clipboard.setPrimaryClip(ClipData.newPlainText("VibePub 诊断信息", diagnostics))
+    Toast.makeText(context, "诊断信息已复制", Toast.LENGTH_SHORT).show()
+}
+
 private suspend fun buildDiagnostics(context: android.content.Context, preferences: AppPreferences): String =
     withContext(Dispatchers.IO) {
-        val latest = AppDatabase.getDatabase(context).recordingDao().getAllRecordings().firstOrNull()
+        val recordings = AppDatabase.getDatabase(context).recordingDao().getAllRecordings()
+        val latest = recordings.firstOrNull()
         val syncText = if (preferences.lastSyncAtMs > 0) {
             SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date(preferences.lastSyncAtMs))
         } else {
             "尚未同步"
         }
-        """
-        App: VibePub ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})
-        Device: ${Build.MANUFACTURER} ${Build.MODEL}
-        Android: ${Build.VERSION.RELEASE} / SDK ${Build.VERSION.SDK_INT}
-        API: ${preferences.apiBaseUrl}
-        Token: ${if (preferences.filesToken.isBlank()) "未配置" else "已配置"}
-        Last sync: $syncText
-        Latest recording: ${latest?.filename ?: "无"}
-        Latest status: ${latest?.status ?: "无"}
-        Latest error: ${latest?.lastError ?: "无"}
-        """.trimIndent()
+        formatDiagnostics(
+            appVersion = "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})",
+            deviceId = Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID).orEmpty()
+                .ifBlank { "unknown" },
+            deviceName = "${Build.MANUFACTURER} ${Build.MODEL}",
+            androidVersion = "${Build.VERSION.RELEASE} / SDK ${Build.VERSION.SDK_INT}",
+            apiBaseUrl = preferences.apiBaseUrl,
+            tokenConfigured = preferences.filesToken.isNotBlank(),
+            lastSyncText = syncText,
+            recordingCount = recordings.size,
+            latest = latest,
+        )
     }
+
+internal fun formatDiagnostics(
+    appVersion: String,
+    deviceId: String,
+    deviceName: String,
+    androidVersion: String,
+    apiBaseUrl: String,
+    tokenConfigured: Boolean,
+    lastSyncText: String,
+    recordingCount: Int,
+    latest: RecordingEntity?,
+): String {
+    return """
+    App: VibePub $appVersion
+    Device ID: $deviceId
+    Device: $deviceName
+    Android: $androidVersion
+    API host: ${apiBaseUrl.ifBlank { "未配置" }}
+    Token: ${if (tokenConfigured) "已配置" else "未配置"}
+    Last sync: $lastSyncText
+    Recording count: $recordingCount
+    Latest recording: ${latest?.filename ?: "无"}
+    Latest status: ${latest?.status ?: "无"}
+    Latest error: ${latest?.lastError ?: "无"}
+    """.trimIndent()
+}

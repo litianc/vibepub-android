@@ -1,0 +1,59 @@
+package cn.litianc.vibepub.ui.screens
+
+import cn.litianc.vibepub.data.RecordingEntity
+import cn.litianc.vibepub.data.RecordingStatus
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+class SettingsScreenTest {
+    @Test
+    fun diagnosticsTextIncludesSupportFields() {
+        val text = formatDiagnostics(
+            appVersion = "0.1.0-debug (1)",
+            deviceId = "device-123",
+            deviceName = "Redmi Tablet",
+            androidVersion = "15 / SDK 35",
+            apiBaseUrl = "https://api.example.com",
+            tokenConfigured = true,
+            lastSyncText = "2026-06-29 16:00:00",
+            recordingCount = 3,
+            latest = RecordingEntity(
+                filename = "VibePub-20260629.m4a",
+                durationMs = 18_000L,
+                timestamp = 1L,
+                status = RecordingStatus.FAILED.value,
+                lastError = "FILES_TOKEN 无效或没有权限",
+            ),
+        )
+
+        assertTrue(text.contains("App: VibePub 0.1.0-debug (1)"))
+        assertTrue(text.contains("Device ID: device-123"))
+        assertTrue(text.contains("Device: Redmi Tablet"))
+        assertTrue(text.contains("API host: https://api.example.com"))
+        assertTrue(text.contains("Token: 已配置"))
+        assertTrue(text.contains("Recording count: 3"))
+        assertTrue(text.contains("Latest recording: VibePub-20260629.m4a"))
+        assertTrue(text.contains("Latest status: FAILED"))
+        assertTrue(text.contains("Latest error: FILES_TOKEN 无效或没有权限"))
+    }
+
+    @Test
+    fun diagnosticsTextShowsMissingConfigurationPlainly() {
+        val text = formatDiagnostics(
+            appVersion = "0.1.0-debug (1)",
+            deviceId = "",
+            deviceName = "unknown",
+            androidVersion = "unknown",
+            apiBaseUrl = "",
+            tokenConfigured = false,
+            lastSyncText = "尚未同步",
+            recordingCount = 0,
+            latest = null,
+        )
+
+        assertTrue(text.contains("API host: 未配置"))
+        assertTrue(text.contains("Token: 未配置"))
+        assertTrue(text.contains("Latest recording: 无"))
+        assertTrue(text.contains("Latest error: 无"))
+    }
+}
