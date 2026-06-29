@@ -96,6 +96,9 @@ class DetailScreenTest {
             articleContent = "正文内容",
             rawText = "原始识别",
             statusLabel = "已成文",
+            statusDetail = "文章已生成，公众号草稿也已准备好。",
+            workflowNode = "当前节点：6. 公众号草稿 · 已完成",
+            workflowCycle = "保存录音 → 上传音频 → 云端排队 → 语音识别 → 文章改写 → 公众号草稿 → 人工发布确认",
             wechatDraftId = "MEDIA_ID_123",
             wechatUrl = "https://mp.weixin.qq.com/draft",
             filename = "VibePub-test.m4a",
@@ -104,6 +107,9 @@ class DetailScreenTest {
 
         assertTrue(text.contains("# 整理好的文章"))
         assertTrue(text.contains("- 处理状态：已成文"))
+        assertTrue(text.contains("- 状态说明：文章已生成，公众号草稿也已准备好。"))
+        assertTrue(text.contains("- 当前节点：6. 公众号草稿 · 已完成"))
+        assertTrue(text.contains("- 完整流程：保存录音 → 上传音频 → 云端排队 → 语音识别 → 文章改写 → 公众号草稿 → 人工发布确认"))
         assertTrue(text.contains("- 公众号草稿：MEDIA_ID_123"))
         assertTrue(text.contains("- 草稿链接：https://mp.weixin.qq.com/draft"))
         assertTrue(text.contains("正文内容"))

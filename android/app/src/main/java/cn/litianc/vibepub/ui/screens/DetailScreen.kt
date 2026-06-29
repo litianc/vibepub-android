@@ -82,6 +82,8 @@ import cn.litianc.vibepub.data.displayTitle
 import cn.litianc.vibepub.data.durationLabel
 import cn.litianc.vibepub.data.statusDetail
 import cn.litianc.vibepub.data.statusLabel
+import cn.litianc.vibepub.data.workflowCycleLabel
+import cn.litianc.vibepub.data.workflowCurrentNodeLabel
 import cn.litianc.vibepub.data.workflowProgressFraction
 import cn.litianc.vibepub.data.workflowProgressLabel
 import cn.litianc.vibepub.data.workflowSteps
@@ -204,6 +206,9 @@ fun DetailScreen(
             articleContent = articleContent,
             rawText = rawText,
             statusLabel = currentRecording.statusLabel(),
+            statusDetail = currentRecording.statusDetail(),
+            workflowNode = currentRecording.workflowCurrentNodeLabel(),
+            workflowCycle = currentRecording.workflowCycleLabel(),
             wechatDraftId = wechatDraftId,
             wechatUrl = wechatUrl,
             filename = currentRecording.filename,
@@ -718,6 +723,9 @@ internal fun buildArticleExportText(
     articleContent: String,
     rawText: String,
     statusLabel: String,
+    statusDetail: String,
+    workflowNode: String,
+    workflowCycle: String,
     wechatDraftId: String,
     wechatUrl: String,
     filename: String,
@@ -729,6 +737,9 @@ internal fun buildArticleExportText(
         appendLine()
         appendLine("## 发布状态")
         appendLine("- 处理状态：$statusLabel")
+        appendLine("- 状态说明：$statusDetail")
+        appendLine("- $workflowNode")
+        appendLine("- 完整流程：$workflowCycle")
         appendLine("- 公众号草稿：${wechatDraftId.ifBlank { "未同步草稿 ID" }}")
         appendLine("- 草稿链接：${wechatUrl.ifBlank { "未同步草稿链接" }}")
         appendLine("- 原始文件：$filename")
