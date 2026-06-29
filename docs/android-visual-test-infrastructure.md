@@ -215,6 +215,21 @@ Important files:
 - `window.xml`
 - `logcat.txt`
 - `checklist.md`
+- `latest-recording-filename.txt`
+- `expected-duration-text.txt`
+- `backend-recording-status.txt`
+- `mining-run-url.txt`
+
+Before accepting a run, execute:
+
+```bash
+scripts/audit-android-device-smoke.sh artifacts/android-device-visual/<timestamp>
+```
+
+The audit rejects stale or weak evidence, including pending transcript state,
+raw HTML tags on the detail page, mismatched duration text, missing backend
+`COMPLETED` status, missing mining workflow evidence, or duplicate/zero-duration
+local rows when the phone is still connected.
 
 ## Infrastructure Policy
 
