@@ -2,6 +2,7 @@ package cn.litianc.vibepub.ui.navigation
 
 import android.net.Uri
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -25,6 +26,8 @@ fun AppNavigation(
     onDeleteRecording: (RecordingEntity) -> Unit,
     onStartRecording: () -> Boolean,
     onStopRecording: suspend () -> Boolean,
+    shouldOpenRecording: Boolean = false,
+    onRecordingOpened: () -> Unit = {},
     currentRecordingAmplitude: () -> Int,
 ) {
     val navController = rememberNavController()
@@ -36,6 +39,15 @@ fun AppNavigation(
     val lastSyncAtMs by remember(preferences) {
         preferences.lastSyncAtMsFlow()
     }.collectAsState(initial = preferences.lastSyncAtMs)
+
+    LaunchedEffect(shouldOpenRecording) {
+        if (shouldNavigateToRecording(shouldOpenRecording)) {
+            navController.navigate("recording") {
+                launchSingleTop = true
+            }
+            onRecordingOpened()
+        }
+    }
     
     NavHost(navController = navController, startDestination = "home") {
         composable("home") {
@@ -88,3 +100,5 @@ fun AppNavigation(
         }
     }
 }
+
+internal fun shouldNavigateToRecording(shouldOpenRecording: Boolean): Boolean = shouldOpenRecording

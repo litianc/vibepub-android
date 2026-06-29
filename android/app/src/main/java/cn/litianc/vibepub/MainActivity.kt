@@ -63,6 +63,7 @@ fun VibePubApp(
     val scope = rememberCoroutineScope()
 
     var isRecording by remember { mutableStateOf(false) }
+    var openRecordingAfterPermission by remember { mutableStateOf(false) }
 
     fun runSync() {
         WorkManager.getInstance(context)
@@ -85,6 +86,7 @@ fun VibePubApp(
             runCatching {
                 recorder.start()
                 isRecording = true
+                openRecordingAfterPermission = true
             }.onFailure {
                 Toast.makeText(context, "无法开始录音", Toast.LENGTH_SHORT).show()
             }
@@ -174,6 +176,8 @@ fun VibePubApp(
                 },
             )
         },
+        shouldOpenRecording = openRecordingAfterPermission,
+        onRecordingOpened = { openRecordingAfterPermission = false },
         currentRecordingAmplitude = recorder::currentAmplitude,
     )
 }
