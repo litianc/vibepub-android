@@ -1,11 +1,10 @@
 package cn.litianc.vibepub
 
 import android.content.Context
-import android.content.SharedPreferences
-import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.onStart
 
 class AppPreferences(context: Context) {
     private val prefs = context.getSharedPreferences("vibepub", Context.MODE_PRIVATE)
@@ -22,18 +21,12 @@ class AppPreferences(context: Context) {
         get() = prefs.getLong(KEY_LAST_SYNC_AT_MS, 0L)
         set(value) {
             prefs.edit().putLong(KEY_LAST_SYNC_AT_MS, value).commit()
+            lastSyncAtMsUpdates.tryEmit(value)
         }
 
-    fun lastSyncAtMsFlow(): Flow<Long> = callbackFlow {
-        val listener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
-            if (key == KEY_LAST_SYNC_AT_MS) {
-                trySend(lastSyncAtMs)
-            }
-        }
-        prefs.registerOnSharedPreferenceChangeListener(listener)
-        trySend(lastSyncAtMs)
-        awaitClose { prefs.unregisterOnSharedPreferenceChangeListener(listener) }
-    }.distinctUntilChanged()
+    fun lastSyncAtMsFlow(): Flow<Long> = lastSyncAtMsUpdates
+        .onStart { emit(lastSyncAtMs) }
+        .distinctUntilChanged()
 
     var transcribedFiles: Set<String>
         get() = prefs.getStringSet(KEY_TRANSCRIBED_FILES, emptySet()) ?: emptySet()
@@ -51,5 +44,6 @@ class AppPreferences(context: Context) {
         private const val KEY_FILES_TOKEN = "files_token"
         private const val KEY_TRANSCRIBED_FILES = "transcribed_files"
         private const val KEY_LAST_SYNC_AT_MS = "last_sync_at_ms"
+        private val lastSyncAtMsUpdates = MutableSharedFlow<Long>(extraBufferCapacity = 1)
     }
 }
