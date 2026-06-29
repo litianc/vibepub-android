@@ -73,6 +73,7 @@ install_apk() {
 mkdir -p "$OUT_DIR"
 
 failures=0
+device_locked=false
 report="$OUT_DIR/readiness.md"
 
 {
@@ -123,6 +124,7 @@ if [[ "$device_count" -ge 1 ]]; then
   adb shell dumpsys window > "$OUT_DIR/window.txt" 2>&1 || true
   if grep -Eq 'mDreamingLockscreen=true|mShowingLockscreen=true|mInputRestricted=true|isStatusBarKeyguard=true' \
     "$OUT_DIR/power.txt" "$OUT_DIR/window.txt"; then
+    device_locked=true
     if truthy "$REQUIRE_UNLOCKED"; then
       check_fail "device is awake and unlocked"
     else
@@ -151,26 +153,37 @@ elif [[ -n "$APK_PATH" ]]; then
   else
     check_pass "APK file exists"
 
-    if truthy "$SKIP_INSTALL"; then
+    if truthy "$device_locked"; then
+      check_fail "device is unlocked before APK install/run-as checks"
+      echo "  - Unlock the phone/tablet, keep the screen awake, then rerun." >> "$report"
+      echo "  - APK install and run-as checks were skipped to avoid HyperOS/MIUI install restrictions while locked." >> "$report"
+    elif truthy "$SKIP_INSTALL"; then
       if adb shell dumpsys package "$PACKAGE_NAME" > "$OUT_DIR/installed-package.txt" 2>&1; then
         check_pass "package is already installed on the phone"
       else
         check_fail "package is already installed on the phone"
       fi
-    elif install_apk "$APK_PATH"; then
-      check_pass "ADB can install the APK"
-    else
-      check_fail "ADB can install the APK"
-      if grep -q "INSTALL_FAILED_USER_RESTRICTED" "$OUT_DIR/install.txt"; then
-        echo "  - Enable USB 安装 / Install via USB on the phone." >> "$report"
-        echo "  - Fallback pm install also failed; see install-fallback-pm.txt if present." >> "$report"
+      if adb shell run-as "$PACKAGE_NAME" id > "$OUT_DIR/run-as.txt" 2>&1; then
+        check_pass "run-as works for debug preference injection"
+      else
+        check_fail "run-as works for debug preference injection"
       fi
-    fi
-
-    if adb shell run-as "$PACKAGE_NAME" id > "$OUT_DIR/run-as.txt" 2>&1; then
-      check_pass "run-as works for debug preference injection"
     else
-      check_fail "run-as works for debug preference injection"
+      if install_apk "$APK_PATH"; then
+        check_pass "ADB can install the APK"
+      else
+        check_fail "ADB can install the APK"
+        if grep -q "INSTALL_FAILED_USER_RESTRICTED" "$OUT_DIR/install.txt"; then
+          echo "  - Enable USB 安装 / Install via USB on the phone." >> "$report"
+          echo "  - Fallback pm install also failed; see install-fallback-pm.txt if present." >> "$report"
+        fi
+      fi
+
+      if adb shell run-as "$PACKAGE_NAME" id > "$OUT_DIR/run-as.txt" 2>&1; then
+        check_pass "run-as works for debug preference injection"
+      else
+        check_fail "run-as works for debug preference injection"
+      fi
     fi
   fi
 else
