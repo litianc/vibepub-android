@@ -40,6 +40,14 @@ xml_contains_text() {
   grep -Fq "text=\"$text\"" "$OUT_DIR/window.xml"
 }
 
+adb_cmd() {
+  if [[ -n "${ANDROID_SERIAL:-}" ]]; then
+    adb -s "$ANDROID_SERIAL" "$@"
+  else
+    adb "$@"
+  fi
+}
+
 [[ -d "$OUT_DIR" ]] || fail "not a directory: $OUT_DIR"
 
 require_file "$OUT_DIR/checklist.md"
@@ -106,11 +114,11 @@ if command -v gh >/dev/null 2>&1; then
   pass "mining workflow $run_id succeeded"
 fi
 
-if command -v adb >/dev/null 2>&1 && adb devices | awk 'NR > 1 && $2 == "device" { found=1 } END { exit found ? 0 : 1 }'; then
+if command -v adb >/dev/null 2>&1 && adb devices | awk -v serial="${ANDROID_SERIAL:-}" 'NR > 1 && $2 == "device" && (serial == "" || $1 == serial) { found=1 } END { exit found ? 0 : 1 }'; then
   tmp_dir="$(mktemp -d "$ROOT_DIR/artifacts/android-db-inspect/audit-XXXXXX")"
-  adb exec-out run-as "$PACKAGE_NAME" cat databases/vibepub_database > "$tmp_dir/vibepub_database"
-  adb exec-out run-as "$PACKAGE_NAME" cat databases/vibepub_database-wal > "$tmp_dir/vibepub_database-wal" 2>/dev/null || true
-  adb exec-out run-as "$PACKAGE_NAME" cat databases/vibepub_database-shm > "$tmp_dir/vibepub_database-shm" 2>/dev/null || true
+  adb_cmd exec-out run-as "$PACKAGE_NAME" cat databases/vibepub_database > "$tmp_dir/vibepub_database"
+  adb_cmd exec-out run-as "$PACKAGE_NAME" cat databases/vibepub_database-wal > "$tmp_dir/vibepub_database-wal" 2>/dev/null || true
+  adb_cmd exec-out run-as "$PACKAGE_NAME" cat databases/vibepub_database-shm > "$tmp_dir/vibepub_database-shm" 2>/dev/null || true
   if command -v sqlite3 >/dev/null 2>&1; then
     row="$(sqlite3 "$tmp_dir/vibepub_database" \
       "select count(*), coalesce(max(durationMs), 0), group_concat(distinct status) from recordings where filename='$filename';")"

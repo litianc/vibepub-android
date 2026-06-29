@@ -25,6 +25,7 @@ MINING_WAIT_SECONDS="${MINING_WAIT_SECONDS:-240}"
 BACKEND_UPLOAD_WAIT_SECONDS="${BACKEND_UPLOAD_WAIT_SECONDS:-90}"
 BACKEND_COMPLETION_WAIT_SECONDS="${BACKEND_COMPLETION_WAIT_SECONDS:-60}"
 FORCE_RECORD_AUDIO_APPOPS="${FORCE_RECORD_AUDIO_APPOPS:-true}"
+WAKE_DEVICE="${WAKE_DEVICE:-true}"
 DEBUG_START_ACTION="cn.litianc.vibepub.DEBUG_START_RECORDING"
 DEBUG_STOP_ACTION="cn.litianc.vibepub.DEBUG_STOP_RECORDING"
 SCREENRECORD_PID=""
@@ -97,6 +98,42 @@ truthy() {
 
 adb_shell() {
   adb shell "$@"
+}
+
+grant_recording_permissions() {
+  adb_shell pm grant "$PACKAGE_NAME" android.permission.RECORD_AUDIO >/dev/null 2>&1 || true
+  adb_shell pm grant "$PACKAGE_NAME" android.permission.ACCESS_COARSE_LOCATION >/dev/null 2>&1 || true
+  adb_shell pm grant "$PACKAGE_NAME" android.permission.POST_NOTIFICATIONS >/dev/null 2>&1 || true
+  if truthy "$FORCE_RECORD_AUDIO_APPOPS"; then
+    adb_shell cmd appops set "$PACKAGE_NAME" RECORD_AUDIO allow >/dev/null 2>&1 || true
+    adb_shell appops set "$PACKAGE_NAME" RECORD_AUDIO allow >/dev/null 2>&1 || true
+  fi
+}
+
+wake_device() {
+  if ! truthy "$WAKE_DEVICE"; then
+    return 0
+  fi
+
+  adb_shell input keyevent KEYCODE_WAKEUP >/dev/null 2>&1 || true
+  adb_shell wm dismiss-keyguard >/dev/null 2>&1 || true
+}
+
+wait_for_app_focus() {
+  local deadline=$((SECONDS + 10))
+  local focused
+
+  while (( SECONDS < deadline )); do
+    focused="$(adb_shell dumpsys window 2>/dev/null | grep -E 'mCurrentFocus|mFocusedApp' | head -n 5 || true)"
+    if [[ "$focused" == *"$PACKAGE_NAME"* ]]; then
+      printf '%s\n' "$focused" > "$OUT_DIR/focused-window.txt"
+      return 0
+    fi
+    sleep 1
+  done
+
+  printf '%s\n' "$focused" > "$OUT_DIR/focused-window-timeout.txt"
+  return 1
 }
 
 pull_if_exists() {
@@ -590,22 +627,20 @@ if truthy "$RESET_APP_DATA"; then
 fi
 
 echo "Granting permissions where possible..."
-adb_shell pm grant "$PACKAGE_NAME" android.permission.RECORD_AUDIO >/dev/null 2>&1 || true
-adb_shell pm grant "$PACKAGE_NAME" android.permission.ACCESS_COARSE_LOCATION >/dev/null 2>&1 || true
-adb_shell pm grant "$PACKAGE_NAME" android.permission.POST_NOTIFICATIONS >/dev/null 2>&1 || true
-if truthy "$FORCE_RECORD_AUDIO_APPOPS"; then
-  adb_shell cmd appops set "$PACKAGE_NAME" RECORD_AUDIO allow >/dev/null 2>&1 || true
-  adb_shell appops set "$PACKAGE_NAME" RECORD_AUDIO allow >/dev/null 2>&1 || true
-fi
+grant_recording_permissions
 adb_shell dumpsys package "$PACKAGE_NAME" > "$OUT_DIR/package-after-permissions.txt" 2>&1 || true
 adb_shell appops get "$PACKAGE_NAME" RECORD_AUDIO > "$OUT_DIR/appops-record-audio.txt" 2>&1 || true
 
 write_app_preferences
 
 echo "Clearing logcat and launching app..."
+wake_device
+adb_shell dumpsys power > "$OUT_DIR/power-before-launch.txt" 2>&1 || true
+adb_shell dumpsys window > "$OUT_DIR/window-before-launch.txt" 2>&1 || true
 adb logcat -c || true
 adb_shell am start -n "$PACKAGE_NAME/$ACTIVITY_NAME" > "$OUT_DIR/launch.txt"
 sleep 3
+wait_for_app_focus || true
 
 echo "Capturing launch screenshot..."
 adb_shell screencap -p /sdcard/vibepub-launch.png
@@ -668,6 +703,12 @@ EOF
 
   sleep "$START_DELAY_SECONDS"
   if [[ "$AUTOMATION_MODE" == "debug-broadcast" ]]; then
+    wake_device
+    adb_shell am start -n "$PACKAGE_NAME/$ACTIVITY_NAME" > "$OUT_DIR/foreground-before-recording.txt" 2>&1 || true
+    wait_for_app_focus
+    grant_recording_permissions
+    adb_shell dumpsys package "$PACKAGE_NAME" > "$OUT_DIR/package-before-recording.txt" 2>&1 || true
+    adb_shell appops get "$PACKAGE_NAME" RECORD_AUDIO > "$OUT_DIR/appops-before-recording.txt" 2>&1 || true
     echo "Starting recording through debug broadcast..."
     adb_shell am broadcast -a "$DEBUG_START_ACTION" -p "$PACKAGE_NAME" > "$OUT_DIR/debug-start-broadcast.txt"
     require_debug_status "STARTED" "start"
