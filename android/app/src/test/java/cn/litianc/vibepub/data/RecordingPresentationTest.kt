@@ -61,6 +61,8 @@ class RecordingPresentationTest {
         assertEquals("当前状态：正在成文", recording.workflowHelpTitle())
         assertTrue(recording.workflowHelpSummary().contains("5. 文章改写"))
         assertTrue(recording.workflowHelpSummary().contains("第 5/7 步"))
+        assertEquals("当前节点：5. 文章改写 · 当前", recording.workflowCurrentNodeLabel())
+        assertTrue(recording.workflowCycleLabel().contains("保存录音 → 上传音频 → 云端排队"))
         assertEquals(WorkflowStepState.DONE, steps[0].state)
         assertEquals(WorkflowStepState.DONE, steps[1].state)
         assertEquals(WorkflowStepState.DONE, steps[2].state)

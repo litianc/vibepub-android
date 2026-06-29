@@ -64,10 +64,14 @@ import cn.litianc.vibepub.data.RecordingStatus
 import cn.litianc.vibepub.data.WorkflowStepState
 import cn.litianc.vibepub.data.asRecordingStatus
 import cn.litianc.vibepub.data.canRetryUpload
+import cn.litianc.vibepub.data.currentWorkflowStep
+import cn.litianc.vibepub.data.displayLabel
 import cn.litianc.vibepub.data.displayTitle
 import cn.litianc.vibepub.data.listDurationLabel
 import cn.litianc.vibepub.data.statusDetail
 import cn.litianc.vibepub.data.statusLabel
+import cn.litianc.vibepub.data.workflowCycleLabel
+import cn.litianc.vibepub.data.workflowCurrentNodeLabel
 import cn.litianc.vibepub.data.workflowHelpSummary
 import cn.litianc.vibepub.data.workflowHelpTitle
 import cn.litianc.vibepub.data.workflowProgressFraction
@@ -331,7 +335,7 @@ fun RecordingCard(
                     color = statusColor(status),
                     trackColor = MaterialTheme.colorScheme.surfaceVariant,
                 )
-                if (status == RecordingStatus.FAILED || status == RecordingStatus.PROCESSING) {
+                if (status == RecordingStatus.FAILED) {
                     Spacer(modifier = Modifier.height(6.dp))
                     Text(
                         text = recording.statusDetail(),
@@ -375,6 +379,7 @@ fun WorkflowHelpDialog(
         },
         title = { Text(recording.workflowHelpTitle()) },
         text = {
+            val currentStep = recording.currentWorkflowStep()
             Column(
                 modifier = Modifier
                     .heightIn(max = 420.dp)
@@ -385,6 +390,18 @@ fun WorkflowHelpDialog(
                     recording.workflowHelpSummary(),
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                WorkflowHelpSection(
+                    label = "当前状态说明",
+                    value = recording.statusDetail(),
+                )
+                WorkflowHelpSection(
+                    label = "当前节点",
+                    value = "${recording.workflowCurrentNodeLabel()}\n${currentStep.detail}",
+                )
+                WorkflowHelpSection(
+                    label = "完整流程周期",
+                    value = recording.workflowCycleLabel(),
                 )
                 recording.workflowSteps().forEach { step ->
                     WorkflowStepRow(step = step)
@@ -399,6 +416,23 @@ fun WorkflowHelpDialog(
             }
         },
     )
+}
+
+@Composable
+private fun WorkflowHelpSection(label: String, value: String) {
+    Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+        Text(
+            label,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurface,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Text(
+            value,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
 }
 
 @Composable
@@ -427,7 +461,7 @@ private fun WorkflowStepRow(step: RecordingWorkflowStep) {
         Spacer(modifier = Modifier.width(10.dp))
         Column(modifier = Modifier.weight(1f)) {
             Text(
-                text = "${step.title} · ${step.state.label()}",
+                text = "${step.title} · ${step.state.displayLabel()}",
                 style = MaterialTheme.typography.bodyMedium,
                 fontWeight = FontWeight.SemiBold,
             )
@@ -437,15 +471,6 @@ private fun WorkflowStepRow(step: RecordingWorkflowStep) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-    }
-}
-
-private fun WorkflowStepState.label(): String {
-    return when (this) {
-        WorkflowStepState.DONE -> "已完成"
-        WorkflowStepState.CURRENT -> "当前"
-        WorkflowStepState.PENDING -> "等待"
-        WorkflowStepState.BLOCKED -> "需处理"
     }
 }
 

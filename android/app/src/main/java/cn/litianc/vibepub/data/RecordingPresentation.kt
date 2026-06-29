@@ -68,12 +68,7 @@ fun RecordingEntity.workflowHelpTitle(): String {
 }
 
 fun RecordingEntity.workflowHelpSummary(): String {
-    val steps = workflowSteps()
-    val currentStep = steps.firstOrNull {
-        it.state == WorkflowStepState.CURRENT || it.state == WorkflowStepState.BLOCKED
-    }
-    val currentText = currentStep?.let { "${it.number}. ${it.title}" } ?: "${steps.size}. 完成"
-    return "这条录音正在经历从口述想法到公众号草稿的流程。当前节点是 $currentText。${workflowProgressLabel()}"
+    return "这条录音正在经历从口述想法到公众号草稿的流程。${workflowCurrentNodeLabel()}，${workflowProgressLabel()}。"
 }
 
 fun RecordingEntity.workflowProgressLabel(): String {
@@ -90,6 +85,22 @@ fun RecordingEntity.workflowProgressFraction(): Float {
     val doneCount = steps.count { it.state == WorkflowStepState.DONE }
     val currentWeight = if (steps.any { it.state == WorkflowStepState.CURRENT || it.state == WorkflowStepState.BLOCKED }) 0.5f else 0f
     return ((doneCount + currentWeight) / steps.size).coerceIn(0f, 1f)
+}
+
+fun RecordingEntity.currentWorkflowStep(): RecordingWorkflowStep {
+    val steps = workflowSteps()
+    return steps.firstOrNull {
+        it.state == WorkflowStepState.CURRENT || it.state == WorkflowStepState.BLOCKED
+    } ?: steps.last()
+}
+
+fun RecordingEntity.workflowCurrentNodeLabel(): String {
+    val step = currentWorkflowStep()
+    return "当前节点：${step.number}. ${step.title} · ${step.state.displayLabel()}"
+}
+
+fun RecordingEntity.workflowCycleLabel(): String {
+    return WORKFLOW_BASE_STEPS.joinToString(" → ") { it.title }
 }
 
 fun RecordingEntity.workflowSteps(): List<RecordingWorkflowStep> {
@@ -190,6 +201,15 @@ private fun RecordingEntity.completedStatusDetail(): String {
 
 private fun RecordingEntity.hasWechatDraftReference(): Boolean {
     return wechatDraftId?.isNotBlank() == true || wechatUrl?.isNotBlank() == true
+}
+
+fun WorkflowStepState.displayLabel(): String {
+    return when (this) {
+        WorkflowStepState.DONE -> "已完成"
+        WorkflowStepState.CURRENT -> "当前"
+        WorkflowStepState.PENDING -> "等待"
+        WorkflowStepState.BLOCKED -> "需处理"
+    }
 }
 
 private fun RecordingEntity.workflowIndexFromProcessingStage(): Int? {
