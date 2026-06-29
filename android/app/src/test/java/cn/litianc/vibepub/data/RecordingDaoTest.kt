@@ -55,4 +55,24 @@ class RecordingDaoTest {
         assertEquals(0L, recordings.first().durationMs)
         assertEquals(RecordingStatus.LOCAL_RECORDED.value, recordings.first().status)
     }
+
+    @Test
+    fun persistsWechatDraftMetadata() = runBlocking {
+        val dao = database.recordingDao()
+        dao.insert(
+            RecordingEntity(
+                filename = "draft.m4a",
+                durationMs = 32_000L,
+                timestamp = 1L,
+                status = RecordingStatus.COMPLETED.value,
+                wechatDraftId = "MEDIA_ID_123",
+                wechatUrl = "https://mp.weixin.qq.com/draft",
+            ),
+        )
+
+        val recording = dao.getRecordingByFilename("draft.m4a")
+
+        assertEquals("MEDIA_ID_123", recording?.wechatDraftId)
+        assertEquals("https://mp.weixin.qq.com/draft", recording?.wechatUrl)
+    }
 }

@@ -20,4 +20,6 @@ data class RecordingEntity(
     val remoteStatusUpdatedAt: String? = null,
     val lastError: String? = null,
     val completedAt: Long? = null,
+    val wechatDraftId: String? = null,
+    val wechatUrl: String? = null,
 )

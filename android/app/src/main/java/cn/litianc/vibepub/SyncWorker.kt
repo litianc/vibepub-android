@@ -62,6 +62,11 @@ class SyncWorker(
                         val lastError = recObj.optString("error_message", "")
                             .ifBlank { recObj.optString("lastError", "") }
                             .blankToNull()
+                        val wechatDraftId = recObj.optString("wechat_draft_id", "")
+                            .ifBlank { recObj.optString("wechatDraftId", "") }
+                            .ifBlank { recObj.optString("mediaId", "") }
+                            .blankToNull()
+                        val wechatUrl = recObj.wechatUrlOrNull()
                         if (existing == null) {
                             dao.insert(RecordingEntity(
                                 filename = filename,
@@ -73,6 +78,8 @@ class SyncWorker(
                                 remoteStatusUpdatedAt = remoteUpdatedAt,
                                 lastError = lastError,
                                 completedAt = if (d1Status == RecordingStatus.COMPLETED) System.currentTimeMillis() else null,
+                                wechatDraftId = wechatDraftId,
+                                wechatUrl = wechatUrl,
                             ))
                         } else if (existing.status != RecordingStatus.COMPLETED.value || d1Status == RecordingStatus.COMPLETED) {
                             val nextStatus = when {
@@ -93,6 +100,8 @@ class SyncWorker(
                                     } else {
                                         existing.completedAt
                                     },
+                                    wechatDraftId = wechatDraftId ?: existing.wechatDraftId,
+                                    wechatUrl = wechatUrl ?: existing.wechatUrl,
                                 ),
                             )
                         }
@@ -136,6 +145,8 @@ class SyncWorker(
                                     ?: recording.rawTextPreview,
                                 lastError = null,
                                 completedAt = recording.completedAt ?: System.currentTimeMillis(),
+                                wechatDraftId = transcript.wechatDraftIdOrNull() ?: recording.wechatDraftId,
+                                wechatUrl = transcript.wechatUrlOrNull() ?: recording.wechatUrl,
                             ),
                         )
                     } else if (responseCode == 404) {
@@ -160,6 +171,8 @@ class SyncWorker(
                             rawTextPreview = transcriptPreview ?: recording.rawTextPreview,
                             lastError = null,
                             completedAt = recording.completedAt ?: System.currentTimeMillis(),
+                            wechatDraftId = transcript?.wechatDraftIdOrNull() ?: recording.wechatDraftId,
+                            wechatUrl = transcript?.wechatUrlOrNull() ?: recording.wechatUrl,
                         ),
                     )
                 }
@@ -175,4 +188,17 @@ class SyncWorker(
     }
 
     private fun String.blankToNull(): String? = trim().ifBlank { null }
+
+    private fun JSONObject.wechatDraftIdOrNull(): String? {
+        return optString("wechatDraftId", "")
+            .ifBlank { optString("mediaId", "") }
+            .ifBlank { optString("wechat_draft_id", "") }
+            .blankToNull()
+    }
+
+    private fun JSONObject.wechatUrlOrNull(): String? {
+        return optString("wechatUrl", "")
+            .ifBlank { optString("wechat_url", "") }
+            .blankToNull()
+    }
 }

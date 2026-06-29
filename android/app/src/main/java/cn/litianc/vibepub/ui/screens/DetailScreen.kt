@@ -161,12 +161,17 @@ fun DetailScreen(
         val wechatDraftId = transcript?.optString("wechatDraftId", "").orEmpty()
             .ifBlank { transcript?.optString("mediaId", "").orEmpty() }
             .ifBlank { transcript?.optString("wechat_draft_id", "").orEmpty() }
+            .ifBlank { currentRecording.wechatDraftId.orEmpty() }
+        val wechatUrl = transcript?.optString("wechatUrl", "").orEmpty()
+            .ifBlank { transcript?.optString("wechat_url", "").orEmpty() }
+            .ifBlank { currentRecording.wechatUrl.orEmpty() }
         val reviewSummary = buildArticleReviewSummary(
             status = currentRecording.status.asRecordingStatus(),
             articleTitle = articleTitle,
             articleContent = articleContent,
             rawText = rawText,
             wechatDraftId = wechatDraftId,
+            wechatUrl = wechatUrl,
         )
         val shareText = buildString {
             append(articleTitle)
@@ -179,6 +184,7 @@ fun DetailScreen(
             rawText = rawText,
             statusLabel = currentRecording.statusLabel(),
             wechatDraftId = wechatDraftId,
+            wechatUrl = wechatUrl,
             filename = currentRecording.filename,
             createdAtMs = currentRecording.timestamp,
         )
@@ -563,6 +569,7 @@ internal fun buildArticleExportText(
     rawText: String,
     statusLabel: String,
     wechatDraftId: String,
+    wechatUrl: String,
     filename: String,
     createdAtMs: Long,
 ): String {
@@ -573,6 +580,7 @@ internal fun buildArticleExportText(
         appendLine("## 发布状态")
         appendLine("- 处理状态：$statusLabel")
         appendLine("- 公众号草稿：${wechatDraftId.ifBlank { "未同步草稿 ID" }}")
+        appendLine("- 草稿链接：${wechatUrl.ifBlank { "未同步草稿链接" }}")
         appendLine("- 原始文件：$filename")
         appendLine("- 创建时间：$createdAt")
         appendLine()
@@ -602,17 +610,19 @@ internal fun buildArticleReviewSummary(
     articleContent: String,
     rawText: String,
     wechatDraftId: String,
+    wechatUrl: String,
 ): ArticleReviewSummary {
     val hasTitle = articleTitle.isNotBlank() && !articleTitle.contains("录音片段")
     val contentChars = articleContent.trim().length
     val hasArticle = status == RecordingStatus.COMPLETED && contentChars >= 80
     val hasRawText = rawText.isNotBlank()
-    val hasDraft = status == RecordingStatus.COMPLETED && wechatDraftId.isNotBlank()
+    val draftReference = wechatDraftId.ifBlank { wechatUrl }
+    val hasDraft = status == RecordingStatus.COMPLETED && draftReference.isNotBlank()
 
     val nextStep = when {
         status != RecordingStatus.COMPLETED -> "文章还在生成中，完成后这里会变成发布前检查清单。"
         hasDraft -> "草稿已创建。下一步到公众号后台打开草稿，再做最后一眼人工确认。"
-        hasArticle -> "文章已生成，但还没拿到公众号草稿 ID。可以先复制正文，或刷新等待草稿状态。"
+        hasArticle -> "文章已生成，但还没拿到公众号草稿信息。可以先复制正文，或刷新等待草稿状态。"
         else -> "流程显示完成，但正文还不完整。请刷新同步，或检查诊断信息后重试。"
     }
 
@@ -637,7 +647,7 @@ internal fun buildArticleReviewSummary(
             ),
             ArticleReviewItem(
                 label = "公众号草稿",
-                value = if (hasDraft) wechatDraftId else "等待云端创建草稿或返回草稿 ID",
+                value = if (hasDraft) draftReference else "等待云端创建草稿或返回草稿信息",
                 ready = hasDraft,
             ),
         ),

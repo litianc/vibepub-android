@@ -31,6 +31,7 @@ class DetailScreenTest {
             articleContent = "这是一段已经整理好的正文。".repeat(12),
             rawText = "原始识别文本",
             wechatDraftId = "MEDIA_ID_123",
+            wechatUrl = "",
         )
 
         assertEquals("公众号草稿审核", summary.title)
@@ -47,11 +48,29 @@ class DetailScreenTest {
             articleContent = "这是一段已经整理好的正文。".repeat(12),
             rawText = "原始识别文本",
             wechatDraftId = "",
+            wechatUrl = "",
         )
 
-        assertTrue(summary.nextStep.contains("还没拿到公众号草稿 ID"))
+        assertTrue(summary.nextStep.contains("还没拿到公众号草稿信息"))
         assertTrue(summary.items.first { it.label == "正文" }.ready)
         assertFalse(summary.items.first { it.label == "公众号草稿" }.ready)
+    }
+
+    @Test
+    fun reviewSummaryMarksDraftReadyWhenOnlyUrlExists() {
+        val summary = buildArticleReviewSummary(
+            status = RecordingStatus.COMPLETED,
+            articleTitle = "一篇整理好的文章",
+            articleContent = "这是一段已经整理好的正文。".repeat(12),
+            rawText = "原始识别文本",
+            wechatDraftId = "",
+            wechatUrl = "https://mp.weixin.qq.com/draft",
+        )
+
+        val draftItem = summary.items.first { it.label == "公众号草稿" }
+        assertTrue(summary.nextStep.contains("草稿已创建"))
+        assertTrue(draftItem.ready)
+        assertEquals("https://mp.weixin.qq.com/draft", draftItem.value)
     }
 
     @Test
@@ -62,6 +81,7 @@ class DetailScreenTest {
             articleContent = "云端正在转录和整理文章。",
             rawText = "",
             wechatDraftId = "",
+            wechatUrl = "",
         )
 
         assertTrue(summary.nextStep.contains("文章还在生成中"))
@@ -77,6 +97,7 @@ class DetailScreenTest {
             rawText = "原始识别",
             statusLabel = "已成文",
             wechatDraftId = "MEDIA_ID_123",
+            wechatUrl = "https://mp.weixin.qq.com/draft",
             filename = "VibePub-test.m4a",
             createdAtMs = 1_771_000_000_000L,
         )
@@ -84,6 +105,7 @@ class DetailScreenTest {
         assertTrue(text.contains("# 整理好的文章"))
         assertTrue(text.contains("- 处理状态：已成文"))
         assertTrue(text.contains("- 公众号草稿：MEDIA_ID_123"))
+        assertTrue(text.contains("- 草稿链接：https://mp.weixin.qq.com/draft"))
         assertTrue(text.contains("正文内容"))
         assertTrue(text.contains("原始识别"))
     }
