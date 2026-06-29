@@ -38,7 +38,7 @@ class WorkflowHelpDialogTest {
         composeTestRule.onNodeWithText("当前状态：转录中").assertIsDisplayed()
         composeTestRule.onNodeWithText("当前状态说明").assertIsDisplayed()
         composeTestRule.onNodeWithText("当前节点").assertIsDisplayed()
-        composeTestRule.onNodeWithText("当前节点：4. 语音识别 · 当前", substring = true).assertIsDisplayed()
+        composeTestRule.onAllNodesWithText("当前节点：4. 语音识别 · 当前", substring = true).assertCountEquals(2)
         composeTestRule.onNodeWithText("完整流程周期").assertIsDisplayed()
         composeTestRule.onNodeWithText("保存录音 → 上传音频 → 云端排队 → 语音识别 → 文章改写 → 公众号草稿 → 人工发布确认").assertIsDisplayed()
         composeTestRule.onAllNodesWithText("语音识别 · 当前").assertCountEquals(1)
