@@ -81,12 +81,14 @@ All gates must pass before declaring the flow complete.
    - `debug-device-test-status.json` shows one imported recording with non-zero
      duration.
    - `local-recording-row.json` shows exactly one Room row for the tested
-     filename, non-zero duration, status `COMPLETED`, title, and raw-text
-     preview.
+     filename, non-zero duration, status `COMPLETED`, title, raw-text preview,
+     and a terminal processing stage (`COMPLETED`, `DRAFT_FAILED`, or
+     `ARTICLE_READY`).
    - `recordings-api.json` has exactly one object for the tested filename, with
      status `COMPLETED`, `article_title`, `raw_text_preview`, and
      terminal `processing_stage` (`COMPLETED` with a draft reference, or
-     `DRAFT_FAILED` with `error_message`).
+     `DRAFT_FAILED` with `error_message`, or `ARTICLE_READY` with generated
+     article metadata).
    - `local-transcript.json` has `articleTitle`, `rawText`, `articleContent`,
      and a terminal processing stage (`COMPLETED`, `DRAFT_FAILED`, or
      `ARTICLE_READY`). When the stage is `COMPLETED`, it must include a WeChat
@@ -110,8 +112,11 @@ All gates must pass before declaring the flow complete.
    ```
 
    Required evidence: the tested filename has status `COMPLETED`, plus
-   `article_title`, `raw_text_preview`, terminal `processing_stage`, and either
-   a draft reference or a visible draft failure/error field.
+   `article_title`, `raw_text_preview`, and terminal `processing_stage`.
+   `COMPLETED` requires a draft reference; `DRAFT_FAILED` requires a visible
+   draft failure/error field; `ARTICLE_READY` requires generated article
+   metadata and means the article is consumable while the draft step is still
+   pending.
 
 ## Anti-False-Success Rules
 

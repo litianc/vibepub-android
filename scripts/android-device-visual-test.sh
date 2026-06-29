@@ -387,7 +387,7 @@ if not data.get("articleTitle"):
 if not data.get("rawTextPreview"):
     raise SystemExit(1)
 stage = data.get("processingStage")
-if stage not in {"COMPLETED", "DRAFT_FAILED"}:
+if stage not in {"COMPLETED", "DRAFT_FAILED", "ARTICLE_READY"}:
     raise SystemExit(1)
 has_draft_ref = bool(data.get("wechatDraftId") or data.get("wechatUrl"))
 if stage == "COMPLETED" and not has_draft_ref:
@@ -418,7 +418,7 @@ if not recording.get("article_title"):
 if not recording.get("raw_text_preview"):
     raise SystemExit(1)
 stage = recording.get("processing_stage")
-if stage not in {"COMPLETED", "DRAFT_FAILED"}:
+if stage not in {"COMPLETED", "DRAFT_FAILED", "ARTICLE_READY"}:
     raise SystemExit(1)
 has_draft_ref = bool(recording.get("wechat_draft_id") or recording.get("wechat_url") or recording.get("media_id"))
 if stage == "COMPLETED" and not has_draft_ref:
