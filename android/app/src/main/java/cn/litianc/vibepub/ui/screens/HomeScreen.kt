@@ -28,6 +28,7 @@ import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.SyncProblem
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.TaskAlt
 import androidx.compose.material.icons.filled.Upload
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -71,6 +72,7 @@ import cn.litianc.vibepub.data.canRetryUpload
 import cn.litianc.vibepub.data.currentWorkflowStep
 import cn.litianc.vibepub.data.displayLabel
 import cn.litianc.vibepub.data.displayTitle
+import cn.litianc.vibepub.data.hasDraftFailureMessage
 import cn.litianc.vibepub.data.listDurationLabel
 import cn.litianc.vibepub.data.statusDetail
 import cn.litianc.vibepub.data.statusLabel
@@ -111,6 +113,7 @@ fun HomeScreen(
 ) {
     val recordings by recordingsFlow.collectAsState(initial = emptyList())
     val syncNotice = homeSyncNotice(recordings, lastSyncAtMs)
+    val focusRecording = homeFocusRecording(recordings)
     var isRefreshing by remember { mutableStateOf(false) }
     var refreshStartedSyncAtMs by remember { mutableStateOf<Long?>(null) }
 
@@ -212,6 +215,13 @@ fun HomeScreen(
                     }
                 }
 
+                if (focusRecording != null) {
+                    HomeWorkflowOverviewCard(
+                        recording = focusRecording,
+                        onClick = { onRecordingClick(focusRecording) },
+                    )
+                }
+
                 if (syncNotice != null) {
                     SyncNoticeCard(
                         notice = syncNotice,
@@ -238,6 +248,28 @@ fun HomeScreen(
                     }
                 }
             }
+        }
+    }
+}
+
+internal fun homeFocusRecording(recordings: List<RecordingEntity>): RecordingEntity? {
+    return recordings.minWithOrNull(
+        compareBy<RecordingEntity> { homeFocusRank(it) }
+            .thenByDescending { it.timestamp },
+    )
+}
+
+private fun homeFocusRank(recording: RecordingEntity): Int {
+    return when (recording.status.asRecordingStatus()) {
+        RecordingStatus.FAILED -> 0
+        RecordingStatus.UPLOADING,
+        RecordingStatus.UPLOADED,
+        RecordingStatus.PROCESSING -> 1
+        RecordingStatus.LOCAL_RECORDED -> 2
+        RecordingStatus.COMPLETED -> {
+            val hasDraft = recording.wechatDraftId?.isNotBlank() == true ||
+                recording.wechatUrl?.isNotBlank() == true
+            if (recording.hasDraftFailureMessage() || !hasDraft) 3 else 4
         }
     }
 }
@@ -294,6 +326,125 @@ private fun syncAgeLabel(elapsedMs: Long): String {
         elapsedMinutes < 60L -> "${elapsedMinutes} 分钟"
         elapsedMinutes < 24L * 60L -> "${elapsedMinutes / 60L} 小时"
         else -> "${elapsedMinutes / (24L * 60L)} 天"
+    }
+}
+
+@Composable
+private fun HomeWorkflowOverviewCard(
+    recording: RecordingEntity,
+    onClick: () -> Unit,
+) {
+    val status = recording.status.asRecordingStatus()
+    val currentStep = recording.currentWorkflowStep()
+    var showWorkflowHelp by remember { mutableStateOf(false) }
+
+    if (showWorkflowHelp) {
+        WorkflowHelpDialog(
+            recording = recording,
+            onDismiss = { showWorkflowHelp = false },
+        )
+    }
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 4.dp)
+            .clickable(onClick = onClick)
+            .testTag("HomeWorkflowOverviewCard"),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        shape = RoundedCornerShape(12.dp),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+    ) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    modifier = Modifier
+                        .size(34.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(IconLightRedBackground),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        Icons.Default.TaskAlt,
+                        contentDescription = null,
+                        tint = PrimaryRed,
+                        modifier = Modifier.size(19.dp),
+                    )
+                }
+                Spacer(modifier = Modifier.width(10.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "当前进度",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Text(
+                        text = recording.displayTitle(),
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.testTag("HomeWorkflowOverviewTitle"),
+                    )
+                }
+                IconButton(
+                    onClick = { showWorkflowHelp = true },
+                    modifier = Modifier
+                        .size(32.dp)
+                        .testTag("HomeWorkflowOverviewHelpButton"),
+                ) {
+                    Icon(
+                        Icons.Default.Info,
+                        contentDescription = "查看处理进度说明",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
+            }
+
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    modifier = Modifier
+                        .size(8.dp)
+                        .clip(CircleShape)
+                        .background(statusColor(status)),
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "${recording.workflowProgressLabel()} · ${recording.statusLabel()}",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+            }
+            LinearProgressIndicator(
+                progress = { recording.workflowProgressFraction() },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(4.dp),
+                color = statusColor(status),
+                trackColor = MaterialTheme.colorScheme.surfaceVariant,
+            )
+            Text(
+                text = "${currentStep.title}：${currentStep.detail}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                text = recording.workflowNextActionLabel(),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurface,
+                fontWeight = FontWeight.Medium,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
     }
 }
 

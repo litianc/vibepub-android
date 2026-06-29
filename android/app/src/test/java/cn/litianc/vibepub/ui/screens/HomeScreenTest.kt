@@ -90,12 +90,87 @@ class HomeScreenTest {
         )
     }
 
+    @Test
+    fun homeFocusRecordingPrioritizesActionableWorkflow() {
+        val completedDraft = recording(
+            status = RecordingStatus.COMPLETED,
+            filename = "completed-draft.m4a",
+            timestamp = 300L,
+            wechatDraftId = "MEDIA_ID_123",
+        )
+        val processing = recording(
+            status = RecordingStatus.PROCESSING,
+            filename = "processing.m4a",
+            timestamp = 100L,
+        )
+        val failed = recording(
+            status = RecordingStatus.FAILED,
+            filename = "failed.m4a",
+            timestamp = 200L,
+        )
+
+        val focus = homeFocusRecording(listOf(completedDraft, processing, failed))
+
+        assertEquals("failed.m4a", focus?.filename)
+    }
+
+    @Test
+    fun homeFocusRecordingKeepsArticleWithoutDraftVisible() {
+        val completedDraft = recording(
+            status = RecordingStatus.COMPLETED,
+            filename = "completed-draft.m4a",
+            timestamp = 200L,
+            wechatDraftId = "MEDIA_ID_123",
+        )
+        val articleOnly = recording(
+            status = RecordingStatus.COMPLETED,
+            filename = "article-only.m4a",
+            timestamp = 100L,
+        )
+
+        val focus = homeFocusRecording(listOf(completedDraft, articleOnly))
+
+        assertEquals("article-only.m4a", focus?.filename)
+    }
+
+    @Test
+    fun homeFocusRecordingUsesNewestWithinSamePriority() {
+        val olderProcessing = recording(
+            status = RecordingStatus.PROCESSING,
+            filename = "older-processing.m4a",
+            timestamp = 100L,
+        )
+        val newerProcessing = recording(
+            status = RecordingStatus.UPLOADED,
+            filename = "newer-processing.m4a",
+            timestamp = 200L,
+        )
+
+        val focus = homeFocusRecording(listOf(olderProcessing, newerProcessing))
+
+        assertEquals("newer-processing.m4a", focus?.filename)
+    }
+
     private fun recording(status: RecordingStatus): RecordingEntity {
-        return RecordingEntity(
+        return recording(
+            status = status,
             filename = "${status.value}.m4a",
-            durationMs = 1_000L,
             timestamp = 1L,
+        )
+    }
+
+    private fun recording(
+        status: RecordingStatus,
+        filename: String,
+        timestamp: Long,
+        wechatDraftId: String? = null,
+    ): RecordingEntity {
+        return RecordingEntity(
+            filename = filename,
+            durationMs = 1_000L,
+            timestamp = timestamp,
             status = status.value,
+            wechatDraftId = wechatDraftId,
         )
     }
 }
