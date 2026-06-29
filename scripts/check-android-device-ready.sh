@@ -13,6 +13,7 @@ REQUIRE_UNLOCKED="${REQUIRE_UNLOCKED:-false}"
 AUTO_CONFIRM_USB_INSTALL_PROMPT="${AUTO_CONFIRM_USB_INSTALL_PROMPT:-true}"
 AUTO_TAP_USB_INSTALL_PROMPT_FALLBACK="${AUTO_TAP_USB_INSTALL_PROMPT_FALLBACK:-true}"
 USB_INSTALL_PROMPT_TIMEOUT_SECONDS="${USB_INSTALL_PROMPT_TIMEOUT_SECONDS:-20}"
+ALLOW_UNINSTALL_ON_SIGNATURE_MISMATCH="${ALLOW_UNINSTALL_ON_SIGNATURE_MISMATCH:-false}"
 
 usage() {
   cat <<EOF
@@ -38,6 +39,10 @@ Environment:
                 observe the prompt. Default: true.
   USB_INSTALL_PROMPT_TIMEOUT_SECONDS
                 Prompt watcher timeout. Default: 20.
+  ALLOW_UNINSTALL_ON_SIGNATURE_MISMATCH
+                If adb install reports INSTALL_FAILED_UPDATE_INCOMPATIBLE,
+                uninstall the existing package and retry. This clears app data.
+                Default: false.
 
 Checks whether a USB-connected Android phone is ready for the VibePub
 real-device smoke lane.
@@ -142,6 +147,15 @@ install_apk() {
   fi
 
   if grep -q "INSTALL_FAILED_UPDATE_INCOMPATIBLE" "$OUT_DIR/install.txt"; then
+    if ! truthy "$ALLOW_UNINSTALL_ON_SIGNATURE_MISMATCH"; then
+      {
+        echo "Existing $PACKAGE_NAME install has a different signing key."
+        echo "Refusing to uninstall automatically because that clears app data."
+        echo "Set ALLOW_UNINSTALL_ON_SIGNATURE_MISMATCH=true to allow a clean reinstall."
+      } > "$OUT_DIR/install-signature-mismatch.txt"
+      return 1
+    fi
+
     adb_cmd uninstall "$PACKAGE_NAME" > "$OUT_DIR/install-uninstall-incompatible.txt" 2>&1 || true
     if run_with_usb_install_prompt_taps \
       "install-after-uninstall" \
@@ -276,6 +290,11 @@ elif [[ -n "$APK_PATH" ]]; then
           fi
           echo "  - Fallback pm install also failed; see install-fallback-pm.txt if present." >> "$report"
         fi
+        if grep -q "INSTALL_FAILED_UPDATE_INCOMPATIBLE" "$OUT_DIR/install.txt"; then
+          echo "  - Existing package signature differs from this APK." >> "$report"
+          echo "  - Uninstall the old app manually, or rerun with ALLOW_UNINSTALL_ON_SIGNATURE_MISMATCH=true if clearing app data is acceptable." >> "$report"
+          echo "  - See install-signature-mismatch.txt if present." >> "$report"
+        fi
       fi
 
       if adb_shell run-as "$PACKAGE_NAME" id > "$OUT_DIR/run-as.txt" 2>&1; then
@@ -303,6 +322,11 @@ On HyperOS/MIUI, wireless debugging can still return
 \`INSTALL_FAILED_USER_RESTRICTED\` for APK installs even when those switches are
 enabled. If that happens, use a USB data connection for installation, or install
 the APK manually and rerun smoke tests with \`SKIP_INSTALL=true RESET_APP_DATA=false\`.
+
+If \`INSTALL_FAILED_UPDATE_INCOMPATIBLE\` appears, the package already installed
+on the device was signed with a different key. ADB cannot update it in place.
+Uninstall the old app manually, or rerun with
+\`ALLOW_UNINSTALL_ON_SIGNATURE_MISMATCH=true\` when clearing app data is OK.
 
 Default VibePub automation uses \`AUTOMATION_MODE=debug-broadcast\`, so tap
 injection is optional. ADB install and debug \`run-as\` are still required for

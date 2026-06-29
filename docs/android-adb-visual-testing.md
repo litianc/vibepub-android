@@ -63,6 +63,17 @@ or install the APK manually first and rerun smoke tests with
 If reset/uninstall fails with `DELETE_FAILED_INTERNAL_ERROR`, manually remove
 the app on the phone or enable the same USB install/security options.
 
+If the long simulated-click permission is not visible on a Xiaomi/Redmi tablet,
+verify the actual capability from the Mac instead:
+
+```bash
+adb -s 192.168.31.72:42327 shell input tap 1 1
+```
+
+If that command exits successfully, UI automation can still tap the screen. The
+missing row is only a blocker when `adb shell input ...` fails with an injection
+permission error.
+
 ## Run A Visual Test
 
 Download `app-debug.apk` from GitHub Actions, or use an APK already on disk.
@@ -93,6 +104,16 @@ Equivalent explicit serial form:
 
 ```bash
 scripts/install-latest-android-apk.sh --serial 192.168.31.72:42327
+```
+
+If the installed app was signed with a different debug key, Android returns
+`INSTALL_FAILED_UPDATE_INCOMPATIBLE`. ADB cannot update that package in place.
+Uninstall VibePub manually, or allow the script to clear app data and reinstall:
+
+```bash
+ALLOW_UNINSTALL_ON_SIGNATURE_MISMATCH=true \
+ANDROID_SERIAL=192.168.31.72:42327 \
+scripts/install-latest-android-apk.sh
 ```
 
 For the standard VibePub smoke test, prefer:
