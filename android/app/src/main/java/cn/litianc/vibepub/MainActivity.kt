@@ -18,7 +18,6 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.WorkManager
-import androidx.work.workDataOf
 import cn.litianc.vibepub.ui.navigation.AppNavigation
 import cn.litianc.vibepub.ui.theme.VibePubTheme
 import kotlinx.coroutines.Dispatchers
@@ -60,33 +59,13 @@ fun VibePubApp(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val workManager = WorkManager.getInstance(context)
 
     var isRecording by remember { mutableStateOf(false) }
 
     fun enqueueUpload(file: File) {
-        val token = preferences.filesToken
-        if (token.isBlank()) {
+        if (!RecordingUploadCoordinator.enqueueUpload(context, preferences, file)) {
             Toast.makeText(context, "Please configure FILES_TOKEN in Settings", Toast.LENGTH_LONG).show()
-            return
         }
-
-        val constraints = Constraints.Builder()
-            .setRequiredNetworkType(NetworkType.CONNECTED)
-            .build()
-        val request = OneTimeWorkRequestBuilder<UploadWorker>()
-            .setConstraints(constraints)
-            .addTag("upload_job")
-            .setInputData(
-                workDataOf(
-                    UploadWorker.KEY_FILE_PATH to file.absolutePath,
-                    UploadWorker.KEY_API_BASE_URL to preferences.apiBaseUrl,
-                    UploadWorker.KEY_FILES_TOKEN to token,
-                ),
-            )
-            .build()
-
-        workManager.enqueue(request)
     }
 
     val permissionsLauncher = rememberLauncherForActivityResult(
@@ -129,17 +108,7 @@ fun VibePubApp(
                 withContext(Dispatchers.IO) {
                     runCatching {
                         val (file, duration) = recorder.stop()
-                        
-                        // Insert into Room
-                        val entity = cn.litianc.vibepub.data.RecordingEntity(
-                            filename = file.name,
-                            durationMs = duration,
-                            timestamp = System.currentTimeMillis(),
-                            status = "UPLOADED"
-                        )
-                        cn.litianc.vibepub.data.AppDatabase.getDatabase(context).recordingDao().insert(entity)
-                        
-                        // Enqueue upload
+                        RecordingUploadCoordinator.saveRecording(context, file, duration)
                         enqueueUpload(file)
                     }
                 }

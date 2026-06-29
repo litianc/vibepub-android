@@ -583,6 +583,14 @@ EOF
   fi
 fi
 
+if truthy "$RESET_APP_DATA"; then
+  echo "Clearing installed app data for deterministic test run..."
+  if ! adb_shell pm clear "$PACKAGE_NAME" > "$OUT_DIR/pm-clear-after-install.txt" 2>&1; then
+    cat "$OUT_DIR/pm-clear-after-install.txt" >&2
+    exit 1
+  fi
+fi
+
 echo "Granting permissions where possible..."
 adb_shell pm grant "$PACKAGE_NAME" android.permission.RECORD_AUDIO >/dev/null 2>&1 || true
 adb_shell pm grant "$PACKAGE_NAME" android.permission.ACCESS_COARSE_LOCATION >/dev/null 2>&1 || true

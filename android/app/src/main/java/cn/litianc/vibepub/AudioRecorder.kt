@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.location.Geocoder
 import android.location.LocationManager
+import android.media.MediaMetadataRetriever
 import android.media.MediaRecorder
 import android.os.Build
 import androidx.core.content.ContextCompat
@@ -74,7 +75,10 @@ class AudioRecorder(private val context: Context) {
             startTime = null
         }
 
-        val durationSecs = java.time.Duration.between(startInst, Instant.now()).seconds
+        val measuredDurationMs = readDurationMs(file)
+        val durationMs = measuredDurationMs
+            ?: java.time.Duration.between(startInst, Instant.now()).toMillis()
+        val durationSecs = (durationMs / 1000).coerceAtLeast(0)
         val mins = durationSecs / 60
         val secs = durationSecs % 60
         val durationStr = "${mins}m${secs}s"
@@ -120,10 +124,33 @@ class AudioRecorder(private val context: Context) {
         // VibePub-YYYY-MM-DD-HHmmss-XmYYs-Day-TimeOfDay-City-District.m4a
         val finalName = "VibePub-$dateStr-$durationStr-$dayStr-$timeOfDay$locationStr.m4a"
             .replace("--", "-") // Clean up empty locations if any
-        val finalFile = File(file.parent, finalName)
-        file.renameTo(finalFile)
+        val finalFile = File(file.parentFile, finalName)
+        if (!file.renameTo(finalFile)) {
+            file.copyTo(finalFile, overwrite = false)
+            check(file.delete()) {
+                "Could not delete temporary recording after copy: ${file.name}"
+            }
+        }
+        check(finalFile.exists() && finalFile.length() > 0L) {
+            "Final recording file is missing or empty: ${finalFile.name}"
+        }
         
-        Pair(finalFile, durationSecs * 1000L)
+        Pair(finalFile, durationMs)
+    }
+
+    private fun readDurationMs(file: File): Long? {
+        return runCatching {
+            val retriever = MediaMetadataRetriever()
+            try {
+                retriever.setDataSource(file.absolutePath)
+                retriever
+                    .extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
+                    ?.toLongOrNull()
+                    ?.takeIf { it > 0L }
+            } finally {
+                retriever.release()
+            }
+        }.getOrNull()
     }
 
     @SuppressLint("MissingPermission")
