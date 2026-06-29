@@ -15,6 +15,20 @@ import cn.litianc.vibepub.data.RecordingStatus
 import cn.litianc.vibepub.data.asRecordingStatus
 import org.json.JSONObject
 
+internal enum class SyncHttpFailure {
+    AUTH,
+    MISSING_TRANSCRIPT,
+    RETRYABLE,
+}
+
+internal fun classifySyncHttpFailure(responseCode: Int): SyncHttpFailure {
+    return when {
+        responseCode == 401 || responseCode == 403 -> SyncHttpFailure.AUTH
+        responseCode == 404 -> SyncHttpFailure.MISSING_TRANSCRIPT
+        else -> SyncHttpFailure.RETRYABLE
+    }
+}
+
 class SyncWorker(
     appContext: Context,
     params: WorkerParameters,
@@ -40,7 +54,8 @@ class SyncWorker(
                 readTimeout = 10_000
                 setRequestProperty("Authorization", "Bearer $filesToken")
             }
-            if (connection.responseCode in 200..299) {
+            val responseCode = connection.responseCode
+            if (responseCode in 200..299) {
                 val jsonText = connection.inputStream.bufferedReader().use { it.readText() }
                 val json = JSONObject(jsonText)
                 val recordingsArray = json.optJSONArray("recordings")
@@ -107,6 +122,12 @@ class SyncWorker(
                         }
                     }
                 }
+            } else if (classifySyncHttpFailure(responseCode) == SyncHttpFailure.AUTH) {
+                markSyncAuthFailure(
+                    message = "FILES_TOKEN 无效或没有权限，无法同步云端录音列表",
+                    onlyActive = true,
+                )
+                return@withContext Result.failure()
             }
         } catch (e: Exception) {
             e.printStackTrace()
@@ -149,12 +170,26 @@ class SyncWorker(
                                 wechatUrl = transcript.wechatUrlOrNull() ?: recording.wechatUrl,
                             ),
                         )
-                    } else if (responseCode == 404) {
-                        if (recording.status == RecordingStatus.UPLOADED.value || recording.status == RecordingStatus.UPLOADING.value) {
-                            dao.insert(recording.copy(status = RecordingStatus.PROCESSING.value))
-                        }
                     } else {
-                        allSuccess = false
+                        when (classifySyncHttpFailure(responseCode)) {
+                            SyncHttpFailure.MISSING_TRANSCRIPT -> {
+                                if (recording.status == RecordingStatus.UPLOADED.value || recording.status == RecordingStatus.UPLOADING.value) {
+                                    dao.insert(recording.copy(status = RecordingStatus.PROCESSING.value))
+                                }
+                            }
+                            SyncHttpFailure.AUTH -> {
+                                dao.insert(
+                                    recording.copy(
+                                        status = RecordingStatus.FAILED.value,
+                                        lastError = "FILES_TOKEN 无效或没有权限，无法同步转录结果",
+                                    ),
+                                )
+                                allSuccess = false
+                            }
+                            SyncHttpFailure.RETRYABLE -> {
+                                allSuccess = false
+                            }
+                        }
                     }
                 } catch (e: Exception) {
                     allSuccess = false
@@ -184,6 +219,25 @@ class SyncWorker(
             Result.success()
         } else {
             Result.retry()
+        }
+    }
+
+    private suspend fun markSyncAuthFailure(message: String, onlyActive: Boolean) {
+        val dao = AppDatabase.getDatabase(applicationContext).recordingDao()
+        dao.getAllRecordings().forEach { recording ->
+            val status = recording.status.asRecordingStatus()
+            val shouldMark = !onlyActive ||
+                status == RecordingStatus.UPLOADING ||
+                status == RecordingStatus.UPLOADED ||
+                status == RecordingStatus.PROCESSING
+            if (shouldMark && status != RecordingStatus.COMPLETED) {
+                dao.insert(
+                    recording.copy(
+                        status = RecordingStatus.FAILED.value,
+                        lastError = message,
+                    ),
+                )
+            }
         }
     }
 
