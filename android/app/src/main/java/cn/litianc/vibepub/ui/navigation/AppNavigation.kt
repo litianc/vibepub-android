@@ -2,6 +2,8 @@ package cn.litianc.vibepub.ui.navigation
 
 import android.net.Uri
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.LocalContext
 import androidx.navigation.compose.NavHost
@@ -31,11 +33,15 @@ fun AppNavigation(
     val recordingsFlow = remember {
         AppDatabase.getDatabase(context).recordingDao().getAllRecordingsFlow()
     }
+    val lastSyncAtMs by remember(preferences) {
+        preferences.lastSyncAtMsFlow()
+    }.collectAsState(initial = preferences.lastSyncAtMs)
     
     NavHost(navController = navController, startDestination = "home") {
         composable("home") {
             HomeScreen(
                 recordingsFlow = recordingsFlow,
+                lastSyncAtMs = lastSyncAtMs,
                 onSettingsClick = { navController.navigate("settings") },
                 onRefresh = onRefresh,
                 onRetryUpload = onRetryUpload,

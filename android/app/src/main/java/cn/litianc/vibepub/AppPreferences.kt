@@ -1,6 +1,11 @@
 package cn.litianc.vibepub
 
 import android.content.Context
+import android.content.SharedPreferences
+import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
 
 class AppPreferences(context: Context) {
     private val prefs = context.getSharedPreferences("vibepub", Context.MODE_PRIVATE)
@@ -16,6 +21,17 @@ class AppPreferences(context: Context) {
     var lastSyncAtMs: Long
         get() = prefs.getLong(KEY_LAST_SYNC_AT_MS, 0L)
         set(value) = prefs.edit().putLong(KEY_LAST_SYNC_AT_MS, value).apply()
+
+    fun lastSyncAtMsFlow(): Flow<Long> = callbackFlow {
+        val listener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+            if (key == KEY_LAST_SYNC_AT_MS) {
+                trySend(lastSyncAtMs)
+            }
+        }
+        prefs.registerOnSharedPreferenceChangeListener(listener)
+        trySend(lastSyncAtMs)
+        awaitClose { prefs.unregisterOnSharedPreferenceChangeListener(listener) }
+    }.distinctUntilChanged()
 
     var transcribedFiles: Set<String>
         get() = prefs.getStringSet(KEY_TRANSCRIBED_FILES, emptySet()) ?: emptySet()

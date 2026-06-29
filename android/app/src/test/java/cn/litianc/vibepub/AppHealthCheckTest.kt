@@ -1,9 +1,14 @@
 package cn.litianc.vibepub
 
+import androidx.activity.ComponentActivity
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
-import androidx.activity.ComponentActivity
 import cn.litianc.vibepub.ui.screens.SettingsScreen
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.async
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
@@ -32,5 +37,20 @@ class AppHealthCheckTest {
         composeTestRule.onNodeWithTag("FilesTokenField").performTextInput(testToken)
         
         assertEquals(testToken, prefs.filesToken)
+    }
+
+    @Test
+    fun lastSyncAtMsFlowEmitsPreferenceUpdates() = runBlocking {
+        val context = composeTestRule.activity
+        val prefs = AppPreferences(context)
+        prefs.lastSyncAtMs = 0L
+
+        val update = async(start = CoroutineStart.UNDISPATCHED) {
+            prefs.lastSyncAtMsFlow().drop(1).first()
+        }
+
+        prefs.lastSyncAtMs = 123_456L
+
+        assertEquals(123_456L, update.await())
     }
 }

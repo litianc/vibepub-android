@@ -88,6 +88,7 @@ import java.util.Locale
 @Composable
 fun HomeScreen(
     recordingsFlow: Flow<List<RecordingEntity>>,
+    lastSyncAtMs: Long,
     onSettingsClick: () -> Unit,
     onRefresh: () -> Unit,
     onRetryUpload: (RecordingEntity) -> Unit,
@@ -161,7 +162,11 @@ fun HomeScreen(
             ) {
                 Column {
                     Text("我的录音", fontWeight = FontWeight.Bold)
-                    Text("${recordings.size} 条", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        "${recordings.size} 条 · ${lastSyncLabel(lastSyncAtMs)}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
                 OutlinedButton(onClick = onRefresh) {
                     Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
@@ -189,6 +194,17 @@ fun HomeScreen(
                 }
             }
         }
+    }
+}
+
+internal fun lastSyncLabel(lastSyncAtMs: Long, nowMs: Long = System.currentTimeMillis()): String {
+    if (lastSyncAtMs <= 0L) return "最近同步：尚未同步"
+    val elapsedSeconds = ((nowMs - lastSyncAtMs).coerceAtLeast(0L) / 1000L).toInt()
+    return when {
+        elapsedSeconds < 60 -> "最近同步：刚刚"
+        elapsedSeconds < 3600 -> "最近同步：${elapsedSeconds / 60} 分钟前"
+        elapsedSeconds < 86_400 -> "最近同步：${elapsedSeconds / 3600} 小时前"
+        else -> "最近同步：${elapsedSeconds / 86_400} 天前"
     }
 }
 
