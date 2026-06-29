@@ -87,6 +87,7 @@ import cn.litianc.vibepub.data.statusDetail
 import cn.litianc.vibepub.data.statusLabel
 import cn.litianc.vibepub.data.workflowCycleLabel
 import cn.litianc.vibepub.data.workflowCurrentNodeLabel
+import cn.litianc.vibepub.data.workflowNextActionLabel
 import cn.litianc.vibepub.data.workflowProgressFraction
 import cn.litianc.vibepub.data.workflowProgressLabel
 import cn.litianc.vibepub.data.workflowSteps
@@ -226,6 +227,7 @@ fun DetailScreen(
             rawText = rawText,
             statusLabel = currentRecording.statusLabel(),
             statusDetail = currentRecording.statusDetail(),
+            nextAction = currentRecording.workflowNextActionLabel(),
             workflowNode = currentRecording.workflowCurrentNodeLabel(),
             workflowCycle = currentRecording.workflowCycleLabel(),
             wechatDraftId = wechatDraftId,
@@ -554,6 +556,13 @@ private fun StatusCard(
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                recording.workflowNextActionLabel(),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurface,
+                fontWeight = FontWeight.Medium,
+            )
             if (recording.remoteStatusUpdatedAt?.isNotBlank() == true) {
                 Spacer(modifier = Modifier.height(6.dp))
                 Text(
@@ -839,6 +848,7 @@ internal fun buildArticleExportText(
     rawText: String,
     statusLabel: String,
     statusDetail: String,
+    nextAction: String,
     workflowNode: String,
     workflowCycle: String,
     wechatDraftId: String,
@@ -853,6 +863,7 @@ internal fun buildArticleExportText(
         appendLine("## 发布状态")
         appendLine("- 处理状态：$statusLabel")
         appendLine("- 状态说明：$statusDetail")
+        appendLine("- $nextAction")
         appendLine("- $workflowNode")
         appendLine("- 完整流程：$workflowCycle")
         appendLine("- 公众号草稿：${wechatDraftId.ifBlank { "未同步草稿 ID" }}")

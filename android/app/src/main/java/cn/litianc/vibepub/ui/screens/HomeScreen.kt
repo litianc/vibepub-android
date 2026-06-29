@@ -78,6 +78,7 @@ import cn.litianc.vibepub.data.workflowCycleLabel
 import cn.litianc.vibepub.data.workflowCurrentNodeLabel
 import cn.litianc.vibepub.data.workflowHelpSummary
 import cn.litianc.vibepub.data.workflowHelpTitle
+import cn.litianc.vibepub.data.workflowNextActionLabel
 import cn.litianc.vibepub.data.workflowProgressFraction
 import cn.litianc.vibepub.data.workflowProgressLabel
 import cn.litianc.vibepub.data.workflowSteps
@@ -608,6 +609,10 @@ fun WorkflowHelpDialog(
                 WorkflowHelpSection(
                     label = "当前节点",
                     value = "${recording.workflowCurrentNodeLabel()}\n${currentStep.detail}",
+                )
+                WorkflowHelpSection(
+                    label = "下一步建议",
+                    value = recording.workflowNextActionLabel(),
                 )
                 WorkflowHelpSection(
                     label = "完整流程周期",

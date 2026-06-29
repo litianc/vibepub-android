@@ -56,6 +56,17 @@ fun RecordingEntity.statusDetail(): String {
     }
 }
 
+fun RecordingEntity.workflowNextActionLabel(): String {
+    return when (status.asRecordingStatus()) {
+        RecordingStatus.LOCAL_RECORDED -> "下一步：点重试上传；如果反复失败，先到设置页检查 FILES_TOKEN。"
+        RecordingStatus.UPLOADING -> "下一步：保持网络可用，等待上传完成；也可以下拉或点同步刷新状态。"
+        RecordingStatus.UPLOADED -> "下一步：等待云端任务接手；如果长时间不动，点同步确认后台进度。"
+        RecordingStatus.PROCESSING -> processingNextActionLabel()
+        RecordingStatus.COMPLETED -> completedNextActionLabel()
+        RecordingStatus.FAILED -> failureNextActionLabel()
+    }
+}
+
 fun RecordingEntity.isTerminalComplete(): Boolean = status.asRecordingStatus() == RecordingStatus.COMPLETED
 
 fun RecordingEntity.canRetryUpload(): Boolean {
@@ -68,7 +79,7 @@ fun RecordingEntity.workflowHelpTitle(): String {
 }
 
 fun RecordingEntity.workflowHelpSummary(): String {
-    return "这条录音正在经历从口述想法到公众号草稿的流程。${workflowCurrentNodeLabel()}，${workflowProgressLabel()}。"
+    return "这条录音正在经历从口述想法到公众号草稿的流程。${workflowCurrentNodeLabel()}，${workflowProgressLabel()}。${workflowNextActionLabel()}"
 }
 
 fun RecordingEntity.workflowProgressLabel(): String {
@@ -192,11 +203,45 @@ private fun RecordingEntity.processingStatusLabel(): String {
     }
 }
 
+private fun RecordingEntity.processingNextActionLabel(): String {
+    return when (processingStageKey()) {
+        "QUEUED" -> "下一步：等待后台任务开始；如果超过几分钟没有变化，点同步刷新。"
+        "ASR" -> "下一步：等待语音识别完成；详情页会先显示原始识别片段。"
+        "REWRITING" -> "下一步：等待文章标题和正文生成；完成后可以复制、分享或导出。"
+        "DRAFTING" -> "下一步：等待公众号草稿创建；草稿可用后会显示打开入口。"
+        else -> when (processingWorkflowIndex()) {
+            4 -> "下一步：等待文章标题和正文生成；完成后可以复制、分享或导出。"
+            5 -> "下一步：等待公众号草稿创建；草稿可用后会显示打开入口。"
+            else -> "下一步：等待云端转录；如果长时间没有更新，点同步刷新。"
+        }
+    }
+}
+
 private fun RecordingEntity.completedStatusDetail(): String {
     return when {
         hasWechatDraftReference() -> "文章已生成，公众号草稿也已准备好。"
         hasDraftFailureMessage() -> "文章已生成，但公众号草稿创建失败。可以先复制正文，稍后再重试草稿。"
         else -> "文章已生成，正在等待公众号草稿信息同步。"
+    }
+}
+
+private fun RecordingEntity.completedNextActionLabel(): String {
+    return when {
+        hasWechatDraftReference() -> "下一步：打开公众号草稿做最后一眼人工确认，再决定是否发布。"
+        hasDraftFailureMessage() -> "下一步：先复制正文备用；修复公众号草稿问题后再同步或重试。"
+        else -> "下一步：先复制或分享正文；如果需要草稿入口，点同步等待草稿信息。"
+    }
+}
+
+private fun RecordingEntity.failureNextActionLabel(): String {
+    val error = lastError.orEmpty().lowercase(Locale.ROOT)
+    return when {
+        error.contains("token") ||
+            error.contains("401") ||
+            error.contains("403") -> "下一步：到设置页更新 FILES_TOKEN，并用“测试后端连接”确认授权。"
+        failureWorkflowIndex() == 1 -> "下一步：点重试上传；如果仍失败，到设置页检查后端连接。"
+        failureWorkflowIndex() == 5 -> "下一步：文章可能已生成，先复制正文；再检查公众号草稿配置。"
+        else -> "下一步：点同步或重试；如果仍失败，复制诊断信息反馈。"
     }
 }
 

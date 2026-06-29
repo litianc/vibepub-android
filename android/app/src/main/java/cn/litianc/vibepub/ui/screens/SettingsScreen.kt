@@ -76,6 +76,7 @@ import cn.litianc.vibepub.data.displayTitle
 import cn.litianc.vibepub.data.statusDetail
 import cn.litianc.vibepub.data.statusLabel
 import cn.litianc.vibepub.data.workflowCurrentNodeLabel
+import cn.litianc.vibepub.data.workflowNextActionLabel
 import cn.litianc.vibepub.data.workflowProgressLabel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -655,6 +656,7 @@ internal fun formatDiagnostics(
     Latest workflow: ${latest?.workflowCurrentNodeLabel() ?: "无"}
     Latest workflow progress: ${latest?.workflowProgressLabel() ?: "无"}
     Latest workflow detail: ${latestStep?.detail ?: "无"}
+    Latest next action: ${latest?.workflowNextActionLabel() ?: "无"}
     Latest remote update: ${latest?.remoteStatusUpdatedAt ?: "无"}
     Latest article title: ${latest?.articleTitle ?: "无"}
     Latest raw text: ${if (latest?.rawTextPreview.isNullOrBlank()) "无" else "已同步"}

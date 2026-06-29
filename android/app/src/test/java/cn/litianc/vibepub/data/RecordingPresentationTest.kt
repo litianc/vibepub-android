@@ -61,7 +61,9 @@ class RecordingPresentationTest {
         assertEquals("当前状态：正在成文", recording.workflowHelpTitle())
         assertTrue(recording.workflowHelpSummary().contains("5. 文章改写"))
         assertTrue(recording.workflowHelpSummary().contains("第 5/7 步"))
+        assertTrue(recording.workflowHelpSummary().contains("下一步：等待文章标题和正文生成"))
         assertEquals("当前节点：5. 文章改写 · 当前", recording.workflowCurrentNodeLabel())
+        assertTrue(recording.workflowNextActionLabel().contains("等待文章标题和正文生成"))
         assertTrue(recording.workflowCycleLabel().contains("保存录音 → 上传音频 → 云端排队"))
         assertEquals(WorkflowStepState.DONE, steps[0].state)
         assertEquals(WorkflowStepState.DONE, steps[1].state)
@@ -87,6 +89,7 @@ class RecordingPresentationTest {
 
         assertEquals("生成草稿中", drafting.statusLabel())
         assertTrue(drafting.statusDetail().contains("微信公众号草稿"))
+        assertTrue(drafting.workflowNextActionLabel().contains("等待公众号草稿创建"))
         assertEquals("第 6/7 步", drafting.workflowProgressLabel())
         assertEquals(WorkflowStepState.DONE, steps[4].state)
         assertEquals(WorkflowStepState.CURRENT, steps[5].state)
@@ -125,6 +128,7 @@ class RecordingPresentationTest {
 
         assertEquals("已成文", recording.statusLabel())
         assertTrue(recording.statusDetail().contains("等待公众号草稿信息"))
+        assertTrue(recording.workflowNextActionLabel().contains("复制或分享正文"))
         assertEquals("第 6/7 步", recording.workflowProgressLabel())
         assertEquals(WorkflowStepState.DONE, steps[4].state)
         assertEquals(WorkflowStepState.CURRENT, steps[5].state)
@@ -147,6 +151,7 @@ class RecordingPresentationTest {
 
         assertEquals("已成文", recording.statusLabel())
         assertTrue(recording.statusDetail().contains("公众号草稿创建失败"))
+        assertTrue(recording.workflowNextActionLabel().contains("复制正文备用"))
         assertEquals("第 6/7 步", recording.workflowProgressLabel())
         assertEquals(WorkflowStepState.DONE, steps[4].state)
         assertEquals(WorkflowStepState.CURRENT, steps[5].state)
@@ -168,6 +173,7 @@ class RecordingPresentationTest {
 
         assertEquals("草稿已就绪", recording.statusLabel())
         assertTrue(recording.statusDetail().contains("公众号草稿也已准备好"))
+        assertTrue(recording.workflowNextActionLabel().contains("打开公众号草稿"))
         assertEquals("第 7/7 步", recording.workflowProgressLabel())
         assertEquals(WorkflowStepState.DONE, steps[5].state)
         assertEquals(WorkflowStepState.CURRENT, steps[6].state)
@@ -185,6 +191,7 @@ class RecordingPresentationTest {
 
         val steps = recording.workflowSteps()
 
+        assertTrue(recording.workflowNextActionLabel().contains("更新 FILES_TOKEN"))
         assertEquals(WorkflowStepState.DONE, steps[0].state)
         assertEquals(WorkflowStepState.BLOCKED, steps[1].state)
         assertEquals(WorkflowStepState.PENDING, steps[2].state)
@@ -202,6 +209,7 @@ class RecordingPresentationTest {
 
         val steps = recording.workflowSteps()
 
+        assertTrue(recording.workflowNextActionLabel().contains("公众号草稿配置"))
         assertEquals("第 6/7 步", recording.workflowProgressLabel())
         assertEquals(WorkflowStepState.DONE, steps[4].state)
         assertEquals(WorkflowStepState.BLOCKED, steps[5].state)

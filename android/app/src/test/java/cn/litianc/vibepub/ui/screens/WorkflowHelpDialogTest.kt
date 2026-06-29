@@ -7,6 +7,7 @@ import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onNodeWithTag
 import cn.litianc.vibepub.data.RecordingEntity
@@ -42,8 +43,12 @@ class WorkflowHelpDialogTest {
         composeTestRule.onNodeWithText("当前状态说明").assertIsDisplayed()
         composeTestRule.onNodeWithText("当前节点").assertIsDisplayed()
         composeTestRule.onAllNodesWithText("当前节点：4. 语音识别 · 当前", substring = true).assertCountEquals(2)
-        composeTestRule.onNodeWithText("完整流程周期").assertIsDisplayed()
-        composeTestRule.onNodeWithText("保存录音 → 上传音频 → 云端排队 → 语音识别 → 文章改写 → 公众号草稿 → 人工发布确认").assertIsDisplayed()
+        composeTestRule.onNodeWithText("下一步建议").assertIsDisplayed()
+        composeTestRule.onNodeWithText("下一步：等待云端转录；如果长时间没有更新，点同步刷新。").assertIsDisplayed()
+        composeTestRule.onNodeWithText("完整流程周期").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithText("保存录音 → 上传音频 → 云端排队 → 语音识别 → 文章改写 → 公众号草稿 → 人工发布确认")
+            .performScrollTo()
+            .assertIsDisplayed()
         composeTestRule.onAllNodesWithText("语音识别 · 当前").assertCountEquals(1)
         composeTestRule.onAllNodesWithText("文章改写 · 等待").assertCountEquals(1)
         composeTestRule.onAllNodesWithText("公众号草稿 · 等待").assertCountEquals(1)

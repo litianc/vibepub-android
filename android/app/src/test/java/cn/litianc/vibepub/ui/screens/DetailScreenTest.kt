@@ -116,6 +116,7 @@ class DetailScreenTest {
             rawText = "原始识别",
             statusLabel = "已成文",
             statusDetail = "文章已生成，公众号草稿也已准备好。",
+            nextAction = "下一步：打开公众号草稿做最后一眼人工确认，再决定是否发布。",
             workflowNode = "当前节点：6. 公众号草稿 · 已完成",
             workflowCycle = "保存录音 → 上传音频 → 云端排队 → 语音识别 → 文章改写 → 公众号草稿 → 人工发布确认",
             wechatDraftId = "MEDIA_ID_123",
@@ -127,6 +128,7 @@ class DetailScreenTest {
         assertTrue(text.contains("# 整理好的文章"))
         assertTrue(text.contains("- 处理状态：已成文"))
         assertTrue(text.contains("- 状态说明：文章已生成，公众号草稿也已准备好。"))
+        assertTrue(text.contains("- 下一步：打开公众号草稿做最后一眼人工确认，再决定是否发布。"))
         assertTrue(text.contains("- 当前节点：6. 公众号草稿 · 已完成"))
         assertTrue(text.contains("- 完整流程：保存录音 → 上传音频 → 云端排队 → 语音识别 → 文章改写 → 公众号草稿 → 人工发布确认"))
         assertTrue(text.contains("- 公众号草稿：MEDIA_ID_123"))
