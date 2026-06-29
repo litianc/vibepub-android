@@ -16,6 +16,8 @@ Cloudflare Worker API for Android audio uploads.
 `processing_stage`, `wechat_url`, `wechat_draft_id`, and `error_message`.
 `processing_stage` is a narrow progress hint for the current pipeline step:
 `QUEUED`, `ASR`, `REWRITING`, `DRAFTING`, `COMPLETED`, or `FAILED`.
+`DRAFT_FAILED` means the article is ready and consumable but WeChat draft
+creation failed after article generation.
 
 ## Setup
 
@@ -27,3 +29,34 @@ npx wrangler deploy
 ```
 
 The Worker route is configured for `vibepub.litianc.cn`.
+
+## Production Update Checklist
+
+Run validation before deploying:
+
+```bash
+npm run typecheck
+npm test
+```
+
+Apply D1 migrations before or alongside Worker deploys when the Android display
+contract changes:
+
+```bash
+npm run migrate:remote
+npm run deploy
+```
+
+If `/api/recordings` has `COMPLETED` rows with empty `article_title` after a
+schema or Worker deploy, backfill display metadata from existing transcript JSON:
+
+```bash
+FILES_TOKEN=... npm run backfill:recordings
+```
+
+Verify the public contract after deploy:
+
+```bash
+curl -H "Authorization: Bearer $FILES_TOKEN" \
+  https://vibepub.litianc.cn/api/recordings
+```
