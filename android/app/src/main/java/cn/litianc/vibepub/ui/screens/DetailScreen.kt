@@ -224,12 +224,17 @@ fun DetailScreen(
             filename = currentRecording.filename,
             createdAtMs = currentRecording.timestamp,
         )
+        val scrollState = rememberScrollState()
+
+        LaunchedEffect(filename) {
+            scrollState.scrollTo(0)
+        }
 
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
-                .verticalScroll(rememberScrollState())
+                .verticalScroll(scrollState)
                 .padding(horizontal = 16.dp, vertical = 8.dp),
         ) {
             AudioPlayerCard(recording = currentRecording)

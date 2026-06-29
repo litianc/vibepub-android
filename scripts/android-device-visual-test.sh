@@ -733,6 +733,53 @@ dump_current_window() {
   pull_if_exists "$remote_path" "$local_path"
 }
 
+reset_detail_scroll_to_top() {
+  local width height tap_x start_y end_y i bounds
+
+  if [[ -f "$OUT_DIR/window.xml" ]]; then
+    bounds="$(
+      grep -o 'bounds="\[[0-9,]*\]\[[0-9,]*\]"' "$OUT_DIR/window.xml" \
+        | sed 's/bounds="\[\([0-9][0-9]*\),\([0-9][0-9]*\)\]\[\([0-9][0-9]*\),\([0-9][0-9]*\)\]"/\1 \2 \3 \4/' \
+        | awk '
+            {
+              width = $3 - $1
+              height = $4 - $2
+              area = width * height
+              if (area > maxArea) {
+                maxArea = area
+                bestWidth = width
+                bestHeight = height
+              }
+            }
+            END {
+              if (bestWidth > 0 && bestHeight > 0) {
+                print bestWidth, bestHeight
+              }
+            }
+          '
+    )"
+  else
+    bounds=""
+  fi
+
+  if [[ -n "$bounds" ]]; then
+    width="$(printf '%s\n' "$bounds" | awk '{ print $1 }')"
+    height="$(printf '%s\n' "$bounds" | awk '{ print $2 }')"
+  else
+    width="$(screen_width)"
+    height="$(screen_height)"
+  fi
+
+  tap_x=$((width / 2))
+  start_y=$((height * 28 / 100))
+  end_y=$((height * 82 / 100))
+
+  for ((i = 1; i <= 4; i++)); do
+    adb_shell input swipe "$tap_x" "$start_y" "$tap_x" "$end_y" 450 >/dev/null 2>&1 || true
+  done
+  sleep 1
+}
+
 wait_for_detail_assertable() {
   local deadline=$((SECONDS + DETAIL_READY_WAIT_SECONDS))
 
@@ -1112,6 +1159,8 @@ EOF
     adb_shell input tap "$first_item_tap_x" "$first_item_tap_y"
   fi
   sleep "$DETAIL_WAIT_SECONDS"
+  dump_current_window /sdcard/vibepub-window.xml "$OUT_DIR/window.xml"
+  reset_detail_scroll_to_top
   mark_phase "detail_opened"
 
   echo "Capturing detail screenshot..."
