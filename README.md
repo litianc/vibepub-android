@@ -25,6 +25,7 @@ This repo is scoped for internal Android installation first. The Apple-specific 
 
 - `android/` - Kotlin + Jetpack Compose Android app
 - `infra/worker/` - Cloudflare Worker upload API backed by R2
+- `docs/android-product-requirements.md` - Android product requirements and scope
 - `docs/resources-android.md` - external services and remaining account inputs
 - `docs/wechat-setup.md` - WeChat Official Account setup checklist
 - `.github/workflows/android-internal-build.yml` - internal APK build
