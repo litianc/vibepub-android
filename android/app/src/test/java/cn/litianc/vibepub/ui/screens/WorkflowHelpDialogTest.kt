@@ -2,9 +2,9 @@ package cn.litianc.vibepub.ui.screens
 
 import androidx.activity.ComponentActivity
 import androidx.compose.ui.test.assertIsDisplayed
-import androidx.compose.ui.test.assertExists
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onNodeWithTag
@@ -131,10 +131,10 @@ class WorkflowHelpDialogTest {
         composeTestRule.onNodeWithText("第 6/7 步").assertIsDisplayed()
         composeTestRule.onNodeWithTag("ProductionFlowStep-5").assertIsDisplayed()
         composeTestRule.onNodeWithText("文章改写 · 已完成").assertIsDisplayed()
-        composeTestRule.onNodeWithTag("ProductionFlowStep-6").assertExists()
-        composeTestRule.onNodeWithText("公众号草稿 · 当前").assertExists()
-        composeTestRule.onNodeWithTag("ProductionFlowStep-7").assertExists()
-        composeTestRule.onNodeWithText("人工发布确认 · 等待").assertExists()
+        composeTestRule.onAllNodesWithTag("ProductionFlowStep-6").assertCountEquals(1)
+        composeTestRule.onAllNodesWithText("公众号草稿 · 当前").assertCountEquals(1)
+        composeTestRule.onAllNodesWithTag("ProductionFlowStep-7").assertCountEquals(1)
+        composeTestRule.onAllNodesWithText("人工发布确认 · 等待").assertCountEquals(1)
     }
 
     @Test
