@@ -65,7 +65,11 @@ check_pass "adb is installed"
 
 adb start-server >/dev/null
 adb devices -l > "$OUT_DIR/adb-devices.txt"
-device_count="$(awk 'NR > 1 && $2 == "device" { count++ } END { print count + 0 }' "$OUT_DIR/adb-devices.txt")"
+if [[ -n "${ANDROID_SERIAL:-}" ]]; then
+  device_count="$(awk -v serial="$ANDROID_SERIAL" 'NR > 1 && $1 == serial && $2 == "device" { count++ } END { print count + 0 }' "$OUT_DIR/adb-devices.txt")"
+else
+  device_count="$(awk 'NR > 1 && $2 == "device" { count++ } END { print count + 0 }' "$OUT_DIR/adb-devices.txt")"
+fi
 
 if [[ "$device_count" -eq 1 ]]; then
   check_pass "exactly one authorized Android device is connected"

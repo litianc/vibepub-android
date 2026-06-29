@@ -508,7 +508,11 @@ mkdir -p "$OUT_DIR"
 
 echo "Checking connected Android device..."
 adb start-server >/dev/null
-device_count="$(adb devices | awk 'NR > 1 && $2 == "device" { count++ } END { print count + 0 }')"
+if [[ -n "${ANDROID_SERIAL:-}" ]]; then
+  device_count="$(adb devices | awk -v serial="$ANDROID_SERIAL" 'NR > 1 && $1 == serial && $2 == "device" { count++ } END { print count + 0 }')"
+else
+  device_count="$(adb devices | awk 'NR > 1 && $2 == "device" { count++ } END { print count + 0 }')"
+fi
 if [[ "$device_count" -eq 0 ]]; then
   cat >&2 <<EOF
 No authorized Android device found.
@@ -536,13 +540,7 @@ adb devices > "$OUT_DIR/adb-devices.txt"
 adb_shell getprop ro.product.model > "$OUT_DIR/device-model.txt" || true
 adb_shell getprop ro.build.version.release > "$OUT_DIR/android-version.txt" || true
 
-if truthy "$SKIP_INSTALL" && truthy "$RESET_APP_DATA"; then
-  echo "RESET_APP_DATA=true cannot be used with SKIP_INSTALL=true." >&2
-  echo "Install a fresh APK manually first, then rerun with RESET_APP_DATA=false." >&2
-  exit 1
-fi
-
-if truthy "$RESET_APP_DATA"; then
+if truthy "$RESET_APP_DATA" && ! truthy "$SKIP_INSTALL"; then
   echo "Uninstalling existing app for deterministic test run..."
   if ! adb uninstall "$PACKAGE_NAME" > "$OUT_DIR/uninstall-for-reset.txt" 2>&1; then
     if ! grep -q "Unknown package" "$OUT_DIR/uninstall-for-reset.txt"; then

@@ -41,4 +41,5 @@ jobs:
           WECHAT_PROXY: ${{ secrets.WECHAT_PROXY }}
           FILES_TOKEN: ${{ secrets.FILES_TOKEN }}
           PUBLIC_BASE_URL: "https://vibepub.litianc.cn"
+          CLEANUP_PERMANENT_AUDIO_FAILURES: "true"
         run: npm start
