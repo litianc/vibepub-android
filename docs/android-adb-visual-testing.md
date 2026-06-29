@@ -98,6 +98,7 @@ The script will:
 - capture a final screenshot
 - export a UI dump
 - export logcat
+- write `timing.tsv` with phase-level duration data
 
 Evidence is written to:
 
@@ -115,7 +116,8 @@ room-noise flakiness:
 2. The debug APK imports it as one local recording.
 3. The app enqueues the normal upload path.
 4. The standard wrapper waits for the upload to appear in the backend, triggers
-   `mining-job.yml`, and waits for the recording to become `COMPLETED`.
+   `mining-job.yml` with the exact latest recording filename, and waits for the
+   recording to become `COMPLETED`.
 5. ADB captures the home screen, opens the latest recording, captures detail,
    records the screen, and exports logcat.
 
@@ -130,7 +132,7 @@ AUDIO_FILE=/path/to/prepared-audio.wav \
 AUTOMATION_MODE=debug-broadcast \
 DEBUG_AUDIO_MODE=import \
 RESET_APP_DATA=true \
-RECORD_SECONDS=45 \
+RECORD_SECONDS=15 \
 scripts/android-device-visual-test.sh /path/to/app-debug.apk
 ```
 
@@ -147,6 +149,19 @@ scripts/android-device-visual-test.sh /path/to/app-debug.apk
 If you specifically want an acoustic microphone test, set
 `DEBUG_AUDIO_MODE=speaker`, use a quiet room, put the phone near the Mac
 speaker, and make sure the Mac speaker volume is high enough.
+
+For fast UI-only iteration against an already installed APK, skip cloud mining:
+
+```bash
+SKIP_INSTALL=true \
+RESET_APP_DATA=false \
+TRIGGER_MINING_JOB=false \
+scripts/run-android-device-smoke.sh /path/to/app-debug.apk
+```
+
+This keeps real-device import and screenshot evidence but does not require the
+recording-to-WeChat pipeline to finish. Use the default full smoke before
+declaring end-to-end acceptance.
 
 If the default tap coordinates do not match a device and you intentionally use
 `AUTOMATION_MODE=ui-tap`, override them:

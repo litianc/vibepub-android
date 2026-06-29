@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { processAudioText, generateCoverImageBuffer } from '../src/llm.js';
 import { publishDraft } from '../src/wechat.js';
+import { filterTargetFiles } from '../src/index.js';
 
 // Mock dependencies
 vi.mock('../src/llm.js', () => ({
@@ -50,5 +51,19 @@ describe('VibePub Cloud Pipeline', () => {
     
     const mediaId = await publishDraft(mockToken, mockTitle, mockContent, mockBuffer);
     expect(mediaId).toBe("draft-media-id-123");
+  });
+
+  it('should filter mining files by exact target filename', () => {
+    const files = [
+      'inbox/VibePub-2026-06-29-100000-0m30s-Debug-Audio-Import.mp3',
+      'inbox/stale-silence.mp3',
+      'inbox/other.mp3',
+    ];
+
+    expect(filterTargetFiles(files, 'VibePub-2026-06-29-100000-0m30s-Debug-Audio-Import.mp3')).toEqual([
+      'inbox/VibePub-2026-06-29-100000-0m30s-Debug-Audio-Import.mp3',
+    ]);
+    expect(filterTargetFiles(files, undefined)).toEqual(files);
+    expect(filterTargetFiles(files, 'missing.mp3')).toEqual([]);
   });
 });

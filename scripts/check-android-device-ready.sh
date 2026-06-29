@@ -8,6 +8,8 @@ RUN_ID="$(date +'%Y%m%d-%H%M%S')"
 OUT_DIR="${OUT_DIR:-$ROOT_DIR/artifacts/android-device-readiness/$RUN_ID}"
 REQUIRE_TAP="${REQUIRE_TAP:-false}"
 SKIP_INSTALL="${SKIP_INSTALL:-false}"
+CHECK_APK_INSTALL="${CHECK_APK_INSTALL:-true}"
+REQUIRE_UNLOCKED="${REQUIRE_UNLOCKED:-false}"
 
 usage() {
   cat <<EOF
@@ -19,6 +21,11 @@ Environment:
   OUT_DIR       Readiness report directory.
   REQUIRE_TAP   Also require adb input tap support. Default: false.
   SKIP_INSTALL  Skip install check and inspect installed package. Default: false.
+  CHECK_APK_INSTALL
+                Check APK installation/readiness. Set false for a fast
+                device-only preflight. Default: true.
+  REQUIRE_UNLOCKED
+                Fail if the device appears locked. Default: false.
 
 Checks whether a USB-connected Android phone is ready for the VibePub
 real-device smoke lane.
@@ -110,6 +117,20 @@ if [[ "$device_count" -ge 1 ]]; then
   adb shell getprop ro.product.model > "$OUT_DIR/device-model.txt" || true
   adb shell getprop ro.build.version.release > "$OUT_DIR/android-version.txt" || true
   check_pass "device properties captured"
+
+  adb shell input keyevent KEYCODE_WAKEUP >/dev/null 2>&1 || true
+  adb shell dumpsys power > "$OUT_DIR/power.txt" 2>&1 || true
+  adb shell dumpsys window > "$OUT_DIR/window.txt" 2>&1 || true
+  if grep -Eq 'mDreamingLockscreen=true|mShowingLockscreen=true|mInputRestricted=true|isStatusBarKeyguard=true' \
+    "$OUT_DIR/power.txt" "$OUT_DIR/window.txt"; then
+    if truthy "$REQUIRE_UNLOCKED"; then
+      check_fail "device is awake and unlocked"
+    else
+      echo "- [~] device appears locked; unlock it before install/smoke runs" >> "$report"
+    fi
+  else
+    check_pass "device is awake and unlocked"
+  fi
 fi
 
 if adb shell input tap 1 1 > "$OUT_DIR/input-tap.txt" 2>&1; then
@@ -122,7 +143,9 @@ else
   fi
 fi
 
-if [[ -n "$APK_PATH" ]]; then
+if ! truthy "$CHECK_APK_INSTALL"; then
+  echo "- [~] APK install/run-as checks skipped by CHECK_APK_INSTALL=false" >> "$report"
+elif [[ -n "$APK_PATH" ]]; then
   if [[ ! -f "$APK_PATH" ]]; then
     check_fail "APK file exists"
   else

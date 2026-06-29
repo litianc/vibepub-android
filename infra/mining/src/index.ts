@@ -3,6 +3,7 @@ import { transcribeAudioUrl } from "./asr.js";
 import { processAudioText, generateCoverImageBuffer } from "./llm.js";
 import { getAccessToken, publishDraft } from "./wechat.js";
 import path from "path";
+import { pathToFileURL } from "url";
 
 function describeError(error: unknown): Record<string, unknown> {
   if (typeof error !== "object" || error === null) {
@@ -63,6 +64,14 @@ type StatusMetadata = {
   errorMessage?: string;
 };
 
+export function filterTargetFiles(files: string[], targetFilename?: string): string[] {
+  const target = targetFilename?.trim();
+  if (!target) {
+    return files;
+  }
+  return files.filter(fileKey => path.basename(fileKey) === target);
+}
+
 async function updateStatus(filename: string, status: string, metadata: StatusMetadata = {}) {
   const url = `${process.env.PUBLIC_BASE_URL}/api/internal/status`;
   const token = process.env.FILES_TOKEN;
@@ -89,17 +98,27 @@ async function main() {
   console.log("Starting VibePub Mining Job...");
   let failedCount = 0;
   let permanentFailedCount = 0;
+  const targetFilename = process.env.TARGET_FILENAME?.trim();
 
   // 1. Check for new audio files
   console.log("Fetching unprocessed files from R2...");
-  const files = await listUnprocessedFiles();
+  const allFiles = await listUnprocessedFiles();
+  const files = filterTargetFiles(allFiles, targetFilename);
   
   if (files.length === 0) {
-    console.log("No new audio files found. Exiting.");
+    if (targetFilename) {
+      console.log(`No R2 inbox file found for TARGET_FILENAME=${targetFilename}. Exiting.`);
+    } else {
+      console.log("No new audio files found. Exiting.");
+    }
     return;
   }
   
-  console.log(`Found ${files.length} file(s) to process.`);
+  if (targetFilename) {
+    console.log(`Found target file to process: ${targetFilename}`);
+  } else {
+    console.log(`Found ${files.length} file(s) to process.`);
+  }
 
   // 2. Obtain WeChat Access Token early to fail fast if config is wrong
   console.log("Getting WeChat Access Token...");
@@ -218,7 +237,9 @@ async function main() {
   console.log("\nMining Job completed successfully.");
 }
 
-main().catch(err => {
-  console.error("Fatal error in mining job:", err);
-  process.exit(1);
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch(err => {
+    console.error("Fatal error in mining job:", err);
+    process.exit(1);
+  });
+}

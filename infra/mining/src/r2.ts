@@ -26,7 +26,9 @@ export async function listUnprocessedFiles(): Promise<string[]> {
   }
   
   // Audio files uploaded by the app (e.g. .m4a or .mp3)
-  return response.Contents.map(c => c.Key!).filter(k => k.endsWith('.m4a') || k.endsWith('.mp3'));
+  return response.Contents.map(c => c.Key!).filter(k =>
+    k.startsWith('inbox/') && (k.endsWith('.m4a') || k.endsWith('.mp3')),
+  );
 }
 
 export async function downloadFile(key: string): Promise<Buffer> {

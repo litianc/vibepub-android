@@ -19,9 +19,15 @@ The standard test path is:
 7. Enqueue the normal upload path from the app.
 8. Wait for the upload to appear in `/api/recordings`.
 9. Trigger and wait for `mining-job.yml` when `TRIGGER_MINING_JOB=true`.
+   The smoke script passes the latest recording filename to the workflow so the
+   mining job processes only this run's R2 inbox object instead of the whole
+   shared queue.
 10. Reopen the latest recording detail page, then capture screenshots, UI dump,
     and logcat.
 11. Store evidence under `artifacts/android-device-visual/`.
+12. Inspect `timing.tsv` when a run feels slow; it records elapsed and total
+    seconds for install, import, upload/mining, detail assertion, and log
+    collection phases.
 
 Final end-to-end acceptance is stricter than producing visual evidence. Use
 `docs/e2e-acceptance-runbook.md` before declaring the recording-to-transcript
@@ -156,7 +162,7 @@ For the current recording/transcript regression:
 
 ## Standard Command
 
-Recommended one-command smoke test:
+Recommended full end-to-end smoke test:
 
 ```bash
 scripts/run-android-device-smoke.sh
@@ -167,8 +173,23 @@ It loads `secrets/device-test.env` when present, otherwise it falls back to
 latest successful debug APK unless an APK path is passed as the first argument.
 It also runs `scripts/check-android-device-ready.sh` before recording. By
 default it sets `TRIGGER_MINING_JOB=true`, so after the phone upload appears in
-the backend it dispatches `mining-job.yml`, waits for completion, and only then
-asserts the Android detail page.
+the backend it dispatches `mining-job.yml` with `target_filename`, waits for
+completion, and only then asserts the Android detail page. The wrapper no longer
+installs the APK during preflight by default, so the APK is installed at most
+once by the main smoke script.
+
+Fast UI-only iteration, when the APK is already installed and you are not
+verifying ASR/LLM/WeChat:
+
+```bash
+SKIP_INSTALL=true \
+RESET_APP_DATA=false \
+TRIGGER_MINING_JOB=false \
+scripts/run-android-device-smoke.sh /path/to/app-debug.apk
+```
+
+This still imports the prepared audio and captures real device evidence, but it
+does not require the detail page to reach `COMPLETED`.
 
 Check the connected phone without running the full smoke:
 
@@ -196,9 +217,14 @@ AUDIO_FILE="/Users/xyli/Documents/Code/revoice-project/.data/test_clips/speaker_
 AUTOMATION_MODE=debug-broadcast \
 DEBUG_AUDIO_MODE=import \
 RESET_APP_DATA=true \
-RECORD_SECONDS=60 \
+RECORD_SECONDS=15 \
 scripts/android-device-visual-test.sh "$APK_PATH"
 ```
+
+For import-mode automation, the default screen recording length is short because
+the audio fixture is copied into the app rather than played in real time. Use a
+longer `RECORD_SECONDS` only when you are explicitly capturing a manual or
+speaker-based recording flow.
 
 ## Evidence Directory
 
@@ -218,6 +244,7 @@ Important files:
 - `window.xml`
 - `logcat.txt`
 - `checklist.md`
+- `timing.tsv`
 - `latest-recording-filename.txt`
 - `expected-duration-text.txt`
 - `backend-recording-status.txt`
