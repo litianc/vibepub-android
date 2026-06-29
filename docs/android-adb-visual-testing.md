@@ -107,16 +107,16 @@ artifacts/android-device-visual/<timestamp>/
 
 ## Fully Automated Audio Flow
 
-ADB cannot directly inject audio into a physical phone microphone. For real
-device testing, the lightweight approach is acoustic automation:
+The default real-device smoke path uses debug-only audio fixture import. It
+keeps the test visual and end-to-end while avoiding Mac speaker, microphone, and
+room-noise flakiness:
 
-1. ADB starts recording through a debug-only control receiver.
-2. The Mac plays your prepared audio file through the speaker.
-3. The phone microphone records that sound.
-4. ADB stops recording through the debug-only control receiver.
-5. The standard wrapper waits for the upload to appear in the backend, triggers
+1. ADB copies your prepared audio file into the app's private storage.
+2. The debug APK imports it as one local recording.
+3. The app enqueues the normal upload path.
+4. The standard wrapper waits for the upload to appear in the backend, triggers
    `mining-job.yml`, and waits for the recording to become `COMPLETED`.
-6. ADB captures the home screen, opens the first recording, captures detail,
+5. ADB captures the home screen, opens the latest recording, captures detail,
    records the screen, and exports logcat.
 
 Run:
@@ -128,6 +128,7 @@ set +a
 
 AUDIO_FILE=/path/to/prepared-audio.wav \
 AUTOMATION_MODE=debug-broadcast \
+DEBUG_AUDIO_MODE=import \
 RESET_APP_DATA=true \
 RECORD_SECONDS=45 \
 scripts/android-device-visual-test.sh /path/to/app-debug.apk
@@ -143,9 +144,12 @@ AUDIO_FILE=/path/to/prepared-audio.wav \
 scripts/android-device-visual-test.sh /path/to/app-debug.apk
 ```
 
-Use a quiet room, put the phone near the Mac speaker, and make sure the Mac
-speaker volume is high enough. If the default tap coordinates do not match a
-device and you intentionally use `AUTOMATION_MODE=ui-tap`, override them:
+If you specifically want an acoustic microphone test, set
+`DEBUG_AUDIO_MODE=speaker`, use a quiet room, put the phone near the Mac
+speaker, and make sure the Mac speaker volume is high enough.
+
+If the default tap coordinates do not match a device and you intentionally use
+`AUTOMATION_MODE=ui-tap`, override them:
 
 ```bash
 RECORD_TAP_X=610 RECORD_TAP_Y=2390 \

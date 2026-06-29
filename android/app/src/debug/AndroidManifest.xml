@@ -8,6 +8,7 @@
             <intent-filter>
                 <action android:name="cn.litianc.vibepub.DEBUG_START_RECORDING" />
                 <action android:name="cn.litianc.vibepub.DEBUG_STOP_RECORDING" />
+                <action android:name="cn.litianc.vibepub.DEBUG_IMPORT_AUDIO" />
             </intent-filter>
         </receiver>
 

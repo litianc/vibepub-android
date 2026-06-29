@@ -35,7 +35,7 @@ class UploadWorker(
                 readTimeout = 60_000
                 doOutput = true
                 setRequestProperty("Authorization", "Bearer $filesToken")
-                setRequestProperty("Content-Type", "audio/mp4")
+                setRequestProperty("Content-Type", audioContentTypeForFilename(file.name))
                 setRequestProperty("X-File-Name", file.name)
                 setFixedLengthStreamingMode(file.length())
             }

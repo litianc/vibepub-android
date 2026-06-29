@@ -18,6 +18,7 @@ SKIP_INSTALL="${SKIP_INSTALL:-false}"
 START_DELAY_SECONDS="${START_DELAY_SECONDS:-1}"
 POST_STOP_WAIT_SECONDS="${POST_STOP_WAIT_SECONDS:-5}"
 DETAIL_WAIT_SECONDS="${DETAIL_WAIT_SECONDS:-8}"
+DEBUG_AUDIO_MODE="${DEBUG_AUDIO_MODE:-import}"
 TRIGGER_MINING_JOB="${TRIGGER_MINING_JOB:-false}"
 MINING_WORKFLOW_ID="${MINING_WORKFLOW_ID:-mining-job.yml}"
 MINING_WORKFLOW_REF="${MINING_WORKFLOW_REF:-main}"
@@ -28,6 +29,7 @@ FORCE_RECORD_AUDIO_APPOPS="${FORCE_RECORD_AUDIO_APPOPS:-true}"
 WAKE_DEVICE="${WAKE_DEVICE:-true}"
 DEBUG_START_ACTION="cn.litianc.vibepub.DEBUG_START_RECORDING"
 DEBUG_STOP_ACTION="cn.litianc.vibepub.DEBUG_STOP_RECORDING"
+DEBUG_IMPORT_AUDIO_ACTION="cn.litianc.vibepub.DEBUG_IMPORT_AUDIO"
 SCREENRECORD_PID=""
 DETAIL_STATUS="not_checked"
 BACKEND_RECORDING_STATUS=""
@@ -43,14 +45,18 @@ Environment:
   OUT_DIR          Output directory for screenshots, video, logs.
   RECORD_SECONDS  Screen recording length after launch. Default: 20.
   AUDIO_FILE      Optional local audio file. If set, the script automatically
-                  taps record, plays this audio through the Mac speaker, stops
-                  recording, opens the first recording, and captures evidence.
+                  drives the debug APK with this fixture, opens the first
+                  recording, and captures evidence.
   API_BASE_URL    Optional API base URL to inject into app preferences.
   FILES_TOKEN     Optional upload/files token to inject into app preferences.
   RESET_APP_DATA  Set to true to clear app data before the run. Default: false.
   REQUIRE_PREFS_INJECTION
                   Fail if API_BASE_URL/FILES_TOKEN injection fails. Default: true.
   AUTOMATION_MODE debug-broadcast or ui-tap. Default: debug-broadcast.
+  DEBUG_AUDIO_MODE
+                  import or speaker when AUTOMATION_MODE=debug-broadcast.
+                  import pushes AUDIO_FILE into the app and uploads it as one
+                  recording without relying on Mac audio output. Default: import.
   SKIP_INSTALL    Use the APK already installed on the phone. Default: false.
   TRIGGER_MINING_JOB
                   Trigger and wait for GitHub Actions mining-job.yml after the
@@ -90,6 +96,36 @@ require_cmd() {
     echo "Install adb with: brew install --cask android-platform-tools" >&2
     exit 1
   fi
+}
+
+install_apk() {
+  local apk_path="$1"
+
+  if adb install -r "$apk_path" > "$OUT_DIR/install.txt" 2>&1; then
+    return 0
+  fi
+
+  if ! grep -q "INSTALL_FAILED_USER_RESTRICTED" "$OUT_DIR/install.txt"; then
+    cat "$OUT_DIR/install.txt" >&2
+    return 1
+  fi
+
+  cat "$OUT_DIR/install.txt" >&2
+  cat >&2 <<EOF
+
+The phone blocked streamed APK installation from adb.
+Trying the fallback device-side pm install path before giving up.
+EOF
+
+  adb push "$apk_path" /data/local/tmp/vibepub-app-debug.apk \
+    > "$OUT_DIR/install-fallback-push.txt" 2>&1
+  if adb_shell pm install -r -t -g /data/local/tmp/vibepub-app-debug.apk \
+    > "$OUT_DIR/install-fallback-pm.txt" 2>&1; then
+    return 0
+  fi
+
+  cat "$OUT_DIR/install-fallback-pm.txt" >&2
+  return 1
 }
 
 truthy() {
@@ -279,6 +315,28 @@ recording_duration_text_from_debug_status() {
   fi
 
   printf '%d:%02d\n' "$((duration_ms / 60000))" "$(((duration_ms % 60000) / 1000))"
+}
+
+import_audio_fixture_to_app() {
+  local source_file="$1"
+  local source_ext
+  local remote_path
+  source_ext="${source_file##*.}"
+  source_ext="$(printf '%s' "$source_ext" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9')"
+  if [[ -z "$source_ext" || "$source_ext" == "$source_file" ]]; then
+    source_ext="audio"
+  fi
+  remote_path="files/debug-input/audio-fixture.$source_ext"
+
+  echo "Pushing audio fixture into app private storage..." >&2
+  adb push "$source_file" /data/local/tmp/vibepub-audio-fixture \
+    > "$OUT_DIR/debug-audio-push.txt"
+  adb shell "run-as '$PACKAGE_NAME' sh -c 'mkdir -p files/debug-input && cat > \"$remote_path\"' < /data/local/tmp/vibepub-audio-fixture" \
+    > "$OUT_DIR/debug-audio-import-copy.txt" 2>&1
+  adb_shell rm -f /data/local/tmp/vibepub-audio-fixture >/dev/null 2>&1 || true
+
+  printf '%s\n' "$remote_path" > "$OUT_DIR/debug-audio-app-path.txt"
+  printf '%s\n' "$remote_path"
 }
 
 fetch_backend_recording_status() {
@@ -538,8 +596,16 @@ if [[ "$AUTOMATION_MODE" != "debug-broadcast" && "$AUTOMATION_MODE" != "ui-tap" 
   exit 1
 fi
 
+if [[ "$DEBUG_AUDIO_MODE" != "import" && "$DEBUG_AUDIO_MODE" != "speaker" ]]; then
+  echo "Invalid DEBUG_AUDIO_MODE: $DEBUG_AUDIO_MODE" >&2
+  echo "Use import or speaker." >&2
+  exit 1
+fi
+
 if [[ -n "$AUDIO_FILE" ]]; then
-  require_cmd afplay
+  if [[ "$AUTOMATION_MODE" != "debug-broadcast" || "$DEBUG_AUDIO_MODE" == "speaker" ]]; then
+    require_cmd afplay
+  fi
   if [[ ! -f "$AUDIO_FILE" ]]; then
     echo "AUDIO_FILE not found: $AUDIO_FILE" >&2
     exit 1
@@ -610,9 +676,8 @@ if truthy "$SKIP_INSTALL"; then
   }
 else
   echo "Installing APK: $APK_PATH"
-  if ! adb install -r "$APK_PATH" > "$OUT_DIR/install.txt" 2>&1; then
-    cat "$OUT_DIR/install.txt" >&2
-    if grep -q "INSTALL_FAILED_USER_RESTRICTED" "$OUT_DIR/install.txt"; then
+  if ! install_apk "$APK_PATH"; then
+    if [[ -f "$OUT_DIR/install.txt" ]] && grep -q "INSTALL_FAILED_USER_RESTRICTED" "$OUT_DIR/install.txt"; then
       cat >&2 <<EOF
 
 The phone blocked APK installation from adb.
@@ -700,6 +765,9 @@ Automated mode is enabled.
 Mode:
   $AUTOMATION_MODE
 
+Debug audio mode:
+  $DEBUG_AUDIO_MODE
+
 Audio file:
   $AUDIO_FILE
 
@@ -707,17 +775,42 @@ Tap coordinates:
   record:     $record_tap_x,$record_tap_y
   stop:       $stop_tap_x,$stop_tap_y
   first item: $first_item_tap_x,$first_item_tap_y
+EOF
+
+  if [[ "$AUTOMATION_MODE" != "debug-broadcast" || "$DEBUG_AUDIO_MODE" == "speaker" ]]; then
+    cat <<EOF
 
 Keep the phone near the Mac speaker in a quiet room. The app will record what
 the physical phone microphone hears from the Mac speaker.
 EOF
+  fi
 
   adb_shell rm -f /sdcard/vibepub-visual-test.mp4
   adb_shell screenrecord --time-limit "$RECORD_SECONDS" /sdcard/vibepub-visual-test.mp4 >/dev/null 2>&1 &
   SCREENRECORD_PID="$!"
 
   sleep "$START_DELAY_SECONDS"
-  if [[ "$AUTOMATION_MODE" == "debug-broadcast" ]]; then
+  if [[ "$AUTOMATION_MODE" == "debug-broadcast" && "$DEBUG_AUDIO_MODE" == "import" ]]; then
+    wake_device
+    adb_shell am start -n "$PACKAGE_NAME/$ACTIVITY_NAME" > "$OUT_DIR/foreground-before-import.txt" 2>&1 || true
+    wait_for_app_focus
+    local_audio_path="$(import_audio_fixture_to_app "$AUDIO_FILE")"
+    echo "Importing audio fixture through debug broadcast..."
+    adb_shell am broadcast \
+      -a "$DEBUG_IMPORT_AUDIO_ACTION" \
+      -p "$PACKAGE_NAME" \
+      --es audio_path "$local_audio_path" \
+      > "$OUT_DIR/debug-import-broadcast.txt"
+    require_debug_status "IMPORTED|IMPORTED_WITHOUT_UPLOAD_TOKEN" "import"
+    LATEST_RECORDING_FILENAME="$(recording_filename_from_debug_status || true)"
+    EXPECTED_DURATION_TEXT="$(recording_duration_text_from_debug_status || true)"
+    if [[ -n "$LATEST_RECORDING_FILENAME" ]]; then
+      printf '%s\n' "$LATEST_RECORDING_FILENAME" > "$OUT_DIR/latest-recording-filename.txt"
+    fi
+    if [[ -n "$EXPECTED_DURATION_TEXT" ]]; then
+      printf '%s\n' "$EXPECTED_DURATION_TEXT" > "$OUT_DIR/expected-duration-text.txt"
+    fi
+  elif [[ "$AUTOMATION_MODE" == "debug-broadcast" ]]; then
     wake_device
     adb_shell am start -n "$PACKAGE_NAME/$ACTIVITY_NAME" > "$OUT_DIR/foreground-before-recording.txt" 2>&1 || true
     wait_for_app_focus
@@ -730,14 +823,14 @@ EOF
   else
     echo "Tapping record..."
     adb_shell input tap "$record_tap_x" "$record_tap_y"
+    sleep 1
+
+    echo "Playing audio through Mac speaker..."
+    afplay "$AUDIO_FILE"
+    sleep 1
   fi
-  sleep 1
 
-  echo "Playing audio through Mac speaker..."
-  afplay "$AUDIO_FILE"
-  sleep 1
-
-  if [[ "$AUTOMATION_MODE" == "debug-broadcast" ]]; then
+  if [[ "$AUTOMATION_MODE" == "debug-broadcast" && "$DEBUG_AUDIO_MODE" == "speaker" ]]; then
     echo "Stopping recording through debug broadcast..."
     adb_shell am broadcast -a "$DEBUG_STOP_ACTION" -p "$PACKAGE_NAME" > "$OUT_DIR/debug-stop-broadcast.txt"
     require_debug_status "STOPPED|STOPPED_WITHOUT_UPLOAD_TOKEN" "stop"
@@ -749,7 +842,7 @@ EOF
     if [[ -n "$EXPECTED_DURATION_TEXT" ]]; then
       printf '%s\n' "$EXPECTED_DURATION_TEXT" > "$OUT_DIR/expected-duration-text.txt"
     fi
-  else
+  elif [[ "$AUTOMATION_MODE" == "ui-tap" ]]; then
     echo "Tapping stop..."
     adb_shell input tap "$stop_tap_x" "$stop_tap_y"
   fi
@@ -830,6 +923,7 @@ cat > "$OUT_DIR/checklist.md" <<EOF
 - API base URL: \`${API_BASE_URL:-app default}\`
 - Reset app data: \`$RESET_APP_DATA\`
 - Automation mode: \`$AUTOMATION_MODE\`
+- Debug audio mode: \`$DEBUG_AUDIO_MODE\`
 - Skip install: \`$SKIP_INSTALL\`
 - Trigger mining job: \`$TRIGGER_MINING_JOB\`
 - Latest recording filename: \`${LATEST_RECORDING_FILENAME:-not_captured}\`

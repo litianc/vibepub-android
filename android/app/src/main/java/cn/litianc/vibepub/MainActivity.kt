@@ -120,7 +120,7 @@ fun VibePubApp(
                 AppDatabase.getDatabase(context).recordingDao().deleteByFilename(recording.filename)
                 recording.localAudioPath?.let { File(it).delete() }
                 File(context.filesDir, "recordings/${recording.filename}").delete()
-                File(context.filesDir, "recordings/${recording.filename.replace(".m4a", ".json")}").delete()
+                File(context.filesDir, "recordings/${transcriptFileNameForRecording(recording.filename)}").delete()
             }
         },
         onStartRecording = {

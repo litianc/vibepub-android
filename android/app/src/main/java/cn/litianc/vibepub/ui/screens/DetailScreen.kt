@@ -70,6 +70,7 @@ import androidx.compose.ui.unit.sp
 import androidx.media3.common.MediaItem
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.core.content.FileProvider
+import cn.litianc.vibepub.transcriptFileNameForRecording
 import cn.litianc.vibepub.data.AppDatabase
 import cn.litianc.vibepub.data.RecordingEntity
 import cn.litianc.vibepub.data.RecordingStatus
@@ -840,7 +841,7 @@ internal fun buildWeChatDraftAction(
 }
 
 private fun loadLocalTranscript(context: Context, filename: String): JSONObject? {
-    val jsonFile = File(context.filesDir, "recordings/${filename.replace(".m4a", ".json")}")
+    val jsonFile = File(context.filesDir, "recordings/${transcriptFileNameForRecording(filename)}")
     return runCatching {
         if (jsonFile.exists()) JSONObject(jsonFile.readText()) else null
     }.getOrNull()

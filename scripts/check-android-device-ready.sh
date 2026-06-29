@@ -34,6 +34,27 @@ truthy() {
   [[ "${1:-}" == "true" || "${1:-}" == "1" || "${1:-}" == "yes" ]]
 }
 
+adb_shell() {
+  adb shell "$@"
+}
+
+install_apk() {
+  local apk_path="$1"
+
+  if adb install -r -t "$apk_path" > "$OUT_DIR/install.txt" 2>&1; then
+    return 0
+  fi
+
+  if ! grep -q "INSTALL_FAILED_USER_RESTRICTED" "$OUT_DIR/install.txt"; then
+    return 1
+  fi
+
+  adb push "$apk_path" /data/local/tmp/vibepub-app-debug.apk \
+    > "$OUT_DIR/install-fallback-push.txt" 2>&1
+  adb_shell pm install -r -t -g /data/local/tmp/vibepub-app-debug.apk \
+    > "$OUT_DIR/install-fallback-pm.txt" 2>&1
+}
+
 mkdir -p "$OUT_DIR"
 
 failures=0
@@ -105,12 +126,13 @@ if [[ -n "$APK_PATH" ]]; then
       else
         check_fail "package is already installed on the phone"
       fi
-    elif adb install -r -t "$APK_PATH" > "$OUT_DIR/install.txt" 2>&1; then
+    elif install_apk "$APK_PATH"; then
       check_pass "ADB can install the APK"
     else
       check_fail "ADB can install the APK"
       if grep -q "INSTALL_FAILED_USER_RESTRICTED" "$OUT_DIR/install.txt"; then
         echo "  - Enable USB 安装 / Install via USB on the phone." >> "$report"
+        echo "  - Fallback pm install also failed; see install-fallback-pm.txt if present." >> "$report"
       fi
     fi
 

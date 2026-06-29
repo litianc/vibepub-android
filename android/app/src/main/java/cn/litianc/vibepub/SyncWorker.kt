@@ -156,7 +156,7 @@ class SyncWorker(
         val recordings = dao.getAllRecordings()
 
         for (recording in recordings) {
-            val jsonFile = File(dir, recording.filename.replace(".m4a", ".json"))
+            val jsonFile = File(dir, transcriptFileNameForRecording(recording.filename))
             if (!jsonFile.exists()) {
                 try {
                     val encodedFilename = URLEncoder.encode(recording.filename, "UTF-8").replace("+", "%20")

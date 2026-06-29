@@ -12,6 +12,9 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkManager
+import cn.litianc.vibepub.SyncWorker
 import cn.litianc.vibepub.data.AppDatabase
 import cn.litianc.vibepub.ui.screens.DetailScreen
 import cn.litianc.vibepub.ui.theme.VibePubTheme
@@ -33,6 +36,8 @@ class DebugLatestRecordingActivity : ComponentActivity() {
                 var loaded by remember { mutableStateOf(false) }
 
                 LaunchedEffect(Unit) {
+                    WorkManager.getInstance(context)
+                        .enqueue(OneTimeWorkRequestBuilder<SyncWorker>().build())
                     filename = withContext(Dispatchers.IO) {
                         val requestedFilename = intent.getStringExtra(EXTRA_FILENAME).orEmpty()
                         if (requestedFilename.isNotBlank()) {

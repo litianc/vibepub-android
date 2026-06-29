@@ -14,9 +14,9 @@ The standard test path is:
 2. Install it on a USB-connected Android test phone.
 3. Inject test backend settings.
 4. Start screen recording.
-5. Start recording through the debug-only ADB control receiver.
-6. Play a prepared audio sample from the Mac speaker.
-7. Stop recording through the debug-only ADB control receiver.
+5. Copy a prepared audio sample into the debug app's private storage.
+6. Import it as one local recording through the debug-only ADB control receiver.
+7. Enqueue the normal upload path from the app.
 8. Wait for the upload to appear in `/api/recordings`.
 9. Trigger and wait for `mining-job.yml` when `TRIGGER_MINING_JOB=true`.
 10. Reopen the latest recording detail page, then capture screenshots, UI dump,
@@ -44,7 +44,7 @@ Recommended:
 
 - Keep this as a test device, not a personal production phone.
 - Keep it unlocked while tests run.
-- Keep it near the Mac speaker for audio playback tests.
+- For optional `DEBUG_AUDIO_MODE=speaker` runs, keep it near the Mac speaker.
 
 ### 2. A Reliable USB Setup
 
@@ -84,7 +84,9 @@ Current standard sample:
 
 Do not commit private voice samples unless you are comfortable keeping them in
 the repo. If the sample is private, keep it outside the repo and pass it through
-`AUDIO_FILE=/path/to/file.wav`.
+`AUDIO_FILE=/path/to/file.wav`. The default `DEBUG_AUDIO_MODE=import` pushes the
+fixture into the debug app and uploads it as a single recording without using Mac
+audio output.
 
 ### 4. Backend Test Credentials
 
@@ -192,6 +194,7 @@ APK_PATH="$(scripts/download-latest-android-apk.sh)"
 
 AUDIO_FILE="/Users/xyli/Documents/Code/revoice-project/.data/test_clips/speaker_boundary_18_48s.mp3" \
 AUTOMATION_MODE=debug-broadcast \
+DEBUG_AUDIO_MODE=import \
 RESET_APP_DATA=true \
 RECORD_SECONDS=60 \
 scripts/android-device-visual-test.sh "$APK_PATH"
