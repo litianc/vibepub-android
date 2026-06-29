@@ -253,7 +253,7 @@ evaluate_detail_result() {
 
 capture_detail_scroll_evidence() {
   local pages="${DETAIL_SCROLL_PAGES:-3}"
-  local width height tap_x start_y end_y i
+  local width height tap_x start_y end_y i bounds
   local xml_all="$OUT_DIR/window-all.xml"
 
   if [[ ! "$pages" =~ ^[0-9]+$ ]]; then
@@ -263,8 +263,35 @@ capture_detail_scroll_evidence() {
     return 0
   fi
 
-  width="$(screen_width)"
-  height="$(screen_height)"
+  bounds="$(
+    grep -o 'bounds="\[[0-9,]*\]\[[0-9,]*\]"' "$OUT_DIR/window.xml" \
+      | sed 's/bounds="\[\([0-9][0-9]*\),\([0-9][0-9]*\)\]\[\([0-9][0-9]*\),\([0-9][0-9]*\)\]"/\1 \2 \3 \4/' \
+      | awk '
+          {
+            width = $3 - $1
+            height = $4 - $2
+            area = width * height
+            if (area > maxArea) {
+              maxArea = area
+              bestWidth = width
+              bestHeight = height
+            }
+          }
+          END {
+            if (bestWidth > 0 && bestHeight > 0) {
+              print bestWidth, bestHeight
+            }
+          }
+        '
+  )"
+  if [[ -n "$bounds" ]]; then
+    width="$(printf '%s\n' "$bounds" | awk '{ print $1 }')"
+    height="$(printf '%s\n' "$bounds" | awk '{ print $2 }')"
+  else
+    width="$(screen_width)"
+    height="$(screen_height)"
+  fi
+
   tap_x=$((width / 2))
   start_y=$((height * 82 / 100))
   end_y=$((height * 28 / 100))

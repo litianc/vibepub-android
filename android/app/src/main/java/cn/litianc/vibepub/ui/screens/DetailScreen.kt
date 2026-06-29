@@ -130,7 +130,16 @@ fun DetailScreen(
     val recording by recordingFlow.collectAsState(initial = null)
     var transcript by remember(filename) { mutableStateOf<JSONObject?>(null) }
 
-    LaunchedEffect(filename, recording?.status) {
+    LaunchedEffect(
+        filename,
+        recording?.status,
+        recording?.articleTitle,
+        recording?.rawTextPreview,
+        recording?.wechatDraftId,
+        recording?.wechatUrl,
+        recording?.remoteStatusUpdatedAt,
+        recording?.processingStage,
+    ) {
         transcript = loadLocalTranscript(context, filename)
     }
 
