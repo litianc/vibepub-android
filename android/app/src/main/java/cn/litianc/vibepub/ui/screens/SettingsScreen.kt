@@ -70,6 +70,12 @@ import cn.litianc.vibepub.AppPreferences
 import cn.litianc.vibepub.BuildConfig
 import cn.litianc.vibepub.data.AppDatabase
 import cn.litianc.vibepub.data.RecordingEntity
+import cn.litianc.vibepub.data.currentWorkflowStep
+import cn.litianc.vibepub.data.displayTitle
+import cn.litianc.vibepub.data.statusDetail
+import cn.litianc.vibepub.data.statusLabel
+import cn.litianc.vibepub.data.workflowCurrentNodeLabel
+import cn.litianc.vibepub.data.workflowProgressLabel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -401,6 +407,11 @@ internal fun formatDiagnostics(
     recordingCount: Int,
     latest: RecordingEntity?,
 ): String {
+    val latestStep = latest?.currentWorkflowStep()
+    val latestDraftReference = latest?.wechatDraftId
+        ?.ifBlank { latest.wechatUrl.orEmpty() }
+        ?.ifBlank { "无" }
+        ?: "无"
     return """
     App: VibePub $appVersion
     Device ID: $deviceId
@@ -411,7 +422,17 @@ internal fun formatDiagnostics(
     Last sync: $lastSyncText
     Recording count: $recordingCount
     Latest recording: ${latest?.filename ?: "无"}
+    Latest title: ${latest?.displayTitle() ?: "无"}
     Latest status: ${latest?.status ?: "无"}
+    Latest status label: ${latest?.statusLabel() ?: "无"}
+    Latest status detail: ${latest?.statusDetail() ?: "无"}
+    Latest workflow: ${latest?.workflowCurrentNodeLabel() ?: "无"}
+    Latest workflow progress: ${latest?.workflowProgressLabel() ?: "无"}
+    Latest workflow detail: ${latestStep?.detail ?: "无"}
+    Latest remote update: ${latest?.remoteStatusUpdatedAt ?: "无"}
+    Latest article title: ${latest?.articleTitle ?: "无"}
+    Latest raw text: ${if (latest?.rawTextPreview.isNullOrBlank()) "无" else "已同步"}
+    Latest WeChat draft: $latestDraftReference
     Latest error: ${latest?.lastError ?: "无"}
     """.trimIndent()
 }
