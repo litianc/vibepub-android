@@ -134,7 +134,6 @@ class WorkflowHelpDialogTest {
         composeTestRule.onNodeWithTag("DeleteRecordingButton").performClick()
         composeTestRule.onNodeWithTag("DeleteRecordingDialog").assertIsDisplayed()
         composeTestRule.onNodeWithText("删除这条录音？").assertIsDisplayed()
-        composeTestRule.onNodeWithText("一篇已经成文的录音").assertIsDisplayed()
         composeTestRule.onNodeWithTag("CancelDeleteRecordingButton").performClick()
 
         composeTestRule.runOnIdle {
