@@ -1078,13 +1078,48 @@ PY
   adb_shell input tap $coords
 }
 
+largest_window_bounds() {
+  local xml_file="$1"
+
+  if [[ ! -f "$xml_file" ]]; then
+    return 0
+  fi
+
+  grep -o 'bounds="\[[0-9,]*\]\[[0-9,]*\]"' "$xml_file" \
+    | sed 's/bounds="\[\([0-9][0-9]*\),\([0-9][0-9]*\)\]\[\([0-9][0-9]*\),\([0-9][0-9]*\)\]"/\1 \2 \3 \4/' \
+    | awk '
+        {
+          width = $3 - $1
+          height = $4 - $2
+          area = width * height
+          if (area > maxArea) {
+            maxArea = area
+            bestWidth = width
+            bestHeight = height
+          }
+        }
+        END {
+          if (bestWidth > 0 && bestHeight > 0) {
+            print bestWidth, bestHeight
+          }
+        }
+      '
+}
+
 scroll_detail_to_text() {
   local label="$1"
   local max_scrolls="${2:-5}"
-  local width height tap_x start_y end_y i
+  local width height tap_x start_y end_y i bounds
 
-  width="$(screen_width)"
-  height="$(screen_height)"
+  dump_current_window /sdcard/vibepub-action-window.xml "$OUT_DIR/action-window.xml"
+  bounds="$(largest_window_bounds "$OUT_DIR/action-window.xml")"
+  if [[ -n "$bounds" ]]; then
+    width="$(printf '%s\n' "$bounds" | awk '{ print $1 }')"
+    height="$(printf '%s\n' "$bounds" | awk '{ print $2 }')"
+  else
+    width="$(screen_width)"
+    height="$(screen_height)"
+  fi
   tap_x=$((width / 2))
   start_y=$((height * 82 / 100))
   end_y=$((height * 28 / 100))
