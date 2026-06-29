@@ -95,6 +95,10 @@ All gates must pass before declaring the flow complete.
      completed`.
    - `window-all.xml` shows the review card, copy/share/export actions, status
      help entry, expected duration, and no escaped raw HTML tags.
+   - `debug-detail-actions.json` proves the detail page actions are functional:
+     local audio playback advanced past 0 ms, copying article text matched the
+     clipboard, the system share intent was sent, and the export package file
+     was created before launching the share sheet.
    - `logcat.txt` has no obvious upload, sync, transcript, database, or crash
      errors.
 
@@ -118,5 +122,7 @@ All gates must pass before declaring the flow complete.
 - Do not accept a visual smoke run that exits before `Transcript detail status`
   is `completed`.
 - Do not accept a visual smoke run whose `Acceptance status` is not `passed`.
+- Do not accept a run that only proves buttons are visible; playback, clipboard,
+  share, and export behavior must be present in `debug-detail-actions.json`.
 - Do not accept old transcript fixtures or dummy recordings as proof for a new
   recording attempt.

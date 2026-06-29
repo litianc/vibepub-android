@@ -70,6 +70,7 @@ import androidx.compose.ui.unit.sp
 import androidx.media3.common.MediaItem
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.core.content.FileProvider
+import cn.litianc.vibepub.BuildConfig
 import cn.litianc.vibepub.transcriptFileNameForRecording
 import cn.litianc.vibepub.data.AppDatabase
 import cn.litianc.vibepub.data.RecordingEntity
@@ -93,6 +94,7 @@ import cn.litianc.vibepub.ui.theme.PrimaryRed
 import kotlinx.coroutines.delay
 import org.json.JSONObject
 import java.io.File
+import java.security.MessageDigest
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -401,6 +403,7 @@ private fun AudioPlayerCard(recording: RecordingEntity) {
     }
     var isPlaying by remember { mutableStateOf(false) }
     var positionMs by remember { mutableLongStateOf(0L) }
+    var playbackProgressRecorded by remember(audioFile.absolutePath) { mutableStateOf(false) }
     val durationMs = recording.durationMs.coerceAtLeast(0L)
 
     DisposableEffect(player) {
@@ -411,6 +414,14 @@ private fun AudioPlayerCard(recording: RecordingEntity) {
         while (true) {
             isPlaying = player.isPlaying
             positionMs = player.currentPosition.coerceAtLeast(0L)
+            if (!playbackProgressRecorded && player.isPlaying && positionMs > 0L) {
+                recordDebugDetailEvidence(context, "playbackProgress") {
+                    put("positionMs", positionMs)
+                    put("durationMs", durationMs)
+                    put("filename", recording.filename)
+                }
+                playbackProgressRecorded = true
+            }
             delay(300)
         }
     }
@@ -429,8 +440,19 @@ private fun AudioPlayerCard(recording: RecordingEntity) {
                     if (!audioFile.exists()) return@IconButton
                     if (player.isPlaying) {
                         player.pause()
+                        recordDebugDetailEvidence(context, "playbackToggle") {
+                            put("action", "pause")
+                            put("audioExists", audioFile.exists())
+                            put("filename", recording.filename)
+                        }
                     } else {
                         player.play()
+                        recordDebugDetailEvidence(context, "playbackToggle") {
+                            put("action", "play")
+                            put("audioExists", audioFile.exists())
+                            put("filename", recording.filename)
+                            put("durationMs", durationMs)
+                        }
                     }
                     isPlaying = player.isPlaying
                 },
@@ -696,6 +718,18 @@ private fun ActionRow(
 private fun copyToClipboard(context: Context, label: String, text: String) {
     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
     clipboard.setPrimaryClip(ClipData.newPlainText(label, text))
+    val copiedText = clipboard.primaryClip
+        ?.takeIf { it.itemCount > 0 }
+        ?.getItemAt(0)
+        ?.coerceToText(context)
+        ?.toString()
+        .orEmpty()
+    recordDebugDetailEvidence(context, "clipboard") {
+        put("label", label)
+        put("textLength", text.length)
+        put("textSha256", text.sha256())
+        put("clipboardMatches", copiedText == text)
+    }
 }
 
 private fun shareArticle(context: Context, text: String) {
@@ -703,7 +737,21 @@ private fun shareArticle(context: Context, text: String) {
         type = "text/plain"
         putExtra(Intent.EXTRA_TEXT, text)
     }
-    context.startActivity(Intent.createChooser(intent, "分享文章"))
+    runCatching {
+        context.startActivity(Intent.createChooser(intent, "分享文章"))
+    }.onSuccess {
+        recordDebugDetailEvidence(context, "shareArticle") {
+            put("sent", true)
+            put("textLength", text.length)
+            put("textSha256", text.sha256())
+        }
+    }.onFailure { error ->
+        recordDebugDetailEvidence(context, "shareArticle") {
+            put("sent", false)
+            put("error", error.message.orEmpty())
+        }
+        Toast.makeText(context, "无法打开分享面板", Toast.LENGTH_SHORT).show()
+    }
 }
 
 private fun openWechatDraft(context: Context, url: String) {
@@ -727,7 +775,52 @@ private fun shareArticleExport(context: Context, fileName: String, text: String)
         addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         clipData = ClipData.newUri(context.contentResolver, fileName, uri)
     }
-    context.startActivity(Intent.createChooser(intent, "导出文章材料包"))
+    runCatching {
+        context.startActivity(Intent.createChooser(intent, "导出文章材料包"))
+    }.onSuccess {
+        recordDebugDetailEvidence(context, "exportArticle") {
+            put("sent", true)
+            put("fileName", fileName)
+            put("fileExists", exportFile.exists())
+            put("textLength", text.length)
+            put("textSha256", text.sha256())
+        }
+    }.onFailure { error ->
+        recordDebugDetailEvidence(context, "exportArticle") {
+            put("sent", false)
+            put("fileName", fileName)
+            put("error", error.message.orEmpty())
+        }
+        Toast.makeText(context, "无法导出材料包", Toast.LENGTH_SHORT).show()
+    }
+}
+
+private fun recordDebugDetailEvidence(
+    context: Context,
+    key: String,
+    block: JSONObject.() -> Unit,
+) {
+    if (!BuildConfig.DEBUG) return
+
+    runCatching {
+        val file = File(context.filesDir, "debug-detail-actions.json")
+        val root = if (file.exists()) {
+            JSONObject(file.readText())
+        } else {
+            JSONObject()
+        }
+        val entry = JSONObject()
+            .put("timestampMs", System.currentTimeMillis())
+            .apply(block)
+        root.put(key, entry)
+        root.put("updatedAtMs", System.currentTimeMillis())
+        file.writeText(root.toString(2))
+    }
+}
+
+private fun String.sha256(): String {
+    val digest = MessageDigest.getInstance("SHA-256").digest(toByteArray())
+    return digest.joinToString("") { "%02x".format(it) }
 }
 
 internal fun renderArticleText(content: String): String {

@@ -47,6 +47,7 @@ ACCEPTANCE_STATUS="not_checked"
 BACKEND_RECORDING_STATUS=""
 LATEST_RECORDING_FILENAME=""
 EXPECTED_DURATION_TEXT=""
+DETAIL_ACTION_STATUS="not_checked"
 RUN_START_SECONDS="$SECONDS"
 PHASE_START_SECONDS="$SECONDS"
 
@@ -328,6 +329,7 @@ evaluate_acceptance_result() {
   local recordings_file="$OUT_DIR/recordings-api.json"
   local status_file="$OUT_DIR/debug-device-test-status.json"
   local local_recording_file="$OUT_DIR/local-recording-row.json"
+  local detail_actions_file="$OUT_DIR/debug-detail-actions.json"
 
   : > "$report"
 
@@ -495,6 +497,46 @@ if f'text="{expected}"' not in text:
     raise SystemExit(1)
 PY
 
+  check_acceptance "detail actions play audio, copy article, share, and export" \
+    python3 - "$detail_actions_file" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+if not path.exists():
+    raise SystemExit(1)
+data = json.loads(path.read_text())
+
+playback = data.get("playbackProgress") or {}
+if int(playback.get("positionMs") or 0) <= 0:
+    raise SystemExit(1)
+if int(playback.get("durationMs") or 0) <= 0:
+    raise SystemExit(1)
+
+clipboard = data.get("clipboard") or {}
+if clipboard.get("label") != "VibePub 正文":
+    raise SystemExit(1)
+if not clipboard.get("clipboardMatches"):
+    raise SystemExit(1)
+if int(clipboard.get("textLength") or 0) < 80:
+    raise SystemExit(1)
+
+share = data.get("shareArticle") or {}
+if share.get("sent") is not True:
+    raise SystemExit(1)
+if int(share.get("textLength") or 0) < 80:
+    raise SystemExit(1)
+
+export = data.get("exportArticle") or {}
+if export.get("sent") is not True:
+    raise SystemExit(1)
+if export.get("fileExists") is not True:
+    raise SystemExit(1)
+if int(export.get("textLength") or 0) < 80:
+    raise SystemExit(1)
+PY
+
   if (( failures == 0 )); then
     ACCEPTANCE_STATUS="passed"
     return 0
@@ -595,6 +637,11 @@ supports_adb_tap() {
 read_debug_status() {
   adb_cmd shell "run-as '$PACKAGE_NAME' cat files/debug-device-test-status.json" \
     > "$OUT_DIR/debug-device-test-status.json" 2>/dev/null
+}
+
+read_debug_detail_actions() {
+  adb_cmd shell "run-as '$PACKAGE_NAME' cat files/debug-detail-actions.json" \
+    > "$OUT_DIR/debug-detail-actions.json" 2>/dev/null
 }
 
 require_debug_status() {
@@ -988,6 +1035,133 @@ dump_current_window() {
   local local_path="$2"
   adb_shell uiautomator dump "$remote_path" >/dev/null 2>&1 || true
   pull_if_exists "$remote_path" "$local_path"
+}
+
+tap_text_center_in_xml() {
+  local label="$1"
+  local xml_file="$2"
+  local coords
+
+  if [[ ! -f "$xml_file" ]]; then
+    return 1
+  fi
+
+  coords="$(python3 - "$xml_file" "$label" <<'PY'
+import re
+import sys
+import xml.etree.ElementTree as ET
+from pathlib import Path
+
+xml_file = Path(sys.argv[1])
+label = sys.argv[2]
+root = ET.fromstring(xml_file.read_text(errors="ignore"))
+
+for node in root.iter("node"):
+    if node.attrib.get("text") != label and node.attrib.get("content-desc") != label:
+        continue
+    bounds = node.attrib.get("bounds", "")
+    match = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", bounds)
+    if not match:
+        continue
+    left, top, right, bottom = map(int, match.groups())
+    print((left + right) // 2, (top + bottom) // 2)
+    raise SystemExit(0)
+
+raise SystemExit(1)
+PY
+)"
+
+  if [[ -z "$coords" ]]; then
+    return 1
+  fi
+
+  adb_shell input tap $coords
+}
+
+scroll_detail_to_text() {
+  local label="$1"
+  local max_scrolls="${2:-5}"
+  local width height tap_x start_y end_y i
+
+  width="$(screen_width)"
+  height="$(screen_height)"
+  tap_x=$((width / 2))
+  start_y=$((height * 82 / 100))
+  end_y=$((height * 28 / 100))
+
+  for ((i = 0; i <= max_scrolls; i++)); do
+    dump_current_window /sdcard/vibepub-action-window.xml "$OUT_DIR/action-window.xml"
+    if [[ -f "$OUT_DIR/action-window.xml" ]] && grep -q "text=\"$label\"\\|content-desc=\"$label\"" "$OUT_DIR/action-window.xml"; then
+      return 0
+    fi
+    adb_shell input swipe "$tap_x" "$start_y" "$tap_x" "$end_y" 450 >/dev/null 2>&1 || true
+    sleep 0.7
+  done
+
+  return 1
+}
+
+bring_detail_to_foreground() {
+  if [[ -n "$LATEST_RECORDING_FILENAME" ]]; then
+    adb_shell am start \
+      -n "$PACKAGE_NAME/.debug.DebugLatestRecordingActivity" \
+      --es filename "$LATEST_RECORDING_FILENAME" \
+      > "$OUT_DIR/foreground-detail-after-action.txt" 2>&1 || true
+  else
+    adb_shell am start -n "$PACKAGE_NAME/.debug.DebugLatestRecordingActivity" \
+      > "$OUT_DIR/foreground-detail-after-action.txt" 2>&1 || true
+  fi
+  sleep 0.8
+}
+
+exercise_detail_actions() {
+  local share_or_export_opened=false
+
+  if [[ -z "$AUDIO_FILE" ]]; then
+    return 0
+  fi
+
+  echo "Exercising detail actions..."
+  reset_detail_scroll_to_top
+  dump_current_window /sdcard/vibepub-action-window.xml "$OUT_DIR/action-window.xml"
+  if tap_text_center_in_xml "Play" "$OUT_DIR/action-window.xml"; then
+    sleep 1.4
+  fi
+
+  if scroll_detail_to_text "复制标题"; then
+    tap_text_center_in_xml "复制标题" "$OUT_DIR/action-window.xml" || true
+    sleep 0.4
+  fi
+
+  if scroll_detail_to_text "复制正文"; then
+    tap_text_center_in_xml "复制正文" "$OUT_DIR/action-window.xml" || true
+    sleep 0.4
+  fi
+
+  if scroll_detail_to_text "分享"; then
+    tap_text_center_in_xml "分享" "$OUT_DIR/action-window.xml" || true
+    sleep 1
+    dump_current_window /sdcard/vibepub-share-window.xml "$OUT_DIR/share-window.xml"
+    share_or_export_opened=true
+    adb_shell input keyevent KEYCODE_BACK >/dev/null 2>&1 || true
+    sleep 0.6
+    bring_detail_to_foreground
+  fi
+
+  if scroll_detail_to_text "导出材料包"; then
+    tap_text_center_in_xml "导出材料包" "$OUT_DIR/action-window.xml" || true
+    sleep 1
+    dump_current_window /sdcard/vibepub-export-window.xml "$OUT_DIR/export-window.xml"
+    share_or_export_opened=true
+    adb_shell input keyevent KEYCODE_BACK >/dev/null 2>&1 || true
+    sleep 0.6
+    bring_detail_to_foreground
+  fi
+
+  read_debug_detail_actions || true
+  if [[ "$share_or_export_opened" == true ]]; then
+    mark_phase "detail_actions_exercised"
+  fi
 }
 
 reset_detail_scroll_to_top() {
@@ -1435,6 +1609,8 @@ EOF
   fi
   mark_phase "detail_assertion_checked"
 
+  exercise_detail_actions
+
   wait "$SCREENRECORD_PID" || true
   SCREENRECORD_PID=""
   mark_phase "screenrecord_finished"
@@ -1509,6 +1685,7 @@ cat > "$OUT_DIR/checklist.md" <<EOF
 - Backend recording status: \`${BACKEND_RECORDING_STATUS:-not_checked}\`
 - Mining workflow run: \`$(if [[ -f "$OUT_DIR/mining-run-url.txt" ]]; then cat "$OUT_DIR/mining-run-url.txt"; else printf 'not_run'; fi)\`
 - Acceptance status: \`$ACCEPTANCE_STATUS\`
+- Detail action evidence: \`debug-detail-actions.json\`
 
 Review:
 
@@ -1517,6 +1694,7 @@ Review:
 - [ ] \`02-after-record.png\` or \`final.png\` shows only one new recording for one recording attempt.
 - [ ] No duplicate 0-second rows appear for the same time.
 - [ ] \`03-detail.png\` or \`final.png\` shows transcript/article content after processing finishes.
+- [ ] \`debug-detail-actions.json\` shows playback progress and copy/share/export actions.
 - [ ] \`logcat.txt\` has no obvious upload/sync/transcript errors.
 
 Automated assertion:
