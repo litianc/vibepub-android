@@ -109,4 +109,49 @@ class WorkflowHelpDialogTest {
         composeTestRule.onNodeWithTag("WorkflowHelpButton").assertIsDisplayed()
         composeTestRule.onAllNodesWithText("云端正在进行语音识别。").assertCountEquals(0)
     }
+
+    @Test
+    fun productionFlowCardShowsVisibleDraftingTimeline() {
+        composeTestRule.setContent {
+            ProductionFlowCard(
+                recording = RecordingEntity(
+                    filename = "VibePub-test.m4a",
+                    durationMs = 42_000L,
+                    timestamp = 1L,
+                    status = RecordingStatus.PROCESSING.value,
+                    processingStage = "DRAFTING",
+                ),
+            )
+        }
+
+        composeTestRule.onNodeWithTag("ProductionFlowCard").assertIsDisplayed()
+        composeTestRule.onNodeWithText("生产流程").assertIsDisplayed()
+        composeTestRule.onNodeWithText("当前：6. 公众号草稿 · 当前").assertIsDisplayed()
+        composeTestRule.onNodeWithText("第 6/7 步").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("ProductionFlowStep-5").assertIsDisplayed()
+        composeTestRule.onNodeWithText("文章改写 · 已完成").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("ProductionFlowStep-6").assertIsDisplayed()
+        composeTestRule.onNodeWithText("公众号草稿 · 当前").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("ProductionFlowStep-7").assertIsDisplayed()
+        composeTestRule.onNodeWithText("人工发布确认 · 等待").assertIsDisplayed()
+    }
+
+    @Test
+    fun productionFlowCardShowsBlockedStepForUploadFailure() {
+        composeTestRule.setContent {
+            ProductionFlowCard(
+                recording = RecordingEntity(
+                    filename = "VibePub-test.m4a",
+                    durationMs = 42_000L,
+                    timestamp = 1L,
+                    status = RecordingStatus.FAILED.value,
+                    lastError = "FILES_TOKEN 无效",
+                ),
+            )
+        }
+
+        composeTestRule.onNodeWithText("当前：2. 上传音频 · 需处理").assertIsDisplayed()
+        composeTestRule.onNodeWithText("上传音频 · 需处理").assertIsDisplayed()
+        composeTestRule.onNodeWithText("云端排队 · 等待").assertIsDisplayed()
+    }
 }

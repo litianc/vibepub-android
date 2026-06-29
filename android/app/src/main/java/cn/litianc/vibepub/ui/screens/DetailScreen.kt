@@ -71,13 +71,18 @@ import androidx.core.content.FileProvider
 import cn.litianc.vibepub.data.AppDatabase
 import cn.litianc.vibepub.data.RecordingEntity
 import cn.litianc.vibepub.data.RecordingStatus
+import cn.litianc.vibepub.data.RecordingWorkflowStep
+import cn.litianc.vibepub.data.WorkflowStepState
 import cn.litianc.vibepub.data.asRecordingStatus
+import cn.litianc.vibepub.data.currentWorkflowStep
+import cn.litianc.vibepub.data.displayLabel
 import cn.litianc.vibepub.data.displayTitle
 import cn.litianc.vibepub.data.durationLabel
 import cn.litianc.vibepub.data.statusDetail
 import cn.litianc.vibepub.data.statusLabel
 import cn.litianc.vibepub.data.workflowProgressFraction
 import cn.litianc.vibepub.data.workflowProgressLabel
+import cn.litianc.vibepub.data.workflowSteps
 import cn.litianc.vibepub.ui.theme.PrimaryRed
 import kotlinx.coroutines.delay
 import org.json.JSONObject
@@ -206,6 +211,8 @@ fun DetailScreen(
                 onRefresh = onRefresh,
                 onRetryUpload = { onRetryUpload(currentRecording) },
             )
+            Spacer(modifier = Modifier.height(16.dp))
+            ProductionFlowCard(recording = currentRecording)
             Spacer(modifier = Modifier.height(22.dp))
 
             Text(
@@ -244,6 +251,91 @@ fun DetailScreen(
                 lineHeight = 28.sp,
             )
             Spacer(modifier = Modifier.height(40.dp))
+        }
+    }
+}
+
+@Composable
+internal fun ProductionFlowCard(recording: RecordingEntity) {
+    val currentStep = recording.currentWorkflowStep()
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("ProductionFlowCard"),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        shape = RoundedCornerShape(12.dp),
+    ) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Default.TaskAlt,
+                    contentDescription = null,
+                    tint = PrimaryRed,
+                    modifier = Modifier.size(20.dp),
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("生产流程", fontWeight = FontWeight.SemiBold)
+                    Text(
+                        "当前：${currentStep.number}. ${currentStep.title} · ${currentStep.state.displayLabel()}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Text(
+                    recording.workflowProgressLabel(),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+
+            recording.workflowSteps().forEach { step ->
+                ProductionFlowStepRow(step = step)
+            }
+        }
+    }
+}
+
+@Composable
+private fun ProductionFlowStepRow(step: RecordingWorkflowStep) {
+    val color = workflowStepColor(step.state)
+
+    Row(
+        modifier = Modifier.testTag("ProductionFlowStep-${step.number}"),
+        verticalAlignment = Alignment.Top,
+    ) {
+        Box(
+            modifier = Modifier
+                .padding(top = 2.dp)
+                .size(24.dp)
+                .clip(CircleShape)
+                .background(color),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = step.number.toString(),
+                color = Color.White,
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.Bold,
+            )
+        }
+        Spacer(modifier = Modifier.width(10.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                "${step.title} · ${step.state.displayLabel()}",
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            Text(
+                step.detail,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }
@@ -689,5 +781,14 @@ private fun statusColor(status: RecordingStatus): Color {
         RecordingStatus.FAILED -> Color(0xFFC62828)
         RecordingStatus.UPLOADING, RecordingStatus.UPLOADED, RecordingStatus.PROCESSING -> Color(0xFFF9A825)
         RecordingStatus.LOCAL_RECORDED -> Color(0xFF607D8B)
+    }
+}
+
+private fun workflowStepColor(state: WorkflowStepState): Color {
+    return when (state) {
+        WorkflowStepState.DONE -> Color(0xFF2E7D32)
+        WorkflowStepState.CURRENT -> Color(0xFFF9A825)
+        WorkflowStepState.BLOCKED -> Color(0xFFC62828)
+        WorkflowStepState.PENDING -> Color(0xFF9E9E9E)
     }
 }
