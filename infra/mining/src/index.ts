@@ -51,7 +51,16 @@ function shouldCleanupPermanentAudioFailures(): boolean {
   );
 }
 
-async function updateStatus(filename: string, status: string) {
+type StatusMetadata = {
+  rawText?: string;
+  articleTitle?: string;
+  articleContent?: string;
+  wechatUrl?: string;
+  wechatDraftId?: string;
+  errorMessage?: string;
+};
+
+async function updateStatus(filename: string, status: string, metadata: StatusMetadata = {}) {
   const url = `${process.env.PUBLIC_BASE_URL}/api/internal/status`;
   const token = process.env.FILES_TOKEN;
   if (!url || !token) {
@@ -65,7 +74,7 @@ async function updateStatus(filename: string, status: string) {
         "Content-Type": "application/json",
         "Authorization": `Bearer ${token}`
       },
-      body: JSON.stringify({ filename, status })
+      body: JSON.stringify({ filename, status, ...metadata })
     });
     if (!res.ok) console.error(`Status update failed: ${res.status} ${await res.text()}`);
   } catch (e) {
@@ -121,7 +130,7 @@ async function main() {
       if (!rawText || rawText.trim().length === 0) {
         console.log("Transcript was empty. Skipping.");
         await deleteFile(fileKey);
-        await updateStatus(filename, "FAILED");
+        await updateStatus(filename, "FAILED", { errorMessage: "转录结果为空" });
         continue;
       }
 
@@ -145,20 +154,26 @@ async function main() {
       await uploadTranscript(jsonKey, JSON.stringify({
         rawText,
         articleTitle: article.title,
-        articleContent: article.content
+        articleContent: article.content,
+        wechatDraftId: mediaId,
       }));
       
       // 7. Cleanup: Delete processed file from R2
       console.log("Cleaning up processed file from R2...");
       await deleteFile(fileKey);
       
-      await updateStatus(filename, "COMPLETED");
+      await updateStatus(filename, "COMPLETED", {
+        rawText,
+        articleTitle: article.title,
+        articleContent: article.content,
+        wechatDraftId: mediaId,
+      });
       
       console.log(`Finished processing: ${fileKey}`);
     } catch (e) {
       console.error(`Failed to process ${fileKey}:`, describeError(e));
       const filename = path.basename(fileKey);
-      await updateStatus(filename, "FAILED");
+      await updateStatus(filename, "FAILED", { errorMessage: getErrorMessage(e).slice(0, 500) });
 
       if (isPermanentAudioFailure(e) && shouldCleanupPermanentAudioFailures()) {
         console.warn(`Deleting permanently invalid audio file from R2 inbox: ${fileKey}`);

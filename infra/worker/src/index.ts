@@ -180,30 +180,115 @@ async function listRecordings(env: Env): Promise<Response> {
   const userId = "default_user";
   try {
     const { results } = await env.DB.prepare(
-      `SELECT id, filename, status, created_at, updated_at FROM recordings WHERE user_id = ? ORDER BY created_at DESC LIMIT 100`
+      `
+      SELECT
+        id,
+        filename,
+        status,
+        created_at,
+        updated_at,
+        article_title,
+        substr(raw_text, 1, 120) AS raw_text_preview,
+        wechat_url,
+        wechat_draft_id,
+        error_message
+      FROM recordings
+      WHERE user_id = ?
+      ORDER BY created_at DESC
+      LIMIT 100
+      `
     )
     .bind(userId)
     .all();
 
     return json({ recordings: results });
   } catch (dbErr: any) {
-    console.error("Failed to fetch from D1:", dbErr);
-    return json({ error: "database_error", details: dbErr.message }, 500);
+    const message = String(dbErr?.message || "");
+    if (!message.includes("no such column")) {
+      console.error("Failed to fetch from D1:", dbErr);
+      return json({ error: "database_error", details: dbErr.message }, 500);
+    }
+
+    const { results } = await env.DB.prepare(
+      `SELECT id, filename, status, created_at, updated_at FROM recordings WHERE user_id = ? ORDER BY created_at DESC LIMIT 100`
+    )
+    .bind(userId)
+    .all();
+    return json({
+      recordings: results.map((recording: any) => ({
+        ...recording,
+        article_title: null,
+        raw_text_preview: null,
+        wechat_url: null,
+        wechat_draft_id: null,
+        error_message: null,
+      })),
+    });
   }
 }
 
 async function updateStatus(request: Request, env: Env): Promise<Response> {
   try {
     const body: any = await request.json();
-    const { filename, status } = body;
+    const {
+      filename,
+      status,
+      rawText,
+      articleTitle,
+      articleContent,
+      wechatUrl,
+      wechatDraftId,
+      errorMessage,
+    } = body;
     if (!filename || !status) {
       return json({ error: "missing_fields" }, 400);
     }
-    await env.DB.prepare(
-      `UPDATE recordings SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ? AND filename = ?`
-    )
-    .bind(status, "default_user", filename)
-    .run();
+    const statement = `
+      UPDATE recordings
+      SET
+        status = ?,
+        raw_text = COALESCE(?, raw_text),
+        article_title = COALESCE(?, article_title),
+        article_content = COALESCE(?, article_content),
+        wechat_url = COALESCE(?, wechat_url),
+        wechat_draft_id = COALESCE(?, wechat_draft_id),
+        error_message = COALESCE(?, error_message),
+        updated_at = CURRENT_TIMESTAMP
+      WHERE user_id = ? AND filename = ?
+      `;
+    try {
+      await env.DB.prepare(statement)
+        .bind(
+          status,
+          rawText || null,
+          articleTitle || null,
+          articleContent || null,
+          wechatUrl || null,
+          wechatDraftId || null,
+          errorMessage || null,
+          "default_user",
+          filename,
+        )
+        .run();
+    } catch (dbErr: any) {
+      const message = String(dbErr?.message || "");
+      if (!message.includes("no such column")) throw dbErr;
+      await env.DB.prepare(
+      `
+      UPDATE recordings
+      SET
+        status = ?,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE user_id = ? AND filename = ?
+      `
+      )
+        .bind(
+          status,
+          "default_user",
+          filename,
+        )
+        .run();
+    }
     return json({ ok: true });
   } catch (e: any) {
     console.error("Failed to update status:", e);

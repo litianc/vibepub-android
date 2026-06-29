@@ -2,6 +2,7 @@ package cn.litianc.vibepub.debug
 
 import android.os.Bundle
 import android.content.Intent
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.material3.Text
@@ -51,6 +52,12 @@ class DebugLatestRecordingActivity : ComponentActivity() {
                     filename != null -> DetailScreen(
                         filename = filename.orEmpty(),
                         onBackClick = { finish() },
+                        onRefresh = {
+                            Toast.makeText(context, "Debug detail refresh requested", Toast.LENGTH_SHORT).show()
+                        },
+                        onRetryUpload = {
+                            Toast.makeText(context, "Debug detail retry requested", Toast.LENGTH_SHORT).show()
+                        },
                     )
                     loaded -> Text("No recordings available")
                     else -> Text("Loading latest recording...")

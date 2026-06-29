@@ -13,6 +13,10 @@ class AppPreferences(context: Context) {
         get() = prefs.getString(KEY_FILES_TOKEN, "") ?: ""
         set(value) = prefs.edit().putString(KEY_FILES_TOKEN, value.trim()).apply()
 
+    var lastSyncAtMs: Long
+        get() = prefs.getLong(KEY_LAST_SYNC_AT_MS, 0L)
+        set(value) = prefs.edit().putLong(KEY_LAST_SYNC_AT_MS, value).apply()
+
     var transcribedFiles: Set<String>
         get() = prefs.getStringSet(KEY_TRANSCRIBED_FILES, emptySet()) ?: emptySet()
         set(value) = prefs.edit().putStringSet(KEY_TRANSCRIBED_FILES, value).apply()
@@ -28,5 +32,6 @@ class AppPreferences(context: Context) {
         private const val KEY_API_BASE_URL = "api_base_url"
         private const val KEY_FILES_TOKEN = "files_token"
         private const val KEY_TRANSCRIBED_FILES = "transcribed_files"
+        private const val KEY_LAST_SYNC_AT_MS = "last_sync_at_ms"
     }
 }

@@ -10,6 +10,8 @@ CREATE TABLE recordings (
     article_title TEXT,
     article_content TEXT,
     wechat_url TEXT,
+    wechat_draft_id TEXT,
+    error_message TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(user_id, filename)

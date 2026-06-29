@@ -13,5 +13,11 @@ data class RecordingEntity(
     val filename: String,
     val durationMs: Long,
     val timestamp: Long,
-    val status: String // "UPLOADING", "UPLOADED", "TRANSCRIBED"
+    val status: String,
+    val articleTitle: String? = null,
+    val rawTextPreview: String? = null,
+    val localAudioPath: String? = null,
+    val remoteStatusUpdatedAt: String? = null,
+    val lastError: String? = null,
+    val completedAt: Long? = null,
 )

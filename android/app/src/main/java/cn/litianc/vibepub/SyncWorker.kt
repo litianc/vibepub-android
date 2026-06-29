@@ -11,6 +11,8 @@ import java.net.URL
 import java.net.URLEncoder
 import cn.litianc.vibepub.data.AppDatabase
 import cn.litianc.vibepub.data.RecordingEntity
+import cn.litianc.vibepub.data.RecordingStatus
+import cn.litianc.vibepub.data.asRecordingStatus
 import org.json.JSONObject
 
 class SyncWorker(
@@ -48,16 +50,51 @@ class SyncWorker(
                         val filename = recObj.optString("filename")
                         if (filename.isBlank()) continue
                         val existing = dao.getRecordingByFilename(filename)
-                        val d1Status = recObj.optString("status", "UPLOADED")
+                        val d1Status = recObj.optString("status", RecordingStatus.UPLOADED.value)
+                            .asRecordingStatus()
+                        val remoteUpdatedAt = recObj.optString("updated_at", "").blankToNull()
+                        val articleTitle = recObj.optString("article_title", "")
+                            .ifBlank { recObj.optString("articleTitle", "") }
+                            .blankToNull()
+                        val rawTextPreview = recObj.optString("raw_text_preview", "")
+                            .ifBlank { recObj.optString("rawTextPreview", "") }
+                            .blankToNull()
+                        val lastError = recObj.optString("error_message", "")
+                            .ifBlank { recObj.optString("lastError", "") }
+                            .blankToNull()
                         if (existing == null) {
                             dao.insert(RecordingEntity(
                                 filename = filename,
                                 durationMs = 0L,
                                 timestamp = System.currentTimeMillis(), // use current for now
-                                status = d1Status
+                                status = d1Status.value,
+                                articleTitle = articleTitle,
+                                rawTextPreview = rawTextPreview,
+                                remoteStatusUpdatedAt = remoteUpdatedAt,
+                                lastError = lastError,
+                                completedAt = if (d1Status == RecordingStatus.COMPLETED) System.currentTimeMillis() else null,
                             ))
-                        } else if (existing.status != d1Status && existing.status != "COMPLETED") {
-                            dao.insert(existing.copy(status = d1Status))
+                        } else if (existing.status != RecordingStatus.COMPLETED.value || d1Status == RecordingStatus.COMPLETED) {
+                            val nextStatus = when {
+                                d1Status == RecordingStatus.COMPLETED -> RecordingStatus.COMPLETED
+                                existing.status == RecordingStatus.COMPLETED.value -> RecordingStatus.COMPLETED
+                                d1Status == RecordingStatus.UPLOADED && existing.status == RecordingStatus.UPLOADING.value -> RecordingStatus.PROCESSING
+                                else -> d1Status
+                            }
+                            dao.insert(
+                                existing.copy(
+                                    status = nextStatus.value,
+                                    articleTitle = articleTitle ?: existing.articleTitle,
+                                    rawTextPreview = rawTextPreview ?: existing.rawTextPreview,
+                                    remoteStatusUpdatedAt = remoteUpdatedAt ?: existing.remoteStatusUpdatedAt,
+                                    lastError = lastError,
+                                    completedAt = if (nextStatus == RecordingStatus.COMPLETED) {
+                                        existing.completedAt ?: System.currentTimeMillis()
+                                    } else {
+                                        existing.completedAt
+                                    },
+                                ),
+                            )
                         }
                     }
                 }
@@ -88,9 +125,23 @@ class SyncWorker(
                         val jsonText = connection.inputStream.bufferedReader().use { it.readText() }
                         dir.mkdirs()
                         jsonFile.writeText(jsonText)
-                        dao.insert(recording.copy(status = "COMPLETED"))
+                        val transcript = JSONObject(jsonText)
+                        dao.insert(
+                            recording.copy(
+                                status = RecordingStatus.COMPLETED.value,
+                                articleTitle = transcript.optString("articleTitle", "").ifBlank { "转录完成" },
+                                rawTextPreview = transcript.optString("rawText", "")
+                                    .take(80)
+                                    .blankToNull()
+                                    ?: recording.rawTextPreview,
+                                lastError = null,
+                                completedAt = recording.completedAt ?: System.currentTimeMillis(),
+                            ),
+                        )
                     } else if (responseCode == 404) {
-                        // Not ready yet
+                        if (recording.status == RecordingStatus.UPLOADED.value || recording.status == RecordingStatus.UPLOADING.value) {
+                            dao.insert(recording.copy(status = RecordingStatus.PROCESSING.value))
+                        }
                     } else {
                         allSuccess = false
                     }
@@ -98,13 +149,30 @@ class SyncWorker(
                     allSuccess = false
                 }
             } else {
-                // Ensure room reflects COMPLETED
-                if (recording.status != "COMPLETED") {
-                    dao.insert(recording.copy(status = "COMPLETED"))
+                if (recording.status != RecordingStatus.COMPLETED.value) {
+                    val transcript = runCatching { JSONObject(jsonFile.readText()) }.getOrNull()
+                    val transcriptTitle = transcript?.optString("articleTitle", "").orEmpty().blankToNull()
+                    val transcriptPreview = transcript?.optString("rawText", "").orEmpty().take(80).blankToNull()
+                    dao.insert(
+                        recording.copy(
+                            status = RecordingStatus.COMPLETED.value,
+                            articleTitle = transcriptTitle ?: recording.articleTitle,
+                            rawTextPreview = transcriptPreview ?: recording.rawTextPreview,
+                            lastError = null,
+                            completedAt = recording.completedAt ?: System.currentTimeMillis(),
+                        ),
+                    )
                 }
             }
         }
 
-        if (allSuccess) Result.success() else Result.retry()
+        if (allSuccess) {
+            prefs.lastSyncAtMs = System.currentTimeMillis()
+            Result.success()
+        } else {
+            Result.retry()
+        }
     }
+
+    private fun String.blankToNull(): String? = trim().ifBlank { null }
 }

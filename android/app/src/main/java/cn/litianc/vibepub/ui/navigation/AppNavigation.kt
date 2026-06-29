@@ -13,16 +13,14 @@ import cn.litianc.vibepub.ui.screens.DetailScreen
 import cn.litianc.vibepub.ui.screens.HomeScreen
 import cn.litianc.vibepub.ui.screens.RecordingScreen
 import cn.litianc.vibepub.ui.screens.SettingsScreen
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.flow
-import java.io.File
-
 import cn.litianc.vibepub.data.AppDatabase
 
 @Composable
 fun AppNavigation(
     preferences: AppPreferences,
+    onRefresh: () -> Unit,
+    onRetryUpload: (RecordingEntity) -> Unit,
+    onDeleteRecording: (RecordingEntity) -> Unit,
     onStartRecording: () -> Unit,
     onStopRecording: () -> Unit
 ) {
@@ -38,6 +36,9 @@ fun AppNavigation(
             HomeScreen(
                 recordingsFlow = recordingsFlow,
                 onSettingsClick = { navController.navigate("settings") },
+                onRefresh = onRefresh,
+                onRetryUpload = onRetryUpload,
+                onDeleteRecording = onDeleteRecording,
                 onRecordClick = {
                     onStartRecording()
                     navController.navigate("recording")
@@ -67,7 +68,9 @@ fun AppNavigation(
             val filename = backStackEntry.arguments?.getString("filename") ?: ""
             DetailScreen(
                 filename = filename,
-                onBackClick = { navController.popBackStack() }
+                onBackClick = { navController.popBackStack() },
+                onRefresh = onRefresh,
+                onRetryUpload = onRetryUpload,
             )
         }
     }

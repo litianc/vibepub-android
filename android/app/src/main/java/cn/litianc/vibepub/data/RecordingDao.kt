@@ -60,8 +60,19 @@ interface RecordingDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(recording: RecordingEntity): Long
 
+    @Query("DELETE FROM recordings WHERE filename = :filename")
+    suspend fun deleteByFilename(filename: String): Int
+
     @Query("SELECT * FROM recordings WHERE id = :id LIMIT 1")
     suspend fun getRecordingById(id: Int): RecordingEntity?
+
+    @Query("""
+        SELECT * FROM recordings
+        WHERE filename = :filename
+        ORDER BY durationMs DESC, timestamp ASC, id ASC
+        LIMIT 1
+    """)
+    fun observeRecordingByFilename(filename: String): Flow<RecordingEntity?>
     
     @Query("""
         SELECT * FROM recordings

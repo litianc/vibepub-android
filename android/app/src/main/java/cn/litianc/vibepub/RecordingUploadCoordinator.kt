@@ -8,6 +8,10 @@ import androidx.work.WorkManager
 import androidx.work.workDataOf
 import cn.litianc.vibepub.data.AppDatabase
 import cn.litianc.vibepub.data.RecordingEntity
+import cn.litianc.vibepub.data.RecordingStatus
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import java.io.File
 
 object RecordingUploadCoordinator {
@@ -15,7 +19,7 @@ object RecordingUploadCoordinator {
         context: Context,
         file: File,
         durationMs: Long,
-        status: String = "UPLOADED",
+        status: String = RecordingStatus.LOCAL_RECORDED.value,
     ) {
         AppDatabase.getDatabase(context)
             .recordingDao()
@@ -25,6 +29,8 @@ object RecordingUploadCoordinator {
                     durationMs = durationMs,
                     timestamp = System.currentTimeMillis(),
                     status = status,
+                    localAudioPath = file.absolutePath,
+                    lastError = null,
                 ),
             )
     }
@@ -37,7 +43,22 @@ object RecordingUploadCoordinator {
     ): Boolean {
         val token = preferences.filesToken
         if (token.isBlank()) {
+            markUploadBlocked(context, file.name, "请先在设置中配置 FILES_TOKEN")
             return false
+        }
+
+        CoroutineScope(Dispatchers.IO).launch {
+            val dao = AppDatabase.getDatabase(context).recordingDao()
+            val existing = dao.getRecordingByFilename(file.name)
+            if (existing != null && existing.status != RecordingStatus.COMPLETED.value) {
+                dao.insert(
+                    existing.copy(
+                        status = RecordingStatus.UPLOADING.value,
+                        localAudioPath = existing.localAudioPath ?: file.absolutePath,
+                        lastError = null,
+                    ),
+                )
+            }
         }
 
         val requestBuilder = OneTimeWorkRequestBuilder<UploadWorker>()
@@ -60,5 +81,20 @@ object RecordingUploadCoordinator {
 
         WorkManager.getInstance(context).enqueue(requestBuilder.build())
         return true
+    }
+
+    private fun markUploadBlocked(context: Context, filename: String, error: String) {
+        CoroutineScope(Dispatchers.IO).launch {
+            val dao = AppDatabase.getDatabase(context).recordingDao()
+            val existing = dao.getRecordingByFilename(filename)
+            if (existing != null) {
+                dao.insert(
+                    existing.copy(
+                        status = RecordingStatus.FAILED.value,
+                        lastError = error,
+                    ),
+                )
+            }
+        }
     }
 }
