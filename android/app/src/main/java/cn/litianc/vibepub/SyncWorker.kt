@@ -29,6 +29,15 @@ internal fun classifySyncHttpFailure(responseCode: Int): SyncHttpFailure {
     }
 }
 
+internal fun shouldMarkSyncConfigurationFailure(status: RecordingStatus, onlyActive: Boolean): Boolean {
+    return status != RecordingStatus.COMPLETED && (
+        !onlyActive ||
+            status == RecordingStatus.UPLOADING ||
+            status == RecordingStatus.UPLOADED ||
+            status == RecordingStatus.PROCESSING
+    )
+}
+
 class SyncWorker(
     appContext: Context,
     params: WorkerParameters,
@@ -38,12 +47,17 @@ class SyncWorker(
         val apiBaseUrl = prefs.apiBaseUrl
         val filesToken = prefs.filesToken
 
-        if (filesToken.isBlank()) {
-            return@withContext Result.failure()
-        }
-
         val dir = File(applicationContext.filesDir, "recordings")
         val dao = AppDatabase.getDatabase(applicationContext).recordingDao()
+        var allSuccess = true
+
+        if (filesToken.isBlank()) {
+            markSyncAuthFailure(
+                message = "请先在设置中配置 FILES_TOKEN，无法同步云端状态",
+                onlyActive = true,
+            )
+            return@withContext Result.failure()
+        }
 
         // Sync missing recordings from D1
         try {
@@ -128,14 +142,15 @@ class SyncWorker(
                     onlyActive = true,
                 )
                 return@withContext Result.failure()
+            } else {
+                allSuccess = false
             }
         } catch (e: Exception) {
             e.printStackTrace()
+            allSuccess = false
         }
 
         val recordings = dao.getAllRecordings()
-
-        var allSuccess = true
 
         for (recording in recordings) {
             val jsonFile = File(dir, recording.filename.replace(".m4a", ".json"))
@@ -226,11 +241,7 @@ class SyncWorker(
         val dao = AppDatabase.getDatabase(applicationContext).recordingDao()
         dao.getAllRecordings().forEach { recording ->
             val status = recording.status.asRecordingStatus()
-            val shouldMark = !onlyActive ||
-                status == RecordingStatus.UPLOADING ||
-                status == RecordingStatus.UPLOADED ||
-                status == RecordingStatus.PROCESSING
-            if (shouldMark && status != RecordingStatus.COMPLETED) {
+            if (shouldMarkSyncConfigurationFailure(status, onlyActive)) {
                 dao.insert(
                     recording.copy(
                         status = RecordingStatus.FAILED.value,
