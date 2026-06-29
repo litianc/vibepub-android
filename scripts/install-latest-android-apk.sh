@@ -24,8 +24,8 @@ Environment:
   REQUIRE_UNLOCKED  Fail fast if the device appears locked. Default: true.
   OUT_DIR           Evidence directory. Default: artifacts/android-install/<time>.
 
-When no APK path is passed, the script downloads the latest successful Android
-Build & Release APK via scripts/download-latest-android-apk.sh.
+When no APK path is passed, the script downloads the latest internal GitHub
+Release APK via scripts/download-latest-android-apk.sh.
 EOF
 }
 

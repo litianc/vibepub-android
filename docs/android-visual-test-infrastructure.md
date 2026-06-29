@@ -35,9 +35,9 @@ For a quick install-only dogfood update, use:
 ANDROID_SERIAL=192.168.31.72:42327 scripts/install-latest-android-apk.sh
 ```
 
-That command downloads the latest successful debug APK when no path is passed,
-runs the same readiness checks, installs the APK, launches VibePub, and writes
-evidence under `artifacts/android-install/`.
+That command downloads the latest internal GitHub Release APK when no path is
+passed, runs the same readiness checks, installs the APK, launches VibePub, and
+writes evidence under `artifacts/android-install/`.
 
 Final end-to-end acceptance is stricter than producing visual evidence. Use
 `docs/e2e-acceptance-runbook.md` before declaring the recording-to-transcript

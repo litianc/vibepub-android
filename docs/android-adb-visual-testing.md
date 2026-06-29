@@ -69,6 +69,10 @@ To download the latest successful debug APK automatically:
 scripts/download-latest-android-apk.sh
 ```
 
+By default this downloads the latest internal GitHub Release asset, matching
+`artifacts/MANIFEST.md`. To pull the latest successful workflow artifact
+instead, use `SOURCE=artifact scripts/download-latest-android-apk.sh`.
+
 To download the latest APK, install it on the connected device, and launch the
 app:
 
