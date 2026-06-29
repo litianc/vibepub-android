@@ -9,6 +9,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -21,6 +22,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -39,20 +41,30 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import cn.litianc.vibepub.ui.theme.PrimaryRed
 import kotlinx.coroutines.delay
+import kotlin.math.ln
 import kotlin.math.roundToInt
 
 @Composable
 fun RecordingScreen(
+    amplitudeProvider: () -> Int = { 0 },
     onStopClick: () -> Unit,
 ) {
     var secondsElapsed by remember { mutableIntStateOf(0) }
     var isStopping by remember { mutableStateOf(false) }
+    var amplitudeLevel by remember { mutableStateOf(0f) }
     val minSeconds = 2
 
     LaunchedEffect(Unit) {
         while (true) {
             delay(1000)
             secondsElapsed++
+        }
+    }
+
+    LaunchedEffect(amplitudeProvider) {
+        while (true) {
+            amplitudeLevel = normalizeAmplitude(amplitudeProvider())
+            delay(100)
         }
     }
 
@@ -98,11 +110,24 @@ fun RecordingScreen(
 
         Spacer(modifier = Modifier.height(28.dp))
 
-        RecordingWave(secondsElapsed = secondsElapsed)
+        RecordingWave(
+            secondsElapsed = secondsElapsed,
+            amplitudeLevel = amplitudeLevel,
+        )
 
         Spacer(modifier = Modifier.height(16.dp))
+        LinearProgressIndicator(
+            progress = { amplitudeLevel.coerceIn(0f, 1f) },
+            modifier = Modifier
+                .fillMaxWidth(0.58f)
+                .height(4.dp)
+                .testTag("RecordingAmplitudeMeter"),
+            color = PrimaryRed,
+            trackColor = MaterialTheme.colorScheme.surfaceVariant,
+        )
+        Spacer(modifier = Modifier.height(8.dp))
         Text(
-            text = if (secondsElapsed < minSeconds) "再说一小会儿就可以保存" else "停止后会自动上传并同步成文",
+            text = recordingHint(secondsElapsed, minSeconds, amplitudeLevel),
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             style = MaterialTheme.typography.bodySmall,
         )
@@ -154,7 +179,10 @@ fun RecordingScreen(
 }
 
 @Composable
-private fun RecordingWave(secondsElapsed: Int) {
+private fun RecordingWave(
+    secondsElapsed: Int,
+    amplitudeLevel: Float,
+) {
     val transition = rememberInfiniteTransition(label = "recording-wave")
     val pulse by transition.animateFloat(
         initialValue = 0.3f,
@@ -172,14 +200,29 @@ private fun RecordingWave(secondsElapsed: Int) {
     ) {
         repeat(17) { index ->
             val base = 8 + ((index * 7 + secondsElapsed * 3) % 26)
+            val reactiveLift = 1f + amplitudeLevel.coerceIn(0f, 1f) * (0.45f + (index % 5) * 0.08f)
             val animated = if (index % 2 == 0) pulse else 1f - (pulse * 0.35f)
             Box(
                 modifier = Modifier
                     .width(4.dp)
-                    .height((base * (0.65f + animated * 0.45f)).roundToInt().dp)
+                    .height((base * reactiveLift * (0.65f + animated * 0.45f)).roundToInt().dp)
                     .clip(CircleShape)
-                    .background(PrimaryRed.copy(alpha = 0.28f + animated * 0.38f)),
+                    .background(PrimaryRed.copy(alpha = 0.24f + animated * 0.28f + amplitudeLevel * 0.26f)),
             )
         }
+    }
+}
+
+internal fun normalizeAmplitude(amplitude: Int): Float {
+    if (amplitude <= 0) return 0f
+    val normalized = ln(1.0 + amplitude.coerceAtMost(32_767).toDouble()) / ln(1.0 + 32_767.0)
+    return normalized.toFloat().coerceIn(0f, 1f)
+}
+
+internal fun recordingHint(secondsElapsed: Int, minSeconds: Int, amplitudeLevel: Float): String {
+    return when {
+        secondsElapsed < minSeconds -> "再说一小会儿就可以保存"
+        amplitudeLevel < 0.08f -> "音量偏低，可以靠近麦克风一点"
+        else -> "停止后会自动上传并同步成文"
     }
 }

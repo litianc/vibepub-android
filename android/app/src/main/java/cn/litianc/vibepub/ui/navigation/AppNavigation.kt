@@ -22,7 +22,8 @@ fun AppNavigation(
     onRetryUpload: (RecordingEntity) -> Unit,
     onDeleteRecording: (RecordingEntity) -> Unit,
     onStartRecording: () -> Unit,
-    onStopRecording: () -> Unit
+    onStopRecording: () -> Unit,
+    currentRecordingAmplitude: () -> Int,
 ) {
     val navController = rememberNavController()
     val context = LocalContext.current
@@ -51,6 +52,7 @@ fun AppNavigation(
         
         composable("recording") {
             RecordingScreen(
+                amplitudeProvider = currentRecordingAmplitude,
                 onStopClick = {
                     onStopRecording()
                     navController.popBackStack()

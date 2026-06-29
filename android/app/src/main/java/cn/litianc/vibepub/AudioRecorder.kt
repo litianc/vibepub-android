@@ -58,6 +58,12 @@ class AudioRecorder(private val context: Context) {
         return file
     }
 
+    fun currentAmplitude(): Int {
+        return runCatching {
+            recorder?.maxAmplitude ?: 0
+        }.getOrDefault(0)
+    }
+
     suspend fun stop(): Pair<File, Long> = withContext(Dispatchers.IO) {
         val file = checkNotNull(outputFile) { "No recording is active" }
         val activeRecorder = checkNotNull(recorder) { "No recording is active" }

@@ -150,6 +150,7 @@ fun VibePubApp(
                     }
                 }
             }
-        }
+        },
+        currentRecordingAmplitude = recorder::currentAmplitude,
     )
 }
