@@ -20,7 +20,9 @@ class AppPreferences(context: Context) {
 
     var lastSyncAtMs: Long
         get() = prefs.getLong(KEY_LAST_SYNC_AT_MS, 0L)
-        set(value) = prefs.edit().putLong(KEY_LAST_SYNC_AT_MS, value).apply()
+        set(value) {
+            prefs.edit().putLong(KEY_LAST_SYNC_AT_MS, value).commit()
+        }
 
     fun lastSyncAtMsFlow(): Flow<Long> = callbackFlow {
         val listener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->

@@ -9,6 +9,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
@@ -51,6 +52,6 @@ class AppHealthCheckTest {
 
         prefs.lastSyncAtMs = 123_456L
 
-        assertEquals(123_456L, update.await())
+        assertEquals(123_456L, withTimeout(2_000L) { update.await() })
     }
 }
