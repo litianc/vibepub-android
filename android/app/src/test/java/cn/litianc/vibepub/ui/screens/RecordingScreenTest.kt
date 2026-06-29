@@ -18,4 +18,11 @@ class RecordingScreenTest {
         assertEquals("音量偏低，可以靠近麦克风一点", recordingHint(secondsElapsed = 3, minSeconds = 2, amplitudeLevel = 0.02f))
         assertEquals("停止后会自动上传并同步成文", recordingHint(secondsElapsed = 3, minSeconds = 2, amplitudeLevel = 0.5f))
     }
+
+    @Test
+    fun stopButtonRequiresMinimumDurationAndIgnoresDuplicateStops() {
+        assertEquals(false, canStopRecording(secondsElapsed = 1, minSeconds = 2, isStopping = false))
+        assertEquals(true, canStopRecording(secondsElapsed = 2, minSeconds = 2, isStopping = false))
+        assertEquals(false, canStopRecording(secondsElapsed = 5, minSeconds = 2, isStopping = true))
+    }
 }

@@ -31,6 +31,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -41,14 +42,16 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import cn.litianc.vibepub.ui.theme.PrimaryRed
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlin.math.ln
 import kotlin.math.roundToInt
 
 @Composable
 fun RecordingScreen(
     amplitudeProvider: () -> Int = { 0 },
-    onStopClick: () -> Unit,
+    onStopClick: suspend () -> Boolean,
 ) {
+    val scope = rememberCoroutineScope()
     var secondsElapsed by remember { mutableIntStateOf(0) }
     var isStopping by remember { mutableStateOf(false) }
     var amplitudeLevel by remember { mutableStateOf(0f) }
@@ -71,7 +74,7 @@ fun RecordingScreen(
     val minutes = secondsElapsed / 60
     val seconds = secondsElapsed % 60
     val timeString = "%02d:%02d".format(minutes, seconds)
-    val canStop = secondsElapsed >= minSeconds && !isStopping
+    val canStop = canStopRecording(secondsElapsed, minSeconds, isStopping)
 
     Column(
         modifier = Modifier
@@ -139,7 +142,12 @@ fun RecordingScreen(
                 onClick = {
                     if (!canStop) return@Button
                     isStopping = true
-                    onStopClick()
+                    scope.launch {
+                        val shouldLeave = onStopClick()
+                        if (!shouldLeave) {
+                            isStopping = false
+                        }
+                    }
                 },
                 enabled = canStop,
                 modifier = Modifier
@@ -225,4 +233,8 @@ internal fun recordingHint(secondsElapsed: Int, minSeconds: Int, amplitudeLevel:
         amplitudeLevel < 0.08f -> "音量偏低，可以靠近麦克风一点"
         else -> "停止后会自动上传并同步成文"
     }
+}
+
+internal fun canStopRecording(secondsElapsed: Int, minSeconds: Int, isStopping: Boolean): Boolean {
+    return secondsElapsed >= minSeconds && !isStopping
 }

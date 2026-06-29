@@ -69,6 +69,13 @@ To download the latest successful debug APK automatically:
 scripts/download-latest-android-apk.sh
 ```
 
+To download the latest APK, install it on the connected device, and launch the
+app:
+
+```bash
+ANDROID_SERIAL=192.168.31.72:42327 scripts/install-latest-android-apk.sh
+```
+
 For the standard VibePub smoke test, prefer:
 
 ```bash

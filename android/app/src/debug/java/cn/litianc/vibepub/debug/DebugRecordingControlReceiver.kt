@@ -75,7 +75,7 @@ private object DebugRecordingHarness {
         val (file, durationMs) = activeRecorder.stop()
         recorder = null
 
-        RecordingUploadCoordinator.saveRecording(context, file, durationMs)
+        RecordingUploadCoordinator.saveRecording(context, file, durationMs, minDurationMs = 0L)
 
         writeStatus(
             context = context,
@@ -110,7 +110,7 @@ private object DebugRecordingHarness {
         val destination = nextImportedRecordingFile(context, source, durationMs)
         source.copyTo(destination, overwrite = false)
 
-        RecordingUploadCoordinator.saveRecording(context, destination, durationMs)
+        RecordingUploadCoordinator.saveRecording(context, destination, durationMs, minDurationMs = 0L)
 
         writeStatus(
             context = context,

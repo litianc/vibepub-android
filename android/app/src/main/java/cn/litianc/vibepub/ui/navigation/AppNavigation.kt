@@ -23,8 +23,8 @@ fun AppNavigation(
     onRefresh: () -> Unit,
     onRetryUpload: (RecordingEntity) -> Unit,
     onDeleteRecording: (RecordingEntity) -> Unit,
-    onStartRecording: () -> Unit,
-    onStopRecording: () -> Unit,
+    onStartRecording: () -> Boolean,
+    onStopRecording: suspend () -> Boolean,
     currentRecordingAmplitude: () -> Int,
 ) {
     val navController = rememberNavController()
@@ -47,8 +47,9 @@ fun AppNavigation(
                 onRetryUpload = onRetryUpload,
                 onDeleteRecording = onDeleteRecording,
                 onRecordClick = {
-                    onStartRecording()
-                    navController.navigate("recording")
+                    if (onStartRecording()) {
+                        navController.navigate("recording")
+                    }
                 },
                 onRecordingClick = { recording ->
                     navController.navigate("detail/${Uri.encode(recording.filename)}")
@@ -60,8 +61,12 @@ fun AppNavigation(
             RecordingScreen(
                 amplitudeProvider = currentRecordingAmplitude,
                 onStopClick = {
-                    onStopRecording()
-                    navController.popBackStack()
+                    if (onStopRecording()) {
+                        navController.popBackStack()
+                        true
+                    } else {
+                        false
+                    }
                 }
             )
         }

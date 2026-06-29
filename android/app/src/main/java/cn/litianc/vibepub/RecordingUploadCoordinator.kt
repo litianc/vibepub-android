@@ -15,12 +15,20 @@ import kotlinx.coroutines.launch
 import java.io.File
 
 object RecordingUploadCoordinator {
+    const val MIN_RECORDING_DURATION_MS = 2_000L
+
     suspend fun saveRecording(
         context: Context,
         file: File,
         durationMs: Long,
         status: String = RecordingStatus.LOCAL_RECORDED.value,
-    ) {
+        minDurationMs: Long = MIN_RECORDING_DURATION_MS,
+    ): Boolean {
+        if (!shouldSaveRecording(file, durationMs, minDurationMs)) {
+            file.delete()
+            return false
+        }
+
         AppDatabase.getDatabase(context)
             .recordingDao()
             .insert(
@@ -33,6 +41,15 @@ object RecordingUploadCoordinator {
                     lastError = null,
                 ),
             )
+        return true
+    }
+
+    fun shouldSaveRecording(
+        file: File,
+        durationMs: Long,
+        minDurationMs: Long = MIN_RECORDING_DURATION_MS,
+    ): Boolean {
+        return durationMs >= minDurationMs && file.exists() && file.length() > 0L
     }
 
     fun enqueueUpload(
