@@ -14,6 +14,9 @@ import cn.litianc.vibepub.data.RecordingEntity
 import cn.litianc.vibepub.data.RecordingStatus
 import cn.litianc.vibepub.data.asRecordingStatus
 import org.json.JSONObject
+import java.text.SimpleDateFormat
+import java.util.Locale
+import java.util.TimeZone
 
 internal enum class SyncHttpFailure {
     AUTH,
@@ -36,6 +39,31 @@ internal fun shouldMarkSyncConfigurationFailure(status: RecordingStatus, onlyAct
             status == RecordingStatus.UPLOADED ||
             status == RecordingStatus.PROCESSING
     )
+}
+
+internal fun parseRemoteRecordingCreatedAt(createdAt: String?): Long? {
+    val value = createdAt?.trim().orEmpty()
+    if (value.isBlank()) return null
+
+    val patterns = listOf(
+        "yyyy-MM-dd HH:mm:ss",
+        "yyyy-MM-dd'T'HH:mm:ss'Z'",
+        "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'",
+    )
+    return patterns.firstNotNullOfOrNull { pattern ->
+        runCatching {
+            SimpleDateFormat(pattern, Locale.US).apply {
+                timeZone = TimeZone.getTimeZone("UTC")
+            }.parse(value)?.time
+        }.getOrNull()
+    }
+}
+
+internal fun parseDurationMsFromRecordingFilename(filename: String): Long? {
+    val match = Regex("""-(\d+)m(\d+)s(?:-|\.|$)""").find(filename) ?: return null
+    val minutes = match.groupValues[1].toLongOrNull() ?: return null
+    val seconds = match.groupValues[2].toLongOrNull() ?: return null
+    return ((minutes * 60) + seconds) * 1_000
 }
 
 class SyncWorker(
@@ -81,6 +109,11 @@ class SyncWorker(
                         val existing = dao.getRecordingByFilename(filename)
                         val d1Status = recObj.optString("status", RecordingStatus.UPLOADED.value)
                             .asRecordingStatus()
+                        val remoteCreatedAtMs = parseRemoteRecordingCreatedAt(recObj.optString("created_at", ""))
+                        val fallbackDurationMs = recObj.optLong("duration_ms", -1L)
+                            .takeIf { it > 0L }
+                            ?: recObj.optLong("durationMs", -1L).takeIf { it > 0L }
+                            ?: parseDurationMsFromRecordingFilename(filename)
                         val remoteUpdatedAt = recObj.optString("updated_at", "").blankToNull()
                         val articleTitle = recObj.optString("article_title", "")
                             .ifBlank { recObj.optString("articleTitle", "") }
@@ -100,8 +133,8 @@ class SyncWorker(
                         if (existing == null) {
                             dao.insert(RecordingEntity(
                                 filename = filename,
-                                durationMs = 0L,
-                                timestamp = System.currentTimeMillis(), // use current for now
+                                durationMs = fallbackDurationMs ?: 0L,
+                                timestamp = remoteCreatedAtMs ?: System.currentTimeMillis(),
                                 status = d1Status.value,
                                 articleTitle = articleTitle,
                                 rawTextPreview = rawTextPreview,
@@ -122,6 +155,12 @@ class SyncWorker(
                             dao.insert(
                                 existing.copy(
                                     status = nextStatus.value,
+                                    durationMs = if (existing.durationMs > 0L) existing.durationMs else fallbackDurationMs ?: 0L,
+                                    timestamp = when {
+                                        existing.localAudioPath.isNullOrBlank() && remoteCreatedAtMs != null -> remoteCreatedAtMs
+                                        existing.timestamp > 0L -> existing.timestamp
+                                        else -> remoteCreatedAtMs ?: existing.timestamp
+                                    },
                                     articleTitle = articleTitle ?: existing.articleTitle,
                                     rawTextPreview = rawTextPreview ?: existing.rawTextPreview,
                                     remoteStatusUpdatedAt = remoteUpdatedAt ?: existing.remoteStatusUpdatedAt,

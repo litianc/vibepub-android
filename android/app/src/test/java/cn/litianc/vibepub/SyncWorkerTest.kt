@@ -5,6 +5,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.time.Instant
 
 class SyncWorkerTest {
     @Test
@@ -38,5 +39,25 @@ class SyncWorkerTest {
     fun canMarkAllNonCompletedRecordingsWhenCallerRequestsBroadFailure() {
         assertTrue(shouldMarkSyncConfigurationFailure(RecordingStatus.LOCAL_RECORDED, onlyActive = false))
         assertFalse(shouldMarkSyncConfigurationFailure(RecordingStatus.COMPLETED, onlyActive = false))
+    }
+
+    @Test
+    fun parsesD1RecordingCreatedAtAsUtc() {
+        val expected = Instant.parse("2026-06-29T13:04:45Z").toEpochMilli()
+
+        assertEquals(expected, parseRemoteRecordingCreatedAt("2026-06-29 13:04:45"))
+        assertEquals(expected, parseRemoteRecordingCreatedAt("2026-06-29T13:04:45Z"))
+    }
+
+    @Test
+    fun parsesDurationFromRecordingFilenameFallback() {
+        assertEquals(
+            30_000L,
+            parseDurationMsFromRecordingFilename("VibePub-2026-06-29-210444-0m30s-Debug-Audio-Import.mp3"),
+        )
+        assertEquals(
+            6_000L,
+            parseDurationMsFromRecordingFilename("VibePub-2026-06-29-160846-0m6s-Mon-Afternoon-Beijing-Chaoyang.m4a"),
+        )
     }
 }

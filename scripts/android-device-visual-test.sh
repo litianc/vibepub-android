@@ -18,6 +18,7 @@ SKIP_INSTALL="${SKIP_INSTALL:-false}"
 START_DELAY_SECONDS="${START_DELAY_SECONDS:-1}"
 POST_STOP_WAIT_SECONDS="${POST_STOP_WAIT_SECONDS:-5}"
 DETAIL_WAIT_SECONDS="${DETAIL_WAIT_SECONDS:-8}"
+DETAIL_SCROLL_PAGES="${DETAIL_SCROLL_PAGES:-3}"
 DEBUG_AUDIO_MODE="${DEBUG_AUDIO_MODE:-import}"
 TRIGGER_MINING_JOB="${TRIGGER_MINING_JOB:-false}"
 MINING_WORKFLOW_ID="${MINING_WORKFLOW_ID:-mining-job.yml}"
@@ -65,6 +66,11 @@ Environment:
                   GitHub Actions workflow to dispatch. Default: mining-job.yml.
   MINING_WORKFLOW_REF Git ref for workflow_dispatch. Default: main.
   MINING_WAIT_SECONDS Max seconds to wait for the workflow. Default: 240.
+  DETAIL_WAIT_SECONDS
+                  Seconds to wait after opening recording detail. Default: 8.
+  DETAIL_SCROLL_PAGES
+                  Extra detail-page scroll dumps to capture for assertions.
+                  Default: 3.
   BACKEND_UPLOAD_WAIT_SECONDS
                   Max seconds to wait for /api/recordings to show the upload.
                   Default: 90.
@@ -243,6 +249,44 @@ evaluate_detail_result() {
 
   DETAIL_STATUS="unknown"
   return 1
+}
+
+capture_detail_scroll_evidence() {
+  local pages="${DETAIL_SCROLL_PAGES:-3}"
+  local width height tap_x start_y end_y i
+  local xml_all="$OUT_DIR/window-all.xml"
+
+  if [[ ! "$pages" =~ ^[0-9]+$ ]]; then
+    return 0
+  fi
+  if (( pages <= 0 )); then
+    return 0
+  fi
+
+  width="$(screen_width)"
+  height="$(screen_height)"
+  tap_x=$((width / 2))
+  start_y=$((height * 82 / 100))
+  end_y=$((height * 28 / 100))
+
+  : > "$xml_all"
+  if [[ -f "$OUT_DIR/window.xml" ]]; then
+    cat "$OUT_DIR/window.xml" >> "$xml_all"
+    printf '\n' >> "$xml_all"
+  fi
+
+  for ((i = 1; i <= pages; i++)); do
+    adb_shell input swipe "$tap_x" "$start_y" "$tap_x" "$end_y" 450 >/dev/null 2>&1 || true
+    sleep 1
+    adb_shell screencap -p "/sdcard/vibepub-detail-scroll-$i.png" >/dev/null 2>&1 || true
+    pull_if_exists "/sdcard/vibepub-detail-scroll-$i.png" "$OUT_DIR/detail-scroll-$i.png"
+    adb_shell uiautomator dump "/sdcard/vibepub-window-scroll-$i.xml" >/dev/null 2>&1 || true
+    pull_if_exists "/sdcard/vibepub-window-scroll-$i.xml" "$OUT_DIR/window-scroll-$i.xml"
+    if [[ -f "$OUT_DIR/window-scroll-$i.xml" ]]; then
+      cat "$OUT_DIR/window-scroll-$i.xml" >> "$xml_all"
+      printf '\n' >> "$xml_all"
+    fi
+  done
 }
 
 cleanup() {
@@ -921,7 +965,10 @@ pull_if_exists /sdcard/vibepub-visual-test.mp4 "$OUT_DIR/vibepub-visual-test.mp4
 adb_shell uiautomator dump /sdcard/vibepub-window.xml >/dev/null 2>&1 || true
 pull_if_exists /sdcard/vibepub-window.xml "$OUT_DIR/window.xml"
 if [[ -n "$AUDIO_FILE" ]]; then
-  if evaluate_detail_result "$OUT_DIR/window.xml"; then
+  capture_detail_scroll_evidence
+fi
+if [[ -n "$AUDIO_FILE" ]]; then
+  if evaluate_detail_result "$OUT_DIR/window-all.xml"; then
     echo "Transcript detail assertion: completed"
   else
     echo "Transcript detail assertion: $DETAIL_STATUS" >&2
