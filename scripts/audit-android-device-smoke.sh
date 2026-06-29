@@ -102,6 +102,16 @@ grep -Fq "转录失败" "$OUT_DIR/window.xml" \
   && fail "UI dump shows transcript failure"
 pass "UI dump shows transcript content, no raw HTML, and expected duration $duration_text"
 
+grep -Fq "公众号草稿审核" "$OUT_DIR/window.xml" \
+  || fail "UI dump does not show article review card"
+grep -Fq "公众号草稿" "$OUT_DIR/window.xml" \
+  || fail "UI dump does not show WeChat draft review item"
+grep -Fq "导出材料包" "$OUT_DIR/window.xml" \
+  || fail "UI dump does not show export package action"
+grep -Fq "查看处理进度说明" "$OUT_DIR/window.xml" \
+  || fail "UI dump does not expose status lifecycle help"
+pass "UI dump shows review card, WeChat draft readiness, export action, and status help"
+
 grep -Eq "RECORD_AUDIO: (allow|foreground)" "$OUT_DIR/appops-record-audio.txt" \
   || fail "RECORD_AUDIO appops was not allow/foreground"
 grep -Fq "android.permission.RECORD_AUDIO: granted=true" "$OUT_DIR/package-after-permissions.txt" \

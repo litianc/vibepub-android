@@ -171,6 +171,21 @@ evaluate_detail_result() {
     return 1
   fi
 
+  if ! grep -q "公众号草稿审核" "$xml_file"; then
+    DETAIL_STATUS="missing_review_card"
+    return 1
+  fi
+
+  if ! grep -q "导出材料包" "$xml_file"; then
+    DETAIL_STATUS="missing_export_action"
+    return 1
+  fi
+
+  if ! grep -q "查看处理进度说明" "$xml_file"; then
+    DETAIL_STATUS="missing_status_help"
+    return 1
+  fi
+
   if grep -q "原始识别结果\\|转录完成" "$xml_file"; then
     DETAIL_STATUS="completed"
     return 0

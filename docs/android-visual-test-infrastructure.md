@@ -228,8 +228,10 @@ scripts/audit-android-device-smoke.sh artifacts/android-device-visual/<timestamp
 
 The audit rejects stale or weak evidence, including pending transcript state,
 raw HTML tags on the detail page, mismatched duration text, missing backend
-`COMPLETED` status, missing mining workflow evidence, or duplicate/zero-duration
-local rows when the phone is still connected.
+`COMPLETED` status, missing mining workflow evidence, missing next-stage detail
+UI such as the lifecycle help entry, publish-readiness review card, export
+package action, or duplicate/zero-duration local rows when the phone is still
+connected.
 
 ## Infrastructure Policy
 
