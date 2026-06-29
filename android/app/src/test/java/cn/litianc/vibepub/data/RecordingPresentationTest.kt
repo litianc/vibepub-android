@@ -25,7 +25,9 @@ class RecordingPresentationTest {
         assertTrue(recording.displayTitle(Locale.CHINA).contains("录音片段"))
         assertEquals("0:32", recording.durationLabel())
         assertEquals("0m32s", recording.listDurationLabel())
-        assertEquals("正在成文", recording.statusLabel())
+        assertEquals("转录中", recording.statusLabel())
+        assertEquals("第 4/7 步", recording.workflowProgressLabel())
+        assertEquals(0.5f, recording.workflowProgressFraction(), 0.001f)
     }
 
     @Test
@@ -51,29 +53,60 @@ class RecordingPresentationTest {
             durationMs = 1_000L,
             timestamp = 1L,
             status = RecordingStatus.PROCESSING.value,
+            rawTextPreview = "已经识别出的原始文字",
         )
 
         val steps = recording.workflowSteps()
 
         assertEquals("当前状态：正在成文", recording.workflowHelpTitle())
-        assertTrue(recording.workflowHelpSummary().contains("4. 识别与成文"))
+        assertTrue(recording.workflowHelpSummary().contains("5. 文章改写"))
+        assertTrue(recording.workflowHelpSummary().contains("第 5/7 步"))
         assertEquals(WorkflowStepState.DONE, steps[0].state)
         assertEquals(WorkflowStepState.DONE, steps[1].state)
         assertEquals(WorkflowStepState.DONE, steps[2].state)
-        assertEquals(WorkflowStepState.CURRENT, steps[3].state)
-        assertEquals(WorkflowStepState.PENDING, steps[4].state)
+        assertEquals(WorkflowStepState.DONE, steps[3].state)
+        assertEquals(WorkflowStepState.CURRENT, steps[4].state)
+        assertEquals(WorkflowStepState.PENDING, steps[5].state)
     }
 
     @Test
-    fun completedWorkflowMarksEveryStepDone() {
+    fun completedArticleWaitsForDraftInfo() {
         val recording = RecordingEntity(
             filename = "VibePub-test.m4a",
             durationMs = 1_000L,
             timestamp = 1L,
             status = RecordingStatus.COMPLETED.value,
+            articleTitle = "整理好的文章",
         )
 
-        assertTrue(recording.workflowSteps().all { it.state == WorkflowStepState.DONE })
+        val steps = recording.workflowSteps()
+
+        assertEquals("已成文", recording.statusLabel())
+        assertTrue(recording.statusDetail().contains("等待公众号草稿信息"))
+        assertEquals("第 6/7 步", recording.workflowProgressLabel())
+        assertEquals(WorkflowStepState.DONE, steps[4].state)
+        assertEquals(WorkflowStepState.CURRENT, steps[5].state)
+        assertEquals(WorkflowStepState.PENDING, steps[6].state)
+    }
+
+    @Test
+    fun completedDraftMovesToManualPublishConfirmation() {
+        val recording = RecordingEntity(
+            filename = "VibePub-test.m4a",
+            durationMs = 1_000L,
+            timestamp = 1L,
+            status = RecordingStatus.COMPLETED.value,
+            articleTitle = "整理好的文章",
+            wechatDraftId = "MEDIA_ID_123",
+        )
+
+        val steps = recording.workflowSteps()
+
+        assertEquals("草稿已就绪", recording.statusLabel())
+        assertTrue(recording.statusDetail().contains("公众号草稿也已准备好"))
+        assertEquals("第 7/7 步", recording.workflowProgressLabel())
+        assertEquals(WorkflowStepState.DONE, steps[5].state)
+        assertEquals(WorkflowStepState.CURRENT, steps[6].state)
     }
 
     @Test
@@ -91,5 +124,23 @@ class RecordingPresentationTest {
         assertEquals(WorkflowStepState.DONE, steps[0].state)
         assertEquals(WorkflowStepState.BLOCKED, steps[1].state)
         assertEquals(WorkflowStepState.PENDING, steps[2].state)
+    }
+
+    @Test
+    fun draftFailureBlocksWechatDraftStep() {
+        val recording = RecordingEntity(
+            filename = "VibePub-test.m4a",
+            durationMs = 1_000L,
+            timestamp = 1L,
+            status = RecordingStatus.FAILED.value,
+            lastError = "微信公众号草稿创建失败",
+        )
+
+        val steps = recording.workflowSteps()
+
+        assertEquals("第 6/7 步", recording.workflowProgressLabel())
+        assertEquals(WorkflowStepState.DONE, steps[4].state)
+        assertEquals(WorkflowStepState.BLOCKED, steps[5].state)
+        assertEquals(WorkflowStepState.PENDING, steps[6].state)
     }
 }

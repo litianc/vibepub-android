@@ -39,8 +39,8 @@ fun RecordingEntity.statusLabel(): String {
         RecordingStatus.LOCAL_RECORDED -> "待上传"
         RecordingStatus.UPLOADING -> "上传中"
         RecordingStatus.UPLOADED -> "处理中"
-        RecordingStatus.PROCESSING -> "正在成文"
-        RecordingStatus.COMPLETED -> "已成文"
+        RecordingStatus.PROCESSING -> if (processingWorkflowIndex() >= 4) "正在成文" else "转录中"
+        RecordingStatus.COMPLETED -> if (hasWechatDraftReference()) "草稿已就绪" else "已成文"
         RecordingStatus.FAILED -> "需要处理"
     }
 }
@@ -50,8 +50,8 @@ fun RecordingEntity.statusDetail(): String {
         RecordingStatus.LOCAL_RECORDED -> "录音已保存，等待上传。"
         RecordingStatus.UPLOADING -> "正在上传录音，网络恢复后会自动继续。"
         RecordingStatus.UPLOADED -> "录音已到云端，正在排队转录。"
-        RecordingStatus.PROCESSING -> "云端正在转录和整理文章。"
-        RecordingStatus.COMPLETED -> "转录和成文已经完成。"
+        RecordingStatus.PROCESSING -> processingStatusDetail()
+        RecordingStatus.COMPLETED -> completedStatusDetail()
         RecordingStatus.FAILED -> lastError?.takeIf { it.isNotBlank() } ?: "这条录音处理失败，可以重试。"
     }
 }
@@ -68,33 +68,70 @@ fun RecordingEntity.workflowHelpTitle(): String {
 }
 
 fun RecordingEntity.workflowHelpSummary(): String {
-    val currentStep = workflowSteps().firstOrNull {
+    val steps = workflowSteps()
+    val currentStep = steps.firstOrNull {
         it.state == WorkflowStepState.CURRENT || it.state == WorkflowStepState.BLOCKED
     }
-    val currentText = currentStep?.let { "${it.number}. ${it.title}" } ?: "6. 完成"
-    return "这条录音正在经历从口述想法到公众号草稿的流程。当前节点是 $currentText。"
+    val currentText = currentStep?.let { "${it.number}. ${it.title}" } ?: "${steps.size}. 完成"
+    return "这条录音正在经历从口述想法到公众号草稿的流程。当前节点是 $currentText。${workflowProgressLabel()}"
+}
+
+fun RecordingEntity.workflowProgressLabel(): String {
+    val steps = workflowSteps()
+    val activeStep = steps.firstOrNull {
+        it.state == WorkflowStepState.CURRENT || it.state == WorkflowStepState.BLOCKED
+    } ?: steps.last()
+    return "第 ${activeStep.number}/${steps.size} 步"
+}
+
+fun RecordingEntity.workflowProgressFraction(): Float {
+    val steps = workflowSteps()
+    if (steps.isEmpty()) return 0f
+    val doneCount = steps.count { it.state == WorkflowStepState.DONE }
+    val currentWeight = if (steps.any { it.state == WorkflowStepState.CURRENT || it.state == WorkflowStepState.BLOCKED }) 0.5f else 0f
+    return ((doneCount + currentWeight) / steps.size).coerceIn(0f, 1f)
 }
 
 fun RecordingEntity.workflowSteps(): List<RecordingWorkflowStep> {
     val status = status.asRecordingStatus()
-    val currentIndex = when (status) {
-        RecordingStatus.LOCAL_RECORDED -> 0
-        RecordingStatus.UPLOADING -> 1
-        RecordingStatus.UPLOADED -> 2
-        RecordingStatus.PROCESSING -> 3
-        RecordingStatus.COMPLETED -> WORKFLOW_BASE_STEPS.lastIndex
-        RecordingStatus.FAILED -> failureWorkflowIndex()
-    }
+    val currentIndex = workflowCurrentIndex(status)
 
     return WORKFLOW_BASE_STEPS.mapIndexed { index, step ->
         val state = when {
-            status == RecordingStatus.COMPLETED -> WorkflowStepState.DONE
+            status == RecordingStatus.COMPLETED && index <= currentIndex -> WorkflowStepState.DONE
+            status == RecordingStatus.COMPLETED && index == currentIndex + 1 -> WorkflowStepState.CURRENT
             status == RecordingStatus.FAILED && index == currentIndex -> WorkflowStepState.BLOCKED
             index < currentIndex -> WorkflowStepState.DONE
             index == currentIndex -> WorkflowStepState.CURRENT
             else -> WorkflowStepState.PENDING
         }
         step.copy(state = state)
+    }
+}
+
+private fun RecordingEntity.workflowCurrentIndex(status: RecordingStatus): Int {
+    return when (status) {
+        RecordingStatus.LOCAL_RECORDED -> 0
+        RecordingStatus.UPLOADING -> 1
+        RecordingStatus.UPLOADED -> 2
+        RecordingStatus.PROCESSING -> processingWorkflowIndex()
+        RecordingStatus.COMPLETED -> completedWorkflowIndex()
+        RecordingStatus.FAILED -> failureWorkflowIndex()
+    }
+}
+
+private fun RecordingEntity.processingWorkflowIndex(): Int {
+    return when {
+        articleTitle?.isNotBlank() == true -> 4
+        rawTextPreview?.isNotBlank() == true -> 4
+        else -> 3
+    }
+}
+
+private fun RecordingEntity.completedWorkflowIndex(): Int {
+    return when {
+        hasWechatDraftReference() -> 5
+        else -> 4
     }
 }
 
@@ -107,12 +144,33 @@ private fun RecordingEntity.failureWorkflowIndex(): Int {
             error.contains("上传") ||
             error.contains("网络") ||
             error.contains("本地录音") -> 1
+        error.contains("识别") ||
+            error.contains("asr") ||
+            error.contains("转录") -> 3
         error.contains("微信") ||
             error.contains("公众号") ||
             error.contains("草稿") ||
-            error.contains("wechat") -> 4
-        else -> 3
+            error.contains("wechat") -> 5
+        else -> 4
     }
+}
+
+private fun RecordingEntity.processingStatusDetail(): String {
+    return when (processingWorkflowIndex()) {
+        4 -> "已拿到识别结果，云端正在整理公众号文章。"
+        else -> "云端正在进行语音识别。"
+    }
+}
+
+private fun RecordingEntity.completedStatusDetail(): String {
+    return when {
+        hasWechatDraftReference() -> "文章已生成，公众号草稿也已准备好。"
+        else -> "文章已生成，正在等待公众号草稿信息同步。"
+    }
+}
+
+private fun RecordingEntity.hasWechatDraftReference(): Boolean {
+    return wechatDraftId?.isNotBlank() == true || wechatUrl?.isNotBlank() == true
 }
 
 private val WORKFLOW_BASE_STEPS = listOf(
@@ -136,20 +194,26 @@ private val WORKFLOW_BASE_STEPS = listOf(
     ),
     RecordingWorkflowStep(
         number = 4,
-        title = "识别与成文",
-        detail = "云端完成语音识别，并把口述内容整理成适合公众号的文章。",
+        title = "语音识别",
+        detail = "把口述音频转成原始文字，供后续成文核对。",
         state = WorkflowStepState.PENDING,
     ),
     RecordingWorkflowStep(
         number = 5,
-        title = "创建草稿",
-        detail = "把整理好的标题和正文准备到微信公众号草稿箱。",
+        title = "文章改写",
+        detail = "把原始识别整理成标题和适合公众号阅读的正文。",
         state = WorkflowStepState.PENDING,
     ),
     RecordingWorkflowStep(
         number = 6,
-        title = "完成",
-        detail = "App 可以查看文章、播放原音，并复制或分享正文。",
+        title = "公众号草稿",
+        detail = "把整理好的标题和正文准备到微信公众号草稿箱。",
+        state = WorkflowStepState.PENDING,
+    ),
+    RecordingWorkflowStep(
+        number = 7,
+        title = "人工发布确认",
+        detail = "打开草稿做最后一眼检查，再由你决定是否发布。",
         state = WorkflowStepState.PENDING,
     ),
 )

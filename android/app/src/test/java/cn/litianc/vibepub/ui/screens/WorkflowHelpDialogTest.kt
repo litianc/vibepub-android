@@ -21,7 +21,7 @@ class WorkflowHelpDialogTest {
     val composeTestRule = createAndroidComposeRule<ComponentActivity>()
 
     @Test
-    fun showsCurrentStepAndLifecycle() {
+    fun showsTranscriptionStepAndLifecycle() {
         composeTestRule.setContent {
             WorkflowHelpDialog(
                 recording = RecordingEntity(
@@ -34,10 +34,32 @@ class WorkflowHelpDialogTest {
             )
         }
 
+        composeTestRule.onNodeWithText("当前状态：转录中").assertIsDisplayed()
+        composeTestRule.onAllNodesWithText("语音识别 · 当前").assertCountEquals(1)
+        composeTestRule.onAllNodesWithText("文章改写 · 等待").assertCountEquals(1)
+        composeTestRule.onAllNodesWithText("公众号草稿 · 等待").assertCountEquals(1)
+        composeTestRule.onAllNodesWithText("人工发布确认 · 等待").assertCountEquals(1)
+    }
+
+    @Test
+    fun showsArticleRewriteStepWhenRawTextExists() {
+        composeTestRule.setContent {
+            WorkflowHelpDialog(
+                recording = RecordingEntity(
+                    filename = "VibePub-test.m4a",
+                    durationMs = 42_000L,
+                    timestamp = 1L,
+                    status = RecordingStatus.PROCESSING.value,
+                    rawTextPreview = "已经识别出的原始文字",
+                ),
+                onDismiss = {},
+            )
+        }
+
         composeTestRule.onNodeWithText("当前状态：正在成文").assertIsDisplayed()
-        composeTestRule.onAllNodesWithText("识别与成文 · 当前").assertCountEquals(1)
-        composeTestRule.onAllNodesWithText("创建草稿 · 等待").assertCountEquals(1)
-        composeTestRule.onAllNodesWithText("完成 · 等待").assertCountEquals(1)
+        composeTestRule.onAllNodesWithText("语音识别 · 已完成").assertCountEquals(1)
+        composeTestRule.onAllNodesWithText("文章改写 · 当前").assertCountEquals(1)
+        composeTestRule.onAllNodesWithText("公众号草稿 · 等待").assertCountEquals(1)
     }
 
     @Test

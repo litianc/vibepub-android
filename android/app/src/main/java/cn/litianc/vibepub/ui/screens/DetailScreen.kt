@@ -39,6 +39,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
@@ -75,6 +76,8 @@ import cn.litianc.vibepub.data.displayTitle
 import cn.litianc.vibepub.data.durationLabel
 import cn.litianc.vibepub.data.statusDetail
 import cn.litianc.vibepub.data.statusLabel
+import cn.litianc.vibepub.data.workflowProgressFraction
+import cn.litianc.vibepub.data.workflowProgressLabel
 import cn.litianc.vibepub.ui.theme.PrimaryRed
 import kotlinx.coroutines.delay
 import org.json.JSONObject
@@ -362,6 +365,12 @@ private fun StatusCard(
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(recording.statusLabel(), fontWeight = FontWeight.SemiBold)
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    recording.workflowProgressLabel(),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
                 IconButton(
                     onClick = { showWorkflowHelp = true },
                     modifier = Modifier
@@ -376,6 +385,14 @@ private fun StatusCard(
                     )
                 }
             }
+            LinearProgressIndicator(
+                progress = { recording.workflowProgressFraction() },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(4.dp),
+                color = statusColor(status),
+                trackColor = MaterialTheme.colorScheme.surfaceVariant,
+            )
             Spacer(modifier = Modifier.height(8.dp))
             Text(
                 recording.statusDetail(),

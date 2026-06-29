@@ -36,6 +36,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
@@ -69,6 +70,8 @@ import cn.litianc.vibepub.data.statusDetail
 import cn.litianc.vibepub.data.statusLabel
 import cn.litianc.vibepub.data.workflowHelpSummary
 import cn.litianc.vibepub.data.workflowHelpTitle
+import cn.litianc.vibepub.data.workflowProgressFraction
+import cn.litianc.vibepub.data.workflowProgressLabel
 import cn.litianc.vibepub.data.workflowSteps
 import cn.litianc.vibepub.ui.theme.IconLightRedBackground
 import cn.litianc.vibepub.ui.theme.PrimaryRed
@@ -292,6 +295,12 @@ fun RecordingCard(
                         color = MaterialTheme.colorScheme.onSurface,
                         fontWeight = FontWeight.Medium,
                     )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = recording.workflowProgressLabel(),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                     IconButton(
                         onClick = { showWorkflowHelp = true },
                         modifier = Modifier
@@ -313,6 +322,15 @@ fun RecordingCard(
                         )
                     }
                 }
+                Spacer(modifier = Modifier.height(6.dp))
+                LinearProgressIndicator(
+                    progress = { recording.workflowProgressFraction() },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(4.dp),
+                    color = statusColor(status),
+                    trackColor = MaterialTheme.colorScheme.surfaceVariant,
+                )
                 if (status == RecordingStatus.FAILED || status == RecordingStatus.PROCESSING) {
                     Spacer(modifier = Modifier.height(6.dp))
                     Text(
