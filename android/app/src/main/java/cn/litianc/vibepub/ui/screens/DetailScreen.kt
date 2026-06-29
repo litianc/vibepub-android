@@ -25,6 +25,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
@@ -292,6 +293,15 @@ private fun StatusCard(
     onRetryUpload: () -> Unit,
 ) {
     val status = recording.status.asRecordingStatus()
+    var showWorkflowHelp by remember { mutableStateOf(false) }
+
+    if (showWorkflowHelp) {
+        WorkflowHelpDialog(
+            recording = recording,
+            onDismiss = { showWorkflowHelp = false },
+        )
+    }
+
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -307,6 +317,19 @@ private fun StatusCard(
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(recording.statusLabel(), fontWeight = FontWeight.SemiBold)
+                IconButton(
+                    onClick = { showWorkflowHelp = true },
+                    modifier = Modifier
+                        .size(32.dp)
+                        .testTag("DetailWorkflowHelpButton"),
+                ) {
+                    Icon(
+                        Icons.Default.Info,
+                        contentDescription = "查看处理进度说明",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
             }
             Spacer(modifier = Modifier.height(8.dp))
             Text(

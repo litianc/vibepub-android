@@ -43,4 +43,53 @@ class RecordingPresentationTest {
         assertEquals("FILES_TOKEN 无效", recording.statusDetail())
         assertTrue(recording.canRetryUpload())
     }
+
+    @Test
+    fun explainsCurrentWorkflowStep() {
+        val recording = RecordingEntity(
+            filename = "VibePub-test.m4a",
+            durationMs = 1_000L,
+            timestamp = 1L,
+            status = RecordingStatus.PROCESSING.value,
+        )
+
+        val steps = recording.workflowSteps()
+
+        assertEquals("当前状态：正在成文", recording.workflowHelpTitle())
+        assertTrue(recording.workflowHelpSummary().contains("4. 识别与成文"))
+        assertEquals(WorkflowStepState.DONE, steps[0].state)
+        assertEquals(WorkflowStepState.DONE, steps[1].state)
+        assertEquals(WorkflowStepState.DONE, steps[2].state)
+        assertEquals(WorkflowStepState.CURRENT, steps[3].state)
+        assertEquals(WorkflowStepState.PENDING, steps[4].state)
+    }
+
+    @Test
+    fun completedWorkflowMarksEveryStepDone() {
+        val recording = RecordingEntity(
+            filename = "VibePub-test.m4a",
+            durationMs = 1_000L,
+            timestamp = 1L,
+            status = RecordingStatus.COMPLETED.value,
+        )
+
+        assertTrue(recording.workflowSteps().all { it.state == WorkflowStepState.DONE })
+    }
+
+    @Test
+    fun uploadFailureBlocksUploadStep() {
+        val recording = RecordingEntity(
+            filename = "VibePub-test.m4a",
+            durationMs = 1_000L,
+            timestamp = 1L,
+            status = RecordingStatus.FAILED.value,
+            lastError = "FILES_TOKEN 无效，上传被拒绝",
+        )
+
+        val steps = recording.workflowSteps()
+
+        assertEquals(WorkflowStepState.DONE, steps[0].state)
+        assertEquals(WorkflowStepState.BLOCKED, steps[1].state)
+        assertEquals(WorkflowStepState.PENDING, steps[2].state)
+    }
 }
