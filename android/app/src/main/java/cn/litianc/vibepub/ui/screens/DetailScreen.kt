@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.text.Html
+import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -27,6 +28,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
@@ -101,6 +103,13 @@ internal data class ArticleReviewSummary(
     val title: String,
     val nextStep: String,
     val items: List<ArticleReviewItem>,
+)
+
+internal data class WeChatDraftAction(
+    val label: String,
+    val enabled: Boolean,
+    val url: String,
+    val helperText: String,
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -181,6 +190,10 @@ fun DetailScreen(
             wechatDraftId = wechatDraftId,
             wechatUrl = wechatUrl,
         )
+        val draftAction = buildWeChatDraftAction(
+            wechatDraftId = wechatDraftId,
+            wechatUrl = wechatUrl,
+        )
         val shareText = buildString {
             append(articleTitle)
             append("\n\n")
@@ -241,6 +254,7 @@ fun DetailScreen(
                 shareText = shareText,
                 exportText = exportText,
                 exportFileName = exportFileName(articleTitle, currentRecording.filename),
+                draftAction = draftAction,
             )
             Spacer(modifier = Modifier.height(20.dp))
 
@@ -587,9 +601,28 @@ private fun ActionRow(
     shareText: String,
     exportText: String,
     exportFileName: String,
+    draftAction: WeChatDraftAction?,
 ) {
     val context = LocalContext.current
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (draftAction != null) {
+            Button(
+                onClick = { openWechatDraft(context, draftAction.url) },
+                enabled = draftAction.enabled,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("OpenWechatDraftButton"),
+            ) {
+                Icon(Icons.Default.OpenInNew, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(draftAction.label)
+            }
+            Text(
+                draftAction.helperText,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
         OutlinedButton(
             onClick = { copyToClipboard(context, "VibePub 标题", articleTitle) },
             modifier = Modifier
@@ -644,6 +677,14 @@ private fun shareArticle(context: Context, text: String) {
         putExtra(Intent.EXTRA_TEXT, text)
     }
     context.startActivity(Intent.createChooser(intent, "分享文章"))
+}
+
+private fun openWechatDraft(context: Context, url: String) {
+    runCatching {
+        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+    }.onFailure {
+        Toast.makeText(context, "无法打开草稿链接", Toast.LENGTH_SHORT).show()
+    }
 }
 
 private fun shareArticleExport(context: Context, fileName: String, text: String) {
@@ -761,6 +802,30 @@ internal fun buildArticleReviewSummary(
             ),
         ),
     )
+}
+
+internal fun buildWeChatDraftAction(
+    wechatDraftId: String,
+    wechatUrl: String,
+): WeChatDraftAction? {
+    val draftUrl = wechatUrl.trim()
+    val draftId = wechatDraftId.trim()
+
+    return when {
+        draftUrl.isNotBlank() -> WeChatDraftAction(
+            label = "打开公众号草稿",
+            enabled = true,
+            url = draftUrl,
+            helperText = "打开后到公众号后台做最后一眼人工确认。",
+        )
+        draftId.isNotBlank() -> WeChatDraftAction(
+            label = "草稿 ID 已同步",
+            enabled = false,
+            url = "",
+            helperText = "草稿 ID：$draftId。当前没有可打开链接，可先复制正文或到公众号后台查看。",
+        )
+        else -> null
+    }
 }
 
 private fun loadLocalTranscript(context: Context, filename: String): JSONObject? {

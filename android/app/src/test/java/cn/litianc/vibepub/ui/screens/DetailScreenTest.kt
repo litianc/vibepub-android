@@ -111,6 +111,45 @@ class DetailScreenTest {
     }
 
     @Test
+    fun draftActionOpensWhenDraftUrlExists() {
+        val action = buildWeChatDraftAction(
+            wechatDraftId = "",
+            wechatUrl = "https://mp.weixin.qq.com/draft",
+        )
+
+        checkNotNull(action)
+        assertEquals("打开公众号草稿", action.label)
+        assertTrue(action.enabled)
+        assertEquals("https://mp.weixin.qq.com/draft", action.url)
+        assertTrue(action.helperText.contains("最后一眼人工确认"))
+    }
+
+    @Test
+    fun draftActionKeepsMediaIdVisibleWhenUrlIsMissing() {
+        val action = buildWeChatDraftAction(
+            wechatDraftId = "MEDIA_ID_123",
+            wechatUrl = "",
+        )
+
+        checkNotNull(action)
+        assertEquals("草稿 ID 已同步", action.label)
+        assertFalse(action.enabled)
+        assertEquals("", action.url)
+        assertTrue(action.helperText.contains("MEDIA_ID_123"))
+        assertTrue(action.helperText.contains("复制正文"))
+    }
+
+    @Test
+    fun draftActionStaysHiddenWhenDraftReferenceIsMissing() {
+        val action = buildWeChatDraftAction(
+            wechatDraftId = "",
+            wechatUrl = "",
+        )
+
+        assertEquals(null, action)
+    }
+
+    @Test
     fun exportFileNameRemovesUnsafeCharacters() {
         val fileName = exportFileName("标题/带:非法*字符?", "fallback.m4a")
 
