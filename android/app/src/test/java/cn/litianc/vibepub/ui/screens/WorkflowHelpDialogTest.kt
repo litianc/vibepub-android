@@ -3,7 +3,6 @@ package cn.litianc.vibepub.ui.screens
 import androidx.activity.ComponentActivity
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertCountEquals
-import androidx.compose.ui.test.assertDoesNotExist
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
@@ -108,6 +107,6 @@ class WorkflowHelpDialogTest {
         composeTestRule.onNodeWithText("转录中").assertIsDisplayed()
         composeTestRule.onNodeWithText("第 4/7 步").assertIsDisplayed()
         composeTestRule.onNodeWithTag("WorkflowHelpButton").assertIsDisplayed()
-        composeTestRule.onNodeWithText("云端正在进行语音识别。").assertDoesNotExist()
+        composeTestRule.onAllNodesWithText("云端正在进行语音识别。").assertCountEquals(0)
     }
 }
