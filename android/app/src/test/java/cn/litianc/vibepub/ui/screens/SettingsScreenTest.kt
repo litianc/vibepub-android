@@ -97,9 +97,31 @@ class SettingsScreenTest {
         assertEquals("录音列表接口异常", result.summary)
         assertTrue(result.nextAction.contains("复制诊断信息"))
         assertEquals(ConnectionCheckState.PASSED, result.checks[0].state)
-        assertEquals(ConnectionCheckState.PASSED, result.checks[1].state)
+        assertEquals(ConnectionCheckState.SKIPPED, result.checks[1].state)
+        assertTrue(result.checks[1].detail.contains("暂未确认权限"))
         assertEquals(ConnectionCheckState.FAILED, result.checks[2].state)
         assertTrue(result.checks[2].detail.contains("HTTP 500"))
+    }
+
+    @Test
+    fun connectionResultKeepsBackendReachableWhenRecordingsRequestThrows() {
+        val result = buildConnectionResult(
+            healthStatusCode = 200,
+            tokenProvided = true,
+            recordingsStatusCode = null,
+            recordingCount = null,
+            errorMessage = null,
+            recordingsErrorMessage = "timeout waiting for /api/recordings",
+        )
+
+        assertFalse(result.success)
+        assertEquals("录音列表接口异常", result.summary)
+        assertEquals(ConnectionCheckState.PASSED, result.checks[0].state)
+        assertEquals("/health HTTP 200", result.checks[0].detail)
+        assertEquals(ConnectionCheckState.SKIPPED, result.checks[1].state)
+        assertTrue(result.checks[1].detail.contains("暂未确认权限"))
+        assertEquals(ConnectionCheckState.FAILED, result.checks[2].state)
+        assertEquals("timeout waiting for /api/recordings", result.checks[2].detail)
     }
 
     @Test

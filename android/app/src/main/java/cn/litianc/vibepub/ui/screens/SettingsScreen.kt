@@ -452,31 +452,42 @@ private suspend fun testBackendConnection(apiBaseUrl: String, filesToken: String
                 )
             }
 
-            val recordings = (URL("$base/api/recordings").openConnection() as HttpURLConnection).apply {
-                requestMethod = "GET"
-                connectTimeout = 8_000
-                readTimeout = 8_000
-                setRequestProperty("Authorization", "Bearer $filesToken")
-            }
-            if (recordings.responseCode in 200..299) {
-                val count = JSONObject(recordings.inputStream.bufferedReader().use { it.readText() })
-                    .optJSONArray("recordings")
-                    ?.length()
-                    ?: 0
+            runCatching {
+                val recordings = (URL("$base/api/recordings").openConnection() as HttpURLConnection).apply {
+                    requestMethod = "GET"
+                    connectTimeout = 8_000
+                    readTimeout = 8_000
+                    setRequestProperty("Authorization", "Bearer $filesToken")
+                }
+                if (recordings.responseCode in 200..299) {
+                    val count = JSONObject(recordings.inputStream.bufferedReader().use { it.readText() })
+                        .optJSONArray("recordings")
+                        ?.length()
+                        ?: 0
+                    buildConnectionResult(
+                        healthStatusCode = health.responseCode,
+                        tokenProvided = true,
+                        recordingsStatusCode = recordings.responseCode,
+                        recordingCount = count,
+                        errorMessage = null,
+                    )
+                } else {
+                    buildConnectionResult(
+                        healthStatusCode = health.responseCode,
+                        tokenProvided = true,
+                        recordingsStatusCode = recordings.responseCode,
+                        recordingCount = null,
+                        errorMessage = null,
+                    )
+                }
+            }.getOrElse { error ->
                 buildConnectionResult(
                     healthStatusCode = health.responseCode,
                     tokenProvided = true,
-                    recordingsStatusCode = recordings.responseCode,
-                    recordingCount = count,
-                    errorMessage = null,
-                )
-            } else {
-                buildConnectionResult(
-                    healthStatusCode = health.responseCode,
-                    tokenProvided = true,
-                    recordingsStatusCode = recordings.responseCode,
+                    recordingsStatusCode = null,
                     recordingCount = null,
                     errorMessage = null,
+                    recordingsErrorMessage = error.message ?: error.javaClass.simpleName,
                 )
             }
         } catch (error: Exception) {
@@ -496,6 +507,7 @@ internal fun buildConnectionResult(
     recordingsStatusCode: Int?,
     recordingCount: Int?,
     errorMessage: String?,
+    recordingsErrorMessage: String? = null,
 ): ConnectionTestResult {
     val healthPassed = healthStatusCode != null && healthStatusCode in 200..299
     val recordingsPassed = recordingsStatusCode != null && recordingsStatusCode in 200..299
@@ -517,13 +529,15 @@ internal fun buildConnectionResult(
             state = when {
                 !tokenProvided -> ConnectionCheckState.FAILED
                 authFailed -> ConnectionCheckState.FAILED
-                healthPassed -> ConnectionCheckState.PASSED
+                recordingsPassed -> ConnectionCheckState.PASSED
+                healthPassed -> ConnectionCheckState.SKIPPED
                 else -> ConnectionCheckState.SKIPPED
             },
             detail = when {
                 !tokenProvided -> "未填写，无法读取云端录音"
                 authFailed -> "Token 无效或没有权限，/api/recordings HTTP $recordingsStatusCode"
-                healthPassed -> "已填写"
+                recordingsPassed -> "已通过授权接口校验"
+                healthPassed -> "已填写，但录音列表未通过，暂未确认权限"
                 else -> "后端未连通，暂未校验"
             },
         ),
@@ -537,6 +551,7 @@ internal fun buildConnectionResult(
             detail = when {
                 recordingsPassed -> "/api/recordings HTTP $recordingsStatusCode，云端 $recordingCount 条录音"
                 recordingsStatusCode != null -> "/api/recordings HTTP $recordingsStatusCode"
+                recordingsErrorMessage != null -> recordingsErrorMessage
                 !healthPassed -> "后端未连通，暂未请求"
                 !tokenProvided -> "需要 FILES_TOKEN"
                 else -> "没有拿到接口响应"
