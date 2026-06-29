@@ -1,6 +1,7 @@
 package cn.litianc.vibepub.ui.screens
 
 import androidx.activity.ComponentActivity
+import androidx.compose.runtime.Composable
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
@@ -154,9 +155,9 @@ class WorkflowHelpDialogTest {
     }
 
     @Test
-    fun productionFlowCardShowsVisibleDraftingTimeline() {
+    fun detailStatusCardKeepsTimelineBehindHelpIcon() {
         composeTestRule.setContent {
-            ProductionFlowCard(
+            DetailStatusCardPreview(
                 recording = RecordingEntity(
                     filename = "VibePub-test.m4a",
                     durationMs = 42_000L,
@@ -167,22 +168,24 @@ class WorkflowHelpDialogTest {
             )
         }
 
-        composeTestRule.onNodeWithTag("ProductionFlowCard").assertIsDisplayed()
-        composeTestRule.onNodeWithText("生产流程").assertIsDisplayed()
-        composeTestRule.onNodeWithText("当前：6. 公众号草稿 · 当前").assertIsDisplayed()
+        composeTestRule.onNodeWithText("生成草稿中").assertIsDisplayed()
         composeTestRule.onNodeWithText("第 6/7 步").assertIsDisplayed()
-        composeTestRule.onNodeWithTag("ProductionFlowStep-5").assertIsDisplayed()
-        composeTestRule.onNodeWithText("文章改写 · 已完成").assertIsDisplayed()
-        composeTestRule.onAllNodesWithTag("ProductionFlowStep-6").assertCountEquals(1)
+        composeTestRule.onNodeWithTag("DetailWorkflowHelpButton").assertIsDisplayed()
+        composeTestRule.onAllNodesWithText("文章改写 · 已完成").assertCountEquals(0)
+        composeTestRule.onAllNodesWithText("公众号草稿 · 当前").assertCountEquals(0)
+        composeTestRule.onAllNodesWithText("人工发布确认 · 等待").assertCountEquals(0)
+
+        composeTestRule.onNodeWithTag("DetailWorkflowHelpButton").performClick()
+
+        composeTestRule.onAllNodesWithText("文章改写 · 已完成").assertCountEquals(1)
         composeTestRule.onAllNodesWithText("公众号草稿 · 当前").assertCountEquals(1)
-        composeTestRule.onAllNodesWithTag("ProductionFlowStep-7").assertCountEquals(1)
         composeTestRule.onAllNodesWithText("人工发布确认 · 等待").assertCountEquals(1)
     }
 
     @Test
-    fun productionFlowCardShowsBlockedStepForUploadFailure() {
+    fun detailStatusCardShowsBlockedStepOnlyInHelpDialog() {
         composeTestRule.setContent {
-            ProductionFlowCard(
+            DetailStatusCardPreview(
                 recording = RecordingEntity(
                     filename = "VibePub-test.m4a",
                     durationMs = 42_000L,
@@ -193,8 +196,21 @@ class WorkflowHelpDialogTest {
             )
         }
 
-        composeTestRule.onNodeWithText("当前：2. 上传音频 · 需处理").assertIsDisplayed()
-        composeTestRule.onNodeWithText("上传音频 · 需处理").assertIsDisplayed()
-        composeTestRule.onNodeWithText("云端排队 · 等待").assertIsDisplayed()
+        composeTestRule.onNodeWithText("需要处理").assertIsDisplayed()
+        composeTestRule.onNodeWithText("第 2/7 步").assertIsDisplayed()
+        composeTestRule.onAllNodesWithText("上传音频 · 需处理").assertCountEquals(0)
+
+        composeTestRule.onNodeWithTag("DetailWorkflowHelpButton").performClick()
+
+        composeTestRule.onAllNodesWithText("上传音频 · 需处理").assertCountEquals(1)
+    }
+
+    @Composable
+    private fun DetailStatusCardPreview(recording: RecordingEntity) {
+        StatusCard(
+            recording = recording,
+            onRefresh = {},
+            onRetryUpload = {},
+        )
     }
 }
