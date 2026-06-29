@@ -29,6 +29,7 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.CloudDone
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Visibility
@@ -86,6 +87,25 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+internal enum class ConnectionCheckState {
+    PASSED,
+    FAILED,
+    SKIPPED,
+}
+
+internal data class ConnectionCheckItem(
+    val label: String,
+    val state: ConnectionCheckState,
+    val detail: String,
+)
+
+internal data class ConnectionTestResult(
+    val success: Boolean,
+    val summary: String,
+    val nextAction: String,
+    val checks: List<ConnectionCheckItem>,
+)
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(
@@ -98,7 +118,7 @@ fun SettingsScreen(
     var filesToken by remember { mutableStateOf(preferences.filesToken) }
     var showToken by remember { mutableStateOf(false) }
     var isTesting by remember { mutableStateOf(false) }
-    var connectionResult by remember { mutableStateOf<String?>(null) }
+    var connectionResult by remember { mutableStateOf<ConnectionTestResult?>(null) }
     var showDiagnostics by remember { mutableStateOf(false) }
     var diagnostics by remember { mutableStateOf("") }
 
@@ -195,9 +215,9 @@ fun SettingsScreen(
                             Spacer(modifier = Modifier.height(10.dp))
                             LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
                         }
-                        connectionResult?.let {
+                        connectionResult?.let { result ->
                             Spacer(modifier = Modifier.height(10.dp))
-                            Text(it, color = if (it.startsWith("连接正常")) Color(0xFF2E7D32) else Color(0xFFC62828))
+                            ConnectionResultCard(result = result)
                         }
                     }
                 }
@@ -259,6 +279,77 @@ fun SettingsScreen(
                 }
             },
         )
+    }
+}
+
+@Composable
+private fun ConnectionResultCard(result: ConnectionTestResult) {
+    val accent = if (result.success) Color(0xFF2E7D32) else Color(0xFFC62828)
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("ConnectionResultCard"),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.background),
+        shape = RoundedCornerShape(10.dp),
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = if (result.success) Icons.Default.CheckCircle else Icons.Default.Error,
+                    contentDescription = null,
+                    tint = accent,
+                    modifier = Modifier.size(18.dp),
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    result.summary,
+                    color = accent,
+                    fontWeight = FontWeight.SemiBold,
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+            result.checks.forEach { item ->
+                ConnectionCheckRow(item = item)
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                result.nextAction,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+    }
+}
+
+@Composable
+private fun ConnectionCheckRow(item: ConnectionCheckItem) {
+    val color = when (item.state) {
+        ConnectionCheckState.PASSED -> Color(0xFF2E7D32)
+        ConnectionCheckState.FAILED -> Color(0xFFC62828)
+        ConnectionCheckState.SKIPPED -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 3.dp),
+        verticalAlignment = Alignment.Top,
+    ) {
+        Text(
+            text = when (item.state) {
+                ConnectionCheckState.PASSED -> "通过"
+                ConnectionCheckState.FAILED -> "失败"
+                ConnectionCheckState.SKIPPED -> "跳过"
+            },
+            color = color,
+            style = MaterialTheme.typography.bodySmall,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.width(44.dp),
+        )
+        Column(modifier = Modifier.weight(1f)) {
+            Text(item.label, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Medium)
+            Text(item.detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
     }
 }
 
@@ -330,10 +421,12 @@ private fun SettingsIcon(color: Color, content: @Composable () -> Unit) {
     }
 }
 
-private suspend fun testBackendConnection(apiBaseUrl: String, filesToken: String): String =
+private suspend fun testBackendConnection(apiBaseUrl: String, filesToken: String): ConnectionTestResult =
     withContext(Dispatchers.IO) {
         val base = apiBaseUrl.trimEnd('/')
-        if (base.isBlank()) return@withContext "连接失败：API Base URL 为空"
+        if (base.isBlank()) {
+            return@withContext connectionInputError("API Base URL 为空", tokenProvided = filesToken.isNotBlank())
+        }
         try {
             val health = (URL("$base/health").openConnection() as HttpURLConnection).apply {
                 requestMethod = "GET"
@@ -341,9 +434,23 @@ private suspend fun testBackendConnection(apiBaseUrl: String, filesToken: String
                 readTimeout = 8_000
             }
             if (health.responseCode !in 200..299) {
-                return@withContext "连接失败：/health HTTP ${health.responseCode}"
+                return@withContext buildConnectionResult(
+                    healthStatusCode = health.responseCode,
+                    tokenProvided = filesToken.isNotBlank(),
+                    recordingsStatusCode = null,
+                    recordingCount = null,
+                    errorMessage = null,
+                )
             }
-            if (filesToken.isBlank()) return@withContext "连接失败：FILES_TOKEN 为空"
+            if (filesToken.isBlank()) {
+                return@withContext buildConnectionResult(
+                    healthStatusCode = health.responseCode,
+                    tokenProvided = false,
+                    recordingsStatusCode = null,
+                    recordingCount = null,
+                    errorMessage = null,
+                )
+            }
 
             val recordings = (URL("$base/api/recordings").openConnection() as HttpURLConnection).apply {
                 requestMethod = "GET"
@@ -356,16 +463,119 @@ private suspend fun testBackendConnection(apiBaseUrl: String, filesToken: String
                     .optJSONArray("recordings")
                     ?.length()
                     ?: 0
-                "连接正常：后端可达，Token 有效，云端 $count 条录音"
-            } else if (recordings.responseCode == 401 || recordings.responseCode == 403) {
-                "连接失败：FILES_TOKEN 无效"
+                buildConnectionResult(
+                    healthStatusCode = health.responseCode,
+                    tokenProvided = true,
+                    recordingsStatusCode = recordings.responseCode,
+                    recordingCount = count,
+                    errorMessage = null,
+                )
             } else {
-                "连接失败：/api/recordings HTTP ${recordings.responseCode}"
+                buildConnectionResult(
+                    healthStatusCode = health.responseCode,
+                    tokenProvided = true,
+                    recordingsStatusCode = recordings.responseCode,
+                    recordingCount = null,
+                    errorMessage = null,
+                )
             }
         } catch (error: Exception) {
-            "连接失败：${error.message ?: error.javaClass.simpleName}"
+            buildConnectionResult(
+                healthStatusCode = null,
+                tokenProvided = filesToken.isNotBlank(),
+                recordingsStatusCode = null,
+                recordingCount = null,
+                errorMessage = error.message ?: error.javaClass.simpleName,
+            )
         }
     }
+
+internal fun buildConnectionResult(
+    healthStatusCode: Int?,
+    tokenProvided: Boolean,
+    recordingsStatusCode: Int?,
+    recordingCount: Int?,
+    errorMessage: String?,
+): ConnectionTestResult {
+    val healthPassed = healthStatusCode != null && healthStatusCode in 200..299
+    val recordingsPassed = recordingsStatusCode != null && recordingsStatusCode in 200..299
+    val authFailed = recordingsStatusCode == 401 || recordingsStatusCode == 403
+
+    val checks = listOf(
+        ConnectionCheckItem(
+            label = "后端网络",
+            state = if (healthPassed) ConnectionCheckState.PASSED else ConnectionCheckState.FAILED,
+            detail = when {
+                healthPassed -> "/health HTTP $healthStatusCode"
+                healthStatusCode != null -> "/health HTTP $healthStatusCode"
+                errorMessage != null -> errorMessage
+                else -> "无法访问 /health"
+            },
+        ),
+        ConnectionCheckItem(
+            label = "FILES_TOKEN",
+            state = when {
+                !tokenProvided -> ConnectionCheckState.FAILED
+                authFailed -> ConnectionCheckState.FAILED
+                healthPassed -> ConnectionCheckState.PASSED
+                else -> ConnectionCheckState.SKIPPED
+            },
+            detail = when {
+                !tokenProvided -> "未填写，无法读取云端录音"
+                authFailed -> "Token 无效或没有权限，/api/recordings HTTP $recordingsStatusCode"
+                healthPassed -> "已填写"
+                else -> "后端未连通，暂未校验"
+            },
+        ),
+        ConnectionCheckItem(
+            label = "录音列表接口",
+            state = when {
+                recordingsPassed -> ConnectionCheckState.PASSED
+                !healthPassed || !tokenProvided -> ConnectionCheckState.SKIPPED
+                else -> ConnectionCheckState.FAILED
+            },
+            detail = when {
+                recordingsPassed -> "/api/recordings HTTP $recordingsStatusCode，云端 $recordingCount 条录音"
+                recordingsStatusCode != null -> "/api/recordings HTTP $recordingsStatusCode"
+                !healthPassed -> "后端未连通，暂未请求"
+                !tokenProvided -> "需要 FILES_TOKEN"
+                else -> "没有拿到接口响应"
+            },
+        ),
+    )
+
+    return ConnectionTestResult(
+        success = healthPassed && tokenProvided && recordingsPassed,
+        summary = when {
+            healthPassed && tokenProvided && recordingsPassed -> "连接正常"
+            !healthPassed -> "后端不可达"
+            !tokenProvided -> "缺少 FILES_TOKEN"
+            authFailed -> "FILES_TOKEN 无效"
+            else -> "录音列表接口异常"
+        },
+        nextAction = when {
+            healthPassed && tokenProvided && recordingsPassed -> "可以继续录音、上传并等待成文。"
+            !healthPassed -> "检查 API Base URL、网络或后端部署状态。"
+            !tokenProvided -> "粘贴 FILES_TOKEN 后重新测试连接。"
+            authFailed -> "在设置中更新 FILES_TOKEN，或检查 GitHub/Worker 使用的密钥是否一致。"
+            else -> "稍后重试；如果持续失败，复制诊断信息反馈。"
+        },
+        checks = checks,
+    )
+}
+
+private fun connectionInputError(message: String, tokenProvided: Boolean): ConnectionTestResult {
+    return buildConnectionResult(
+        healthStatusCode = null,
+        tokenProvided = tokenProvided,
+        recordingsStatusCode = null,
+        recordingCount = null,
+        errorMessage = message,
+    ).copy(
+        summary = "配置不完整",
+        nextAction = "填写 API Base URL 后重新测试连接。",
+    )
+}
 
 private fun copyDiagnostics(context: Context, diagnostics: String) {
     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager

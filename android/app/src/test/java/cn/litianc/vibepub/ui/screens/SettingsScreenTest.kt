@@ -2,10 +2,106 @@ package cn.litianc.vibepub.ui.screens
 
 import cn.litianc.vibepub.data.RecordingEntity
 import cn.litianc.vibepub.data.RecordingStatus
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class SettingsScreenTest {
+    @Test
+    fun connectionResultSummarizesHealthyBackendAndToken() {
+        val result = buildConnectionResult(
+            healthStatusCode = 200,
+            tokenProvided = true,
+            recordingsStatusCode = 200,
+            recordingCount = 7,
+            errorMessage = null,
+        )
+
+        assertTrue(result.success)
+        assertEquals("连接正常", result.summary)
+        assertTrue(result.nextAction.contains("继续录音"))
+        assertEquals(ConnectionCheckState.PASSED, result.checks[0].state)
+        assertEquals("后端网络", result.checks[0].label)
+        assertEquals(ConnectionCheckState.PASSED, result.checks[1].state)
+        assertEquals(ConnectionCheckState.PASSED, result.checks[2].state)
+        assertTrue(result.checks[2].detail.contains("云端 7 条录音"))
+    }
+
+    @Test
+    fun connectionResultSeparatesBackendFailureFromTokenFailure() {
+        val result = buildConnectionResult(
+            healthStatusCode = 503,
+            tokenProvided = true,
+            recordingsStatusCode = null,
+            recordingCount = null,
+            errorMessage = null,
+        )
+
+        assertFalse(result.success)
+        assertEquals("后端不可达", result.summary)
+        assertTrue(result.nextAction.contains("API Base URL"))
+        assertEquals(ConnectionCheckState.FAILED, result.checks[0].state)
+        assertEquals(ConnectionCheckState.SKIPPED, result.checks[1].state)
+        assertEquals(ConnectionCheckState.SKIPPED, result.checks[2].state)
+    }
+
+    @Test
+    fun connectionResultShowsMissingTokenAsConfigurationProblem() {
+        val result = buildConnectionResult(
+            healthStatusCode = 200,
+            tokenProvided = false,
+            recordingsStatusCode = null,
+            recordingCount = null,
+            errorMessage = null,
+        )
+
+        assertFalse(result.success)
+        assertEquals("缺少 FILES_TOKEN", result.summary)
+        assertTrue(result.nextAction.contains("粘贴 FILES_TOKEN"))
+        assertEquals(ConnectionCheckState.PASSED, result.checks[0].state)
+        assertEquals(ConnectionCheckState.FAILED, result.checks[1].state)
+        assertEquals("未填写，无法读取云端录音", result.checks[1].detail)
+        assertEquals(ConnectionCheckState.SKIPPED, result.checks[2].state)
+    }
+
+    @Test
+    fun connectionResultCallsOutInvalidToken() {
+        val result = buildConnectionResult(
+            healthStatusCode = 200,
+            tokenProvided = true,
+            recordingsStatusCode = 403,
+            recordingCount = null,
+            errorMessage = null,
+        )
+
+        assertFalse(result.success)
+        assertEquals("FILES_TOKEN 无效", result.summary)
+        assertTrue(result.nextAction.contains("更新 FILES_TOKEN"))
+        assertEquals(ConnectionCheckState.PASSED, result.checks[0].state)
+        assertEquals(ConnectionCheckState.FAILED, result.checks[1].state)
+        assertEquals(ConnectionCheckState.FAILED, result.checks[2].state)
+    }
+
+    @Test
+    fun connectionResultReportsRecordingsApiFailureAfterHealthyAuthInputs() {
+        val result = buildConnectionResult(
+            healthStatusCode = 200,
+            tokenProvided = true,
+            recordingsStatusCode = 500,
+            recordingCount = null,
+            errorMessage = null,
+        )
+
+        assertFalse(result.success)
+        assertEquals("录音列表接口异常", result.summary)
+        assertTrue(result.nextAction.contains("复制诊断信息"))
+        assertEquals(ConnectionCheckState.PASSED, result.checks[0].state)
+        assertEquals(ConnectionCheckState.PASSED, result.checks[1].state)
+        assertEquals(ConnectionCheckState.FAILED, result.checks[2].state)
+        assertTrue(result.checks[2].detail.contains("HTTP 500"))
+    }
+
     @Test
     fun diagnosticsTextIncludesSupportFields() {
         val text = formatDiagnostics(
