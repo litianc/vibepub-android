@@ -230,6 +230,7 @@ private fun RecordingEntity.processingStatusDetail(): String {
         ProcessingStageKind.QUEUED -> "录音已到云端，等待后台任务开始处理。"
         ProcessingStageKind.ASR -> "云端正在进行语音识别。"
         ProcessingStageKind.ARTICLE -> "已拿到识别结果，云端正在整理公众号文章。"
+        ProcessingStageKind.ARTICLE_READY -> "文章已生成，可以先阅读、复制或分享；公众号草稿仍在准备或同步中。"
         ProcessingStageKind.WECHAT -> "文章已生成，正在准备微信公众号草稿。"
         ProcessingStageKind.COMPLETED -> completedStatusDetail()
         ProcessingStageKind.FAILED -> lastError?.takeIf { it.isNotBlank() } ?: "云端处理阶段失败，等待重试或人工检查。"
@@ -249,6 +250,7 @@ private fun RecordingEntity.processingStatusLabel(): String {
         ProcessingStageKind.QUEUED -> "排队中"
         ProcessingStageKind.ASR -> "转录中"
         ProcessingStageKind.ARTICLE -> "正在成文"
+        ProcessingStageKind.ARTICLE_READY -> "文章已生成"
         ProcessingStageKind.WECHAT -> "生成草稿中"
         ProcessingStageKind.COMPLETED -> if (hasWechatDraftReference()) "草稿已就绪" else "已成文"
         ProcessingStageKind.FAILED -> "需要处理"
@@ -264,6 +266,7 @@ private fun RecordingEntity.processingNextActionLabel(): String {
         ProcessingStageKind.QUEUED -> "下一步：等待后台任务开始；如果超过几分钟没有变化，点同步刷新。"
         ProcessingStageKind.ASR -> "下一步：等待语音识别完成；详情页会先显示原始识别片段。"
         ProcessingStageKind.ARTICLE -> "下一步：等待文章标题和正文生成；完成后可以复制、分享或导出。"
+        ProcessingStageKind.ARTICLE_READY -> "下一步：可以先查看、复制或分享正文；点同步等待公众号草稿状态。"
         ProcessingStageKind.WECHAT -> "下一步：等待公众号草稿创建；草稿可用后会显示打开入口。"
         ProcessingStageKind.COMPLETED -> completedNextActionLabel()
         ProcessingStageKind.FAILED -> failureNextActionLabel()
@@ -282,6 +285,7 @@ private enum class ProcessingStageKind {
     QUEUED,
     ASR,
     ARTICLE,
+    ARTICLE_READY,
     WECHAT,
     COMPLETED,
     FAILED,
@@ -296,7 +300,8 @@ private fun RecordingEntity.processingStageKind(): ProcessingStageKind {
         "UPLOADED", "QUEUED", "PENDING" -> ProcessingStageKind.QUEUED
         "ASR", "TRANSCRIBING", "TRANSCRIPTION", "TRANSCRIBE" -> ProcessingStageKind.ASR
         "ARTICLE", "REWRITE", "REWRITING", "LLM", "GENERATING_ARTICLE" -> ProcessingStageKind.ARTICLE
-        "ARTICLE_READY", "WECHAT", "DRAFT", "DRAFTING", "CREATING_DRAFT", "PUBLISHING_DRAFT" -> ProcessingStageKind.WECHAT
+        "ARTICLE_READY", "ARTICLE_DONE", "READY_FOR_DRAFT" -> ProcessingStageKind.ARTICLE_READY
+        "WECHAT", "DRAFT", "DRAFTING", "CREATING_DRAFT", "PUBLISHING_DRAFT" -> ProcessingStageKind.WECHAT
         "COMPLETED", "DONE" -> ProcessingStageKind.COMPLETED
         "ASR_FAILED", "TRANSCRIPTION_FAILED", "TRANSCRIBE_FAILED" -> ProcessingStageKind.ASR_FAILED
         "ARTICLE_FAILED", "REWRITE_FAILED", "LLM_FAILED" -> ProcessingStageKind.ARTICLE_FAILED
@@ -311,6 +316,7 @@ private fun RecordingEntity.workflowIndexFromProcessingStage(): Int? {
         ProcessingStageKind.QUEUED -> 2
         ProcessingStageKind.ASR -> 3
         ProcessingStageKind.ARTICLE -> 4
+        ProcessingStageKind.ARTICLE_READY -> 5
         ProcessingStageKind.WECHAT -> 5
         ProcessingStageKind.COMPLETED -> completedWorkflowIndex()
         ProcessingStageKind.FAILED -> null

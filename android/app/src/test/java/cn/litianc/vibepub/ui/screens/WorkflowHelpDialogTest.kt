@@ -252,6 +252,28 @@ class WorkflowHelpDialogTest {
     }
 
     @Test
+    fun detailStatusCardSeparatesArticleReadyFromDraftReady() {
+        composeTestRule.setContent {
+            DetailStatusCardPreview(
+                recording = RecordingEntity(
+                    filename = "VibePub-test.m4a",
+                    durationMs = 42_000L,
+                    timestamp = 1L,
+                    status = RecordingStatus.PROCESSING.value,
+                    articleTitle = "文章已生成",
+                    rawTextPreview = "原始识别结果",
+                    processingStage = "ARTICLE_READY",
+                ),
+            )
+        }
+
+        composeTestRule.onNodeWithText("文章已生成").assertIsDisplayed()
+        composeTestRule.onNodeWithText("第 6/7 步").assertIsDisplayed()
+        composeTestRule.onNodeWithText("下一步：可以先查看、复制或分享正文；点同步等待公众号草稿状态。").assertIsDisplayed()
+        composeTestRule.onAllNodesWithText("生成草稿中").assertCountEquals(0)
+    }
+
+    @Test
     fun detailStatusCardShowsBlockedStepOnlyInHelpDialog() {
         composeTestRule.setContent {
             DetailStatusCardPreview(

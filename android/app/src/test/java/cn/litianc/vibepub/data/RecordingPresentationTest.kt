@@ -186,10 +186,12 @@ class RecordingPresentationTest {
         assertEquals("第 5/7 步", article.workflowProgressLabel())
         assertEquals(WorkflowStepState.CURRENT, article.workflowSteps()[4].state)
 
-        assertEquals("生成草稿中", articleReady.statusLabel())
+        assertEquals("文章已生成", articleReady.statusLabel())
+        assertTrue(articleReady.statusDetail().contains("可以先阅读、复制或分享"))
         assertEquals("第 6/7 步", articleReady.workflowProgressLabel())
         assertEquals(WorkflowStepState.DONE, articleReady.workflowSteps()[4].state)
         assertEquals(WorkflowStepState.CURRENT, articleReady.workflowSteps()[5].state)
+        assertTrue(articleReady.workflowNextActionLabel().contains("查看、复制或分享正文"))
 
         assertEquals("生成草稿中", wechat.statusLabel())
         assertEquals("第 6/7 步", wechat.workflowProgressLabel())
