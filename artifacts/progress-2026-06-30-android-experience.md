@@ -1,6 +1,6 @@
 # VibePub Android Experience Progress - 2026-06-30
 
-记录时间：2026-06-30 21:23 CST
+记录时间：2026-06-30 21:50 CST
 分支：`codex/android-experience-v1`  
 本次记录基线提交：`8f43de6 Make workflow stalls visible in the Android app`
 
@@ -68,27 +68,33 @@
   - 封面生成或草稿发布失败时，会保留已生成文章并以 `DRAFT_FAILED` 回写，而不是把整条录音标记为不可用失败。
 
 ### 真机/ADB
-- 当前 ADB 检查无设备在线：
-  - 命令：`adb devices -l`
-  - 输出：`List of devices attached` 后无设备。
-  - `adb kill-server && adb start-server && adb devices -l` 后仍无设备。
-  - `adb mdns services` 当前没有发现无线调试服务。
-  - `system_profiler SPUSBDataType` 当前只看到 Mac USB bus，没有枚举出 Android/Redmi 设备；这表示有线连接还没进入系统可见状态。
-  - `nc -vz -w 3 10.161.2.96 43355` 返回 `Connection refused`；该同网段无线调试端口当前已失效或未开放。
-  - Mac 当前 Wi-Fi 地址是 `10.161.2.226/24`，和此前的 `10.161.2.96` 在同网段；但 `192.168.31.72` 不在当前网段，不能作为当前有效无线调试目标。
-  - `scripts/check-android-device-ready.sh` 现在会自动保存 `adb-mdns-services.txt`、尝试连接 `_adb-tls-connect` 端点，并把 `adb-wireless-connect.txt` 写进 readiness 报告；当前证据见 `artifacts/android-device-readiness/latest/readiness.md`。
-  - 下一次真机验证需要先让设备出现在 `adb devices -l`；可选路径是重新插拔数据线并确认 USB 模式/调试授权，或重新打开平板无线调试页面获取新的配对码和新的连接端口。
-- 当前卡住原因归因：
-  - 不在代码层：本地 Android 单测、assemble、体验审计均已通过。
-  - 不在 GitHub Actions 层：Android Tests 和 Android Build & Release 都已成功，最新 Release 已生成。
-  - 卡在设备连接层：Mac 既看不到 USB 设备，也连不上无线调试端口，因此不能安装最新 APK，也不能跑真机端到端自动化。
-- 上一轮 APK 已安装并启动，但不是当前最新 Release：
-  - 安装证据：`artifacts/android-install/20260630-1054cc1/install/summary.md`
-  - readiness：`artifacts/android-install/20260630-1054cc1/install/readiness/readiness.md`
-  - 包版本：`versionName=0.1.0-debug`，`versionCode=1`
-  - 签名摘要：`18a43bae`
-  - 设备进程：`cn.litianc.vibepub` 已运行。
-  - 当前最新 `8f43de6` APK 尚未完成真机安装/端到端验证。
+- 红米真机已恢复为可自动化测试状态：
+  - 指定 serial：`10.161.2.96:45117`
+  - 设备型号：`25079RPDCC`
+  - readiness：`artifacts/android-device-readiness/20260630-android-provided-single/readiness.md` 通过。
+- 真机端到端 smoke 已通过：
+  - 证据目录：`artifacts/android-device-visual/20260630-android-provided-smoke-rerun`
+  - 测试音频：`/Users/xyli/Documents/Code/revoice-project/.data/test_clips/speaker_boundary_18_48s.mp3`
+  - APK：`android/app/build/outputs/apk/debug/app-debug.apk`
+  - 录音文件：`VibePub-2026-06-30-214139-0m30s-Debug-Audio-Import.mp3`
+  - GitHub Actions mining run：`28448860756` 成功。
+  - 后端状态：`COMPLETED`，`processing_stage=COMPLETED`，有 `article_title` 和 `wechat_draft_id`。
+  - App 验收：`Transcript detail assertion: completed`，`Acceptance assertion: passed`。
+  - audit：`scripts/audit-android-device-smoke.sh artifacts/android-device-visual/20260630-android-provided-smoke-rerun` 通过。
+- 真机验证覆盖：
+  - debug import 只创建一条非零录音。
+  - 本地 Room 对同 filename 只有一条非零 `COMPLETED` 记录。
+  - 后端 `/api/recordings` 返回完成态和文章元数据。
+  - mining 日志引用本次目标 filename。
+  - 详情页显示标题、原始识别、正文、时长 `0:30`、公众号草稿审核、状态说明入口。
+  - 详情页正文无 raw HTML 标签。
+  - 播放、复制正文、分享正文、导出材料包、打开公众号草稿动作均通过自动化断言。
+- 本轮发现并修复了真机自动化脚本的竞态误判：
+  - 现象：Worker 触发 mining 太快，脚本在上传记录出现后才读取 `previous_run_id`，会把本次 run 误当作旧 run，报 `Could not find a Worker-dispatched mining workflow run`。
+  - 修复：`scripts/android-device-visual-test.sh` 会按当前 workflow ref 扫描最近的 `workflow_dispatch` runs，并用目标 filename 命中 mining 日志来确认本次 run。
+- 用户手动刷新证据：
+  - 证据目录：`artifacts/android-device-visual/20260630-manual-refresh-evidence`
+  - 手动刷新后详情页显示 `草稿已就绪`、`第 7/7 步`、标题和公众号草稿审核。
 
 ## 待验证
 
@@ -127,6 +133,7 @@
   - 本轮体验版完成度审计脚本 `scripts/audit-android-experience-readiness.sh` 已新增；它会检查需求文档、Android 状态/Room/UI/设置证据、Worker/mining 字段、Release manifest、真机 smoke 脚本，并把当前无 ADB 的真机门禁标为 `[~]`。本地运行结果：自动源代码/测试/发布失败数 `0`，设备门禁项 `2`，报告见 `artifacts/android-experience-readiness/latest/readiness.md`。
   - 本轮 DAO 写入保护改动后，`RecordingDao.upsertBest` 会在同 filename 新记录竞争时保留更高质量记录，避免 0 秒或更差状态覆盖已有非零/已完成记录；显式携带已有 id 的状态更新仍可正常更新。`scripts/build-android-local.sh test`、`scripts/build-android-local.sh assemble`、`scripts/audit-android-experience-readiness.sh`、`git diff --check` 均通过。
   - 本轮流程关注提示改动后，`RecordingPresentationTest` 覆盖可行动状态和长时间无进展提示，`WorkflowHelpDialogTest` 覆盖列表/详情/弹窗可见性；`scripts/build-android-local.sh` 已支持透传 `--tests`，避免定向测试误跑全量。`scripts/build-android-local.sh test`、`scripts/build-android-local.sh assemble`、`scripts/audit-android-experience-readiness.sh`、`git diff --check` 均通过。
+  - 本轮真机自动化 run 识别竞态修复后，`bash -n scripts/android-device-visual-test.sh scripts/run-android-device-smoke.sh scripts/audit-android-device-smoke.sh scripts/audit-android-experience-readiness.sh`、目标 run 日志搜索验证、真机 smoke rerun、`scripts/audit-android-device-smoke.sh`、`git diff --check` 均通过。
 - GitHub Actions Android Tests 可用并已通过。
 - 最新 GitHub Actions Android Tests run `28447258290` 已覆盖提交 `8f43de6` 并成功。
 - 最新 GitHub Actions Android Build & Release run `28447258407` 已覆盖提交 `8f43de6` 并成功创建 Release `build-20260630-132053-8f43de6`。
@@ -134,24 +141,25 @@
 - 注意：本地单测必须使用 JDK 21；JDK 26 会导致 Robolectric 4.12 shadow class 解析失败。
 
 ### 生产环境待验证
-- 需要下一次真机/上传流程验证：
-  - 新上传录音在 D1 中写入稳定 `duration_ms`。
+- 已用真机新录音验证：
+  - 新上传录音在 D1 中写入稳定 `duration_ms=30000`。
   - 真机上传新录音后 GitHub Actions mining run 接收到对应 `target_filename`，而不是只等待 10 分钟定时扫描。
-  - Android 首页与详情页时长显示不依赖文件名兜底。
+  - Android 详情页时长显示 `0:30`。
+- 仍待后续处理：
   - `target_filename` 支持合入 `main` 后，将 Worker `GITHUB_WORKFLOW_REF` 切回 `main` 并重新部署。
 
 ### 真机端到端待验证
-- 需要使用准备好的音频 `/Users/xyli/Documents/Code/revoice-project/.data/test_clips/speaker_boundary_18_48s.mp3` 跑完整流程：
+- 已用准备好的音频 `/Users/xyli/Documents/Code/revoice-project/.data/test_clips/speaker_boundary_18_48s.mp3` 跑通完整流程：
   - 一次录音只生成一条非零秒记录。
-  - 首页状态从上传/处理中推进到完成。
+  - 首页状态从上传推进到完成，详情页显示 7/7 草稿就绪。
   - 详情页显示标题、正文、时长，且正文无 raw HTML 标签。
   - 播放按钮可播放本地录音，进度变化。
   - 复制/分享/导出入口可点击。
+- 仍待覆盖：
   - Token 错误时显示配置错误和可恢复路径。
 - 本地 APK 已生成：`android/app/build/outputs/apk/debug/app-debug.apk`
   - 当前本地 APK SHA-256：`4a5890221e4ddd36bf0a24598ba2a89d2e9a59f6519af3c0abc1a14117f0382b`
-- 待恢复 ADB 后安装本地 APK：当前 `adb devices -l` 无设备在线，需要重新连接 USB，或重新打开平板无线调试页面获取新端口。
-- ADB 恢复后可直接运行：
+- ADB 当前可用时可直接运行：
   - `scripts/install-android-local-apk.sh --serial <new-adb-serial> --skip-build`
   - 或 `scripts/install-android-local-apk.sh --serial <new-adb-serial> --test`
   - 完整 dogfood E2E：`scripts/run-android-device-smoke.sh android/app/build/outputs/apk/debug/app-debug.apk`
@@ -165,7 +173,7 @@
 
 ### 产品体验待完善
 - 继续按体验优先版计划推进：
-  - mining `ARTICLE_READY` 进度回写需要随分支进入生产 workflow 后，用真机新录音验证首页/详情是否先显示“文章已生成”再进入草稿阶段。
+  - mining `ARTICLE_READY` 进度回写已经在完整完成态链路中被间接验证；后续可补一个封面/草稿失败场景，专门验证“文章已生成但草稿未就绪”的中间态体验。
   - 设置页诊断信息与连接测试继续作为 dogfood 基础设施检查点。
   - 自动化测试产物需要稳定保存截图、UI dump、logcat、audit 结果。
 

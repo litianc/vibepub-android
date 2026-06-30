@@ -32,6 +32,7 @@ DEFAULT_MINING_WORKFLOW_REF="$(git -C "$ROOT_DIR" branch --show-current 2>/dev/n
 MINING_WORKFLOW_REF="${MINING_WORKFLOW_REF:-${DEFAULT_MINING_WORKFLOW_REF:-main}}"
 MINING_TRIGGER_MODE="${MINING_TRIGGER_MODE:-auto}"
 MINING_WAIT_SECONDS="${MINING_WAIT_SECONDS:-240}"
+MINING_RUN_SEARCH_LIMIT="${MINING_RUN_SEARCH_LIMIT:-8}"
 BACKEND_UPLOAD_WAIT_SECONDS="${BACKEND_UPLOAD_WAIT_SECONDS:-90}"
 BACKEND_COMPLETION_WAIT_SECONDS="${BACKEND_COMPLETION_WAIT_SECONDS:-60}"
 BACKEND_POLL_INTERVAL_SECONDS="${BACKEND_POLL_INTERVAL_SECONDS:-2}"
@@ -87,6 +88,10 @@ Environment:
   MINING_WORKFLOW_REF Git ref for workflow_dispatch. Default: current git branch,
                   falling back to main outside a branch checkout.
   MINING_WAIT_SECONDS Max seconds to wait for the workflow. Default: 240.
+  MINING_RUN_SEARCH_LIMIT
+                  Number of recent workflow_dispatch runs to scan for the
+                  target filename when the Worker dispatches before the smoke
+                  script snapshots the previous run id. Default: 8.
   DETAIL_WAIT_SECONDS
                   Seconds to wait after opening recording detail. Default: 8.
   DETAIL_SCROLL_PAGES
@@ -897,15 +902,56 @@ latest_workflow_dispatch_run_id() {
   gh run list \
     --workflow "$MINING_WORKFLOW_ID" \
     --event workflow_dispatch \
+    --branch "$MINING_WORKFLOW_REF" \
     --limit 1 \
     --json databaseId \
     --jq '.[0].databaseId // ""' 2>/dev/null || true
+}
+
+recent_workflow_dispatch_run_ids() {
+  gh run list \
+    --workflow "$MINING_WORKFLOW_ID" \
+    --event workflow_dispatch \
+    --branch "$MINING_WORKFLOW_REF" \
+    --limit "$MINING_RUN_SEARCH_LIMIT" \
+    --json databaseId \
+    --jq '.[].databaseId' 2>/dev/null || true
+}
+
+find_mining_run_referencing_target() {
+  local target_filename="$1"
+  local run_id candidate_log
+
+  if [[ -z "$target_filename" ]]; then
+    return 1
+  fi
+
+  while IFS= read -r run_id; do
+    if [[ -z "$run_id" ]]; then
+      continue
+    fi
+
+    candidate_log="$OUT_DIR/mining-run-candidate-$run_id.log"
+    if gh run view "$run_id" --log \
+      > "$candidate_log.tmp" 2>"$candidate_log.err"; then
+      mv "$candidate_log.tmp" "$candidate_log"
+      if grep -Fq "$target_filename" "$candidate_log"; then
+        printf '%s\n' "$run_id"
+        return 0
+      fi
+    else
+      rm -f "$candidate_log.tmp"
+    fi
+  done < <(recent_workflow_dispatch_run_ids)
+
+  return 1
 }
 
 wait_for_mining_job_dispatched_by_worker() {
   local previous_run_id="$1"
   local target_filename="$2"
   local run_id=""
+  local target_run_id=""
   local deadline=$((SECONDS + MINING_WAIT_SECONDS))
 
   echo "Waiting for Worker-dispatched GitHub Actions workflow: $MINING_WORKFLOW_ID ($MINING_WORKFLOW_REF)"
@@ -920,6 +966,13 @@ wait_for_mining_job_dispatched_by_worker() {
       printf '%s\n' "$run_id" > "$OUT_DIR/mining-run-id.txt"
       return 0
     fi
+
+    target_run_id="$(find_mining_run_referencing_target "$target_filename" || true)"
+    if [[ -n "$target_run_id" ]]; then
+      printf '%s\n' "$target_run_id" > "$OUT_DIR/mining-run-id.txt"
+      return 0
+    fi
+
     sleep 3
   done
 
