@@ -317,10 +317,18 @@ async function updateStatus(request: Request, env: Env): Promise<Response> {
       wechatUrl,
       wechatDraftId,
       errorMessage,
+      error_message,
     } = body;
     if (!filename || !status) {
       return json({ error: "missing_fields" }, 400);
     }
+    const stage = processingStage || processing_stage || null;
+    const statusError = resolveStatusErrorUpdate({
+      status,
+      processingStage: stage,
+      hasIncomingErrorMessage: hasOwn(body, "errorMessage") || hasOwn(body, "error_message"),
+      incomingErrorMessage: errorMessage ?? error_message,
+    });
     const statement = `
       UPDATE recordings
       SET
@@ -331,7 +339,7 @@ async function updateStatus(request: Request, env: Env): Promise<Response> {
         processing_stage = COALESCE(?, processing_stage),
         wechat_url = COALESCE(?, wechat_url),
         wechat_draft_id = COALESCE(?, wechat_draft_id),
-        error_message = COALESCE(?, error_message),
+        error_message = CASE WHEN ? = 1 THEN ? ELSE error_message END,
         updated_at = CURRENT_TIMESTAMP
       WHERE user_id = ? AND filename = ?
       `;
@@ -342,10 +350,11 @@ async function updateStatus(request: Request, env: Env): Promise<Response> {
           rawText || null,
           articleTitle || null,
           articleContent || null,
-          processingStage || processing_stage || null,
+          stage,
           wechatUrl || null,
           wechatDraftId || null,
-          errorMessage || null,
+          statusError.shouldSet ? 1 : 0,
+          statusError.value,
           "default_user",
           filename,
         )
@@ -361,7 +370,7 @@ async function updateStatus(request: Request, env: Env): Promise<Response> {
         articleContent,
         wechatUrl,
         wechatDraftId,
-        errorMessage,
+        errorMessage: statusError,
       });
     }
     return json({ ok: true });
@@ -381,7 +390,7 @@ async function updateStatusWithoutProcessingStage(
     articleContent?: string;
     wechatUrl?: string;
     wechatDraftId?: string;
-    errorMessage?: string;
+    errorMessage: StatusErrorUpdate;
   },
 ): Promise<void> {
   const statement = `
@@ -393,7 +402,7 @@ async function updateStatusWithoutProcessingStage(
       article_content = COALESCE(?, article_content),
       wechat_url = COALESCE(?, wechat_url),
       wechat_draft_id = COALESCE(?, wechat_draft_id),
-      error_message = COALESCE(?, error_message),
+      error_message = CASE WHEN ? = 1 THEN ? ELSE error_message END,
       updated_at = CURRENT_TIMESTAMP
     WHERE user_id = ? AND filename = ?
     `;
@@ -406,7 +415,8 @@ async function updateStatusWithoutProcessingStage(
         body.articleContent || null,
         body.wechatUrl || null,
         body.wechatDraftId || null,
-        body.errorMessage || null,
+        body.errorMessage.shouldSet ? 1 : 0,
+        body.errorMessage.value,
         "default_user",
         body.filename,
       )
@@ -430,6 +440,58 @@ async function updateStatusWithoutProcessingStage(
       )
       .run();
   }
+}
+
+type StatusErrorUpdate = {
+  shouldSet: boolean;
+  value: string | null;
+};
+
+function resolveStatusErrorUpdate(input: {
+  status: string;
+  processingStage?: string | null;
+  hasIncomingErrorMessage: boolean;
+  incomingErrorMessage?: unknown;
+}): StatusErrorUpdate {
+  if (input.hasIncomingErrorMessage) {
+    return {
+      shouldSet: true,
+      value: normalizeOptionalString(input.incomingErrorMessage),
+    };
+  }
+
+  if (keepsExistingErrorMessage(input.status, input.processingStage)) {
+    return { shouldSet: false, value: null };
+  }
+
+  return { shouldSet: true, value: null };
+}
+
+function keepsExistingErrorMessage(status: string, processingStage?: string | null): boolean {
+  const statusKey = statusKeyOf(status);
+  const stageKey = statusKeyOf(processingStage || "");
+  return statusKey === "FAILED" || isFailureStage(stageKey);
+}
+
+function isFailureStage(stageKey: string): boolean {
+  return stageKey === "FAILED" ||
+    stageKey === "ERROR" ||
+    stageKey.endsWith("_FAILED");
+}
+
+function statusKeyOf(value: string): string {
+  return value
+    .trim()
+    .toUpperCase()
+    .replace(/[-\s]+/g, "_");
+}
+
+function normalizeOptionalString(value: unknown): string | null {
+  return typeof value === "string" ? value.trim() || null : null;
+}
+
+function hasOwn(value: object, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(value, key);
 }
 
 async function getFile(env: Env, encodedKey: string): Promise<Response> {

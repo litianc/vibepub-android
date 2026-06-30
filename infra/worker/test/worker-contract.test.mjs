@@ -100,6 +100,7 @@ test("persists mining status metadata for Android progress display", async () =>
   const db = {
     prepare(sql) {
       assert.match(sql, /processing_stage = COALESCE/);
+      assert.match(sql, /error_message = CASE WHEN \? = 1 THEN \? ELSE error_message END/);
       return statement({
         run: async (values) => {
           boundValues = values;
@@ -135,10 +136,102 @@ test("persists mining status metadata for Android progress display", async () =>
     "DRAFTING",
     null,
     "MEDIA_ID_123",
+    1,
     null,
     "default_user",
     "voice.m4a",
   ]);
+});
+
+test("clears stale status error when progress resumes without an error message", async () => {
+  let boundValues = [];
+  const db = {
+    prepare() {
+      return statement({
+        run: async (values) => {
+          boundValues = values;
+          return { meta: { changes: 1 } };
+        },
+      });
+    },
+  };
+
+  const response = await worker.fetch(
+    authorizedRequest("https://example.test/api/internal/status", {
+      method: "PUT",
+      body: JSON.stringify({
+        filename: "voice.m4a",
+        status: "PROCESSING",
+        processingStage: "ASR",
+      }),
+    }),
+    createEnv({ DB: db }),
+    createExecutionContext(),
+  );
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(boundValues.slice(7, 9), [1, null]);
+});
+
+test("preserves stale status error when failed update has no replacement message", async () => {
+  let boundValues = [];
+  const db = {
+    prepare() {
+      return statement({
+        run: async (values) => {
+          boundValues = values;
+          return { meta: { changes: 1 } };
+        },
+      });
+    },
+  };
+
+  const response = await worker.fetch(
+    authorizedRequest("https://example.test/api/internal/status", {
+      method: "PUT",
+      body: JSON.stringify({
+        filename: "voice.m4a",
+        status: "FAILED",
+        processingStage: "ASR",
+      }),
+    }),
+    createEnv({ DB: db }),
+    createExecutionContext(),
+  );
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(boundValues.slice(7, 9), [0, null]);
+});
+
+test("persists snake_case status error for draft failure metadata", async () => {
+  let boundValues = [];
+  const db = {
+    prepare() {
+      return statement({
+        run: async (values) => {
+          boundValues = values;
+          return { meta: { changes: 1 } };
+        },
+      });
+    },
+  };
+
+  const response = await worker.fetch(
+    authorizedRequest("https://example.test/api/internal/status", {
+      method: "PUT",
+      body: JSON.stringify({
+        filename: "voice.m4a",
+        status: "COMPLETED",
+        processing_stage: "DRAFT_FAILED",
+        error_message: "公众号草稿创建失败：502",
+      }),
+    }),
+    createEnv({ DB: db }),
+    createExecutionContext(),
+  );
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(boundValues.slice(7, 9), [1, "公众号草稿创建失败：502"]);
 });
 
 async function loadWorker() {
