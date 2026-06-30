@@ -56,6 +56,35 @@ For wireless debugging, the Mac and Android device must be on the same reachable
 network. Use fresh pairing and connect ports from the current Wireless debugging
 screen; old pairing codes and ports expire.
 
+The readiness preflight now captures wireless debugging discovery and tries
+connectable mDNS endpoints automatically:
+
+```bash
+CHECK_APK_INSTALL=false scripts/check-android-device-ready.sh
+```
+
+When `adb mdns services` shows an `_adb-tls-connect._tcp` endpoint but the
+preflight still reports no authorized device, open the device's current Wireless
+debugging screen. Pair again if needed, then rerun with the fresh connect
+address:
+
+```bash
+adb pair <pair-ip>:<pair-port>
+WIRELESS_ADB_CONNECT_TARGETS=<connect-ip>:<connect-port> \
+CHECK_APK_INSTALL=false \
+scripts/check-android-device-ready.sh
+```
+
+The report writes the raw discovery and connect evidence to:
+
+- `adb-mdns-services.txt`
+- `adb-wireless-connect-targets.txt`
+- `adb-wireless-connect.txt`
+
+If `adb-wireless-connect.txt` says `Connection refused`, the advertised connect
+port is stale or the device rejected the TCP connection. Keep the wireless
+debugging screen open, copy the fresh connect port, and retry.
+
 The default automated path uses a debug-only broadcast receiver and does not
 require simulated tap permission. If you explicitly use `AUTOMATION_MODE=ui-tap`,
 also check:

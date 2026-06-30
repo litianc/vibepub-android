@@ -15,6 +15,8 @@ AUTO_TAP_USB_INSTALL_PROMPT_FALLBACK="${AUTO_TAP_USB_INSTALL_PROMPT_FALLBACK:-tr
 USB_INSTALL_PROMPT_TIMEOUT_SECONDS="${USB_INSTALL_PROMPT_TIMEOUT_SECONDS:-20}"
 ADB_INSTALL_TIMEOUT_SECONDS="${ADB_INSTALL_TIMEOUT_SECONDS:-120}"
 ALLOW_UNINSTALL_ON_SIGNATURE_MISMATCH="${ALLOW_UNINSTALL_ON_SIGNATURE_MISMATCH:-false}"
+AUTO_CONNECT_WIRELESS_ADB="${AUTO_CONNECT_WIRELESS_ADB:-true}"
+WIRELESS_ADB_CONNECT_TARGETS="${WIRELESS_ADB_CONNECT_TARGETS:-}"
 
 usage() {
   cat <<EOF
@@ -48,6 +50,12 @@ Environment:
                 If adb install reports INSTALL_FAILED_UPDATE_INCOMPATIBLE,
                 uninstall the existing package and retry. This clears app data.
                 Default: false.
+  AUTO_CONNECT_WIRELESS_ADB
+                Try adb connect for mDNS-discovered wireless debugging
+                endpoints before failing the device preflight. Default: true.
+  WIRELESS_ADB_CONNECT_TARGETS
+                Optional space/comma-separated host:port targets to try in
+                addition to mDNS-discovered _adb-tls-connect endpoints.
 
 Checks whether a USB-connected Android phone is ready for the VibePub
 real-device smoke lane.
@@ -278,6 +286,51 @@ capture_macos_usb_snapshot() {
   fi
 }
 
+capture_wireless_adb_snapshot() {
+  adb mdns services > "$OUT_DIR/adb-mdns-services.txt" 2>&1 || true
+  awk '
+    $0 ~ /_adb-tls-connect\._tcp/ {
+      for (i = NF; i >= 1; i--) {
+        if ($i ~ /^[0-9A-Za-z_.:-]+:[0-9]+$/) {
+          print $i
+          next
+        }
+      }
+    }
+  ' "$OUT_DIR/adb-mdns-services.txt" | sort -u > "$OUT_DIR/adb-mdns-connect-targets.txt"
+}
+
+wireless_connect_targets() {
+  {
+    if [[ -n "$WIRELESS_ADB_CONNECT_TARGETS" ]]; then
+      printf '%s\n' "$WIRELESS_ADB_CONNECT_TARGETS" | tr ', ' '\n'
+    fi
+    if [[ -f "$OUT_DIR/adb-mdns-connect-targets.txt" ]]; then
+      cat "$OUT_DIR/adb-mdns-connect-targets.txt"
+    fi
+  } | awk 'NF > 0' | sort -u
+}
+
+try_wireless_adb_connects() {
+  if ! truthy "$AUTO_CONNECT_WIRELESS_ADB"; then
+    return 0
+  fi
+
+  wireless_connect_targets > "$OUT_DIR/adb-wireless-connect-targets.txt"
+  if [[ ! -s "$OUT_DIR/adb-wireless-connect-targets.txt" ]]; then
+    return 0
+  fi
+
+  : > "$OUT_DIR/adb-wireless-connect.txt"
+  while IFS= read -r target; do
+    {
+      echo "## adb connect $target"
+      adb connect "$target" || true
+      echo
+    } >> "$OUT_DIR/adb-wireless-connect.txt" 2>&1
+  done < "$OUT_DIR/adb-wireless-connect-targets.txt"
+}
+
 append_connection_hints() {
   local visible_count="$1"
   local authorized_count="$2"
@@ -296,6 +349,16 @@ append_connection_hints() {
 - Offline devices: \`$offline_count\`
 - Raw adb list: \`$OUT_DIR/adb-devices.txt\`
 EOF
+
+  if [[ -f "$OUT_DIR/adb-mdns-services.txt" ]]; then
+    echo "- Wireless debugging mDNS services: \`$OUT_DIR/adb-mdns-services.txt\`" >> "$report"
+  fi
+  if [[ -s "$OUT_DIR/adb-wireless-connect-targets.txt" ]]; then
+    echo "- Wireless connect targets tried: \`$OUT_DIR/adb-wireless-connect-targets.txt\`" >> "$report"
+  fi
+  if [[ -f "$OUT_DIR/adb-wireless-connect.txt" ]]; then
+    echo "- Wireless connect output: \`$OUT_DIR/adb-wireless-connect.txt\`" >> "$report"
+  fi
 
   if [[ -f "$OUT_DIR/macos-usb-android-filter.txt" ]]; then
     echo "- macOS USB snapshot: \`$OUT_DIR/macos-usb-android-filter.txt\`" >> "$report"
@@ -316,6 +379,25 @@ If the macOS USB snapshot has no Android/Xiaomi/Redmi/MTP row, macOS is not
 enumerating the device at the USB layer; try another cable, port, or adapter
 before changing app or APK settings.
 EOF
+
+    if [[ -s "$OUT_DIR/adb-mdns-connect-targets.txt" ]]; then
+      cat >> "$report" <<EOF
+
+Wireless debugging is advertising a connect endpoint, but adb still has no
+authorized device row after the automatic connect attempt. This usually means
+the wireless debugging port expired, pairing is missing, or the tablet rejected
+the TCP connection. Open the device's Wireless debugging screen, keep it awake,
+then either:
+
+1. Pair again with \`adb pair <pair-ip>:<pair-port>\` using the fresh pairing
+   code, then rerun this preflight.
+2. Or copy the fresh connect address shown on that screen and rerun with
+   \`WIRELESS_ADB_CONNECT_TARGETS=<connect-ip>:<connect-port>\`.
+
+If \`ANDROID_SERIAL\` is set to an old wireless address, unset it or update it
+to the new connected serial.
+EOF
+    fi
   fi
 
   if [[ "$unauthorized_count" -gt 0 ]]; then
@@ -377,8 +459,12 @@ count_adb_rows() {
   ' "$OUT_DIR/adb-devices.txt"
 }
 
-adb_cmd start-server >/dev/null
-adb_cmd devices -l > "$OUT_DIR/adb-devices.txt"
+adb start-server >/dev/null
+adb devices -l > "$OUT_DIR/adb-devices-initial.txt"
+cp "$OUT_DIR/adb-devices-initial.txt" "$OUT_DIR/adb-devices.txt"
+capture_wireless_adb_snapshot
+try_wireless_adb_connects
+adb devices -l > "$OUT_DIR/adb-devices.txt"
 visible_count="$(count_adb_rows "${ANDROID_SERIAL:-}" "visible")"
 device_count="$(count_adb_rows "${ANDROID_SERIAL:-}" "device")"
 unauthorized_count="$(count_adb_rows "${ANDROID_SERIAL:-}" "unauthorized")"

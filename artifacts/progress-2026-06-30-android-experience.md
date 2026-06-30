@@ -71,6 +71,7 @@
   - 命令：`/opt/homebrew/share/android-commandlinetools/platform-tools/adb devices -l`
   - 输出：`List of devices attached` 后无设备。
   - `adb mdns services` 可发现无线调试服务 `10.161.2.96:42327`，但 `adb connect 10.161.2.96:42327` 当前返回 `Connection refused`。
+  - `scripts/check-android-device-ready.sh` 现在会自动保存 `adb-mdns-services.txt`、尝试连接 `_adb-tls-connect` 端点，并把 `adb-wireless-connect.txt` 写进 readiness 报告；当前证据见 `artifacts/android-device-readiness/latest/readiness.md`。
   - 下一次真机验证需要重新连接 USB，或重新打开平板无线调试页面获取新的配对码/配对端口。
 - 上一轮 APK 已安装并启动，但不是当前最新 Release：
   - 安装证据：`artifacts/android-install/20260630-1054cc1/install/summary.md`
@@ -113,6 +114,7 @@
   - 本轮 mining 进度回写改动后，`infra/mining` 下 `npm test`、`npm exec tsc -- --noEmit`、`git diff --check` 均通过。
   - 本轮 Android 同步映射改动后，`SyncWorkerTest`、`scripts/build-android-local.sh test`、`scripts/build-android-local.sh assemble`、`git diff --check` 均通过。
   - 本轮活跃进度同步调度改动后，`RecordingFilesTest`、`scripts/build-android-local.sh test`、`scripts/build-android-local.sh assemble`、`git diff --check` 均通过。
+  - 本轮 ADB readiness 自动连接诊断改动后，`bash -n scripts/check-android-device-ready.sh scripts/install-latest-android-apk.sh scripts/run-android-device-smoke.sh`、`CHECK_APK_INSTALL=false scripts/check-android-device-ready.sh`、`RecordingFilesTest`、`scripts/build-android-local.sh test`、`git diff --check` 均通过；preflight 正确记录当前无线调试端口 `Connection refused`。
 - GitHub Actions Android Tests 可用并已通过。
 - 最新 GitHub Actions Android Tests run `28443221766` 已覆盖提交 `8424f32` 并成功。
 - 最新 GitHub Actions Android Build & Release run `28443222078` 已覆盖提交 `8424f32` 并成功创建 Release `build-20260630-121346-8424f32`。
