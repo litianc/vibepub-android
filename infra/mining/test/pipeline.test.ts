@@ -124,6 +124,53 @@ describe('VibePub Cloud Pipeline', () => {
     });
   });
 
+  it('should publish article-ready progress before starting WeChat draft work', async () => {
+    const fileKey = 'inbox/VibePub-2026-06-30-044540-0m30s-Debug-Audio-Import.mp3';
+    const filename = 'VibePub-2026-06-30-044540-0m30s-Debug-Audio-Import.mp3';
+    const article = {
+      title: '把口述想法变成文章',
+      content: '<p>这是一篇已经生成完成、可以先阅读和复制的文章正文。</p>',
+      imagePrompt: 'A clean editorial cover',
+    };
+
+    vi.mocked(listUnprocessedFiles).mockResolvedValue([fileKey]);
+    vi.mocked(createPresignedDownloadUrl).mockResolvedValue('https://r2.example.test/audio.mp3');
+    vi.mocked(transcribeAudioUrl).mockResolvedValue('今天我想记录一下怎么减少写作成本。');
+    vi.mocked(processAudioText).mockResolvedValue(article);
+    vi.mocked(generateCoverImageBuffer).mockResolvedValue(Buffer.from('fake-cover'));
+    vi.mocked(getAccessToken).mockResolvedValue('wechat-token');
+    vi.mocked(publishDraft).mockResolvedValue('MEDIA_ID_123');
+    vi.mocked(uploadTranscript).mockResolvedValue();
+    vi.mocked(deleteFile).mockResolvedValue();
+
+    await expect(main()).resolves.toBeUndefined();
+
+    const fetchCalls = vi.mocked(fetch).mock.calls.map(([, init]) => JSON.parse(String(init?.body)));
+    expect(fetchCalls.map(call => call.processingStage)).toEqual([
+      'QUEUED',
+      'ASR',
+      'REWRITING',
+      'ARTICLE_READY',
+      'DRAFTING',
+      'COMPLETED',
+    ]);
+    expect(fetchCalls).toContainEqual(expect.objectContaining({
+      filename,
+      status: 'PROCESSING',
+      articleTitle: article.title,
+      articleContent: article.content,
+      processingStage: 'ARTICLE_READY',
+    }));
+    expect(fetchCalls).toContainEqual(expect.objectContaining({
+      filename,
+      status: 'COMPLETED',
+      articleTitle: article.title,
+      articleContent: article.content,
+      processingStage: 'COMPLETED',
+      wechatDraftId: 'MEDIA_ID_123',
+    }));
+  });
+
   it('should keep generated article visible when WeChat draft publishing fails', async () => {
     const fileKey = 'inbox/VibePub-2026-06-30-044540-0m30s-Debug-Audio-Import.mp3';
     const filename = 'VibePub-2026-06-30-044540-0m30s-Debug-Audio-Import.mp3';
@@ -163,5 +210,47 @@ describe('VibePub Cloud Pipeline', () => {
       call.status === 'FAILED' &&
         call.filename === filename
     )).toBe(false);
+  });
+
+  it('should keep generated article visible when cover generation fails after article-ready progress', async () => {
+    const fileKey = 'inbox/VibePub-2026-06-30-055501-0m30s-Cover-Failure.mp3';
+    const filename = 'VibePub-2026-06-30-055501-0m30s-Cover-Failure.mp3';
+    const article = {
+      title: '先保住已经写好的文章',
+      content: '<p>文章已经生成，封面失败也不应该让 App 看不到正文。</p>',
+      imagePrompt: 'A clean editorial cover',
+    };
+
+    vi.mocked(listUnprocessedFiles).mockResolvedValue([fileKey]);
+    vi.mocked(createPresignedDownloadUrl).mockResolvedValue('https://r2.example.test/audio.mp3');
+    vi.mocked(transcribeAudioUrl).mockResolvedValue('今天我想说说失败恢复。');
+    vi.mocked(processAudioText).mockResolvedValue(article);
+    vi.mocked(generateCoverImageBuffer).mockRejectedValue(new Error('cover generation timeout'));
+    vi.mocked(uploadTranscript).mockResolvedValue();
+    vi.mocked(deleteFile).mockResolvedValue();
+
+    await expect(main()).resolves.toBeUndefined();
+
+    const fetchCalls = vi.mocked(fetch).mock.calls.map(([, init]) => JSON.parse(String(init?.body)));
+    expect(fetchCalls).toContainEqual(expect.objectContaining({
+      filename,
+      status: 'PROCESSING',
+      articleTitle: article.title,
+      articleContent: article.content,
+      processingStage: 'ARTICLE_READY',
+    }));
+    expect(fetchCalls).toContainEqual(expect.objectContaining({
+      filename,
+      status: 'COMPLETED',
+      articleTitle: article.title,
+      articleContent: article.content,
+      processingStage: 'DRAFT_FAILED',
+      errorMessage: expect.stringContaining('cover generation timeout'),
+    }));
+    expect(fetchCalls.some(call =>
+      call.status === 'FAILED' &&
+        call.filename === filename
+    )).toBe(false);
+    expect(publishDraft).not.toHaveBeenCalled();
   });
 });

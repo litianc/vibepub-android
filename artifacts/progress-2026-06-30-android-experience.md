@@ -59,6 +59,9 @@
   - 生产 Worker 当前 `GITHUB_WORKFLOW_REF` 指向 `codex/android-experience-v1`，因为该分支的 `mining-job.yml` 已支持 `target_filename`；合入 main 后应切回 `main`。
   - 生产验证：上传 `VibePub-20260630111621-0m0s-Codex-Dispatch-Smoke.m4a` 后触发 GitHub Actions run `28440265834`，事件为 `workflow_dispatch`，分支为 `codex/android-experience-v1`，日志显示 `TARGET_FILENAME` 与目标文件名匹配。
   - 该 smoke 文件因无效音频被 mining job 从 R2 清理；D1 测试记录已手动删除，授权 `/api/recordings` 复查 `smoke_record_count=0`。
+- mining job 现在会在文章生成并保存后先回写 `ARTICLE_READY`：
+  - App 可以先显示“文章已生成，可以阅读/复制/分享”，再等待微信公众号草稿阶段。
+  - 封面生成或草稿发布失败时，会保留已生成文章并以 `DRAFT_FAILED` 回写，而不是把整条录音标记为不可用失败。
 
 ### 真机/ADB
 - 当前 ADB 检查无设备在线：
@@ -102,6 +105,7 @@
   - 本轮诊断最近录音摘要改动后，`SettingsScreenTest`、`scripts/build-android-local.sh test`、`scripts/build-android-local.sh assemble`、`git diff --check` 均通过。
   - 本轮诊断弹窗滚动改动后，`SettingsScreenTest`、`SettingsDiagnosticsDialogTest`、`git diff --check` 均通过。
   - 本轮真机自动化脚本改动后，`scripts/android-device-visual-test.sh` 默认等待 Worker 自动创建的 `workflow_dispatch` run；acceptance 和 audit 都会校验 `mining-run.log` 引用了本次录音文件名。`bash -n`、脚本 `--help`、`git diff --check` 均通过。
+  - 本轮 mining 进度回写改动后，`infra/mining` 下 `npm test`、`npm exec tsc -- --noEmit`、`git diff --check` 均通过。
 - GitHub Actions Android Tests 可用并已通过。
 - 注意：本地单测必须使用 JDK 21；JDK 26 会导致 Robolectric 4.12 shadow class 解析失败。
 
@@ -130,7 +134,7 @@
 
 ### 产品体验待完善
 - 继续按体验优先版计划推进：
-  - 后端/Worker 生产部署后补真实进度字段验证。
+  - mining `ARTICLE_READY` 进度回写需要随分支进入生产 workflow 后，用真机新录音验证首页/详情是否先显示“文章已生成”再进入草稿阶段。
   - 设置页诊断信息与连接测试继续作为 dogfood 基础设施检查点。
   - 自动化测试产物需要稳定保存截图、UI dump、logcat、audit 结果。
 

@@ -253,8 +253,7 @@ export async function main() {
       article = await processAudioText(rawText);
       console.log(`Generated Article Title: ${article.title}`);
       
-      // 5.5 LLM: Image Generation
-      processingStage = "DRAFTING";
+      processingStage = "ARTICLE_READY";
       await updateStatus(filename, "PROCESSING", {
         processingStage,
         rawText,
@@ -266,6 +265,14 @@ export async function main() {
       });
       articleTranscriptSaved = true;
 
+      // 5.5 LLM: Image Generation
+      processingStage = "DRAFTING";
+      await updateStatus(filename, "PROCESSING", {
+        processingStage,
+        rawText,
+        articleTitle: article.title,
+        articleContent: article.content,
+      });
       console.log(`Generating cover image with prompt: ${article.imagePrompt}`);
       const coverBuffer = await generateCoverImageBuffer(article.imagePrompt);
       
@@ -310,7 +317,11 @@ export async function main() {
     } catch (e) {
       console.error(`Failed to process ${fileKey}:`, describeError(e));
 
-      if (article && rawText.trim().length > 0 && processingStage === "DRAFTING") {
+      if (
+        article &&
+        rawText.trim().length > 0 &&
+        (processingStage === "ARTICLE_READY" || processingStage === "DRAFTING")
+      ) {
         const recovered = await completeWithArticleOnly(
           fileKey,
           filename,
