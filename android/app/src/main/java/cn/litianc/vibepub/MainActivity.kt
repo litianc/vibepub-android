@@ -170,14 +170,23 @@ fun VibePubApp(
             val result = withContext(Dispatchers.IO) {
                 runCatching {
                     val (file, duration) = recorder.stop()
-                    val saved = RecordingUploadCoordinator.saveRecording(context, file, duration)
-                    saved to file
+                    val hasUploadToken = preferences.filesToken.isNotBlank()
+                    val initialStatus = initialRecordingStatusForUploadToken(hasUploadToken)
+                    val initialError = initialRecordingErrorForUploadToken(hasUploadToken)
+                    val saved = RecordingUploadCoordinator.saveRecording(
+                        context = context,
+                        file = file,
+                        durationMs = duration,
+                        status = initialStatus,
+                        lastError = initialError,
+                    )
+                    Triple(saved, file, hasUploadToken)
                 }
             }
             result.fold(
-                onSuccess = { (saved, file) ->
+                onSuccess = { (saved, file, hasUploadToken) ->
                     if (saved) {
-                        val queued = enqueueUpload(file)
+                        val queued = hasUploadToken && enqueueUpload(file)
                         val message = if (queued) {
                             "录音已保存，正在上传处理"
                         } else {
@@ -200,4 +209,12 @@ fun VibePubApp(
         onRecordingOpened = { openRecordingAfterPermission = false },
         currentRecordingAmplitude = recorder::currentAmplitude,
     )
+}
+
+internal fun initialRecordingStatusForUploadToken(hasUploadToken: Boolean): String {
+    return if (hasUploadToken) RecordingStatus.UPLOADING.value else RecordingStatus.FAILED.value
+}
+
+internal fun initialRecordingErrorForUploadToken(hasUploadToken: Boolean): String? {
+    return if (hasUploadToken) null else "请先在设置中配置 FILES_TOKEN"
 }

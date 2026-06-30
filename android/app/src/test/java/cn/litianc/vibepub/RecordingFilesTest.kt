@@ -3,6 +3,7 @@ package cn.litianc.vibepub
 import androidx.work.ExistingWorkPolicy
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
@@ -78,6 +79,24 @@ class RecordingFilesTest {
         assertEquals(
             ExistingWorkPolicy.REPLACE,
             RecordingUploadCoordinator.uploadExistingWorkPolicy(replaceExistingUpload = true),
+        )
+    }
+
+    @Test
+    fun stoppedRecordingStartsWithActionableUploadState() {
+        assertEquals(
+            "UPLOADING",
+            initialRecordingStatusForUploadToken(hasUploadToken = true),
+        )
+        assertNull(initialRecordingErrorForUploadToken(hasUploadToken = true))
+
+        assertEquals(
+            "FAILED",
+            initialRecordingStatusForUploadToken(hasUploadToken = false),
+        )
+        assertEquals(
+            "请先在设置中配置 FILES_TOKEN",
+            initialRecordingErrorForUploadToken(hasUploadToken = false),
         )
     }
 }

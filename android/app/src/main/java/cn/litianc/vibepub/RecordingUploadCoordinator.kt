@@ -25,6 +25,7 @@ object RecordingUploadCoordinator {
         file: File,
         durationMs: Long,
         status: String = RecordingStatus.LOCAL_RECORDED.value,
+        lastError: String? = null,
         minDurationMs: Long = MIN_RECORDING_DURATION_MS,
     ): Boolean {
         if (!shouldSaveRecording(file, durationMs, minDurationMs)) {
@@ -41,7 +42,7 @@ object RecordingUploadCoordinator {
                     timestamp = System.currentTimeMillis(),
                     status = status,
                     localAudioPath = file.absolutePath,
-                    lastError = null,
+                    lastError = lastError,
                 ),
             )
         return true
