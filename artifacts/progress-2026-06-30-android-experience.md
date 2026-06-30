@@ -1,18 +1,18 @@
 # VibePub Android Experience Progress - 2026-06-30
 
-记录时间：2026-06-30 17:22 CST
+记录时间：2026-06-30 17:30 CST
 分支：`codex/android-experience-v1`  
 当前已推送提交：`ec43c84 Keep home focus from trusting placeholder draft refs`
 
 ## 已验证
 
 ### Android 最新 APK 渠道
-- GitHub Release：`build-20260630-084824-ae943af`
-- APK：<https://github.com/litianc/vibepub-android/releases/download/build-20260630-084824-ae943af/app-debug.apk>
-- SHA-256：`83dd84ab3a74f0f856baff02a0e6178370e5f0d19cd0356650ca95703d4bd7d2`
+- GitHub Release：`build-20260630-092807-1054cc1`
+- APK：<https://github.com/litianc/vibepub-android/releases/download/build-20260630-092807-1054cc1/app-debug.apk>
+- SHA-256：`ac0082bb489ae2cc5c29fdcf765bb43848918c424e3adc983539148e673d7d94`
 - Manifest 已指向该 Release：`artifacts/MANIFEST.md`
-- Android Tests：GitHub Actions run `28431850416` 成功
-- Android Build & Release：GitHub Actions run `28431850259` 成功
+- Android Tests：GitHub Actions run `28433787330` 成功
+- Android Build & Release：GitHub Actions run `28434107458` 成功
 
 ### Android 端已落地能力
 - 录音/首页/详情页已有体验优先版主干：
@@ -47,7 +47,12 @@
 - 当前红米平板 ADB 在线：
   - `10.161.2.96:43355`
   - 状态：`device`
-- 当前 APK 先前已可安装并启动；后续真机自动化仍以这台设备为目标。
+- 当前最新 APK 已安装并启动：
+  - 安装证据：`artifacts/android-install/20260630-1054cc1/install/summary.md`
+  - readiness：`artifacts/android-install/20260630-1054cc1/install/readiness/readiness.md`
+  - 包版本：`versionName=0.1.0-debug`，`versionCode=1`
+  - 签名摘要：`18a43bae`
+  - 设备进程：`cn.litianc.vibepub` 已运行。
 
 ## 待验证
 
@@ -79,6 +84,5 @@
   - 自动化测试产物需要稳定保存截图、UI dump、logcat、audit 结果。
 
 ## 当前注意事项
-- 目前最新可安装 APK 仍是 `ae943af` 对应 Release。
-- `ec43c84` 只通过 Android Tests，尚未产出新的 APK。
+- 目前最新可安装 APK 是 `1054cc1` 对应 Release。
 - `artifacts/` 下存在多批历史安装/CI 调试产物，当前记录未整理或删除它们。
