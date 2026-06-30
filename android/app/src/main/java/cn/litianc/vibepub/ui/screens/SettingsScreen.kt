@@ -84,6 +84,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 import java.text.SimpleDateFormat
@@ -663,6 +664,9 @@ private suspend fun buildDiagnostics(context: android.content.Context, preferenc
             lastSyncText = syncText,
             recordingCount = recordings.size,
             latest = latest,
+            latestLocalAudioExists = latest?.localAudioPath
+                ?.takeIf { it.isNotBlank() }
+                ?.let { File(it).exists() },
         )
     }
 
@@ -676,6 +680,9 @@ internal fun formatDiagnostics(
     lastSyncText: String,
     recordingCount: Int,
     latest: RecordingEntity?,
+    latestLocalAudioExists: Boolean? = latest?.localAudioPath
+        ?.takeIf { it.isNotBlank() }
+        ?.let { File(it).exists() },
 ): String {
     val latestStep = latest?.currentWorkflowStep()
     val latestDraftReference = latest?.let { recording ->
@@ -697,11 +704,14 @@ internal fun formatDiagnostics(
     Latest status: ${latest?.status ?: "无"}
     Latest status label: ${latest?.statusLabel() ?: "无"}
     Latest status detail: ${latest?.statusDetail() ?: "无"}
+    Latest processing stage: ${latest?.processingStage ?: "无"}
     Latest workflow: ${latest?.workflowCurrentNodeLabel() ?: "无"}
     Latest workflow progress: ${latest?.workflowProgressLabel() ?: "无"}
     Latest workflow detail: ${latestStep?.detail ?: "无"}
     Latest next action: ${latest?.workflowNextActionLabel() ?: "无"}
     Latest remote update: ${latest?.remoteStatusUpdatedAt ?: "无"}
+    Latest local audio path: ${latest?.localAudioPath ?: "无"}
+    Latest local audio exists: ${latestLocalAudioExists?.let { if (it) "是" else "否" } ?: "未知"}
     Latest article title: ${latest?.articleTitle ?: "无"}
     Latest raw text: ${if (latest?.rawTextPreview.isNullOrBlank()) "无" else "已同步"}
     Latest WeChat draft: $latestDraftReference

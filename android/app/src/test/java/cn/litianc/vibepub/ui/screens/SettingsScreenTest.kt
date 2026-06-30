@@ -167,11 +167,14 @@ class SettingsScreenTest {
                 durationMs = 18_000L,
                 timestamp = 1L,
                 status = RecordingStatus.FAILED.value,
-                lastError = "FILES_TOKEN 无效或没有权限",
+                lastError = "服务返回空转录结果",
                 articleTitle = "一次发布前的想法",
                 rawTextPreview = "原始识别片段",
                 remoteStatusUpdatedAt = "2026-06-29T08:00:00Z",
+                localAudioPath = "/tmp/VibePub-20260629.m4a",
+                processingStage = "ASR",
             ),
+            latestLocalAudioExists = false,
         )
 
         assertTrue(text.contains("App: VibePub 0.1.0-debug (1)"))
@@ -184,16 +187,19 @@ class SettingsScreenTest {
         assertTrue(text.contains("Latest status: FAILED"))
         assertTrue(text.contains("Latest title: 一次发布前的想法"))
         assertTrue(text.contains("Latest status label: 需要处理"))
-        assertTrue(text.contains("Latest status detail: FILES_TOKEN 无效或没有权限"))
-        assertTrue(text.contains("Latest workflow: 当前节点：2. 上传音频 · 需处理"))
-        assertTrue(text.contains("Latest workflow progress: 第 2/7 步"))
-        assertTrue(text.contains("Latest workflow detail: 把录音上传到云端"))
-        assertTrue(text.contains("Latest next action: 下一步：到设置页更新 FILES_TOKEN"))
+        assertTrue(text.contains("Latest status detail: 服务返回空转录结果"))
+        assertTrue(text.contains("Latest processing stage: ASR"))
+        assertTrue(text.contains("Latest workflow: 当前节点：4. 语音识别 · 需处理"))
+        assertTrue(text.contains("Latest workflow progress: 第 4/7 步"))
+        assertTrue(text.contains("Latest workflow detail: 把口述音频转成原始文字"))
+        assertTrue(text.contains("Latest next action: 下一步：点同步或重试"))
         assertTrue(text.contains("Latest remote update: 2026-06-29T08:00:00Z"))
+        assertTrue(text.contains("Latest local audio path: /tmp/VibePub-20260629.m4a"))
+        assertTrue(text.contains("Latest local audio exists: 否"))
         assertTrue(text.contains("Latest article title: 一次发布前的想法"))
         assertTrue(text.contains("Latest raw text: 已同步"))
         assertTrue(text.contains("Latest WeChat draft: 无"))
-        assertTrue(text.contains("Latest error: FILES_TOKEN 无效或没有权限"))
+        assertTrue(text.contains("Latest error: 服务返回空转录结果"))
     }
 
     @Test
@@ -213,8 +219,11 @@ class SettingsScreenTest {
         assertTrue(text.contains("API host: 未配置"))
         assertTrue(text.contains("Token: 未配置"))
         assertTrue(text.contains("Latest recording: 无"))
+        assertTrue(text.contains("Latest processing stage: 无"))
         assertTrue(text.contains("Latest workflow: 无"))
         assertTrue(text.contains("Latest next action: 无"))
+        assertTrue(text.contains("Latest local audio path: 无"))
+        assertTrue(text.contains("Latest local audio exists: 未知"))
         assertTrue(text.contains("Latest article title: 无"))
         assertTrue(text.contains("Latest raw text: 无"))
         assertTrue(text.contains("Latest WeChat draft: 无"))
@@ -240,13 +249,19 @@ class SettingsScreenTest {
                 articleTitle = "整理好的文章",
                 rawTextPreview = "原始识别",
                 wechatUrl = "https://mp.weixin.qq.com/draft",
+                localAudioPath = "/tmp/VibePub-done.m4a",
+                processingStage = "COMPLETED",
             ),
+            latestLocalAudioExists = true,
         )
 
         assertTrue(text.contains("Latest status label: 草稿已就绪"))
+        assertTrue(text.contains("Latest processing stage: COMPLETED"))
         assertTrue(text.contains("Latest workflow: 当前节点：7. 人工发布确认 · 当前"))
         assertTrue(text.contains("Latest workflow progress: 第 7/7 步"))
         assertTrue(text.contains("Latest next action: 下一步：打开公众号草稿"))
+        assertTrue(text.contains("Latest local audio path: /tmp/VibePub-done.m4a"))
+        assertTrue(text.contains("Latest local audio exists: 是"))
         assertTrue(text.contains("Latest WeChat draft: https://mp.weixin.qq.com/draft"))
     }
 }
