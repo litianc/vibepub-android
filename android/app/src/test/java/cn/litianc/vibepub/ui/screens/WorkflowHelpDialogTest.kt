@@ -107,6 +107,7 @@ class WorkflowHelpDialogTest {
                     status = RecordingStatus.PROCESSING.value,
                     processingStage = "ASR",
                 ),
+                lastSyncAtMs = 1_000L,
                 onClick = {},
                 onRetryUpload = {},
                 onDeleteRecording = {},
@@ -115,6 +116,7 @@ class WorkflowHelpDialogTest {
 
         composeTestRule.onNodeWithText("转录中").assertIsDisplayed()
         composeTestRule.onNodeWithText("第 4/7 步").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("RecordingCardSyncFreshness").assertIsDisplayed()
         composeTestRule.onNodeWithTag("WorkflowHelpButton").assertIsDisplayed()
         composeTestRule.onAllNodesWithText("云端正在进行语音识别。").assertCountEquals(0)
     }
@@ -131,6 +133,7 @@ class WorkflowHelpDialogTest {
                     status = RecordingStatus.COMPLETED.value,
                     articleTitle = "一篇已经成文的录音",
                 ),
+                lastSyncAtMs = 1_000L,
                 onClick = {},
                 onRetryUpload = {},
                 onDeleteRecording = { deleteCount++ },

@@ -163,6 +163,42 @@ class HomeScreenTest {
     }
 
     @Test
+    fun recordingCardSyncFreshnessExplainsStateSpecificFreshness() {
+        assertEquals(
+            "最近同步：5 分钟前",
+            recordingCardSyncFreshnessLabel(
+                status = RecordingStatus.PROCESSING,
+                lastSyncAtMs = 700_000L,
+                nowMs = 1_000_000L,
+            ),
+        )
+        assertEquals(
+            "本机已保存，等待上传",
+            recordingCardSyncFreshnessLabel(
+                status = RecordingStatus.LOCAL_RECORDED,
+                lastSyncAtMs = 700_000L,
+                nowMs = 1_000_000L,
+            ),
+        )
+        assertEquals(
+            "云端结果已同步",
+            recordingCardSyncFreshnessLabel(
+                status = RecordingStatus.COMPLETED,
+                lastSyncAtMs = 700_000L,
+                nowMs = 1_000_000L,
+            ),
+        )
+        assertEquals(
+            "已停止自动等待，请按提示处理",
+            recordingCardSyncFreshnessLabel(
+                status = RecordingStatus.FAILED,
+                lastSyncAtMs = 700_000L,
+                nowMs = 1_000_000L,
+            ),
+        )
+    }
+
+    @Test
     fun autoRefreshActiveWorkSkipsWhenNothingIsRunningOrSyncIsFresh() {
         assertEquals(
             false,

@@ -259,6 +259,7 @@ fun HomeScreen(
                         items(recordings, key = { it.filename }) { recording ->
                             RecordingCard(
                                 recording = recording,
+                                lastSyncAtMs = lastSyncAtMs,
                                 onClick = { onRecordingClick(recording) },
                                 onRetryUpload = { onRetryUpload(recording) },
                                 onDeleteRecording = { onDeleteRecording(recording) },
@@ -550,6 +551,7 @@ private fun EmptyHome(onRecordClick: () -> Unit) {
 @Composable
 fun RecordingCard(
     recording: RecordingEntity,
+    lastSyncAtMs: Long,
     onClick: () -> Unit,
     onRetryUpload: () -> Unit,
     onDeleteRecording: () -> Unit,
@@ -666,6 +668,18 @@ fun RecordingCard(
                     color = statusColor(status),
                     trackColor = MaterialTheme.colorScheme.surfaceVariant,
                 )
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = recordingCardSyncFreshnessLabel(
+                        status = status,
+                        lastSyncAtMs = lastSyncAtMs,
+                    ),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.testTag("RecordingCardSyncFreshness"),
+                )
                 if (status == RecordingStatus.FAILED) {
                     Spacer(modifier = Modifier.height(6.dp))
                     Text(
@@ -697,6 +711,21 @@ fun RecordingCard(
                 }
             }
         }
+    }
+}
+
+internal fun recordingCardSyncFreshnessLabel(
+    status: RecordingStatus,
+    lastSyncAtMs: Long,
+    nowMs: Long = System.currentTimeMillis(),
+): String {
+    return when (status) {
+        RecordingStatus.UPLOADING,
+        RecordingStatus.UPLOADED,
+        RecordingStatus.PROCESSING -> lastSyncLabel(lastSyncAtMs, nowMs)
+        RecordingStatus.LOCAL_RECORDED -> "本机已保存，等待上传"
+        RecordingStatus.COMPLETED -> "云端结果已同步"
+        RecordingStatus.FAILED -> "已停止自动等待，请按提示处理"
     }
 }
 
