@@ -832,7 +832,7 @@ private fun DeleteRecordingDialog(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(
-                    "将从本机移除录音记录、音频文件和本地结果文件。",
+                    "将从本机移除录音、音频和结果文件，并尝试删除云端历史记录。",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

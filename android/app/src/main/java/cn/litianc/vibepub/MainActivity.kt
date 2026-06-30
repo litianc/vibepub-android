@@ -144,13 +144,21 @@ fun VibePubApp(
             }
         },
         onDeleteRecording = { recording ->
-            scope.launch(Dispatchers.IO) {
-                AppDatabase.getDatabase(context)
-                    .recordingDao()
-                    .markDeletedByFilename(recording.filename, System.currentTimeMillis())
-                recording.localAudioPath?.let { File(it).delete() }
-                File(context.filesDir, "recordings/${recording.filename}").delete()
-                File(context.filesDir, "recordings/${transcriptFileNameForRecording(recording.filename)}").delete()
+            scope.launch {
+                val remoteDeleted = withContext(Dispatchers.IO) {
+                    AppDatabase.getDatabase(context)
+                        .recordingDao()
+                        .markDeletedByFilename(recording.filename, System.currentTimeMillis())
+                    recording.localAudioPath?.let { File(it).delete() }
+                    File(context.filesDir, "recordings/${recording.filename}").delete()
+                    File(context.filesDir, "recordings/${transcriptFileNameForRecording(recording.filename)}").delete()
+                    deleteRemoteRecording(
+                        apiBaseUrl = preferences.apiBaseUrl,
+                        filesToken = preferences.filesToken,
+                        filename = recording.filename,
+                    )
+                }
+                Toast.makeText(context, deleteRecordingToastMessage(remoteDeleted), Toast.LENGTH_SHORT).show()
             }
         },
         onStartRecording = {
@@ -228,6 +236,10 @@ internal fun initialRecordingErrorForUploadToken(hasUploadToken: Boolean): Strin
 
 internal fun retryUploadToastMessage(queued: Boolean): String {
     return if (queued) "已重新加入上传队列" else "请先配置 FILES_TOKEN 后重试上传"
+}
+
+internal fun deleteRecordingToastMessage(remoteDeleted: Boolean): String {
+    return if (remoteDeleted) "已删除本机和云端记录" else "已删除本机记录，云端删除未完成"
 }
 
 internal fun stopRecordingFailureToastMessage(): String {

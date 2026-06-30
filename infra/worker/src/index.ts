@@ -9,7 +9,7 @@ export interface Env {
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
   "Access-Control-Allow-Headers": "Authorization, Content-Type, X-File-Name, X-Files-Token",
 };
 
@@ -39,6 +39,11 @@ export default {
 
     if (request.method === "GET" && url.pathname === "/api/recordings") {
       return listRecordings(env);
+    }
+
+    if (request.method === "DELETE" && url.pathname.startsWith("/api/recordings/")) {
+      const filename = safeDecodeURIComponent(url.pathname.slice("/api/recordings/".length));
+      return deleteRecording(env, filename);
     }
 
     if (request.method === "PUT" && url.pathname === "/api/internal/status") {
@@ -298,6 +303,71 @@ async function listRecordings(env: Env): Promise<Response> {
       }
     }
   }
+}
+
+async function deleteRecording(env: Env, filename: string): Promise<Response> {
+  const safeName = sanitizeFileName(filename);
+  if (!safeName) {
+    return json({ error: "missing_filename" }, 400);
+  }
+
+  const userId = "default_user";
+  const r2Keys = new Set<string>();
+  const transcriptKey = `transcripts/${safeName.replace(/\.[^/.]+$/, ".json")}`;
+
+  r2Keys.add(`inbox/${safeName}`);
+  r2Keys.add(transcriptKey);
+
+  try {
+    const { results } = await env.DB.prepare(
+      `SELECT r2_key FROM recordings WHERE user_id = ? AND filename = ? LIMIT 1`
+    )
+    .bind(userId, safeName)
+    .all();
+    const r2Key = normalizeOptionalString((results?.[0] as any)?.r2_key);
+    if (r2Key) {
+      r2Keys.add(r2Key);
+    }
+  } catch (dbErr: any) {
+    const message = String(dbErr?.message || "");
+    if (!message.includes("no such column")) {
+      console.error("Failed to fetch recording file key before delete:", dbErr);
+    }
+  }
+
+  let deletedRecordCount = 0;
+  try {
+    const deleted = await env.DB.prepare(
+      `DELETE FROM recordings WHERE user_id = ? AND filename = ?`
+    )
+    .bind(userId, safeName)
+    .run();
+    deletedRecordCount = deleted.meta.changes ?? 0;
+  } catch (dbErr: any) {
+    console.error("Failed to delete recording from D1:", dbErr);
+    return json({ error: "database_error", details: dbErr.message }, 500);
+  }
+
+  const deletedFiles: string[] = [];
+  const fileErrors: Array<{ key: string; message: string }> = [];
+  for (const key of r2Keys) {
+    try {
+      await env.FILES_BUCKET.delete(key);
+      deletedFiles.push(key);
+    } catch (fileErr: any) {
+      const message = String(fileErr?.message || fileErr);
+      console.error(`Failed to delete R2 object ${key}:`, fileErr);
+      fileErrors.push({ key, message });
+    }
+  }
+
+  return json({
+    ok: fileErrors.length === 0,
+    filename: safeName,
+    deleted_record_count: deletedRecordCount,
+    deleted_files: deletedFiles,
+    file_errors: fileErrors,
+  }, fileErrors.length === 0 ? 200 : 207);
 }
 
 function withRecordingDisplayFields(

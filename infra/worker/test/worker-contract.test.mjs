@@ -115,6 +115,78 @@ test("lists placeholder draft references as missing values", async () => {
   assert.equal(body.recordings[0].wechat_draft_id, null);
 });
 
+test("deletes a recording and its remote files", async () => {
+  const deletedKeys = [];
+  const sqlCalls = [];
+  const valueCalls = [];
+  const db = {
+    prepare(sql) {
+      sqlCalls.push(sql);
+      return statement({
+        all: async (values) => {
+          valueCalls.push(values);
+          return {
+            results: [
+              {
+                r2_key: "inbox/custom-upload-key.m4a",
+              },
+            ],
+          };
+        },
+        run: async (values) => {
+          valueCalls.push(values);
+          return { meta: { changes: 1 } };
+        },
+      });
+    },
+  };
+  const bucket = {
+    async delete(key) {
+      deletedKeys.push(key);
+    },
+  };
+
+  const response = await worker.fetch(
+    authorizedRequest("https://example.test/api/recordings/VibePub-2026-06-30-214139-0m30s-Debug-Audio-Import.mp3", {
+      method: "DELETE",
+    }),
+    createEnv({ DB: db, FILES_BUCKET: bucket }),
+    createExecutionContext(),
+  );
+
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.ok, true);
+  assert.equal(body.deleted_record_count, 1);
+  assert.match(sqlCalls[0], /SELECT r2_key FROM recordings/);
+  assert.match(sqlCalls[1], /DELETE FROM recordings/);
+  assert.deepEqual(valueCalls[0], [
+    "default_user",
+    "VibePub-2026-06-30-214139-0m30s-Debug-Audio-Import.mp3",
+  ]);
+  assert.deepEqual(valueCalls[1], [
+    "default_user",
+    "VibePub-2026-06-30-214139-0m30s-Debug-Audio-Import.mp3",
+  ]);
+  assert.deepEqual(deletedKeys.sort(), [
+    "inbox/VibePub-2026-06-30-214139-0m30s-Debug-Audio-Import.mp3",
+    "inbox/custom-upload-key.m4a",
+    "transcripts/VibePub-2026-06-30-214139-0m30s-Debug-Audio-Import.json",
+  ].sort());
+});
+
+test("rejects unauthorized recording deletion", async () => {
+  const response = await worker.fetch(
+    new Request("https://example.test/api/recordings/voice.m4a", {
+      method: "DELETE",
+    }),
+    createEnv(),
+    createExecutionContext(),
+  );
+
+  assert.equal(response.status, 401);
+});
+
 test("keeps rich recording fields when only processing_stage is not migrated yet", async () => {
   let calls = 0;
   const db = {
@@ -645,7 +717,7 @@ function statement(handlers) {
   return {
     bind(...values) {
       return {
-        all: handlers.all,
+        all: () => handlers.all(values),
         run: () => handlers.run(values),
       };
     },

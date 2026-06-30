@@ -24,6 +24,19 @@ class RecordingFilesTest {
     }
 
     @Test
+    fun remoteRecordingDeleteUrlEncodesFilename() {
+        val url = remoteRecordingDeleteUrl(
+            apiBaseUrl = "https://vibepub.litianc.cn/",
+            filename = "VibePub 录音 1.m4a",
+        )
+
+        assertEquals(
+            "https://vibepub.litianc.cn/api/recordings/VibePub%20%E5%BD%95%E9%9F%B3%201.m4a",
+            url.toString(),
+        )
+    }
+
+    @Test
     fun rejectsTooShortOrEmptyRecordingsBeforeTheyReachRoom() {
         val audioFile = File.createTempFile("vibepub-recording", ".m4a").apply {
             writeText("audio")
@@ -104,6 +117,12 @@ class RecordingFilesTest {
     fun retryUploadMessageMatchesWhetherWorkWasQueued() {
         assertEquals("已重新加入上传队列", retryUploadToastMessage(queued = true))
         assertEquals("请先配置 FILES_TOKEN 后重试上传", retryUploadToastMessage(queued = false))
+    }
+
+    @Test
+    fun deleteRecordingMessageReflectsRemoteResult() {
+        assertEquals("已删除本机和云端记录", deleteRecordingToastMessage(remoteDeleted = true))
+        assertEquals("已删除本机记录，云端删除未完成", deleteRecordingToastMessage(remoteDeleted = false))
     }
 
     @Test
