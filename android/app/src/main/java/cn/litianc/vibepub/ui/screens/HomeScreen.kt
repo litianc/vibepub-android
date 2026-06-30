@@ -87,6 +87,7 @@ import cn.litianc.vibepub.data.workflowNextActionLabel
 import cn.litianc.vibepub.data.workflowProgressFraction
 import cn.litianc.vibepub.data.workflowProgressLabel
 import cn.litianc.vibepub.data.workflowSteps
+import cn.litianc.vibepub.data.wechatDraftReferenceOrNull
 import cn.litianc.vibepub.ui.theme.IconLightRedBackground
 import cn.litianc.vibepub.ui.theme.PrimaryRed
 import kotlinx.coroutines.delay
@@ -291,8 +292,7 @@ private fun homeFocusRank(recording: RecordingEntity): Int {
         RecordingStatus.PROCESSING -> 1
         RecordingStatus.LOCAL_RECORDED -> 2
         RecordingStatus.COMPLETED -> {
-            val hasDraft = recording.wechatDraftId?.isNotBlank() == true ||
-                recording.wechatUrl?.isNotBlank() == true
+            val hasDraft = wechatDraftReferenceOrNull(recording.wechatDraftId, recording.wechatUrl) != null
             if (recording.hasDraftFailureMessage() || !hasDraft) 3 else 4
         }
     }

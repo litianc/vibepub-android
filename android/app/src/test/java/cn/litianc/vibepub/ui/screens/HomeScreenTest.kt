@@ -134,6 +134,27 @@ class HomeScreenTest {
     }
 
     @Test
+    fun homeFocusRecordingDoesNotTreatPlaceholderDraftReferencesAsReady() {
+        val completedDraft = recording(
+            status = RecordingStatus.COMPLETED,
+            filename = "completed-draft.m4a",
+            timestamp = 200L,
+            wechatDraftId = "MEDIA_ID_123",
+        )
+        val placeholderDraft = recording(
+            status = RecordingStatus.COMPLETED,
+            filename = "placeholder-draft.m4a",
+            timestamp = 100L,
+            wechatDraftId = " undefined ",
+            wechatUrl = "null",
+        )
+
+        val focus = homeFocusRecording(listOf(completedDraft, placeholderDraft))
+
+        assertEquals("placeholder-draft.m4a", focus?.filename)
+    }
+
+    @Test
     fun homeFocusRecordingUsesNewestWithinSamePriority() {
         val olderProcessing = recording(
             status = RecordingStatus.PROCESSING,
@@ -267,6 +288,7 @@ class HomeScreenTest {
         filename: String,
         timestamp: Long,
         wechatDraftId: String? = null,
+        wechatUrl: String? = null,
     ): RecordingEntity {
         return RecordingEntity(
             filename = filename,
@@ -274,6 +296,7 @@ class HomeScreenTest {
             timestamp = timestamp,
             status = status.value,
             wechatDraftId = wechatDraftId,
+            wechatUrl = wechatUrl,
         )
     }
 }
