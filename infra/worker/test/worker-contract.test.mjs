@@ -52,6 +52,7 @@ test("lists Android recording display fields including processing stage", async 
 });
 
 test("preserves explicit recording duration when D1 starts returning it", async () => {
+  let selectedSql = "";
   const db = createDb([
     {
       id: 1,
@@ -67,7 +68,11 @@ test("preserves explicit recording duration when D1 starts returning it", async 
       wechat_draft_id: "MEDIA_ID_123",
       error_message: null,
     },
-  ]);
+  ], {
+    onPrepare(sql) {
+      selectedSql = sql;
+    },
+  });
 
   const response = await worker.fetch(
     authorizedRequest("https://example.test/api/recordings"),
@@ -77,6 +82,7 @@ test("preserves explicit recording duration when D1 starts returning it", async 
 
   assert.equal(response.status, 200);
   const body = await response.json();
+  assert.match(selectedSql, /duration_ms/);
   assert.equal(body.recordings[0].duration_ms, 6_250);
 });
 
@@ -115,6 +121,7 @@ test("keeps rich recording fields when only processing_stage is not migrated yet
     prepare(sql) {
       calls += 1;
       if (calls === 1) {
+        assert.match(sql, /duration_ms/);
         assert.match(sql, /processing_stage/);
         return statement({
           all: async () => {
@@ -122,6 +129,16 @@ test("keeps rich recording fields when only processing_stage is not migrated yet
           },
         });
       }
+      if (calls === 2) {
+        assert.doesNotMatch(sql, /duration_ms/);
+        assert.match(sql, /processing_stage/);
+        return statement({
+          all: async () => {
+            throw new Error("D1_ERROR: no such column: processing_stage");
+          },
+        });
+      }
+      assert.doesNotMatch(sql, /duration_ms/);
       assert.doesNotMatch(sql, /processing_stage/);
       return statement({
         all: async () => ({
@@ -156,6 +173,160 @@ test("keeps rich recording fields when only processing_stage is not migrated yet
   assert.equal(body.recordings[0].processing_stage, null);
   assert.equal(body.recordings[0].duration_ms, null);
   assert.equal(body.recordings[0].wechat_draft_id, "MEDIA_ID_OLD");
+});
+
+test("keeps processing stage when only duration column is not migrated yet", async () => {
+  let calls = 0;
+  const db = {
+    prepare(sql) {
+      calls += 1;
+      if (calls === 1) {
+        assert.match(sql, /duration_ms/);
+        assert.match(sql, /processing_stage/);
+        return statement({
+          all: async () => {
+            throw new Error("D1_ERROR: no such column: duration_ms");
+          },
+        });
+      }
+      assert.doesNotMatch(sql, /duration_ms/);
+      assert.match(sql, /processing_stage/);
+      return statement({
+        all: async () => ({
+          results: [
+            {
+              id: 1,
+              filename: "legacy-duration.m4a",
+              status: "PROCESSING",
+              created_at: "2026-06-29 08:00:00",
+              updated_at: "2026-06-29 08:01:00",
+              article_title: "旧库文章",
+              raw_text_preview: "旧库转录预览",
+              processing_stage: "DRAFTING",
+              wechat_url: null,
+              wechat_draft_id: null,
+              error_message: null,
+            },
+          ],
+        }),
+      });
+    },
+  };
+
+  const response = await worker.fetch(
+    authorizedRequest("https://example.test/api/recordings"),
+    createEnv({ DB: db }),
+    createExecutionContext(),
+  );
+
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.recordings[0].duration_ms, null);
+  assert.equal(body.recordings[0].processing_stage, "DRAFTING");
+});
+
+test("stores parsed duration on upload when duration column exists", async () => {
+  const putCalls = [];
+  const sqlCalls = [];
+  const valueCalls = [];
+  const db = {
+    prepare(sql) {
+      sqlCalls.push(sql);
+      const prepareIndex = sqlCalls.length;
+      return statement({
+        run: async (values) => {
+          valueCalls.push(values);
+          return { meta: { changes: prepareIndex === 1 ? 0 : 1 } };
+        },
+      });
+    },
+  };
+  const bucket = {
+    async put(key, body, options) {
+      putCalls.push({ key, body, options });
+    },
+  };
+
+  const response = await worker.fetch(
+    authorizedRequest("https://example.test/api/uploads", {
+      method: "POST",
+      headers: { "X-File-Name": "VibePub-2026-06-30-160000-0m18s-Tue-Afternoon.m4a" },
+      body: "audio",
+    }),
+    createEnv({ DB: db, FILES_BUCKET: bucket }),
+    createExecutionContext(),
+  );
+
+  assert.equal(response.status, 201);
+  assert.equal(putCalls.length, 1);
+  assert.match(String(sqlCalls[0]), /duration_ms = COALESCE/);
+  assert.match(String(sqlCalls[1]), /processing_stage, duration_ms/);
+  assert.deepEqual(valueCalls[0].slice(0, 4), [
+    "inbox/VibePub-2026-06-30-160000-0m18s-Tue-Afternoon.m4a",
+    "UPLOADED",
+    "QUEUED",
+    18_000,
+  ]);
+  assert.deepEqual(valueCalls[1].slice(0, 6), [
+    "default_user",
+    "VibePub-2026-06-30-160000-0m18s-Tue-Afternoon.m4a",
+    "inbox/VibePub-2026-06-30-160000-0m18s-Tue-Afternoon.m4a",
+    "UPLOADED",
+    "QUEUED",
+    18_000,
+  ]);
+});
+
+test("keeps upload stage when only duration column is not migrated yet", async () => {
+  const sqlCalls = [];
+  const valueCalls = [];
+  const db = {
+    prepare(sql) {
+      sqlCalls.push(sql);
+      const prepareIndex = sqlCalls.length;
+      return statement({
+        run: async (values) => {
+          valueCalls.push(values);
+          if (prepareIndex === 1) {
+            throw new Error("D1_ERROR: no such column: duration_ms");
+          }
+          return { meta: { changes: prepareIndex === 2 ? 0 : 1 } };
+        },
+      });
+    },
+  };
+  const bucket = {
+    async put() {},
+  };
+
+  const response = await worker.fetch(
+    authorizedRequest("https://example.test/api/uploads", {
+      method: "POST",
+      headers: { "X-File-Name": "VibePub-2026-06-30-160000-0m18s-Tue-Afternoon.m4a" },
+      body: "audio",
+    }),
+    createEnv({ DB: db, FILES_BUCKET: bucket }),
+    createExecutionContext(),
+  );
+
+  assert.equal(response.status, 201);
+  assert.match(String(sqlCalls[0]), /duration_ms = COALESCE/);
+  assert.doesNotMatch(String(sqlCalls[1]), /duration_ms/);
+  assert.match(String(sqlCalls[1]), /processing_stage/);
+  assert.doesNotMatch(String(sqlCalls[2]), /duration_ms/);
+  assert.match(String(sqlCalls[2]), /processing_stage/);
+  assert.deepEqual(valueCalls[1].slice(0, 3), [
+    "inbox/VibePub-2026-06-30-160000-0m18s-Tue-Afternoon.m4a",
+    "UPLOADED",
+    "QUEUED",
+  ]);
+  assert.deepEqual(valueCalls[2].slice(0, 5), [
+    "default_user",
+    "VibePub-2026-06-30-160000-0m18s-Tue-Afternoon.m4a",
+    "inbox/VibePub-2026-06-30-160000-0m18s-Tue-Afternoon.m4a",
+    "UPLOADED",
+    "QUEUED",
+  ]);
 });
 
 test("persists mining status metadata for Android progress display", async () => {
@@ -402,9 +573,10 @@ function createExecutionContext() {
   };
 }
 
-function createDb(results) {
+function createDb(results, options = {}) {
   return {
-    prepare() {
+    prepare(sql) {
+      options.onPrepare?.(sql);
       return statement({
         all: async () => ({ results }),
         run: async () => ({ meta: { changes: 1 } }),

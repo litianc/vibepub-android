@@ -6,6 +6,7 @@ CREATE TABLE recordings (
     filename TEXT NOT NULL,
     r2_key TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'UPLOADED', -- 'UPLOADED', 'TRANSCRIBED', 'FAILED'
+    duration_ms INTEGER,
     raw_text TEXT,
     article_title TEXT,
     article_content TEXT,

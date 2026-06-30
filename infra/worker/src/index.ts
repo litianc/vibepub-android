@@ -82,6 +82,7 @@ async function uploadAudio(request: Request, env: Env, ctx: ExecutionContext): P
 
   // Default user ID for now since we have a single global auth token
   const userId = "default_user";
+  const durationMs = parseDurationMsFromRecordingFilename(safeOriginalName);
 
   // Record the upload in D1. Update first so deploys stay compatible before the
   // unique filename migration has been applied.
@@ -89,21 +90,21 @@ async function uploadAudio(request: Request, env: Env, ctx: ExecutionContext): P
     const updated = await env.DB.prepare(
       `
       UPDATE recordings
-      SET r2_key = ?, status = ?, processing_stage = ?, error_message = NULL, updated_at = CURRENT_TIMESTAMP
+      SET r2_key = ?, status = ?, processing_stage = ?, duration_ms = COALESCE(?, duration_ms), error_message = NULL, updated_at = CURRENT_TIMESTAMP
       WHERE user_id = ? AND filename = ?
       `
     )
-    .bind(key, "UPLOADED", "QUEUED", userId, safeOriginalName)
+    .bind(key, "UPLOADED", "QUEUED", durationMs, userId, safeOriginalName)
     .run();
 
     if ((updated.meta.changes ?? 0) === 0) {
       await env.DB.prepare(
         `
-        INSERT INTO recordings (user_id, filename, r2_key, status, processing_stage)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO recordings (user_id, filename, r2_key, status, processing_stage, duration_ms)
+        VALUES (?, ?, ?, ?, ?, ?)
         `
       )
-      .bind(userId, safeOriginalName, key, "UPLOADED", "QUEUED")
+      .bind(userId, safeOriginalName, key, "UPLOADED", "QUEUED", durationMs)
       .run();
     }
   } catch (dbErr) {
@@ -115,25 +116,53 @@ async function uploadAudio(request: Request, env: Env, ctx: ExecutionContext): P
         const updated = await env.DB.prepare(
           `
           UPDATE recordings
-          SET r2_key = ?, status = ?, updated_at = CURRENT_TIMESTAMP
+          SET r2_key = ?, status = ?, processing_stage = ?, error_message = NULL, updated_at = CURRENT_TIMESTAMP
           WHERE user_id = ? AND filename = ?
           `
         )
-        .bind(key, "UPLOADED", userId, safeOriginalName)
+        .bind(key, "UPLOADED", "QUEUED", userId, safeOriginalName)
         .run();
 
         if ((updated.meta.changes ?? 0) === 0) {
           await env.DB.prepare(
             `
-            INSERT INTO recordings (user_id, filename, r2_key, status)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO recordings (user_id, filename, r2_key, status, processing_stage)
+            VALUES (?, ?, ?, ?, ?)
             `
           )
-          .bind(userId, safeOriginalName, key, "UPLOADED")
+          .bind(userId, safeOriginalName, key, "UPLOADED", "QUEUED")
           .run();
         }
-      } catch (legacyDbErr) {
-        console.error("Failed to insert into D1:", legacyDbErr);
+      } catch (stageDbErr) {
+        const stageMessage = String((stageDbErr as Error)?.message || "");
+        if (!stageMessage.includes("no such column")) {
+          console.error("Failed to insert into D1:", stageDbErr);
+        } else {
+          try {
+            const updated = await env.DB.prepare(
+              `
+              UPDATE recordings
+              SET r2_key = ?, status = ?, updated_at = CURRENT_TIMESTAMP
+              WHERE user_id = ? AND filename = ?
+              `
+            )
+            .bind(key, "UPLOADED", userId, safeOriginalName)
+            .run();
+
+            if ((updated.meta.changes ?? 0) === 0) {
+              await env.DB.prepare(
+                `
+                INSERT INTO recordings (user_id, filename, r2_key, status)
+                VALUES (?, ?, ?, ?)
+                `
+              )
+              .bind(userId, safeOriginalName, key, "UPLOADED")
+              .run();
+            }
+          } catch (legacyDbErr) {
+            console.error("Failed to insert into D1:", legacyDbErr);
+          }
+        }
       }
     }
   }
@@ -217,8 +246,8 @@ async function listRecordings(env: Env): Promise<Response> {
     try {
       return json({
         recordings: withRecordingDisplayFields(
-          await queryRecordings(env, userId, "withoutProcessingStage"),
-          { processing_stage: null },
+          await queryRecordings(env, userId, "withoutDuration"),
+          { duration_ms: null },
         ),
       });
     } catch (legacyDbErr: any) {
@@ -228,21 +257,40 @@ async function listRecordings(env: Env): Promise<Response> {
         return json({ error: "database_error", details: legacyDbErr.message }, 500);
       }
 
-      const { results } = await env.DB.prepare(
-        `SELECT id, filename, status, created_at, updated_at FROM recordings WHERE user_id = ? ORDER BY created_at DESC LIMIT 100`
-      )
-      .bind(userId)
-      .all();
-      return json({
-        recordings: withRecordingDisplayFields(results, {
-          article_title: null,
-          raw_text_preview: null,
-          processing_stage: null,
-          wechat_url: null,
-          wechat_draft_id: null,
-          error_message: null,
-        }),
-      });
+      try {
+        return json({
+          recordings: withRecordingDisplayFields(
+            await queryRecordings(env, userId, "withoutProcessingStage"),
+            {
+              duration_ms: null,
+              processing_stage: null,
+            },
+          ),
+        });
+      } catch (oldDbErr: any) {
+        const oldMessage = String(oldDbErr?.message || "");
+        if (!oldMessage.includes("no such column")) {
+          console.error("Failed to fetch from D1:", oldDbErr);
+          return json({ error: "database_error", details: oldDbErr.message }, 500);
+        }
+
+        const { results } = await env.DB.prepare(
+          `SELECT id, filename, status, created_at, updated_at FROM recordings WHERE user_id = ? ORDER BY created_at DESC LIMIT 100`
+        )
+        .bind(userId)
+        .all();
+        return json({
+          recordings: withRecordingDisplayFields(results, {
+            article_title: null,
+            raw_text_preview: null,
+            duration_ms: null,
+            processing_stage: null,
+            wechat_url: null,
+            wechat_draft_id: null,
+            error_message: null,
+          }),
+        });
+      }
     }
   }
 }
@@ -286,9 +334,36 @@ function parseDurationMsFromRecordingFilename(filename: unknown): number | null 
 async function queryRecordings(
   env: Env,
   userId: string,
-  shape: "full" | "withoutProcessingStage",
+  shape: "full" | "withoutDuration" | "withoutProcessingStage",
 ): Promise<unknown[]> {
   if (shape === "full") {
+    const { results } = await env.DB.prepare(
+      `
+      SELECT
+        id,
+        filename,
+        status,
+        duration_ms,
+        created_at,
+        updated_at,
+        article_title,
+        substr(raw_text, 1, 120) AS raw_text_preview,
+        processing_stage,
+        wechat_url,
+        wechat_draft_id,
+        error_message
+      FROM recordings
+      WHERE user_id = ?
+      ORDER BY created_at DESC
+      LIMIT 100
+      `
+    )
+    .bind(userId)
+    .all();
+    return results;
+  }
+
+  if (shape === "withoutDuration") {
     const { results } = await env.DB.prepare(
       `
       SELECT
