@@ -98,8 +98,6 @@ internal data class HomeSyncNotice(
 
 private const val HOME_REFRESH_FINISH_DELAY_MS = 450L
 private const val HOME_REFRESH_TIMEOUT_MS = 3_500L
-private const val HOME_ACTIVE_AUTO_REFRESH_INTERVAL_MS = 30_000L
-private const val HOME_ACTIVE_AUTO_REFRESH_RECENT_SYNC_MS = 15_000L
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -140,9 +138,9 @@ fun HomeScreen(
     }
 
     LaunchedEffect(recordings, lastSyncAtMs) {
-        while (homeHasActiveCloudWork(recordings)) {
+        while (recordingsHaveActiveCloudWork(recordings)) {
             val nowMs = System.currentTimeMillis()
-            if (shouldAutoRefreshActiveWork(
+            if (shouldAutoRefreshActiveRecordings(
                     recordings = recordings,
                     lastSyncAtMs = lastSyncAtMs,
                     lastAutoRefreshRequestAtMs = lastAutoRefreshRequestAtMs,
@@ -152,7 +150,7 @@ fun HomeScreen(
                 lastAutoRefreshRequestAtMs = nowMs
                 onAutoRefresh()
             }
-            delay(HOME_ACTIVE_AUTO_REFRESH_INTERVAL_MS)
+            delay(ACTIVE_RECORDING_AUTO_REFRESH_INTERVAL_MS)
         }
     }
 
@@ -293,37 +291,6 @@ private fun homeFocusRank(recording: RecordingEntity): Int {
             if (recording.hasDraftFailureMessage() || !hasDraft) 3 else 4
         }
     }
-}
-
-internal fun homeHasActiveCloudWork(recordings: List<RecordingEntity>): Boolean {
-    return recordings.any { recording ->
-        when (recording.status.asRecordingStatus()) {
-            RecordingStatus.UPLOADING,
-            RecordingStatus.UPLOADED,
-            RecordingStatus.PROCESSING -> true
-            RecordingStatus.LOCAL_RECORDED,
-            RecordingStatus.COMPLETED,
-            RecordingStatus.FAILED -> false
-        }
-    }
-}
-
-internal fun shouldAutoRefreshActiveWork(
-    recordings: List<RecordingEntity>,
-    lastSyncAtMs: Long,
-    lastAutoRefreshRequestAtMs: Long,
-    nowMs: Long = System.currentTimeMillis(),
-): Boolean {
-    if (!homeHasActiveCloudWork(recordings)) return false
-
-    val syncAgeMs = (nowMs - lastSyncAtMs).coerceAtLeast(0L)
-    if (lastSyncAtMs > 0L && syncAgeMs < HOME_ACTIVE_AUTO_REFRESH_RECENT_SYNC_MS) {
-        return false
-    }
-
-    val requestAgeMs = (nowMs - lastAutoRefreshRequestAtMs).coerceAtLeast(0L)
-    return lastAutoRefreshRequestAtMs <= 0L ||
-        requestAgeMs >= HOME_ACTIVE_AUTO_REFRESH_INTERVAL_MS
 }
 
 internal fun shouldFinishHomeRefresh(refreshStartedSyncAtMs: Long?, lastSyncAtMs: Long): Boolean {

@@ -1,5 +1,6 @@
 package cn.litianc.vibepub.ui.screens
 
+import cn.litianc.vibepub.data.RecordingEntity
 import cn.litianc.vibepub.data.RecordingStatus
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -181,5 +182,63 @@ class DetailScreenTest {
         val fileName = exportFileName("标题/带:非法*字符?", "fallback.m4a")
 
         assertEquals("标题-带-非法-字符-.txt", fileName)
+    }
+
+    @Test
+    fun detailActiveRecordingAutoRefreshUsesCloudPipelineStatuses() {
+        assertFalse(recordingHasActiveCloudWork(recording(status = RecordingStatus.LOCAL_RECORDED)))
+        assertFalse(recordingHasActiveCloudWork(recording(status = RecordingStatus.COMPLETED)))
+        assertFalse(recordingHasActiveCloudWork(recording(status = RecordingStatus.FAILED)))
+        assertTrue(recordingHasActiveCloudWork(recording(status = RecordingStatus.UPLOADING)))
+        assertTrue(recordingHasActiveCloudWork(recording(status = RecordingStatus.UPLOADED)))
+        assertTrue(recordingHasActiveCloudWork(recording(status = RecordingStatus.PROCESSING)))
+        assertFalse(recordingHasActiveCloudWork(null))
+    }
+
+    @Test
+    fun detailActiveRecordingAutoRefreshRespectsFreshSyncAndInterval() {
+        val active = recording(status = RecordingStatus.PROCESSING)
+
+        assertTrue(
+            shouldAutoRefreshActiveRecording(
+                recording = active,
+                lastSyncAtMs = 0L,
+                lastAutoRefreshRequestAtMs = 0L,
+                nowMs = 60_000L,
+            ),
+        )
+        assertFalse(
+            shouldAutoRefreshActiveRecording(
+                recording = active,
+                lastSyncAtMs = 50_000L,
+                lastAutoRefreshRequestAtMs = 0L,
+                nowMs = 60_000L,
+            ),
+        )
+        assertFalse(
+            shouldAutoRefreshActiveRecording(
+                recording = active,
+                lastSyncAtMs = 0L,
+                lastAutoRefreshRequestAtMs = 45_000L,
+                nowMs = 60_000L,
+            ),
+        )
+        assertFalse(
+            shouldAutoRefreshActiveRecording(
+                recording = recording(status = RecordingStatus.COMPLETED),
+                lastSyncAtMs = 0L,
+                lastAutoRefreshRequestAtMs = 0L,
+                nowMs = 60_000L,
+            ),
+        )
+    }
+
+    private fun recording(status: RecordingStatus): RecordingEntity {
+        return RecordingEntity(
+            filename = "${status.value}.m4a",
+            durationMs = 1_000L,
+            timestamp = 1L,
+            status = status.value,
+        )
     }
 }

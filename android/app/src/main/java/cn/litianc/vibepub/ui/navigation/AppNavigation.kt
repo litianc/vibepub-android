@@ -95,8 +95,10 @@ fun AppNavigation(
             val filename = backStackEntry.arguments?.getString("filename") ?: ""
             DetailScreen(
                 filename = filename,
+                lastSyncAtMs = lastSyncAtMs,
                 onBackClick = { navController.popBackStack() },
                 onRefresh = onRefresh,
+                onAutoRefresh = onAutoRefresh,
                 onRetryUpload = onRetryUpload,
             )
         }

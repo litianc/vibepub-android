@@ -153,20 +153,20 @@ class HomeScreenTest {
 
     @Test
     fun homeActiveCloudWorkOnlyIncludesCloudPipelineStatuses() {
-        assertEquals(false, homeHasActiveCloudWork(emptyList()))
-        assertEquals(false, homeHasActiveCloudWork(listOf(recording(status = RecordingStatus.LOCAL_RECORDED))))
-        assertEquals(false, homeHasActiveCloudWork(listOf(recording(status = RecordingStatus.COMPLETED))))
-        assertEquals(false, homeHasActiveCloudWork(listOf(recording(status = RecordingStatus.FAILED))))
-        assertEquals(true, homeHasActiveCloudWork(listOf(recording(status = RecordingStatus.UPLOADING))))
-        assertEquals(true, homeHasActiveCloudWork(listOf(recording(status = RecordingStatus.UPLOADED))))
-        assertEquals(true, homeHasActiveCloudWork(listOf(recording(status = RecordingStatus.PROCESSING))))
+        assertEquals(false, recordingsHaveActiveCloudWork(emptyList()))
+        assertEquals(false, recordingsHaveActiveCloudWork(listOf(recording(status = RecordingStatus.LOCAL_RECORDED))))
+        assertEquals(false, recordingsHaveActiveCloudWork(listOf(recording(status = RecordingStatus.COMPLETED))))
+        assertEquals(false, recordingsHaveActiveCloudWork(listOf(recording(status = RecordingStatus.FAILED))))
+        assertEquals(true, recordingsHaveActiveCloudWork(listOf(recording(status = RecordingStatus.UPLOADING))))
+        assertEquals(true, recordingsHaveActiveCloudWork(listOf(recording(status = RecordingStatus.UPLOADED))))
+        assertEquals(true, recordingsHaveActiveCloudWork(listOf(recording(status = RecordingStatus.PROCESSING))))
     }
 
     @Test
     fun autoRefreshActiveWorkSkipsWhenNothingIsRunningOrSyncIsFresh() {
         assertEquals(
             false,
-            shouldAutoRefreshActiveWork(
+            shouldAutoRefreshActiveRecordings(
                 recordings = listOf(recording(status = RecordingStatus.COMPLETED)),
                 lastSyncAtMs = 0L,
                 lastAutoRefreshRequestAtMs = 0L,
@@ -176,7 +176,7 @@ class HomeScreenTest {
 
         assertEquals(
             false,
-            shouldAutoRefreshActiveWork(
+            shouldAutoRefreshActiveRecordings(
                 recordings = listOf(recording(status = RecordingStatus.PROCESSING)),
                 lastSyncAtMs = 50_000L,
                 lastAutoRefreshRequestAtMs = 0L,
@@ -191,7 +191,7 @@ class HomeScreenTest {
 
         assertEquals(
             true,
-            shouldAutoRefreshActiveWork(
+            shouldAutoRefreshActiveRecordings(
                 recordings = active,
                 lastSyncAtMs = 0L,
                 lastAutoRefreshRequestAtMs = 0L,
@@ -200,7 +200,7 @@ class HomeScreenTest {
         )
         assertEquals(
             false,
-            shouldAutoRefreshActiveWork(
+            shouldAutoRefreshActiveRecordings(
                 recordings = active,
                 lastSyncAtMs = 0L,
                 lastAutoRefreshRequestAtMs = 45_000L,
@@ -209,7 +209,7 @@ class HomeScreenTest {
         )
         assertEquals(
             true,
-            shouldAutoRefreshActiveWork(
+            shouldAutoRefreshActiveRecordings(
                 recordings = active,
                 lastSyncAtMs = 0L,
                 lastAutoRefreshRequestAtMs = 30_000L,

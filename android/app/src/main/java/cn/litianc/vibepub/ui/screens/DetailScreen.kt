@@ -118,8 +118,10 @@ internal data class WeChatDraftAction(
 @Composable
 fun DetailScreen(
     filename: String,
+    lastSyncAtMs: Long,
     onBackClick: () -> Unit,
     onRefresh: () -> Unit,
+    onAutoRefresh: () -> Unit,
     onRetryUpload: (RecordingEntity) -> Unit,
 ) {
     val context = LocalContext.current
@@ -128,6 +130,7 @@ fun DetailScreen(
     }
     val recording by recordingFlow.collectAsState(initial = null)
     var transcript by remember(filename) { mutableStateOf<JSONObject?>(null) }
+    var lastAutoRefreshRequestAtMs by remember(filename) { mutableStateOf(0L) }
 
     LaunchedEffect(
         filename,
@@ -140,6 +143,23 @@ fun DetailScreen(
         recording?.processingStage,
     ) {
         transcript = loadLocalTranscript(context, filename)
+    }
+
+    LaunchedEffect(recording, lastSyncAtMs) {
+        while (recordingHasActiveCloudWork(recording)) {
+            val nowMs = System.currentTimeMillis()
+            if (shouldAutoRefreshActiveRecording(
+                    recording = recording,
+                    lastSyncAtMs = lastSyncAtMs,
+                    lastAutoRefreshRequestAtMs = lastAutoRefreshRequestAtMs,
+                    nowMs = nowMs,
+                )
+            ) {
+                lastAutoRefreshRequestAtMs = nowMs
+                onAutoRefresh()
+            }
+            delay(ACTIVE_RECORDING_AUTO_REFRESH_INTERVAL_MS)
+        }
     }
 
     Scaffold(
@@ -247,6 +267,7 @@ fun DetailScreen(
             Spacer(modifier = Modifier.height(18.dp))
             StatusCard(
                 recording = currentRecording,
+                lastSyncAtMs = lastSyncAtMs,
                 onRefresh = onRefresh,
                 onRetryUpload = { onRetryUpload(currentRecording) },
             )
@@ -402,6 +423,7 @@ private fun AudioPlayerCard(recording: RecordingEntity) {
 @Composable
 internal fun StatusCard(
     recording: RecordingEntity,
+    lastSyncAtMs: Long,
     onRefresh: () -> Unit,
     onRetryUpload: () -> Unit,
 ) {
@@ -479,6 +501,12 @@ internal fun StatusCard(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                lastSyncLabel(lastSyncAtMs),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
             Spacer(modifier = Modifier.height(10.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(onClick = onRefresh) {

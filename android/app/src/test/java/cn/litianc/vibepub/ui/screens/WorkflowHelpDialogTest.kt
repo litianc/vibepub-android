@@ -209,6 +209,7 @@ class WorkflowHelpDialogTest {
     private fun DetailStatusCardPreview(recording: RecordingEntity) {
         StatusCard(
             recording = recording,
+            lastSyncAtMs = 0L,
             onRefresh = {},
             onRetryUpload = {},
         )
