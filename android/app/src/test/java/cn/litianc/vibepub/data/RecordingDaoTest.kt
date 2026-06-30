@@ -93,4 +93,24 @@ class RecordingDaoTest {
 
         assertEquals("DRAFTING", recording?.processingStage)
     }
+
+    @Test
+    fun localDeletionHidesRecordingButKeepsTombstoneForSync() = runBlocking {
+        val dao = database.recordingDao()
+        dao.insert(
+            RecordingEntity(
+                filename = "deleted.m4a",
+                durationMs = 32_000L,
+                timestamp = 1L,
+                status = RecordingStatus.COMPLETED.value,
+            ),
+        )
+
+        dao.markDeletedByFilename("deleted.m4a", deletedAt = 123_000L)
+
+        assertEquals(emptyList<RecordingEntity>(), dao.getAllRecordings())
+        assertEquals(null, dao.getRecordingByFilename("deleted.m4a"))
+        val tombstone = dao.getRecordingByFilenameIncludingDeleted("deleted.m4a")
+        assertEquals(123_000L, tombstone?.deletedAt)
+    }
 }

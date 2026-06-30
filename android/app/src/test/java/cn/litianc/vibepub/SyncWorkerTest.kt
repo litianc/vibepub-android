@@ -1,6 +1,7 @@
 package cn.litianc.vibepub
 
 import cn.litianc.vibepub.data.RecordingStatus
+import cn.litianc.vibepub.data.RecordingEntity
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -83,5 +84,20 @@ class SyncWorkerTest {
                 hasDraftReference = true,
             ),
         )
+    }
+
+    @Test
+    fun skipsRemoteRecordingWhenUserDeletedLocalCard() {
+        val tombstone = RecordingEntity(
+            filename = "deleted.m4a",
+            durationMs = 18_000L,
+            timestamp = 1L,
+            status = RecordingStatus.COMPLETED.value,
+            deletedAt = 123_000L,
+        )
+
+        assertTrue(shouldSkipRemoteRecording(tombstone))
+        assertFalse(shouldSkipRemoteRecording(tombstone.copy(deletedAt = null)))
+        assertFalse(shouldSkipRemoteRecording(null))
     }
 }

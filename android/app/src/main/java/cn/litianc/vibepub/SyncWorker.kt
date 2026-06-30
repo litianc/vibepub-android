@@ -78,6 +78,10 @@ internal fun mergedTranscriptError(
     }
 }
 
+internal fun shouldSkipRemoteRecording(existing: RecordingEntity?): Boolean {
+    return existing?.deletedAt != null
+}
+
 class SyncWorker(
     appContext: Context,
     params: WorkerParameters,
@@ -118,7 +122,8 @@ class SyncWorker(
                         val recObj = recordingsArray.getJSONObject(i)
                         val filename = recObj.optString("filename")
                         if (filename.isBlank()) continue
-                        val existing = dao.getRecordingByFilename(filename)
+                        val existing = dao.getRecordingByFilenameIncludingDeleted(filename)
+                        if (shouldSkipRemoteRecording(existing)) continue
                         val d1Status = recObj.optString("status", RecordingStatus.UPLOADED.value)
                             .asRecordingStatus()
                         val remoteCreatedAtMs = parseRemoteRecordingCreatedAt(recObj.optString("created_at", ""))

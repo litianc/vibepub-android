@@ -140,7 +140,9 @@ fun VibePubApp(
         },
         onDeleteRecording = { recording ->
             scope.launch(Dispatchers.IO) {
-                AppDatabase.getDatabase(context).recordingDao().deleteByFilename(recording.filename)
+                AppDatabase.getDatabase(context)
+                    .recordingDao()
+                    .markDeletedByFilename(recording.filename, System.currentTimeMillis())
                 recording.localAudioPath?.let { File(it).delete() }
                 File(context.filesDir, "recordings/${recording.filename}").delete()
                 File(context.filesDir, "recordings/${transcriptFileNameForRecording(recording.filename)}").delete()
