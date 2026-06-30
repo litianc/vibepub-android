@@ -3,6 +3,7 @@ package cn.litianc.vibepub.data
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.TimeZone
 
 enum class WorkflowStepState {
     DONE,
@@ -108,6 +109,18 @@ fun RecordingEntity.currentWorkflowStep(): RecordingWorkflowStep {
 fun RecordingEntity.workflowCurrentNodeLabel(): String {
     val step = currentWorkflowStep()
     return "当前节点：${step.number}. ${step.title} · ${step.state.displayLabel()}"
+}
+
+fun RecordingEntity.workflowFreshnessLabel(nowMs: Long = System.currentTimeMillis()): String {
+    val age = workflowFreshnessAnchorMs()?.let { relativeWorkflowAgeLabel(it, nowMs) } ?: "未知"
+    return when (status.asRecordingStatus()) {
+        RecordingStatus.LOCAL_RECORDED -> "本机保存：$age"
+        RecordingStatus.UPLOADING -> "上传状态更新：$age"
+        RecordingStatus.UPLOADED -> "云端排队更新：$age"
+        RecordingStatus.PROCESSING -> "当前阶段更新：$age"
+        RecordingStatus.COMPLETED -> "完成时间：$age"
+        RecordingStatus.FAILED -> "失败时间：$age"
+    }
 }
 
 fun RecordingEntity.workflowCycleLabel(): String {
@@ -282,6 +295,48 @@ private fun RecordingEntity.processingStageKey(): String {
         .uppercase(Locale.ROOT)
         .replace("-", "_")
         .replace(" ", "_")
+}
+
+private fun RecordingEntity.workflowFreshnessAnchorMs(): Long? {
+    return when (status.asRecordingStatus()) {
+        RecordingStatus.COMPLETED -> completedAt
+            ?: remoteStatusUpdatedAt.toWorkflowTimestampMs()
+            ?: timestamp.takeIf { it > 0L }
+        RecordingStatus.LOCAL_RECORDED -> timestamp.takeIf { it > 0L }
+        RecordingStatus.UPLOADING,
+        RecordingStatus.UPLOADED,
+        RecordingStatus.PROCESSING,
+        RecordingStatus.FAILED -> remoteStatusUpdatedAt.toWorkflowTimestampMs()
+            ?: timestamp.takeIf { it > 0L }
+    }
+}
+
+private fun relativeWorkflowAgeLabel(anchorMs: Long, nowMs: Long): String {
+    val elapsedSeconds = ((nowMs - anchorMs).coerceAtLeast(0L) / 1000L).toInt()
+    return when {
+        elapsedSeconds < 60 -> "刚刚"
+        elapsedSeconds < 3600 -> "${elapsedSeconds / 60} 分钟前"
+        elapsedSeconds < 86_400 -> "${elapsedSeconds / 3600} 小时前"
+        else -> "${elapsedSeconds / 86_400} 天前"
+    }
+}
+
+private fun String?.toWorkflowTimestampMs(): Long? {
+    val value = this?.trim().orEmpty()
+    if (value.isBlank()) return null
+
+    val patterns = listOf(
+        "yyyy-MM-dd HH:mm:ss",
+        "yyyy-MM-dd'T'HH:mm:ss'Z'",
+        "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'",
+    )
+    return patterns.firstNotNullOfOrNull { pattern ->
+        runCatching {
+            SimpleDateFormat(pattern, Locale.US).apply {
+                timeZone = TimeZone.getTimeZone("UTC")
+            }.parse(value)?.time
+        }.getOrNull()
+    }
 }
 
 private val WORKFLOW_BASE_STEPS = listOf(

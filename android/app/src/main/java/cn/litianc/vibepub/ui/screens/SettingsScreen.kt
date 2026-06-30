@@ -77,6 +77,7 @@ import cn.litianc.vibepub.data.displayTitle
 import cn.litianc.vibepub.data.statusDetail
 import cn.litianc.vibepub.data.statusLabel
 import cn.litianc.vibepub.data.workflowCurrentNodeLabel
+import cn.litianc.vibepub.data.workflowFreshnessLabel
 import cn.litianc.vibepub.data.workflowNextActionLabel
 import cn.litianc.vibepub.data.workflowProgressLabel
 import kotlinx.coroutines.delay
@@ -707,6 +708,7 @@ internal fun formatDiagnostics(
     Latest processing stage: ${latest?.processingStage ?: "无"}
     Latest workflow: ${latest?.workflowCurrentNodeLabel() ?: "无"}
     Latest workflow progress: ${latest?.workflowProgressLabel() ?: "无"}
+    Latest workflow freshness: ${latest?.workflowFreshnessLabel() ?: "无"}
     Latest workflow detail: ${latestStep?.detail ?: "无"}
     Latest next action: ${latest?.workflowNextActionLabel() ?: "无"}
     Latest remote update: ${latest?.remoteStatusUpdatedAt ?: "无"}

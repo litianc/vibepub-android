@@ -78,6 +78,7 @@ import cn.litianc.vibepub.data.statusDetail
 import cn.litianc.vibepub.data.statusLabel
 import cn.litianc.vibepub.data.workflowCycleLabel
 import cn.litianc.vibepub.data.workflowCurrentNodeLabel
+import cn.litianc.vibepub.data.workflowFreshnessLabel
 import cn.litianc.vibepub.data.workflowHelpSummary
 import cn.litianc.vibepub.data.workflowHelpTitle
 import cn.litianc.vibepub.data.workflowNextActionLabel
@@ -457,6 +458,13 @@ private fun HomeWorkflowOverviewCard(
                 overflow = TextOverflow.Ellipsis,
             )
             Text(
+                text = recording.workflowFreshnessLabel(),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
                 text = recording.workflowNextActionLabel(),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurface,
@@ -671,6 +679,7 @@ fun RecordingCard(
                 Spacer(modifier = Modifier.height(6.dp))
                 Text(
                     text = recordingCardSyncFreshnessLabel(
+                        recording = recording,
                         status = status,
                         lastSyncAtMs = lastSyncAtMs,
                     ),
@@ -715,6 +724,7 @@ fun RecordingCard(
 }
 
 internal fun recordingCardSyncFreshnessLabel(
+    recording: RecordingEntity? = null,
     status: RecordingStatus,
     lastSyncAtMs: Long,
     nowMs: Long = System.currentTimeMillis(),
@@ -722,7 +732,7 @@ internal fun recordingCardSyncFreshnessLabel(
     return when (status) {
         RecordingStatus.UPLOADING,
         RecordingStatus.UPLOADED,
-        RecordingStatus.PROCESSING -> lastSyncLabel(lastSyncAtMs, nowMs)
+        RecordingStatus.PROCESSING -> recording?.workflowFreshnessLabel(nowMs) ?: lastSyncLabel(lastSyncAtMs, nowMs)
         RecordingStatus.LOCAL_RECORDED -> "本机已保存，等待上传"
         RecordingStatus.COMPLETED -> "云端结果已同步"
         RecordingStatus.FAILED -> "已停止自动等待，请按提示处理"
@@ -812,6 +822,10 @@ fun WorkflowHelpDialog(
                 WorkflowHelpSection(
                     label = "下一步建议",
                     value = recording.workflowNextActionLabel(),
+                )
+                WorkflowHelpSection(
+                    label = "更新时间",
+                    value = recording.workflowFreshnessLabel(),
                 )
                 WorkflowHelpSection(
                     label = "完整流程周期",

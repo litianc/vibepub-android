@@ -83,6 +83,7 @@ import cn.litianc.vibepub.data.statusDetail
 import cn.litianc.vibepub.data.statusLabel
 import cn.litianc.vibepub.data.workflowCycleLabel
 import cn.litianc.vibepub.data.workflowCurrentNodeLabel
+import cn.litianc.vibepub.data.workflowFreshnessLabel
 import cn.litianc.vibepub.data.workflowNextActionLabel
 import cn.litianc.vibepub.data.workflowProgressFraction
 import cn.litianc.vibepub.data.workflowProgressLabel
@@ -503,6 +504,12 @@ internal fun StatusCard(
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurface,
                 fontWeight = FontWeight.Medium,
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                recording.workflowFreshnessLabel(),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             if (recording.remoteStatusUpdatedAt?.isNotBlank() == true) {
                 Spacer(modifier = Modifier.height(6.dp))

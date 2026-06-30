@@ -106,6 +106,7 @@ class WorkflowHelpDialogTest {
                     timestamp = 1L,
                     status = RecordingStatus.PROCESSING.value,
                     processingStage = "ASR",
+                    remoteStatusUpdatedAt = "2026-06-30T03:00:00Z",
                 ),
                 lastSyncAtMs = 1_000L,
                 onClick = {},
@@ -116,7 +117,7 @@ class WorkflowHelpDialogTest {
 
         composeTestRule.onNodeWithText("转录中").assertIsDisplayed()
         composeTestRule.onNodeWithText("第 4/7 步").assertIsDisplayed()
-        composeTestRule.onAllNodesWithText("最近同步：", substring = true).assertCountEquals(1)
+        composeTestRule.onAllNodesWithText("当前阶段更新：", substring = true).assertCountEquals(1)
         composeTestRule.onAllNodesWithTag("WorkflowHelpButton").assertCountEquals(1)
         composeTestRule.onAllNodesWithText("云端正在进行语音识别。").assertCountEquals(0)
     }
@@ -167,12 +168,14 @@ class WorkflowHelpDialogTest {
                     timestamp = 1L,
                     status = RecordingStatus.PROCESSING.value,
                     processingStage = "DRAFTING",
+                    remoteStatusUpdatedAt = "2026-06-30T03:00:00Z",
                 ),
             )
         }
 
         composeTestRule.onNodeWithText("生成草稿中").assertIsDisplayed()
         composeTestRule.onNodeWithText("第 6/7 步").assertIsDisplayed()
+        composeTestRule.onNodeWithText("当前阶段更新：", substring = true).assertIsDisplayed()
         composeTestRule.onNodeWithTag("DetailWorkflowHelpButton").assertIsDisplayed()
         composeTestRule.onAllNodesWithText("文章改写 · 已完成").assertCountEquals(0)
         composeTestRule.onAllNodesWithText("公众号草稿 · 当前").assertCountEquals(0)
@@ -183,6 +186,7 @@ class WorkflowHelpDialogTest {
         composeTestRule.onAllNodesWithText("文章改写 · 已完成").assertCountEquals(1)
         composeTestRule.onAllNodesWithText("公众号草稿 · 当前").assertCountEquals(1)
         composeTestRule.onAllNodesWithText("人工发布确认 · 等待").assertCountEquals(1)
+        composeTestRule.onNodeWithText("更新时间").performScrollTo().assertIsDisplayed()
     }
 
     @Test

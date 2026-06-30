@@ -96,6 +96,41 @@ class RecordingPresentationTest {
     }
 
     @Test
+    fun workflowFreshnessExplainsHowLongCurrentStageHasBeenStale() {
+        val processing = RecordingEntity(
+            filename = "VibePub-test.m4a",
+            durationMs = 1_000L,
+            timestamp = 1_000L,
+            status = RecordingStatus.PROCESSING.value,
+            remoteStatusUpdatedAt = "2026-06-30T03:00:00Z",
+            processingStage = "ASR",
+        )
+        val completed = processing.copy(
+            status = RecordingStatus.COMPLETED.value,
+            completedAt = 1_000L,
+            wechatDraftId = "MEDIA_ID_123",
+        )
+        val failed = processing.copy(
+            status = RecordingStatus.FAILED.value,
+            remoteStatusUpdatedAt = "2026-06-30 02:00:00",
+            lastError = "语音识别失败",
+        )
+
+        assertEquals(
+            "当前阶段更新：5 分钟前",
+            processing.workflowFreshnessLabel(nowMs = 1_782_788_700_000L),
+        )
+        assertEquals(
+            "完成时间：刚刚",
+            completed.workflowFreshnessLabel(nowMs = 30_000L),
+        )
+        assertEquals(
+            "失败时间：2 小时前",
+            failed.workflowFreshnessLabel(nowMs = 1_782_792_000_000L),
+        )
+    }
+
+    @Test
     fun productStageAliasesDriveVisibleWorkflowPosition() {
         val article = RecordingEntity(
             filename = "VibePub-article.m4a",
