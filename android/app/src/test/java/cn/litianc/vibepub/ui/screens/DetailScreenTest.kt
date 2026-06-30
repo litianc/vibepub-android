@@ -118,6 +118,38 @@ class DetailScreenTest {
     }
 
     @Test
+    fun effectiveProcessingStagePrefersNewerRoomStageOverStaleTranscriptStage() {
+        assertEquals(
+            "DRAFT_FAILED",
+            chooseEffectiveProcessingStage(
+                transcriptProcessingStage = "ARTICLE_READY",
+                recordingProcessingStage = "DRAFT_FAILED",
+            ),
+        )
+        assertEquals(
+            "COMPLETED",
+            chooseEffectiveProcessingStage(
+                transcriptProcessingStage = "article-ready",
+                recordingProcessingStage = "completed",
+            ),
+        )
+        assertEquals(
+            "ARTICLE_READY",
+            chooseEffectiveProcessingStage(
+                transcriptProcessingStage = "ARTICLE_READY",
+                recordingProcessingStage = "",
+            ),
+        )
+        assertEquals(
+            "COMPLETED",
+            chooseEffectiveProcessingStage(
+                transcriptProcessingStage = "FAILED",
+                recordingProcessingStage = "COMPLETED",
+            ),
+        )
+    }
+
+    @Test
     fun reviewSummaryDoesNotTreatRawTranscriptFallbackAsGeneratedArticle() {
         val summary = buildArticleReviewSummary(
             status = RecordingStatus.COMPLETED,

@@ -216,8 +216,10 @@ fun DetailScreen(
         val articleContentIsGenerated = generatedArticleContent.isNotBlank()
         val transcriptProcessingStage = transcript?.optString("processingStage", "").orEmpty()
             .ifBlank { transcript?.optString("processing_stage", "").orEmpty() }
-        val effectiveProcessingStage = transcriptProcessingStage
-            .ifBlank { currentRecording.processingStage.orEmpty() }
+        val effectiveProcessingStage = chooseEffectiveProcessingStage(
+            transcriptProcessingStage = transcriptProcessingStage,
+            recordingProcessingStage = currentRecording.processingStage.orEmpty(),
+        )
         val wechatDraftId = transcript?.optString("wechatDraftId", "").orEmpty()
             .ifBlank { transcript?.optString("mediaId", "").orEmpty() }
             .ifBlank { transcript?.optString("wechat_draft_id", "").orEmpty() }
@@ -889,6 +891,41 @@ private val DRAFT_FAILED_STAGES = setOf(
     "WECHAT_FAILED",
 )
 
+internal fun chooseEffectiveProcessingStage(
+    transcriptProcessingStage: String,
+    recordingProcessingStage: String,
+): String {
+    val transcriptStage = normalizeProcessingStage(transcriptProcessingStage)
+    val recordingStage = normalizeProcessingStage(recordingProcessingStage)
+    return when {
+        transcriptStage.isBlank() -> recordingStage
+        recordingStage.isBlank() -> transcriptStage
+        processingStageRank(recordingStage) >= processingStageRank(transcriptStage) -> recordingStage
+        else -> transcriptStage
+    }
+}
+
+private fun normalizeProcessingStage(stage: String): String {
+    return stage
+        .trim()
+        .uppercase(Locale.ROOT)
+        .replace("-", "_")
+        .replace(" ", "_")
+}
+
+private fun processingStageRank(stage: String): Int {
+    return when (stage) {
+        "UPLOADED", "QUEUED", "PENDING" -> 1
+        "ASR", "TRANSCRIBING", "TRANSCRIPTION", "TRANSCRIBE" -> 2
+        "ARTICLE", "REWRITE", "REWRITING", "LLM", "GENERATING_ARTICLE" -> 3
+        "ARTICLE_READY", "ARTICLE_DONE", "READY_FOR_DRAFT" -> 4
+        "WECHAT", "DRAFT", "DRAFTING", "CREATING_DRAFT", "PUBLISHING_DRAFT" -> 5
+        "FAILED", "ERROR" -> 5
+        "DRAFT_FAILED", "WECHAT_FAILED", "COMPLETED", "DONE" -> 6
+        else -> 0
+    }
+}
+
 internal fun buildArticleReviewSummary(
     status: RecordingStatus,
     articleTitle: String,
@@ -902,11 +939,7 @@ internal fun buildArticleReviewSummary(
 ): ArticleReviewSummary {
     val hasTitle = articleTitle.isNotBlank() && !articleTitle.contains("录音片段")
     val contentChars = articleContent.trim().length
-    val stage = processingStage
-        .trim()
-        .uppercase(Locale.ROOT)
-        .replace("-", "_")
-        .replace(" ", "_")
+    val stage = normalizeProcessingStage(processingStage)
     val stageHasArticle = stage in ARTICLE_READY_STAGES
     val stageDraftFailed = stage in DRAFT_FAILED_STAGES
     val hasArticle = (status == RecordingStatus.COMPLETED || stageHasArticle || stageDraftFailed) &&
