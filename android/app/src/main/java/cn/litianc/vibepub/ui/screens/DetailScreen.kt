@@ -202,35 +202,36 @@ fun DetailScreen(
             return@Scaffold
         }
 
-        val transcriptTitle = transcript?.optString("articleTitle", "").orEmpty().trim()
+        val transcriptTitle = transcript.optTranscriptString("articleTitle", "article_title")
         val articleTitle = transcriptTitle
             .ifBlank { currentRecording.articleTitle.orEmpty() }
             .ifBlank { currentRecording.displayTitle() }
-        val rawText = transcript?.optString("rawText", "")?.ifBlank { currentRecording.rawTextPreview.orEmpty() }.orEmpty()
-        val generatedArticleContent = transcript?.optString("articleContent", "").orEmpty().trim()
+        val rawText = transcript.optTranscriptString("rawText", "raw_text")
+            .ifBlank { currentRecording.rawTextPreview.orEmpty() }
+        val generatedArticleContent = transcript.optTranscriptString("articleContent", "article_content")
         val articleContentSource = generatedArticleContent.ifBlank { rawText }
         val articleContent = articleContentSource
             .takeIf { it.isNotBlank() }
             ?.let(::renderArticleText)
             ?: currentRecording.statusDetail()
         val articleContentIsGenerated = generatedArticleContent.isNotBlank()
-        val transcriptProcessingStage = transcript?.optString("processingStage", "").orEmpty()
-            .ifBlank { transcript?.optString("processing_stage", "").orEmpty() }
+        val transcriptProcessingStage = transcript.optTranscriptString("processingStage", "processing_stage")
         val effectiveProcessingStage = chooseEffectiveProcessingStage(
             transcriptProcessingStage = transcriptProcessingStage,
             recordingProcessingStage = currentRecording.processingStage.orEmpty(),
         )
-        val wechatDraftId = transcript?.optString("wechatDraftId", "").orEmpty()
-            .ifBlank { transcript?.optString("mediaId", "").orEmpty() }
-            .ifBlank { transcript?.optString("wechat_draft_id", "").orEmpty() }
+        val wechatDraftId = transcript.optTranscriptString("wechatDraftId", "mediaId", "wechat_draft_id")
             .ifBlank { currentRecording.wechatDraftId.orEmpty() }
-        val wechatUrl = transcript?.optString("wechatUrl", "").orEmpty()
-            .ifBlank { transcript?.optString("wechat_url", "").orEmpty() }
+        val wechatUrl = transcript.optTranscriptString("wechatUrl", "wechat_url")
             .ifBlank { currentRecording.wechatUrl.orEmpty() }
-        val draftError = if (currentRecording.hasDraftFailureMessage()) {
-            currentRecording.lastError.orEmpty().ifBlank { currentRecording.statusDetail() }
-        } else {
-            ""
+        val transcriptError = transcript.optTranscriptString("errorMessage", "error_message")
+        val draftError = when {
+            currentRecording.hasDraftFailureMessage() -> currentRecording.lastError.orEmpty()
+                .ifBlank { transcriptError }
+                .ifBlank { currentRecording.statusDetail() }
+            normalizeProcessingStage(effectiveProcessingStage) in DRAFT_FAILED_STAGES -> transcriptError
+                .ifBlank { currentRecording.lastError.orEmpty() }
+            else -> ""
         }
         val reviewSummary = buildArticleReviewSummary(
             status = currentRecording.status.asRecordingStatus(),
@@ -824,6 +825,13 @@ internal fun renderArticleText(content: String): String {
         .replace(Regex("\n{3,}"), "\n\n")
         .trim()
     return text.ifBlank { content }
+}
+
+internal fun JSONObject?.optTranscriptString(vararg keys: String): String {
+    if (this == null) return ""
+    return keys.firstNotNullOfOrNull { key ->
+        optString(key, "").trim().ifBlank { null }
+    }.orEmpty()
 }
 
 internal fun buildArticleExportText(

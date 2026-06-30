@@ -78,6 +78,22 @@ internal fun mergedTranscriptError(
     }
 }
 
+internal fun transcriptArticleTitleOrNull(transcript: JSONObject?): String? {
+    if (transcript == null) return null
+    return transcript.optString("articleTitle", "")
+        .ifBlank { transcript.optString("article_title", "") }
+        .trim()
+        .ifBlank { null }
+}
+
+internal fun transcriptRawTextOrNull(transcript: JSONObject?): String? {
+    if (transcript == null) return null
+    return transcript.optString("rawText", "")
+        .ifBlank { transcript.optString("raw_text", "") }
+        .trim()
+        .ifBlank { null }
+}
+
 internal fun shouldSkipRemoteRecording(existing: RecordingEntity?): Boolean {
     return existing?.deletedAt != null
 }
@@ -236,10 +252,10 @@ class SyncWorker(
                         dao.insert(
                             recording.copy(
                                 status = RecordingStatus.COMPLETED.value,
-                                articleTitle = transcript.optString("articleTitle", "").ifBlank { "转录完成" },
-                                rawTextPreview = transcript.optString("rawText", "")
-                                    .take(80)
-                                    .blankToNull()
+                                articleTitle = transcriptArticleTitleOrNull(transcript) ?: recording.articleTitle,
+                                rawTextPreview = transcriptRawTextOrNull(transcript)
+                                    ?.take(80)
+                                    ?.blankToNull()
                                     ?: recording.rawTextPreview,
                                 lastError = mergedTranscriptError(
                                     existingError = recording.lastError,
@@ -280,8 +296,8 @@ class SyncWorker(
             } else {
                 if (recording.status != RecordingStatus.COMPLETED.value) {
                     val transcript = runCatching { JSONObject(jsonFile.readText()) }.getOrNull()
-                    val transcriptTitle = transcript?.optString("articleTitle", "").orEmpty().blankToNull()
-                    val transcriptPreview = transcript?.optString("rawText", "").orEmpty().take(80).blankToNull()
+                    val transcriptTitle = transcriptArticleTitleOrNull(transcript)
+                    val transcriptPreview = transcriptRawTextOrNull(transcript)?.take(80)?.blankToNull()
                     val transcriptProcessingStage = transcript?.processingStageOrNull() ?: "COMPLETED"
                     val transcriptWechatDraftId = transcript?.wechatDraftIdOrNull()
                     val transcriptWechatUrl = transcript?.wechatUrlOrNull()

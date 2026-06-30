@@ -6,8 +6,14 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.json.JSONObject
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
 import java.time.Instant
 
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [34])
 class SyncWorkerTest {
     @Test
     fun classifiesAuthorizationFailuresAsUserFixable() {
@@ -84,6 +90,35 @@ class SyncWorkerTest {
                 hasDraftReference = true,
             ),
         )
+    }
+
+    @Test
+    fun transcriptArticleTitleOnlyUsesRealArticleTitleFields() {
+        assertEquals(
+            "整理好的标题",
+            transcriptArticleTitleOrNull(JSONObject("""{"articleTitle":"整理好的标题"}""")),
+        )
+        assertEquals(
+            "后端字段标题",
+            transcriptArticleTitleOrNull(JSONObject("""{"article_title":"后端字段标题"}""")),
+        )
+        assertEquals(null, transcriptArticleTitleOrNull(JSONObject("""{"rawText":"只有原始转录"}""")))
+        assertEquals(null, transcriptArticleTitleOrNull(JSONObject("""{"articleTitle":"   "}""")))
+        assertEquals(null, transcriptArticleTitleOrNull(null))
+    }
+
+    @Test
+    fun transcriptRawTextAcceptsCamelAndSnakeCaseFields() {
+        assertEquals(
+            "原始转录",
+            transcriptRawTextOrNull(JSONObject("""{"rawText":"原始转录"}""")),
+        )
+        assertEquals(
+            "后端原始转录",
+            transcriptRawTextOrNull(JSONObject("""{"raw_text":"后端原始转录"}""")),
+        )
+        assertEquals(null, transcriptRawTextOrNull(JSONObject("""{"rawText":"   "}""")))
+        assertEquals(null, transcriptRawTextOrNull(null))
     }
 
     @Test

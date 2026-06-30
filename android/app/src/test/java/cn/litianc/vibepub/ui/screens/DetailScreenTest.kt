@@ -5,6 +5,7 @@ import cn.litianc.vibepub.data.RecordingStatus
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.json.JSONObject
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -22,6 +23,33 @@ class DetailScreenTest {
         assertFalse(rendered, rendered.contains("<p>"))
         assertFalse(rendered, rendered.contains("<h3>"))
         assertEquals("第一段\n\n小标题\n\n第二段\n下一行", rendered)
+    }
+
+    @Test
+    fun transcriptStringReaderAcceptsCamelAndSnakeCaseFields() {
+        val transcript = JSONObject(
+            """
+            {
+              "article_title": "后端标题",
+              "article_content": "<p>正文</p>",
+              "raw_text": "原始转录",
+              "error_message": "公众号草稿创建失败"
+            }
+            """.trimIndent(),
+        )
+
+        assertEquals("后端标题", transcript.optTranscriptString("articleTitle", "article_title"))
+        assertEquals("<p>正文</p>", transcript.optTranscriptString("articleContent", "article_content"))
+        assertEquals("原始转录", transcript.optTranscriptString("rawText", "raw_text"))
+        assertEquals("公众号草稿创建失败", transcript.optTranscriptString("errorMessage", "error_message"))
+    }
+
+    @Test
+    fun transcriptStringReaderSkipsBlankValuesBeforeFallback() {
+        val transcript = JSONObject("""{"articleTitle":"   ","article_title":"可用标题"}""")
+
+        assertEquals("可用标题", transcript.optTranscriptString("articleTitle", "article_title"))
+        assertEquals("", (null as JSONObject?).optTranscriptString("articleTitle", "article_title"))
     }
 
     @Test
