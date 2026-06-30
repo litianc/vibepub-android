@@ -425,8 +425,10 @@ sdkmanager "platforms;android-36" "build-tools;36.0.0"</code></pre>
         <pre><code># 日常快速闭环
 scripts/build-android-local.sh test
 scripts/build-android-local.sh assemble
-adb -s 10.161.2.96:43355 install -r android/app/build/outputs/apk/debug/app-debug.apk
-adb -s 10.161.2.96:43355 shell am start -n cn.litianc.vibepub/.MainActivity</code></pre>
+scripts/install-android-local-apk.sh --serial 10.161.2.96:43355 --skip-build
+
+# 或者一条命令完成测试、打包、安装、启动
+scripts/install-android-local-apk.sh --serial 10.161.2.96:43355 --test</code></pre>
       </div>
     </section>
 

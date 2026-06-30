@@ -43,6 +43,12 @@ if [[ ! -d "$ANDROID_HOME/platforms/android-36" ]]; then
   exit 1
 fi
 
+if [[ ! -d "$ANDROID_HOME/build-tools/36.0.0" ]]; then
+  echo "Missing Android build tools: $ANDROID_HOME/build-tools/36.0.0" >&2
+  echo "Install with: sdkmanager \"build-tools;36.0.0\"" >&2
+  exit 1
+fi
+
 if [[ ! -x "$JAVA_HOME/bin/java" ]]; then
   echo "Missing JDK 21 java: $JAVA_HOME/bin/java" >&2
   echo "Install with: HOMEBREW_NO_AUTO_UPDATE=1 brew install openjdk@21" >&2
