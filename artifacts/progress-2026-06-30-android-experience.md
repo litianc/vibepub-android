@@ -74,8 +74,10 @@
 ## 待验证
 
 ### 本机 Android 测试环境
-- 本地快速编译流程图：`artifacts/android-local-build-flow-2026-06-30.html`
-- 本地快速编译流程图快照：`artifacts/android-local-build-flow-2026-06-30.png`
+- 本地开发闭环全景图：`artifacts/android-local-build-flow-2026-06-30.html`
+  - 记录从“等 GitHub Release APK”改为“本地测试/打包/ADB 安装/真机验证”的流程。
+  - 同步记录 Cloudflare Worker 上传后携带 `target_filename` 触发 GitHub Actions mining job 的后端链路。
+  - 该 HTML 是当前可视化主交付；旧 PNG 快照不再作为最新证据。
 - `android-commandlinetools` 已安装到 `/opt/homebrew/share/android-commandlinetools`。
 - Android SDK 包已安装：
   - `platforms;android-36`

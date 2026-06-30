@@ -16,3 +16,7 @@
 - **APK URL**: <https://github.com/litianc/vibepub-android/releases/download/build-20260630-092807-1054cc1/app-debug.apk>
 
 **Note**: For all internal testing and dogfooding, always download the latest APK from GitHub Releases rather than relying on local `artifacts/` snapshots.
+
+## Process Diagrams
+- **Android development loop**: `artifacts/android-local-build-flow-2026-06-30.html`
+- **Status**: Current visual record for the 2026-06-30 shift from GitHub-only APK waiting to local build, ADB install, Worker-targeted mining dispatch, and evidence-based dogfood testing.
