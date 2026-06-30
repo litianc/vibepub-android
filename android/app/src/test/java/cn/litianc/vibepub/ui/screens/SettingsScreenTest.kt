@@ -203,6 +203,8 @@ class SettingsScreenTest {
         assertTrue(text.contains("API host: https://api.example.com"))
         assertTrue(text.contains("Token: 已配置"))
         assertTrue(text.contains("Recording count: 3"))
+        assertTrue(text.contains("Recent recordings:"))
+        assertTrue(text.contains("1. VibePub-20260629.m4a | 0m18s | FAILED | 需要处理"))
         assertTrue(text.contains("Latest recording: VibePub-20260629.m4a"))
         assertTrue(text.contains("Latest status: FAILED"))
         assertTrue(text.contains("Latest title: 一次发布前的想法"))
@@ -221,6 +223,49 @@ class SettingsScreenTest {
         assertTrue(text.contains("Latest raw text: 已同步"))
         assertTrue(text.contains("Latest WeChat draft: 无"))
         assertTrue(text.contains("Latest error: 服务返回空转录结果"))
+    }
+
+    @Test
+    fun diagnosticsTextSummarizesRecentRecordingsForDuplicateAndZeroSecondDebugging() {
+        val normal = RecordingEntity(
+            filename = "VibePub-20260630-18m48s.m4a",
+            durationMs = 1_128_000L,
+            timestamp = 0L,
+            status = RecordingStatus.COMPLETED.value,
+            articleTitle = "正常录音",
+            processingStage = "COMPLETED",
+        )
+        val zeroSecond = RecordingEntity(
+            filename = "VibePub-20260630-0m0s.m4a",
+            durationMs = 0L,
+            timestamp = 0L,
+            status = RecordingStatus.FAILED.value,
+            lastError = "录音太短，已丢弃",
+            processingStage = "LOCAL",
+        )
+        val duplicateZeroSecond = zeroSecond.copy(
+            filename = "VibePub-20260630-duplicate-0m0s.m4a",
+            status = RecordingStatus.LOCAL_RECORDED.value,
+            lastError = null,
+        )
+
+        val text = formatDiagnostics(
+            appVersion = "0.1.0-debug (1)",
+            deviceId = "device-123",
+            deviceName = "Redmi Tablet",
+            androidVersion = "15 / SDK 35",
+            apiBaseUrl = "https://api.example.com",
+            tokenConfigured = true,
+            lastSyncText = "尚未同步",
+            recordingCount = 3,
+            latest = normal,
+            recentRecordings = listOf(normal, zeroSecond, duplicateZeroSecond),
+        )
+
+        assertTrue(text.contains("Recent recordings:"))
+        assertTrue(text.contains("1. VibePub-20260630-18m48s.m4a | 18m48s | COMPLETED | 已成文 | created=未知 | stage=COMPLETED | error=无"))
+        assertTrue(text.contains("2. VibePub-20260630-0m0s.m4a | 0m0s | FAILED | 需要处理 | created=未知 | stage=LOCAL | error=录音太短，已丢弃"))
+        assertTrue(text.contains("3. VibePub-20260630-duplicate-0m0s.m4a | 0m0s | LOCAL_RECORDED | 待上传 | created=未知 | stage=LOCAL | error=无"))
     }
 
     @Test

@@ -76,6 +76,7 @@ import cn.litianc.vibepub.data.AppDatabase
 import cn.litianc.vibepub.data.RecordingEntity
 import cn.litianc.vibepub.data.currentWorkflowStep
 import cn.litianc.vibepub.data.displayTitle
+import cn.litianc.vibepub.data.listDurationLabel
 import cn.litianc.vibepub.data.statusDetail
 import cn.litianc.vibepub.data.statusLabel
 import cn.litianc.vibepub.data.workflowCurrentNodeLabel
@@ -708,6 +709,7 @@ private suspend fun buildDiagnostics(context: android.content.Context, preferenc
             lastSyncText = syncText,
             recordingCount = recordings.size,
             latest = latest,
+            recentRecordings = recordings.take(5),
             latestLocalAudioExists = latest?.localAudioPath
                 ?.takeIf { it.isNotBlank() }
                 ?.let { File(it).exists() },
@@ -724,6 +726,7 @@ internal fun formatDiagnostics(
     lastSyncText: String,
     recordingCount: Int,
     latest: RecordingEntity?,
+    recentRecordings: List<RecordingEntity> = latest?.let { listOf(it) } ?: emptyList(),
     latestLocalAudioExists: Boolean? = latest?.localAudioPath
         ?.takeIf { it.isNotBlank() }
         ?.let { File(it).exists() },
@@ -732,6 +735,7 @@ internal fun formatDiagnostics(
     val latestDraftReference = latest
         ?.let { recording -> wechatDraftReferenceOrNull(recording.wechatDraftId, recording.wechatUrl) }
         ?: "无"
+    val recentRecordingsText = formatRecentRecordingDiagnostics(recentRecordings)
     return """
     App: VibePub $appVersion
     Device ID: $deviceId
@@ -741,6 +745,7 @@ internal fun formatDiagnostics(
     Token: ${if (tokenConfigured) "已配置" else "未配置"}
     Last sync: $lastSyncText
     Recording count: $recordingCount
+    $recentRecordingsText
     Latest recording: ${latest?.filename ?: "无"}
     Latest title: ${latest?.displayTitle() ?: "无"}
     Latest status: ${latest?.status ?: "无"}
@@ -760,4 +765,36 @@ internal fun formatDiagnostics(
     Latest WeChat draft: $latestDraftReference
     Latest error: ${latest?.lastError ?: "无"}
     """.trimIndent()
+}
+
+internal fun formatRecentRecordingDiagnostics(
+    recordings: List<RecordingEntity>,
+    limit: Int = 5,
+): String {
+    if (recordings.isEmpty()) return "Recent recordings: 无"
+
+    val rows = recordings.take(limit.coerceAtLeast(0)).mapIndexed { index, recording ->
+        "${index + 1}. ${compactDiagnosticValue(recording.filename)}" +
+            " | ${recording.listDurationLabel()}" +
+            " | ${recording.status}" +
+            " | ${recording.statusLabel()}" +
+            " | created=${diagnosticTimeLabel(recording.timestamp)}" +
+            " | stage=${compactDiagnosticValue(recording.processingStage)}" +
+            " | error=${compactDiagnosticValue(recording.lastError)}"
+    }
+    return buildString {
+        appendLine("Recent recordings:")
+        rows.forEach { appendLine(it) }
+    }.trimEnd()
+}
+
+private fun compactDiagnosticValue(value: String?, fallback: String = "无", maxLength: Int = 80): String {
+    val cleaned = value.orEmpty().replace(Regex("\\s+"), " ").trim()
+    if (cleaned.isBlank()) return fallback
+    return if (cleaned.length <= maxLength) cleaned else cleaned.take(maxLength - 3) + "..."
+}
+
+private fun diagnosticTimeLabel(timestampMs: Long): String {
+    if (timestampMs <= 0L) return "未知"
+    return SimpleDateFormat("MM-dd HH:mm:ss", Locale.getDefault()).format(Date(timestampMs))
 }
