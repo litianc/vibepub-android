@@ -1,19 +1,19 @@
 # VibePub Android Experience Progress - 2026-06-30
 
-记录时间：2026-06-30 21:50 CST
+记录时间：2026-06-30 22:08 CST
 分支：`codex/android-experience-v1`  
-本次记录基线提交：`8f43de6 Make workflow stalls visible in the Android app`
+本次记录基线提交：`4eb064d Let users remove bad historical recordings`
 
 ## 已验证
 
 ### Android 最新 APK 渠道
-- GitHub Release：`build-20260630-132053-8f43de6`
-- APK：<https://github.com/litianc/vibepub-android/releases/download/build-20260630-132053-8f43de6/app-debug.apk>
-- SHA-256：`3d73eee55cb6626cace70d04f3a3e32766d70ca48edb5e38ca9d84ec8bcf4610`
-- Release Commit：`8f43de6254190be2294a93753ed26a42c4cf53e1`
+- GitHub Release：`build-20260630-140513-4eb064d`
+- APK：<https://github.com/litianc/vibepub-android/releases/download/build-20260630-140513-4eb064d/app-debug.apk>
+- SHA-256：`f3f060036cba079e96c0c72e900cfe91f5b42a9c17eb877d8b1e340d56ade38f`
+- Release Commit：`4eb064d685911d47024b4b88cee2f5c0d8399694`
 - Manifest 已指向该 Release：`artifacts/MANIFEST.md`
-- Android Tests：GitHub Actions run `28447258290` 成功
-- Android Build & Release：GitHub Actions run `28447258407` 成功
+- Android Tests：GitHub Actions run `28450159485` 成功
+- Android Build & Release：GitHub Actions run `28450159188` 成功
 
 ### Android 端已落地能力
 - 录音/首页/详情页已有体验优先版主干：
@@ -28,6 +28,7 @@
   - 首页同步提示会优先识别本机待上传录音，提示先上传/检查 `FILES_TOKEN`，而不是让用户误以为同步能解决上传前问题。
   - 设置页诊断信息会列出最近录音摘要，包含文件名、时长、状态、阶段和错误，方便排查同一时间多条记录或零秒录音。
   - 设置页诊断弹窗支持长内容滚动，并保留一键复制，避免最近录音摘要变长后在真机上看不到底部错误信息。
+  - 首页录音卡片删除入口现在会先删除本机 Room 记录、本机音频和结果文件，并请求云端 `DELETE /api/recordings/:filename` 清理 D1 记录、R2 音频和 transcript；云端未完成时会明确提示。
   - Android 同步 `/api/recordings` 时会把 `ARTICLE_READY`、`DRAFT_FAILED` 等远端阶段稳定映射进本地 Room 字段，避免端上看不到文章已生成/草稿失败的中间态。
   - 首页/详情页活跃录音的自动同步请求会替换旧的 one-time sync work，避免旧请求卡住时新的进度刷新被 WorkManager `KEEP` 吞掉。
   - 首页重点卡、列表卡、详情状态卡和状态说明弹窗现在共用 `workflowAttention`，对本机待上传、失败、文章已可用、草稿待同步、草稿失败和长时间无进展状态显示一致的“需要关注”提示。
@@ -66,6 +67,12 @@
 - mining job 现在会在文章生成并保存后先回写 `ARTICLE_READY`：
   - App 可以先显示“文章已生成，可以阅读/复制/分享”，再等待微信公众号草稿阶段。
   - 封面生成或草稿发布失败时，会保留已生成文章并以 `DRAFT_FAILED` 回写，而不是把整条录音标记为不可用失败。
+- Worker 生产环境已支持删除历史录音：
+  - 新增授权接口：`DELETE /api/recordings/:filename`。
+  - 删除范围：D1 `recordings` 行、R2 `inbox/<filename>`、R2 `transcripts/<filename>.json`，并兼容历史 `r2_key`。
+  - 生产 Worker 已通过本机 Wrangler 发布，当前版本 ID：`09a5480b-f36a-4e76-80d3-6d0ae7a734d4`。
+  - 生产验证：`GET /health` 返回 `ok: true`；未授权 `DELETE /api/recordings/Codex-Delete-Smoke-Nonexistent-20260630.m4a` 返回 `401`。
+  - GitHub Actions Deploy Worker run `28450160363` validate 通过，但 deploy job 因仓库缺 `CLOUDFLARE_API_TOKEN` secret 失败；本轮已用本机 Wrangler 登录态完成生产部署。
 
 ### 真机/ADB
 - 红米真机已恢复为可自动化测试状态：
@@ -135,8 +142,8 @@
   - 本轮流程关注提示改动后，`RecordingPresentationTest` 覆盖可行动状态和长时间无进展提示，`WorkflowHelpDialogTest` 覆盖列表/详情/弹窗可见性；`scripts/build-android-local.sh` 已支持透传 `--tests`，避免定向测试误跑全量。`scripts/build-android-local.sh test`、`scripts/build-android-local.sh assemble`、`scripts/audit-android-experience-readiness.sh`、`git diff --check` 均通过。
   - 本轮真机自动化 run 识别竞态修复后，`bash -n scripts/android-device-visual-test.sh scripts/run-android-device-smoke.sh scripts/audit-android-device-smoke.sh scripts/audit-android-experience-readiness.sh`、目标 run 日志搜索验证、真机 smoke rerun、`scripts/audit-android-device-smoke.sh`、`git diff --check` 均通过。
 - GitHub Actions Android Tests 可用并已通过。
-- 最新 GitHub Actions Android Tests run `28447258290` 已覆盖提交 `8f43de6` 并成功。
-- 最新 GitHub Actions Android Build & Release run `28447258407` 已覆盖提交 `8f43de6` 并成功创建 Release `build-20260630-132053-8f43de6`。
+- 最新 GitHub Actions Android Tests run `28450159485` 已覆盖提交 `4eb064d` 并成功。
+- 最新 GitHub Actions Android Build & Release run `28450159188` 已覆盖提交 `4eb064d` 并成功创建 Release `build-20260630-140513-4eb064d`。
 - GitHub Actions `mining-tests.yml` 文件目前不在默认分支，GitHub API 暂不能直接对该 workflow 发起 `workflow_dispatch`；本轮 mining 改动已用本地 `infra/mining` 测试和 typecheck 验证，后续合入默认分支后再补云端 mining-tests。
 - 注意：本地单测必须使用 JDK 21；JDK 26 会导致 Robolectric 4.12 shadow class 解析失败。
 
@@ -158,7 +165,8 @@
 - 仍待覆盖：
   - Token 错误时显示配置错误和可恢复路径。
 - 本地 APK 已生成：`android/app/build/outputs/apk/debug/app-debug.apk`
-  - 当前本地 APK SHA-256：`4a5890221e4ddd36bf0a24598ba2a89d2e9a59f6519af3c0abc1a14117f0382b`
+  - 当前本地 APK SHA-256：`28068169d3ce354b6cb266e7a70baae08b7a8ec37bb2380794120e3f7c6df0c6`
+  - 已安装到当前红米测试机 `10.161.2.96:45117`，设备显示 `versionName=0.1.0-debug`，`lastUpdateTime=2026-06-30 22:07:35`。
 - ADB 当前可用时可直接运行：
   - `scripts/install-android-local-apk.sh --serial <new-adb-serial> --skip-build`
   - 或 `scripts/install-android-local-apk.sh --serial <new-adb-serial> --test`
@@ -178,6 +186,6 @@
   - 自动化测试产物需要稳定保存截图、UI dump、logcat、audit 结果。
 
 ## 当前注意事项
-- 目前最新可安装 APK 是 `8f43de6` 对应 Release。
-- 最新 Release asset 元数据已经给出 SHA-256；本机用 `gh release download` 复核时遇到一次 `release-assets.githubusercontent.com` 连接超时，不影响 Release 已成功生成的结论。
+- 目前最新可安装 APK 是 `4eb064d` 对应 Release。
+- GitHub Actions Deploy Worker 缺 `CLOUDFLARE_API_TOKEN` secret，后续应补齐该 secret，让生产部署重新回到 GitHub Actions 自动链路。
 - `artifacts/` 下存在多批历史安装/CI 调试产物，当前记录未整理或删除它们。
