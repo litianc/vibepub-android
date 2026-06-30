@@ -57,9 +57,11 @@
 ## 待验证
 
 ### 本机 Android 测试环境
+- 本地快速编译流程图：`artifacts/android-local-build-flow-2026-06-30.html`
+- `android-commandlinetools` 已安装到 `/opt/homebrew/share/android-commandlinetools`。
 - GitHub Actions Android Tests 可用并已通过。
-- 本机当前仍没有可用 Android SDK 配置；`gradle :app:testDebugUnitTest ...` 会因缺少 `ANDROID_HOME` / `android/local.properties` 失败。
-- 建议：需要本机快速验证时，先配置 Android SDK 路径，避免每次都依赖远端 CI。
+- 本机仍待补齐 Android platform/build-tools：`platforms;android-36`、`build-tools;36.0.0`。
+- 建议：下一步接受 SDK licenses、安装上述 SDK 包并写入 `android/local.properties`，把本地 `testDebugUnitTest`、`assembleDebug`、ADB 安装串成快速闭环。
 
 ### 生产环境待验证
 - Worker `duration_ms` 迁移尚未部署到生产 D1。

@@ -1,0 +1,456 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VibePub Android 本地快速编译流程</title>
+  <style>
+    :root {
+      --ink: #17202a;
+      --muted: #5f6b7a;
+      --line: #d7dde6;
+      --paper: #f6f8fb;
+      --card: #ffffff;
+      --red: #d83b3b;
+      --red-soft: #fdeaea;
+      --green: #1f8a5b;
+      --green-soft: #e6f5ee;
+      --blue: #2762c7;
+      --blue-soft: #e8f0ff;
+      --yellow: #9c6b00;
+      --yellow-soft: #fff5d6;
+      --shadow: 0 10px 30px rgba(25, 34, 44, 0.08);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--paper);
+      color: var(--ink);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      line-height: 1.5;
+    }
+
+    main {
+      width: min(1180px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 32px 0 48px;
+    }
+
+    header {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 24px;
+      align-items: end;
+      padding-bottom: 22px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(28px, 4vw, 46px);
+      letter-spacing: 0;
+      line-height: 1.08;
+    }
+
+    .subtitle {
+      margin: 12px 0 0;
+      color: var(--muted);
+      font-size: 17px;
+      max-width: 760px;
+    }
+
+    .stamp {
+      padding: 12px 14px;
+      border-radius: 8px;
+      background: var(--card);
+      border: 1px solid var(--line);
+      color: var(--muted);
+      white-space: nowrap;
+      box-shadow: var(--shadow);
+      font-size: 14px;
+    }
+
+    section {
+      margin-top: 28px;
+    }
+
+    h2 {
+      margin: 0 0 14px;
+      font-size: 22px;
+      letter-spacing: 0;
+    }
+
+    .compare {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 18px;
+    }
+
+    .panel {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 18px;
+      box-shadow: var(--shadow);
+    }
+
+    .panel.old {
+      border-top: 5px solid var(--red);
+    }
+
+    .panel.new {
+      border-top: 5px solid var(--green);
+    }
+
+    .panel-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+
+    .panel-title h3 {
+      margin: 0;
+      font-size: 19px;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      min-height: 28px;
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .badge.slow {
+      background: var(--red-soft);
+      color: var(--red);
+    }
+
+    .badge.fast {
+      background: var(--green-soft);
+      color: var(--green);
+    }
+
+    .flow {
+      display: grid;
+      gap: 10px;
+    }
+
+    .step {
+      position: relative;
+      display: grid;
+      grid-template-columns: 34px 1fr;
+      gap: 10px;
+      align-items: start;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fbfcfe;
+    }
+
+    .step::after {
+      content: "";
+      position: absolute;
+      left: 28px;
+      bottom: -11px;
+      width: 2px;
+      height: 10px;
+      background: var(--line);
+    }
+
+    .step:last-child::after {
+      display: none;
+    }
+
+    .num {
+      width: 30px;
+      height: 30px;
+      display: grid;
+      place-items: center;
+      border-radius: 50%;
+      color: white;
+      font-weight: 800;
+      font-size: 14px;
+    }
+
+    .old .num {
+      background: var(--red);
+    }
+
+    .new .num {
+      background: var(--green);
+    }
+
+    .step strong {
+      display: block;
+      margin-bottom: 3px;
+      font-size: 15px;
+    }
+
+    .step span {
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .lane {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+      align-items: stretch;
+    }
+
+    .tile {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 16px;
+      box-shadow: var(--shadow);
+      min-height: 160px;
+    }
+
+    .tile .icon {
+      width: 42px;
+      height: 42px;
+      display: grid;
+      place-items: center;
+      border-radius: 10px;
+      margin-bottom: 12px;
+      font-size: 23px;
+      font-weight: 800;
+    }
+
+    .tile h3 {
+      margin: 0 0 8px;
+      font-size: 17px;
+    }
+
+    .tile p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .tile.local .icon {
+      background: var(--blue-soft);
+      color: var(--blue);
+    }
+
+    .tile.device .icon {
+      background: var(--green-soft);
+      color: var(--green);
+    }
+
+    .tile.release .icon {
+      background: var(--yellow-soft);
+      color: var(--yellow);
+    }
+
+    .tile.record .icon {
+      background: var(--red-soft);
+      color: var(--red);
+    }
+
+    .commands {
+      display: grid;
+      gap: 10px;
+    }
+
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+      font-size: 13px;
+    }
+
+    pre {
+      margin: 0;
+      overflow-x: auto;
+      padding: 14px;
+      border-radius: 8px;
+      border: 1px solid #cbd5e1;
+      background: #101820;
+      color: #e8eef7;
+      line-height: 1.45;
+    }
+
+    .status-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .status {
+      border-radius: 10px;
+      padding: 14px;
+      border: 1px solid var(--line);
+      background: var(--card);
+      box-shadow: var(--shadow);
+    }
+
+    .status h3 {
+      margin: 0 0 6px;
+      font-size: 16px;
+    }
+
+    .status p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .ok {
+      border-left: 5px solid var(--green);
+    }
+
+    .todo {
+      border-left: 5px solid var(--yellow);
+    }
+
+    .later {
+      border-left: 5px solid var(--blue);
+    }
+
+    footer {
+      margin-top: 28px;
+      color: var(--muted);
+      font-size: 13px;
+      text-align: center;
+    }
+
+    @media (max-width: 860px) {
+      header,
+      .compare,
+      .lane,
+      .status-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .stamp {
+        white-space: normal;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <h1>Android 迭代从“等云端打包”改成“本地快速闭环”</h1>
+        <p class="subtitle">
+          目标是把 VibePub Android 的日常开发循环缩短：本地编译、本地安装、真机验证；只有需要共享 APK 或做发布边界确认时，才走 GitHub Release。
+        </p>
+      </div>
+      <div class="stamp">记录：2026-06-30 · 分支 codex/android-experience-v1</div>
+    </header>
+
+    <section>
+      <h2>新旧流程对比</h2>
+      <div class="compare">
+        <article class="panel old">
+          <div class="panel-title">
+            <h3>旧流程：每次都等 GitHub</h3>
+            <span class="badge slow">慢 · 适合发布</span>
+          </div>
+          <div class="flow">
+            <div class="step"><div class="num">1</div><div><strong>修改代码</strong><span>本地完成改动。</span></div></div>
+            <div class="step"><div class="num">2</div><div><strong>提交并推送</strong><span>必须把代码推到 GitHub。</span></div></div>
+            <div class="step"><div class="num">3</div><div><strong>Actions 排队</strong><span>runner 启动、拉代码、装 SDK。</span></div></div>
+            <div class="step"><div class="num">4</div><div><strong>云端测试与打包</strong><span>生成 Release APK。</span></div></div>
+            <div class="step"><div class="num">5</div><div><strong>下载再安装</strong><span>回到本机用 ADB 装到平板。</span></div></div>
+          </div>
+        </article>
+
+        <article class="panel new">
+          <div class="panel-title">
+            <h3>新流程：本地先闭环</h3>
+            <span class="badge fast">快 · 适合迭代</span>
+          </div>
+          <div class="flow">
+            <div class="step"><div class="num">1</div><div><strong>修改代码</strong><span>Android UI、Worker 契约、测试都在本地改。</span></div></div>
+            <div class="step"><div class="num">2</div><div><strong>本地测试</strong><span><code>gradle -p android :app:testDebugUnitTest</code></span></div></div>
+            <div class="step"><div class="num">3</div><div><strong>本地打包</strong><span><code>gradle -p android :app:assembleDebug</code></span></div></div>
+            <div class="step"><div class="num">4</div><div><strong>ADB 安装</strong><span><code>adb install -r app-debug.apk</code>，直接到红米平板。</span></div></div>
+            <div class="step"><div class="num">5</div><div><strong>真机验证</strong><span>截图、UI dump、logcat、audit 结果保存在 artifacts。</span></div></div>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <section>
+      <h2>基础设施分工</h2>
+      <div class="lane">
+        <article class="tile local">
+          <div class="icon">SDK</div>
+          <h3>本机最小 SDK</h3>
+          <p>只安装 command line tools、Android 36 platform、build-tools 36，不装 Android Studio 和模拟器。</p>
+        </article>
+        <article class="tile device">
+          <div class="icon">ADB</div>
+          <h3>真机优先</h3>
+          <p>红米平板通过 ADB 做安装、启动、权限、导入音频和视觉验证。</p>
+        </article>
+        <article class="tile release">
+          <div class="icon">GH</div>
+          <h3>Release 只做分发</h3>
+          <p>需要给人 APK 链接、固定 dogfood 版本、或做远端确认时再触发 GitHub Build & Release。</p>
+        </article>
+        <article class="tile record">
+          <div class="icon">DOC</div>
+          <h3>证据同步</h3>
+          <p>MANIFEST 和 progress artifact 记录当前 APK、测试、安装和待验证边界。</p>
+        </article>
+      </div>
+    </section>
+
+    <section>
+      <h2>命令入口</h2>
+      <div class="commands">
+        <pre><code># 一次性安装最小 Android SDK 管理工具
+brew install --cask android-commandlinetools
+
+# 本机 SDK 根目录
+export ANDROID_HOME=/opt/homebrew/share/android-commandlinetools
+export ANDROID_SDK_ROOT=$ANDROID_HOME
+
+# 接下来补齐项目所需 platform/build-tools
+yes | sdkmanager --licenses
+sdkmanager "platforms;android-36" "build-tools;36.0.0"</code></pre>
+
+        <pre><code># 日常快速闭环
+gradle -p android :app:testDebugUnitTest
+gradle -p android :app:assembleDebug
+adb -s 10.161.2.96:43355 install -r android/app/build/outputs/apk/debug/app-debug.apk
+adb -s 10.161.2.96:43355 shell am start -n cn.litianc.vibepub/.MainActivity</code></pre>
+      </div>
+    </section>
+
+    <section>
+      <h2>当前状态</h2>
+      <div class="status-grid">
+        <article class="status ok">
+          <h3>已完成</h3>
+          <p><code>android-commandlinetools</code> 已安装；<code>adb</code> 和 <code>gradle</code> 已存在。</p>
+        </article>
+        <article class="status todo">
+          <h3>下一步</h3>
+          <p>安装 <code>platforms;android-36</code> 和 <code>build-tools;36.0.0</code>，写入本地 SDK 配置。</p>
+        </article>
+        <article class="status later">
+          <h3>仍保留</h3>
+          <p>GitHub Actions 继续作为共享 APK、远端验证和发布记录的来源。</p>
+        </article>
+      </div>
+    </section>
+
+    <footer>
+      VibePub Android local build flow · Generated as a project artifact.
+    </footer>
+  </main>
+</body>
+</html>
