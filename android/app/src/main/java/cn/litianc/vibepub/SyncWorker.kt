@@ -101,6 +101,89 @@ internal fun shouldSkipRemoteRecording(existing: RecordingEntity?): Boolean {
     return existing?.deletedAt != null
 }
 
+internal fun mergeRemoteRecordingFromListItem(
+    recObj: JSONObject,
+    existing: RecordingEntity?,
+    nowMs: Long = System.currentTimeMillis(),
+): RecordingEntity? {
+    val filename = recObj.optString("filename").trim()
+    if (filename.isBlank() || shouldSkipRemoteRecording(existing)) return null
+
+    val remoteStatus = recObj.optString("status", RecordingStatus.UPLOADED.value)
+        .asRecordingStatus()
+    val remoteCreatedAtMs = parseRemoteRecordingCreatedAt(recObj.optString("created_at", ""))
+    val fallbackDurationMs = recObj.optLong("duration_ms", -1L)
+        .takeIf { it > 0L }
+        ?: recObj.optLong("durationMs", -1L).takeIf { it > 0L }
+        ?: parseDurationMsFromRecordingFilename(filename)
+    val remoteUpdatedAt = recObj.optString("updated_at", "").blankToNullValue()
+    val articleTitle = recObj.optString("article_title", "")
+        .ifBlank { recObj.optString("articleTitle", "") }
+        .blankToNullValue()
+    val rawTextPreview = recObj.optString("raw_text_preview", "")
+        .ifBlank { recObj.optString("rawTextPreview", "") }
+        .blankToNullValue()
+    val lastError = recObj.optString("error_message", "")
+        .ifBlank { recObj.optString("lastError", "") }
+        .blankToNullValue()
+    val wechatDraftId = recObj.optString("wechat_draft_id", "")
+        .ifBlank { recObj.optString("wechatDraftId", "") }
+        .ifBlank { recObj.optString("mediaId", "") }
+        .blankToNullValue()
+    val wechatUrl = recObj.wechatUrlOrNull()
+    val processingStage = recObj.processingStageOrNull()
+
+    if (existing == null) {
+        return RecordingEntity(
+            filename = filename,
+            durationMs = fallbackDurationMs ?: 0L,
+            timestamp = remoteCreatedAtMs ?: nowMs,
+            status = remoteStatus.value,
+            articleTitle = articleTitle,
+            rawTextPreview = rawTextPreview,
+            remoteStatusUpdatedAt = remoteUpdatedAt,
+            lastError = lastError,
+            completedAt = if (remoteStatus == RecordingStatus.COMPLETED) nowMs else null,
+            wechatDraftId = wechatDraftId,
+            wechatUrl = wechatUrl,
+            processingStage = processingStage,
+        )
+    }
+
+    if (existing.status == RecordingStatus.COMPLETED.value && remoteStatus != RecordingStatus.COMPLETED) {
+        return null
+    }
+
+    val nextStatus = when {
+        remoteStatus == RecordingStatus.COMPLETED -> RecordingStatus.COMPLETED
+        existing.status == RecordingStatus.COMPLETED.value -> RecordingStatus.COMPLETED
+        remoteStatus == RecordingStatus.UPLOADED && existing.status == RecordingStatus.UPLOADING.value -> RecordingStatus.PROCESSING
+        else -> remoteStatus
+    }
+
+    return existing.copy(
+        status = nextStatus.value,
+        durationMs = if (existing.durationMs > 0L) existing.durationMs else fallbackDurationMs ?: 0L,
+        timestamp = when {
+            existing.localAudioPath.isNullOrBlank() && remoteCreatedAtMs != null -> remoteCreatedAtMs
+            existing.timestamp > 0L -> existing.timestamp
+            else -> remoteCreatedAtMs ?: existing.timestamp
+        },
+        articleTitle = articleTitle ?: existing.articleTitle,
+        rawTextPreview = rawTextPreview ?: existing.rawTextPreview,
+        remoteStatusUpdatedAt = remoteUpdatedAt ?: existing.remoteStatusUpdatedAt,
+        lastError = lastError,
+        completedAt = if (nextStatus == RecordingStatus.COMPLETED) {
+            existing.completedAt ?: nowMs
+        } else {
+            existing.completedAt
+        },
+        wechatDraftId = wechatDraftId ?: existing.wechatDraftId,
+        wechatUrl = wechatUrl ?: existing.wechatUrl,
+        processingStage = processingStage ?: existing.processingStage,
+    )
+}
+
 class SyncWorker(
     appContext: Context,
     params: WorkerParameters,
@@ -139,78 +222,12 @@ class SyncWorker(
                 if (recordingsArray != null) {
                     for (i in 0 until recordingsArray.length()) {
                         val recObj = recordingsArray.getJSONObject(i)
-                        val filename = recObj.optString("filename")
+                        val filename = recObj.optString("filename").trim()
                         if (filename.isBlank()) continue
                         val existing = dao.getRecordingByFilenameIncludingDeleted(filename)
-                        if (shouldSkipRemoteRecording(existing)) continue
-                        val d1Status = recObj.optString("status", RecordingStatus.UPLOADED.value)
-                            .asRecordingStatus()
-                        val remoteCreatedAtMs = parseRemoteRecordingCreatedAt(recObj.optString("created_at", ""))
-                        val fallbackDurationMs = recObj.optLong("duration_ms", -1L)
-                            .takeIf { it > 0L }
-                            ?: recObj.optLong("durationMs", -1L).takeIf { it > 0L }
-                            ?: parseDurationMsFromRecordingFilename(filename)
-                        val remoteUpdatedAt = recObj.optString("updated_at", "").blankToNull()
-                        val articleTitle = recObj.optString("article_title", "")
-                            .ifBlank { recObj.optString("articleTitle", "") }
-                            .blankToNull()
-                        val rawTextPreview = recObj.optString("raw_text_preview", "")
-                            .ifBlank { recObj.optString("rawTextPreview", "") }
-                            .blankToNull()
-                        val lastError = recObj.optString("error_message", "")
-                            .ifBlank { recObj.optString("lastError", "") }
-                            .blankToNull()
-                        val wechatDraftId = recObj.optString("wechat_draft_id", "")
-                            .ifBlank { recObj.optString("wechatDraftId", "") }
-                            .ifBlank { recObj.optString("mediaId", "") }
-                            .blankToNull()
-                        val wechatUrl = recObj.wechatUrlOrNull()
-                        val processingStage = recObj.processingStageOrNull()
-                        if (existing == null) {
-                            dao.insert(RecordingEntity(
-                                filename = filename,
-                                durationMs = fallbackDurationMs ?: 0L,
-                                timestamp = remoteCreatedAtMs ?: System.currentTimeMillis(),
-                                status = d1Status.value,
-                                articleTitle = articleTitle,
-                                rawTextPreview = rawTextPreview,
-                                remoteStatusUpdatedAt = remoteUpdatedAt,
-                                lastError = lastError,
-                                completedAt = if (d1Status == RecordingStatus.COMPLETED) System.currentTimeMillis() else null,
-                                wechatDraftId = wechatDraftId,
-                                wechatUrl = wechatUrl,
-                                processingStage = processingStage,
-                            ))
-                        } else if (existing.status != RecordingStatus.COMPLETED.value || d1Status == RecordingStatus.COMPLETED) {
-                            val nextStatus = when {
-                                d1Status == RecordingStatus.COMPLETED -> RecordingStatus.COMPLETED
-                                existing.status == RecordingStatus.COMPLETED.value -> RecordingStatus.COMPLETED
-                                d1Status == RecordingStatus.UPLOADED && existing.status == RecordingStatus.UPLOADING.value -> RecordingStatus.PROCESSING
-                                else -> d1Status
-                            }
-                            dao.insert(
-                                existing.copy(
-                                    status = nextStatus.value,
-                                    durationMs = if (existing.durationMs > 0L) existing.durationMs else fallbackDurationMs ?: 0L,
-                                    timestamp = when {
-                                        existing.localAudioPath.isNullOrBlank() && remoteCreatedAtMs != null -> remoteCreatedAtMs
-                                        existing.timestamp > 0L -> existing.timestamp
-                                        else -> remoteCreatedAtMs ?: existing.timestamp
-                                    },
-                                    articleTitle = articleTitle ?: existing.articleTitle,
-                                    rawTextPreview = rawTextPreview ?: existing.rawTextPreview,
-                                    remoteStatusUpdatedAt = remoteUpdatedAt ?: existing.remoteStatusUpdatedAt,
-                                    lastError = lastError,
-                                    completedAt = if (nextStatus == RecordingStatus.COMPLETED) {
-                                        existing.completedAt ?: System.currentTimeMillis()
-                                    } else {
-                                        existing.completedAt
-                                    },
-                                    wechatDraftId = wechatDraftId ?: existing.wechatDraftId,
-                                    wechatUrl = wechatUrl ?: existing.wechatUrl,
-                                    processingStage = processingStage ?: existing.processingStage,
-                                ),
-                            )
+                        val merged = mergeRemoteRecordingFromListItem(recObj, existing)
+                        if (merged != null) {
+                            dao.insert(merged)
                         }
                     }
                 }
@@ -258,7 +275,7 @@ class SyncWorker(
                                 articleTitle = transcriptArticleTitleOrNull(transcript) ?: recording.articleTitle,
                                 rawTextPreview = transcriptRawTextOrNull(transcript)
                                     ?.take(80)
-                                    ?.blankToNull()
+                                    ?.blankToNullValue()
                                     ?: recording.rawTextPreview,
                                 lastError = mergedTranscriptError(
                                     existingError = recording.lastError,
@@ -300,7 +317,7 @@ class SyncWorker(
                 if (recording.status != RecordingStatus.COMPLETED.value) {
                     val transcript = runCatching { JSONObject(jsonFile.readText()) }.getOrNull()
                     val transcriptTitle = transcriptArticleTitleOrNull(transcript)
-                    val transcriptPreview = transcriptRawTextOrNull(transcript)?.take(80)?.blankToNull()
+                    val transcriptPreview = transcriptRawTextOrNull(transcript)?.take(80)?.blankToNullValue()
                     val transcriptProcessingStage = transcript?.processingStageOrNull() ?: "COMPLETED"
                     val transcriptWechatDraftId = transcript?.wechatDraftIdOrNull()
                     val transcriptWechatUrl = transcript?.wechatUrlOrNull()
@@ -347,30 +364,30 @@ class SyncWorker(
         }
     }
 
-    private fun String.blankToNull(): String? = blankToNullValue()
+    private fun JSONObject.errorMessageOrNull(): String? = syncErrorMessageOrNull()
+}
 
-    private fun JSONObject.wechatDraftIdOrNull(): String? {
-        return optString("wechatDraftId", "")
-            .ifBlank { optString("mediaId", "") }
-            .ifBlank { optString("wechat_draft_id", "") }
-            .blankToNull()
-    }
+internal fun JSONObject.wechatDraftIdOrNull(): String? {
+    return optString("wechatDraftId", "")
+        .ifBlank { optString("mediaId", "") }
+        .ifBlank { optString("wechat_draft_id", "") }
+        .blankToNullValue()
+}
 
-    private fun JSONObject.wechatUrlOrNull(): String? {
-        return optString("wechatUrl", "")
-            .ifBlank { optString("wechat_url", "") }
-            .blankToNull()
-    }
+internal fun JSONObject.wechatUrlOrNull(): String? {
+    return optString("wechatUrl", "")
+        .ifBlank { optString("wechat_url", "") }
+        .blankToNullValue()
+}
 
-    private fun JSONObject.processingStageOrNull(): String? {
-        return optString("processingStage", "")
-            .ifBlank { optString("processing_stage", "") }
-            .blankToNull()
-    }
+internal fun JSONObject.processingStageOrNull(): String? {
+    return optString("processingStage", "")
+        .ifBlank { optString("processing_stage", "") }
+        .blankToNullValue()
+}
 
-    private fun JSONObject.errorMessageOrNull(): String? {
-        return optString("errorMessage", "")
-            .ifBlank { optString("error_message", "") }
-            .blankToNull()
-    }
+internal fun JSONObject.syncErrorMessageOrNull(): String? {
+    return optString("errorMessage", "")
+        .ifBlank { optString("error_message", "") }
+        .blankToNullValue()
 }

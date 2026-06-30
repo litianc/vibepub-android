@@ -143,4 +143,105 @@ class SyncWorkerTest {
         assertFalse(shouldSkipRemoteRecording(tombstone.copy(deletedAt = null)))
         assertFalse(shouldSkipRemoteRecording(null))
     }
+
+    @Test
+    fun remoteArticleReadyRecordingKeepsArticleConsumableBeforeDraftCompletes() {
+        val remote = JSONObject(
+            """
+            {
+              "filename": "VibePub-20260630-055501-0m18s-Article-Ready.m4a",
+              "status": "PROCESSING",
+              "created_at": "2026-06-30T05:55:01Z",
+              "updated_at": "2026-06-30T05:56:20Z",
+              "duration_ms": 18480,
+              "article_title": "把口述想法变成公众号文章",
+              "raw_text_preview": "今天我想说一下如何减少写作成本",
+              "processing_stage": "ARTICLE_READY",
+              "wechat_draft_id": null,
+              "wechat_url": null,
+              "error_message": null
+            }
+            """.trimIndent(),
+        )
+
+        val recording = mergeRemoteRecordingFromListItem(
+            recObj = remote,
+            existing = null,
+            nowMs = 1_782_806_000_000L,
+        )
+
+        requireNotNull(recording)
+        assertEquals("VibePub-20260630-055501-0m18s-Article-Ready.m4a", recording.filename)
+        assertEquals(18_480L, recording.durationMs)
+        assertEquals(RecordingStatus.PROCESSING.value, recording.status)
+        assertEquals("把口述想法变成公众号文章", recording.articleTitle)
+        assertEquals("今天我想说一下如何减少写作成本", recording.rawTextPreview)
+        assertEquals("ARTICLE_READY", recording.processingStage)
+        assertEquals("2026-06-30T05:56:20Z", recording.remoteStatusUpdatedAt)
+        assertEquals(null, recording.completedAt)
+        assertEquals(null, recording.lastError)
+    }
+
+    @Test
+    fun remoteDraftFailureKeepsGeneratedArticleAndErrorForRecovery() {
+        val existing = RecordingEntity(
+            filename = "VibePub-20260630-055501-0m18s-Article-Ready.m4a",
+            durationMs = 18_480L,
+            timestamp = 1_782_800_000_000L,
+            status = RecordingStatus.PROCESSING.value,
+            processingStage = "ARTICLE_READY",
+            articleTitle = "旧标题",
+            rawTextPreview = "旧识别",
+        )
+        val remote = JSONObject(
+            """
+            {
+              "filename": "VibePub-20260630-055501-0m18s-Article-Ready.m4a",
+              "status": "COMPLETED",
+              "updated_at": "2026-06-30T05:57:30Z",
+              "article_title": "把口述想法变成公众号文章",
+              "raw_text_preview": "今天我想说一下如何减少写作成本",
+              "processing_stage": "DRAFT_FAILED",
+              "error_message": "公众号草稿创建失败：cover generation timeout"
+            }
+            """.trimIndent(),
+        )
+
+        val recording = mergeRemoteRecordingFromListItem(
+            recObj = remote,
+            existing = existing,
+            nowMs = 1_782_806_000_000L,
+        )
+
+        requireNotNull(recording)
+        assertEquals(RecordingStatus.COMPLETED.value, recording.status)
+        assertEquals("DRAFT_FAILED", recording.processingStage)
+        assertEquals("把口述想法变成公众号文章", recording.articleTitle)
+        assertEquals("今天我想说一下如何减少写作成本", recording.rawTextPreview)
+        assertEquals("公众号草稿创建失败：cover generation timeout", recording.lastError)
+        assertEquals(1_782_806_000_000L, recording.completedAt)
+    }
+
+    @Test
+    fun remoteProcessingUpdateDoesNotDowngradeCompletedLocalRecording() {
+        val existing = RecordingEntity(
+            filename = "VibePub-done.m4a",
+            durationMs = 18_000L,
+            timestamp = 1L,
+            status = RecordingStatus.COMPLETED.value,
+            articleTitle = "已经完成",
+            processingStage = "COMPLETED",
+        )
+        val remote = JSONObject(
+            """
+            {
+              "filename": "VibePub-done.m4a",
+              "status": "PROCESSING",
+              "processing_stage": "ASR"
+            }
+            """.trimIndent(),
+        )
+
+        assertEquals(null, mergeRemoteRecordingFromListItem(remote, existing))
+    }
 }
