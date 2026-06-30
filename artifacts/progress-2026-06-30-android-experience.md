@@ -1,8 +1,8 @@
 # VibePub Android Experience Progress - 2026-06-30
 
-记录时间：2026-06-30 19:35 CST
+记录时间：2026-06-30 18:48 CST
 分支：`codex/android-experience-v1`  
-本次记录基线提交：`92c9a12 Match retry upload feedback to queue result`
+本次记录基线提交：`8eb5921 Leave recording screen after stop failure`
 
 ## 已验证
 
@@ -24,6 +24,7 @@
   - 设置页配置中心可直接看到最近一次云端同步状态；未同步时显示 `尚未同步`，已同步时显示具体时间。
   - 重试上传时会根据真实排队结果反馈：只有实际进入 WorkManager 上传队列才显示 `已重新加入上传队列`；缺少 `FILES_TOKEN` 时提示先配置后重试。
   - 录音停止保存失败时不再停留在“仍在录音”的假状态；会回到首页并提示重新开始录音。
+  - 首页同步提示会优先识别本机待上传录音，提示先上传/检查 `FILES_TOKEN`，而不是让用户误以为同步能解决上传前问题。
   - 状态模型覆盖 `LOCAL_RECORDED`、`UPLOADING`、`UPLOADED`、`PROCESSING`、`COMPLETED`、`FAILED`。
 - placeholder 草稿引用修复已验证并发布到 APK：
   - Android 提交：`ae943af Keep draft readiness from trusting placeholder values`
@@ -82,6 +83,7 @@
   - 本轮设置页最近同步状态改动后，`SettingsScreenTest`、`scripts/build-android-local.sh test`、`scripts/build-android-local.sh assemble` 均通过。
   - 本轮重试上传反馈改动后，`RecordingFilesTest`、`scripts/build-android-local.sh test`、`scripts/build-android-local.sh assemble` 均通过。
   - 本轮录音停止失败恢复改动后，`RecordingFilesTest`、`scripts/build-android-local.sh test`、`scripts/build-android-local.sh assemble` 均通过。
+  - 本轮首页本机待上传恢复提示改动后，`HomeScreenTest`、`scripts/build-android-local.sh test`、`scripts/build-android-local.sh assemble`、`git diff --check` 均通过。
 - GitHub Actions Android Tests 可用并已通过。
 - 注意：本地单测必须使用 JDK 21；JDK 26 会导致 Robolectric 4.12 shadow class 解析失败。
 
@@ -101,7 +103,7 @@
   - 复制/分享/导出入口可点击。
   - Token 错误时显示配置错误和可恢复路径。
 - 本地 APK 已生成：`android/app/build/outputs/apk/debug/app-debug.apk`
-  - 当前本地 APK SHA-256：`499facf346f5a97f3ee9e45b210b5e0edf50427d1a654b586dc55987056321b7`
+  - 当前本地 APK SHA-256：`b296577f0da35960255330f457c80fe99b9225389a2f1de979bd6b9c10480808`
 - 待恢复 ADB 后安装本地 APK：当前 `10.161.2.96` 网络可 ping 通，但无线调试端口 `42327` / `43355` 均 connection refused，需要重新打开平板无线调试页面获取新端口，或改用 USB。
 - ADB 恢复后可直接运行：
   - `scripts/install-android-local-apk.sh --serial <new-adb-serial> --skip-build`

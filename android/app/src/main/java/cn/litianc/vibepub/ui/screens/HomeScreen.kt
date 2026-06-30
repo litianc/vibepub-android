@@ -310,6 +310,9 @@ internal fun homeSyncNotice(
     nowMs: Long = System.currentTimeMillis(),
 ): HomeSyncNotice? {
     if (recordings.isEmpty()) return null
+    if (recordings.any { it.status.asRecordingStatus() == RecordingStatus.LOCAL_RECORDED }) {
+        return HomeSyncNotice("有本机录音还没上传，先点录音卡片上的上传；反复失败时检查 FILES_TOKEN。")
+    }
     if (lastSyncAtMs <= 0L) {
         return HomeSyncNotice("还没有和云端同步过，点同步检查上传和处理进度。")
     }

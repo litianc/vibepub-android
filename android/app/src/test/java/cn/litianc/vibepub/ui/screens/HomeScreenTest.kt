@@ -54,6 +54,17 @@ class HomeScreenTest {
     }
 
     @Test
+    fun homeSyncNoticePrioritizesLocalUploadRecovery() {
+        val notice = homeSyncNotice(
+            recordings = listOf(recording(status = RecordingStatus.LOCAL_RECORDED)),
+            lastSyncAtMs = 0L,
+            nowMs = 1_000L,
+        )
+
+        assertEquals("有本机录音还没上传，先点录音卡片上的上传；反复失败时检查 FILES_TOKEN。", notice?.message)
+    }
+
+    @Test
     fun homeSyncNoticeFlagsStaleActiveCloudWork() {
         val notice = homeSyncNotice(
             recordings = listOf(recording(status = RecordingStatus.PROCESSING)),
