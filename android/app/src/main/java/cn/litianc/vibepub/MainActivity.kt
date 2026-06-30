@@ -31,6 +31,11 @@ import java.util.concurrent.TimeUnit
 private const val PERIODIC_SYNC_WORK_NAME = "sync_transcripts"
 private const val ONE_TIME_SYNC_WORK_NAME = "sync_transcripts_now"
 
+internal enum class SyncRequestKind {
+    STARTUP,
+    USER_OR_ACTIVE_PROGRESS,
+}
+
 class MainActivity : ComponentActivity() {
     private lateinit var preferences: AppPreferences
     private lateinit var recorder: AudioRecorder
@@ -50,7 +55,7 @@ class MainActivity : ComponentActivity() {
         // Also run once immediately on startup
         workManager.enqueueUniqueWork(
             ONE_TIME_SYNC_WORK_NAME,
-            ExistingWorkPolicy.KEEP,
+            syncWorkPolicyForRequest(SyncRequestKind.STARTUP),
             OneTimeWorkRequestBuilder<SyncWorker>().build(),
         )
 
@@ -77,7 +82,7 @@ fun VibePubApp(
         WorkManager.getInstance(context)
             .enqueueUniqueWork(
                 ONE_TIME_SYNC_WORK_NAME,
-                ExistingWorkPolicy.KEEP,
+                syncWorkPolicyForRequest(SyncRequestKind.USER_OR_ACTIVE_PROGRESS),
                 OneTimeWorkRequestBuilder<SyncWorker>().build(),
             )
     }
@@ -230,3 +235,10 @@ internal fun stopRecordingFailureToastMessage(): String {
 }
 
 internal fun shouldLeaveRecordingAfterStopFailure(): Boolean = true
+
+internal fun syncWorkPolicyForRequest(kind: SyncRequestKind): ExistingWorkPolicy {
+    return when (kind) {
+        SyncRequestKind.STARTUP -> ExistingWorkPolicy.KEEP
+        SyncRequestKind.USER_OR_ACTIVE_PROGRESS -> ExistingWorkPolicy.REPLACE
+    }
+}

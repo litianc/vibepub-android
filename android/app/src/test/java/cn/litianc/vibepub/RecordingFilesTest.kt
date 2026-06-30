@@ -107,6 +107,18 @@ class RecordingFilesTest {
     }
 
     @Test
+    fun activeProgressSyncReplacesStaleOneTimeWork() {
+        assertEquals(
+            ExistingWorkPolicy.KEEP,
+            syncWorkPolicyForRequest(SyncRequestKind.STARTUP),
+        )
+        assertEquals(
+            ExistingWorkPolicy.REPLACE,
+            syncWorkPolicyForRequest(SyncRequestKind.USER_OR_ACTIVE_PROGRESS),
+        )
+    }
+
+    @Test
     fun stopRecordingFailureMessageAsksForFreshRecording() {
         assertEquals("保存录音失败，请重新开始录音", stopRecordingFailureToastMessage())
         assertTrue(shouldLeaveRecordingAfterStopFailure())
