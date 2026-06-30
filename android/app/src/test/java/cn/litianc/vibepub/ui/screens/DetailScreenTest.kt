@@ -219,6 +219,23 @@ class DetailScreenTest {
     }
 
     @Test
+    fun reviewSummaryTreatsNullLikeDraftValuesAsMissing() {
+        val summary = buildArticleReviewSummary(
+            status = RecordingStatus.COMPLETED,
+            articleTitle = "一篇整理好的文章",
+            articleContent = "这是一段已经整理好的正文。".repeat(12),
+            rawText = "原始识别文本",
+            wechatDraftId = "undefined",
+            wechatUrl = " null ",
+        )
+
+        val draftItem = summary.items.first { it.label == "公众号草稿" }
+        assertTrue(summary.nextStep.contains("还没拿到公众号草稿信息"))
+        assertFalse(draftItem.ready)
+        assertEquals("等待云端创建草稿或返回草稿信息", draftItem.value)
+    }
+
+    @Test
     fun reviewSummaryShowsProcessingMessageBeforeCompletion() {
         val summary = buildArticleReviewSummary(
             status = RecordingStatus.PROCESSING,
@@ -264,6 +281,29 @@ class DetailScreenTest {
     }
 
     @Test
+    fun articleExportTextDoesNotLeakNullLikeDraftReferences() {
+        val text = buildArticleExportText(
+            articleTitle = "整理好的文章",
+            articleContent = "正文内容",
+            rawText = "原始识别",
+            statusLabel = "已成文",
+            statusDetail = "文章已生成，正在等待公众号草稿信息同步。",
+            nextAction = "下一步：先复制或分享正文；如果需要草稿入口，点同步等待草稿信息。",
+            workflowNode = "当前节点：6. 公众号草稿 · 当前",
+            workflowCycle = "保存录音 → 上传音频 → 云端排队 → 语音识别 → 文章改写 → 公众号草稿 → 人工发布确认",
+            wechatDraftId = "undefined",
+            wechatUrl = " null ",
+            filename = "VibePub-test.m4a",
+            createdAtMs = 1_771_000_000_000L,
+        )
+
+        assertTrue(text.contains("- 公众号草稿：未同步草稿 ID"))
+        assertTrue(text.contains("- 草稿链接：未同步草稿链接"))
+        assertFalse(text.contains("undefined"))
+        assertFalse(text.contains(" null "))
+    }
+
+    @Test
     fun draftActionOpensWhenDraftUrlExists() {
         val action = buildWeChatDraftAction(
             wechatDraftId = "",
@@ -303,6 +343,16 @@ class DetailScreenTest {
         assertEquals("草稿 ID 已同步", action.label)
         assertFalse(action.enabled)
         assertEquals("", action.url)
+    }
+
+    @Test
+    fun draftActionIgnoresNullLikeDraftReferences() {
+        val action = buildWeChatDraftAction(
+            wechatDraftId = "undefined",
+            wechatUrl = " null ",
+        )
+
+        assertEquals(null, action)
     }
 
     @Test

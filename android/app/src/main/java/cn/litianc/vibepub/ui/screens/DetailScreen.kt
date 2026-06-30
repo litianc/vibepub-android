@@ -83,6 +83,8 @@ import cn.litianc.vibepub.data.hasDraftFailureMessage
 import cn.litianc.vibepub.data.primaryRecoveryAction
 import cn.litianc.vibepub.data.statusDetail
 import cn.litianc.vibepub.data.statusLabel
+import cn.litianc.vibepub.data.sanitizedRemoteReference
+import cn.litianc.vibepub.data.wechatDraftReferenceOrNull
 import cn.litianc.vibepub.data.workflowCycleLabel
 import cn.litianc.vibepub.data.workflowCurrentNodeLabel
 import cn.litianc.vibepub.data.workflowFreshnessLabel
@@ -221,9 +223,9 @@ fun DetailScreen(
             recordingProcessingStage = currentRecording.processingStage.orEmpty(),
         )
         val wechatDraftId = transcript.optTranscriptString("wechatDraftId", "mediaId", "wechat_draft_id")
-            .ifBlank { currentRecording.wechatDraftId.orEmpty() }
+            .ifBlank { sanitizedRemoteReference(currentRecording.wechatDraftId).orEmpty() }
         val wechatUrl = transcript.optTranscriptString("wechatUrl", "wechat_url")
-            .ifBlank { currentRecording.wechatUrl.orEmpty() }
+            .ifBlank { sanitizedRemoteReference(currentRecording.wechatUrl).orEmpty() }
         val transcriptError = transcript.optTranscriptString("errorMessage", "error_message")
         val draftError = when {
             currentRecording.hasDraftFailureMessage() -> currentRecording.lastError.orEmpty()
@@ -835,9 +837,7 @@ internal fun JSONObject?.optTranscriptString(vararg keys: String): String {
 }
 
 private fun String.blankToMissingString(): String? {
-    return takeUnless { value ->
-        value.isBlank() || value.equals("null", ignoreCase = true)
-    }
+    return sanitizedRemoteReference(this)
 }
 
 internal fun buildArticleExportText(
@@ -855,6 +855,8 @@ internal fun buildArticleExportText(
     createdAtMs: Long,
 ): String {
     val createdAt = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date(createdAtMs))
+    val draftId = sanitizedRemoteReference(wechatDraftId).orEmpty()
+    val draftUrl = sanitizedRemoteReference(wechatUrl).orEmpty()
     return buildString {
         appendLine("# $articleTitle")
         appendLine()
@@ -864,8 +866,8 @@ internal fun buildArticleExportText(
         appendLine("- $nextAction")
         appendLine("- $workflowNode")
         appendLine("- 完整流程：$workflowCycle")
-        appendLine("- 公众号草稿：${wechatDraftId.ifBlank { "未同步草稿 ID" }}")
-        appendLine("- 草稿链接：${wechatUrl.ifBlank { "未同步草稿链接" }}")
+        appendLine("- 公众号草稿：${draftId.ifBlank { "未同步草稿 ID" }}")
+        appendLine("- 草稿链接：${draftUrl.ifBlank { "未同步草稿链接" }}")
         appendLine("- 原始文件：$filename")
         appendLine("- 创建时间：$createdAt")
         appendLine()
@@ -960,7 +962,7 @@ internal fun buildArticleReviewSummary(
         articleContentIsGenerated &&
         contentChars >= 80
     val hasRawText = rawText.isNotBlank()
-    val draftReference = wechatDraftId.ifBlank { wechatUrl }
+    val draftReference = wechatDraftReferenceOrNull(wechatDraftId, wechatUrl).orEmpty()
     val hasDraft = draftReference.isNotBlank()
     val draftFailed = (status == RecordingStatus.COMPLETED || stageDraftFailed) &&
         (draftError.isNotBlank() || stageDraftFailed)

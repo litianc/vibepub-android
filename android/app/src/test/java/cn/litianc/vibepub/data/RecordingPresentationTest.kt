@@ -283,6 +283,32 @@ class RecordingPresentationTest {
     }
 
     @Test
+    fun nullLikeDraftReferencesDoNotMarkCompletedArticleAsDraftReady() {
+        val recording = RecordingEntity(
+            filename = "VibePub-test.m4a",
+            durationMs = 1_000L,
+            timestamp = 1L,
+            status = RecordingStatus.COMPLETED.value,
+            articleTitle = "整理好的文章",
+            wechatDraftId = " undefined ",
+            wechatUrl = "null",
+        )
+
+        val steps = recording.workflowSteps()
+
+        assertEquals("已成文", recording.statusLabel())
+        assertTrue(recording.statusDetail().contains("等待公众号草稿信息"))
+        assertTrue(recording.workflowNextActionLabel().contains("复制或分享正文"))
+        assertEquals("第 6/7 步", recording.workflowProgressLabel())
+        assertEquals(WorkflowStepState.DONE, steps[4].state)
+        assertEquals(WorkflowStepState.CURRENT, steps[5].state)
+        assertEquals(WorkflowStepState.PENDING, steps[6].state)
+        assertEquals(null, sanitizedRemoteReference(" null "))
+        assertEquals(null, sanitizedRemoteReference("undefined"))
+        assertEquals("MEDIA_ID_123", wechatDraftReferenceOrNull("MEDIA_ID_123", "null"))
+    }
+
+    @Test
     fun completedArticleCanReportDraftFailureWithoutLosingArticleState() {
         val recording = RecordingEntity(
             filename = "VibePub-test.m4a",

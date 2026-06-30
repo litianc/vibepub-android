@@ -267,4 +267,34 @@ class SettingsScreenTest {
         assertTrue(text.contains("Latest local audio exists: 是"))
         assertTrue(text.contains("Latest WeChat draft: https://mp.weixin.qq.com/draft"))
     }
+
+    @Test
+    fun diagnosticsTextTreatsNullLikeDraftReferencesAsMissing() {
+        val text = formatDiagnostics(
+            appVersion = "0.1.0-debug (1)",
+            deviceId = "device-123",
+            deviceName = "Redmi Tablet",
+            androidVersion = "15 / SDK 35",
+            apiBaseUrl = "https://api.example.com",
+            tokenConfigured = true,
+            lastSyncText = "2026-06-29 16:00:00",
+            recordingCount = 1,
+            latest = RecordingEntity(
+                filename = "VibePub-done.m4a",
+                durationMs = 48_000L,
+                timestamp = 1L,
+                status = RecordingStatus.COMPLETED.value,
+                articleTitle = "整理好的文章",
+                rawTextPreview = "原始识别",
+                wechatDraftId = "undefined",
+                wechatUrl = "null",
+                processingStage = "COMPLETED",
+            ),
+            latestLocalAudioExists = true,
+        )
+
+        assertTrue(text.contains("Latest WeChat draft: 无"))
+        assertFalse(text.contains("Latest WeChat draft: null"))
+        assertFalse(text.contains("Latest WeChat draft: undefined"))
+    }
 }

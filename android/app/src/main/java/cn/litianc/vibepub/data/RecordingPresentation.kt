@@ -169,6 +169,20 @@ fun RecordingEntity.workflowCycleLabel(): String {
     return WORKFLOW_BASE_STEPS.joinToString(" → ") { it.title }
 }
 
+fun sanitizedRemoteReference(value: String?): String? {
+    val trimmed = value?.trim().orEmpty()
+    return trimmed.takeUnless {
+        it.isBlank() ||
+            it.equals("null", ignoreCase = true) ||
+            it.equals("undefined", ignoreCase = true)
+    }
+}
+
+fun wechatDraftReferenceOrNull(wechatDraftId: String?, wechatUrl: String?): String? {
+    return sanitizedRemoteReference(wechatDraftId)
+        ?: sanitizedRemoteReference(wechatUrl)
+}
+
 fun RecordingEntity.workflowSteps(): List<RecordingWorkflowStep> {
     val status = status.asRecordingStatus()
     val currentIndex = workflowCurrentIndex(status)
@@ -495,7 +509,7 @@ private fun RecordingEntity.failedRecoveryAction(): RecordingRecoveryAction {
 }
 
 private fun RecordingEntity.hasWechatDraftReference(): Boolean {
-    return wechatDraftId?.isNotBlank() == true || wechatUrl?.isNotBlank() == true
+    return wechatDraftReferenceOrNull(wechatDraftId, wechatUrl) != null
 }
 
 fun RecordingEntity.hasDraftFailureMessage(): Boolean {

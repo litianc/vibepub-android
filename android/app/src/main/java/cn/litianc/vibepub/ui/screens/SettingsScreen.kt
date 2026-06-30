@@ -80,6 +80,7 @@ import cn.litianc.vibepub.data.workflowCurrentNodeLabel
 import cn.litianc.vibepub.data.workflowFreshnessLabel
 import cn.litianc.vibepub.data.workflowNextActionLabel
 import cn.litianc.vibepub.data.workflowProgressLabel
+import cn.litianc.vibepub.data.wechatDraftReferenceOrNull
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -686,11 +687,9 @@ internal fun formatDiagnostics(
         ?.let { File(it).exists() },
 ): String {
     val latestStep = latest?.currentWorkflowStep()
-    val latestDraftReference = latest?.let { recording ->
-        recording.wechatDraftId.orEmpty()
-            .ifBlank { recording.wechatUrl.orEmpty() }
-            .ifBlank { "无" }
-    } ?: "无"
+    val latestDraftReference = latest
+        ?.let { recording -> wechatDraftReferenceOrNull(recording.wechatDraftId, recording.wechatUrl) }
+        ?: "无"
     return """
     App: VibePub $appVersion
     Device ID: $deviceId
