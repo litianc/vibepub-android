@@ -122,6 +122,14 @@ class SyncWorkerTest {
     }
 
     @Test
+    fun blankToNullValueTreatsJsonNullStringAsMissing() {
+        assertEquals("草稿ID", " 草稿ID ".blankToNullValue())
+        assertEquals(null, "null".blankToNullValue())
+        assertEquals(null, " NULL ".blankToNullValue())
+        assertEquals(null, "   ".blankToNullValue())
+    }
+
+    @Test
     fun skipsRemoteRecordingWhenUserDeletedLocalCard() {
         val tombstone = RecordingEntity(
             filename = "deleted.m4a",

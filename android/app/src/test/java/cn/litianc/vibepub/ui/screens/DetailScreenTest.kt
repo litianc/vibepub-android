@@ -53,6 +53,13 @@ class DetailScreenTest {
     }
 
     @Test
+    fun transcriptStringReaderTreatsNullStringAsMissing() {
+        val transcript = JSONObject("""{"wechatUrl":"null","wechat_url":"   "}""")
+
+        assertEquals("", transcript.optTranscriptString("wechatUrl", "wechat_url"))
+    }
+
+    @Test
     fun reviewSummaryMarksCompletedDraftReady() {
         val summary = buildArticleReviewSummary(
             status = RecordingStatus.COMPLETED,

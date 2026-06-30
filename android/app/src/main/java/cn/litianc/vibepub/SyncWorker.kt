@@ -82,16 +82,19 @@ internal fun transcriptArticleTitleOrNull(transcript: JSONObject?): String? {
     if (transcript == null) return null
     return transcript.optString("articleTitle", "")
         .ifBlank { transcript.optString("article_title", "") }
-        .trim()
-        .ifBlank { null }
+        .blankToNullValue()
 }
 
 internal fun transcriptRawTextOrNull(transcript: JSONObject?): String? {
     if (transcript == null) return null
     return transcript.optString("rawText", "")
         .ifBlank { transcript.optString("raw_text", "") }
-        .trim()
-        .ifBlank { null }
+        .blankToNullValue()
+}
+
+internal fun String.blankToNullValue(): String? {
+    val value = trim()
+    return value.takeUnless { it.isBlank() || it.equals("null", ignoreCase = true) }
 }
 
 internal fun shouldSkipRemoteRecording(existing: RecordingEntity?): Boolean {
@@ -344,7 +347,7 @@ class SyncWorker(
         }
     }
 
-    private fun String.blankToNull(): String? = trim().ifBlank { null }
+    private fun String.blankToNull(): String? = blankToNullValue()
 
     private fun JSONObject.wechatDraftIdOrNull(): String? {
         return optString("wechatDraftId", "")

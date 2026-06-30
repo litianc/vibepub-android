@@ -830,7 +830,9 @@ internal fun renderArticleText(content: String): String {
 internal fun JSONObject?.optTranscriptString(vararg keys: String): String {
     if (this == null) return ""
     return keys.firstNotNullOfOrNull { key ->
-        optString(key, "").trim().ifBlank { null }
+        optString(key, "").trim().takeUnless { value ->
+            value.isBlank() || value.equals("null", ignoreCase = true)
+        }
     }.orEmpty()
 }
 
