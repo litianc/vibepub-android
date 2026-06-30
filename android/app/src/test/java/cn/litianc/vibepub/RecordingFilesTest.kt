@@ -51,4 +51,20 @@ class RecordingFilesTest {
             ),
         )
     }
+
+    @Test
+    fun uploadWorkNameIsStablePerRecordingWithoutLeakingFilename() {
+        val filename = "VibePub-2026-06-30-090000-0m18s-Tue-Morning.m4a"
+
+        val first = RecordingUploadCoordinator.uniqueUploadWorkName(filename)
+        val second = RecordingUploadCoordinator.uniqueUploadWorkName(filename)
+        val other = RecordingUploadCoordinator.uniqueUploadWorkName("other-recording.m4a")
+
+        assertEquals(first, second)
+        assertTrue(first.startsWith("upload_recording-"))
+        assertFalse(first.contains("VibePub"))
+        assertFalse(first.contains("090000"))
+        assertFalse(first.contains(".m4a"))
+        assertFalse(first == other)
+    }
 }

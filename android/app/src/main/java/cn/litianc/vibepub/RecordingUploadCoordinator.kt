@@ -2,6 +2,7 @@ package cn.litianc.vibepub
 
 import android.content.Context
 import androidx.work.Constraints
+import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
@@ -13,9 +14,11 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import java.io.File
+import java.security.MessageDigest
 
 object RecordingUploadCoordinator {
     const val MIN_RECORDING_DURATION_MS = 2_000L
+    private const val UNIQUE_UPLOAD_WORK_PREFIX = "upload_recording"
 
     suspend fun saveRecording(
         context: Context,
@@ -96,8 +99,21 @@ object RecordingUploadCoordinator {
             requestBuilder.addTag("upload_job")
         }
 
-        WorkManager.getInstance(context).enqueue(requestBuilder.build())
+        WorkManager.getInstance(context).enqueueUniqueWork(
+            uniqueUploadWorkName(file.name),
+            ExistingWorkPolicy.KEEP,
+            requestBuilder.build(),
+        )
         return true
+    }
+
+    internal fun uniqueUploadWorkName(filename: String): String {
+        val normalized = filename.trim().ifBlank { "unnamed" }
+        val digest = MessageDigest.getInstance("SHA-256")
+            .digest(normalized.toByteArray())
+            .take(8)
+            .joinToString("") { "%02x".format(it) }
+        return "$UNIQUE_UPLOAD_WORK_PREFIX-$digest"
     }
 
     private fun markUploadBlocked(context: Context, filename: String, error: String) {
