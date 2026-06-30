@@ -329,6 +329,61 @@ test("keeps upload stage when only duration column is not migrated yet", async (
   ]);
 });
 
+test("dispatches mining workflow for the uploaded filename", async () => {
+  const originalFetch = globalThis.fetch;
+  const dispatches = [];
+  const waitUntilPromises = [];
+  globalThis.fetch = async (url, init = {}) => {
+    dispatches.push({
+      url: String(url),
+      init,
+      body: JSON.parse(String(init.body || "{}")),
+    });
+    return new Response(null, { status: 204 });
+  };
+
+  try {
+    const bucket = {
+      async put() {},
+    };
+    const context = {
+      waitUntil(promise) {
+        waitUntilPromises.push(promise);
+      },
+    };
+
+    const response = await worker.fetch(
+      authorizedRequest("https://example.test/api/uploads", {
+        method: "POST",
+        headers: { "X-File-Name": "VibePub-2026-06-30-160000-0m18s-Tue-Afternoon.m4a" },
+        body: "audio",
+      }),
+      createEnv({
+        FILES_BUCKET: bucket,
+        GITHUB_PAT: "github-token",
+      }),
+      context,
+    );
+
+    assert.equal(response.status, 201);
+    assert.equal(waitUntilPromises.length, 1);
+    await Promise.all(waitUntilPromises);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(dispatches.length, 1);
+  assert.equal(
+    dispatches[0].url,
+    "https://api.github.com/repos/litianc/vibepub-android/actions/workflows/mining-job.yml/dispatches",
+  );
+  assert.equal(dispatches[0].init.method, "POST");
+  assert.equal(dispatches[0].body.ref, "main");
+  assert.deepEqual(dispatches[0].body.inputs, {
+    target_filename: "VibePub-2026-06-30-160000-0m18s-Tue-Afternoon.m4a",
+  });
+});
+
 test("persists mining status metadata for Android progress display", async () => {
   let boundValues = [];
   const db = {

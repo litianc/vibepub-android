@@ -168,7 +168,7 @@ async function uploadAudio(request: Request, env: Env, ctx: ExecutionContext): P
   }
 
   // Fire and forget triggering of the GitHub Action Mining Job
-  ctx.waitUntil(triggerGitHubAction(env).catch((e) => {
+  ctx.waitUntil(triggerGitHubAction(env, safeOriginalName).catch((e) => {
     console.error("Failed to trigger GitHub Action:", e);
   }));
 
@@ -184,7 +184,7 @@ async function uploadAudio(request: Request, env: Env, ctx: ExecutionContext): P
   );
 }
 
-async function triggerGitHubAction(env: Env): Promise<void> {
+async function triggerGitHubAction(env: Env, targetFilename: string): Promise<void> {
   if (!env.GITHUB_PAT) {
     console.warn("GITHUB_PAT is not configured. Skipping immediate GitHub Action trigger.");
     return;
@@ -203,7 +203,10 @@ async function triggerGitHubAction(env: Env): Promise<void> {
       "Content-Type": "application/json"
     },
     body: JSON.stringify({
-      ref: "main"
+      ref: "main",
+      inputs: {
+        target_filename: targetFilename,
+      },
     })
   });
   

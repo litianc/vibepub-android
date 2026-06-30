@@ -1,8 +1,8 @@
 # VibePub Android Experience Progress - 2026-06-30
 
-记录时间：2026-06-30 18:54 CST
+记录时间：2026-06-30 18:58 CST
 分支：`codex/android-experience-v1`  
-本次记录基线提交：`2ae1bb1 Guide local recordings toward upload recovery on home`
+本次记录基线提交：`ccd085d Expose recent recordings in diagnostics`
 
 ## 已验证
 
@@ -48,6 +48,11 @@
   - 本地验证：`npm run typecheck`、`npm test`、`git diff --check` 均通过。
   - Worker validate：GitHub Actions run `28433259609` 成功
   - 未部署生产，只做 validate-only。
+- Worker 上传后会把刚上传的文件名传给 GitHub Actions mining workflow：
+  - `/api/uploads` 触发 `mining-job.yml` 时带上 `inputs.target_filename`。
+  - mining workflow 已支持 `TARGET_FILENAME`，因此后台可以优先点名处理本次录音，减少等待定时扫描和处理整个 inbox 的延迟。
+  - 本地验证：`infra/worker` 下 `npm test`、`npm run typecheck` 均通过。
+  - 未部署生产；生产生效还需要 Worker deploy，并确认 Worker secret `GITHUB_PAT` 已配置。
 
 ### 真机/ADB
 - 当前红米平板 ADB 在线：
@@ -91,9 +96,11 @@
 
 ### 生产环境待验证
 - Worker `duration_ms` 迁移尚未部署到生产 D1。
+- Worker 定向触发 mining workflow 尚未部署到生产。
 - 需要在明确部署窗口执行 Worker deploy/migration 后验证：
   - `/api/recordings` 返回 `duration_ms`。
   - 新上传录音在 D1 中有稳定时长。
+  - 上传新录音后 GitHub Actions mining run 接收到对应 `target_filename`，而不是只等待 10 分钟定时扫描。
   - Android 首页与详情页时长显示不依赖文件名兜底。
 
 ### 真机端到端待验证
