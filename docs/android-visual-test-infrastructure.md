@@ -43,6 +43,16 @@ Final end-to-end acceptance is stricter than producing visual evidence. Use
 `docs/e2e-acceptance-runbook.md` before declaring the recording-to-transcript
 flow fully debugged.
 
+Before a full real-device run, use the source readiness audit to confirm that
+the Android, Worker, mining, release, and smoke-test evidence is wired up:
+
+```bash
+scripts/audit-android-experience-readiness.sh
+```
+
+This is a pre-E2E gate. It can pass while still reporting manual/device-gated
+items when no authorized ADB device is connected.
+
 ## What You Need To Provide
 
 ### 1. A Dedicated Android Test Phone

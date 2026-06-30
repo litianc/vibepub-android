@@ -115,6 +115,7 @@
   - 本轮 Android 同步映射改动后，`SyncWorkerTest`、`scripts/build-android-local.sh test`、`scripts/build-android-local.sh assemble`、`git diff --check` 均通过。
   - 本轮活跃进度同步调度改动后，`RecordingFilesTest`、`scripts/build-android-local.sh test`、`scripts/build-android-local.sh assemble`、`git diff --check` 均通过。
   - 本轮 ADB readiness 自动连接诊断改动后，`bash -n scripts/check-android-device-ready.sh scripts/install-latest-android-apk.sh scripts/run-android-device-smoke.sh`、`CHECK_APK_INSTALL=false scripts/check-android-device-ready.sh`、`RecordingFilesTest`、`scripts/build-android-local.sh test`、`git diff --check` 均通过；preflight 正确记录当前无线调试端口 `Connection refused`。
+  - 本轮体验版完成度审计脚本 `scripts/audit-android-experience-readiness.sh` 已新增；它会检查需求文档、Android 状态/Room/UI/设置证据、Worker/mining 字段、Release manifest、真机 smoke 脚本，并把当前无 ADB 的真机门禁标为 `[~]`。本地运行结果：自动源代码/测试/发布失败数 `0`，设备门禁项 `2`，报告见 `artifacts/android-experience-readiness/latest/readiness.md`。
 - GitHub Actions Android Tests 可用并已通过。
 - 最新 GitHub Actions Android Tests run `28443221766` 已覆盖提交 `8424f32` 并成功。
 - 最新 GitHub Actions Android Build & Release run `28443222078` 已覆盖提交 `8424f32` 并成功创建 Release `build-20260630-121346-8424f32`。

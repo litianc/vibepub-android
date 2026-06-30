@@ -48,6 +48,17 @@ Useful Volcengine references:
 
 All gates must pass before declaring the flow complete.
 
+0. Android experience source readiness:
+
+   ```bash
+   scripts/audit-android-experience-readiness.sh
+   ```
+
+   Required evidence: the report has `Automated source/test/release failures:
+   0`. Manual/device-gated items are allowed at this stage only if they point to
+   the real-device smoke gates below; they are not proof of final E2E
+   completion.
+
 1. External service smoke:
 
    ```bash
