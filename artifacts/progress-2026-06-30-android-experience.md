@@ -26,6 +26,7 @@
   - 录音停止保存失败时不再停留在“仍在录音”的假状态；会回到首页并提示重新开始录音。
   - 首页同步提示会优先识别本机待上传录音，提示先上传/检查 `FILES_TOKEN`，而不是让用户误以为同步能解决上传前问题。
   - 设置页诊断信息会列出最近录音摘要，包含文件名、时长、状态、阶段和错误，方便排查同一时间多条记录或零秒录音。
+  - 设置页诊断弹窗支持长内容滚动，并保留一键复制，避免最近录音摘要变长后在真机上看不到底部错误信息。
   - 状态模型覆盖 `LOCAL_RECORDED`、`UPLOADING`、`UPLOADED`、`PROCESSING`、`COMPLETED`、`FAILED`。
 - placeholder 草稿引用修复已验证并发布到 APK：
   - Android 提交：`ae943af Keep draft readiness from trusting placeholder values`
@@ -99,6 +100,7 @@
   - 本轮录音停止失败恢复改动后，`RecordingFilesTest`、`scripts/build-android-local.sh test`、`scripts/build-android-local.sh assemble` 均通过。
   - 本轮首页本机待上传恢复提示改动后，`HomeScreenTest`、`scripts/build-android-local.sh test`、`scripts/build-android-local.sh assemble`、`git diff --check` 均通过。
   - 本轮诊断最近录音摘要改动后，`SettingsScreenTest`、`scripts/build-android-local.sh test`、`scripts/build-android-local.sh assemble`、`git diff --check` 均通过。
+  - 本轮诊断弹窗滚动改动后，`SettingsScreenTest`、`SettingsDiagnosticsDialogTest`、`git diff --check` 均通过。
   - 本轮真机自动化脚本改动后，`scripts/android-device-visual-test.sh` 默认等待 Worker 自动创建的 `workflow_dispatch` run；acceptance 和 audit 都会校验 `mining-run.log` 引用了本次录音文件名。`bash -n`、脚本 `--help`、`git diff --check` 均通过。
 - GitHub Actions Android Tests 可用并已通过。
 - 注意：本地单测必须使用 JDK 21；JDK 26 会导致 Robolectric 4.12 shadow class 解析失败。
@@ -119,7 +121,7 @@
   - 复制/分享/导出入口可点击。
   - Token 错误时显示配置错误和可恢复路径。
 - 本地 APK 已生成：`android/app/build/outputs/apk/debug/app-debug.apk`
-  - 当前本地 APK SHA-256：`8f135fa16b46fc75b972ee9756ab9f0872dba7dfe1df2ecf14fedbea98579feb`
+  - 当前本地 APK SHA-256：`54204f02b75e56858b509bcd9c9dd2598d6a2e805c332a1631f202229946c4a6`
 - 待恢复 ADB 后安装本地 APK：当前 `adb devices -l` 无设备在线，需要重新连接 USB，或重新打开平板无线调试页面获取新端口。
 - ADB 恢复后可直接运行：
   - `scripts/install-android-local-apk.sh --serial <new-adb-serial> --skip-build`

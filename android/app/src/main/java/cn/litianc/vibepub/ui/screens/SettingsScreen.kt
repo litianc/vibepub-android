@@ -17,11 +17,14 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.BugReport
@@ -325,22 +328,45 @@ fun SettingsScreen(
     }
 
     if (showDiagnostics) {
-        AlertDialog(
-            onDismissRequest = { showDiagnostics = false },
-            title = { Text("诊断信息") },
-            text = { Text(diagnostics) },
-            confirmButton = {
-                TextButton(onClick = { showDiagnostics = false }) {
-                    Text("关闭")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { copyDiagnostics(context, diagnostics) }) {
-                    Text("复制诊断")
-                }
-            },
+        DiagnosticsDialog(
+            diagnostics = diagnostics,
+            onDismiss = { showDiagnostics = false },
+            onCopy = { copyDiagnostics(context, diagnostics) },
         )
     }
+}
+
+@Composable
+internal fun DiagnosticsDialog(
+    diagnostics: String,
+    onDismiss: () -> Unit,
+    onCopy: () -> Unit,
+) {
+    AlertDialog(
+        modifier = Modifier.testTag("DiagnosticsDialog"),
+        onDismissRequest = onDismiss,
+        title = { Text("诊断信息") },
+        text = {
+            Text(
+                diagnostics,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 420.dp)
+                    .verticalScroll(rememberScrollState())
+                    .testTag("DiagnosticsDialogText"),
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("关闭")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onCopy) {
+                Text("复制诊断")
+            }
+        },
+    )
 }
 
 @Composable
