@@ -201,6 +201,94 @@ check_fail() {
   failures=$((failures + 1))
 }
 
+capture_macos_usb_snapshot() {
+  if [[ "$(uname -s)" != "Darwin" ]] || ! command -v system_profiler >/dev/null 2>&1; then
+    return 0
+  fi
+
+  system_profiler SPUSBDataType > "$OUT_DIR/macos-usb.txt" 2>&1 || true
+  if command -v rg >/dev/null 2>&1; then
+    rg -i "redmi|xiaomi|android|mtp|adb|portable|tablet|phone|usb" \
+      -C 2 "$OUT_DIR/macos-usb.txt" > "$OUT_DIR/macos-usb-android-filter.txt" || true
+  else
+    grep -Ei -C 2 "redmi|xiaomi|android|mtp|adb|portable|tablet|phone|usb" \
+      "$OUT_DIR/macos-usb.txt" > "$OUT_DIR/macos-usb-android-filter.txt" || true
+  fi
+}
+
+append_connection_hints() {
+  local visible_count="$1"
+  local authorized_count="$2"
+  local unauthorized_count="$3"
+  local offline_count="$4"
+
+  capture_macos_usb_snapshot
+
+  cat >> "$report" <<EOF
+
+## ADB Connection Diagnosis
+
+- Visible adb rows: \`$visible_count\`
+- Authorized devices: \`$authorized_count\`
+- Unauthorized devices: \`$unauthorized_count\`
+- Offline devices: \`$offline_count\`
+- Raw adb list: \`$OUT_DIR/adb-devices.txt\`
+EOF
+
+  if [[ -f "$OUT_DIR/macos-usb-android-filter.txt" ]]; then
+    echo "- macOS USB snapshot: \`$OUT_DIR/macos-usb-android-filter.txt\`" >> "$report"
+  fi
+
+  if [[ "$visible_count" -eq 0 ]]; then
+    cat >> "$report" <<EOF
+
+No Android device is visible to adb yet. Fix the physical/data connection first:
+
+1. Use a data-capable USB cable and connect directly to the Mac, not through a hub.
+2. Keep the phone/tablet unlocked and screen awake.
+3. On the device USB notification, choose File transfer / MTP / 传输文件.
+4. In Developer options, enable USB debugging. If already enabled, toggle it off and on.
+5. If no RSA prompt appears, revoke USB debugging authorizations, unplug, replug, then allow the prompt.
+
+If the macOS USB snapshot has no Android/Xiaomi/Redmi/MTP row, macOS is not
+enumerating the device at the USB layer; try another cable, port, or adapter
+before changing app or APK settings.
+EOF
+  fi
+
+  if [[ "$unauthorized_count" -gt 0 ]]; then
+    cat >> "$report" <<EOF
+
+At least one device is visible but unauthorized. Unlock it, accept the RSA
+fingerprint prompt, and choose always allow. If the prompt is missing, use
+Developer options -> Revoke USB debugging authorizations, then reconnect.
+EOF
+  fi
+
+  if [[ "$offline_count" -gt 0 ]]; then
+    cat >> "$report" <<EOF
+
+At least one device is offline. Run \`adb reconnect offline\`, unplug/replug the
+device, and toggle USB debugging if it stays offline.
+EOF
+  fi
+
+  if [[ "$authorized_count" -gt 1 && -z "${ANDROID_SERIAL:-}" ]]; then
+    cat >> "$report" <<EOF
+
+Multiple authorized devices are connected. Rerun with
+\`ANDROID_SERIAL=<device-id>\` or \`--serial <device-id>\` on wrapper scripts.
+EOF
+  fi
+
+  cat >> "$report" <<EOF
+
+For wireless debugging, pair/connect only after the Mac and Android device are
+on the same reachable network. Pairing codes and ports expire, so use fresh
+values from the current Wireless debugging screen.
+EOF
+}
+
 if ! command -v adb >/dev/null 2>&1; then
   check_fail "adb is installed"
   echo "Missing adb. Install with: brew install --cask android-platform-tools" >&2
@@ -208,18 +296,41 @@ if ! command -v adb >/dev/null 2>&1; then
 fi
 check_pass "adb is installed"
 
+count_adb_rows() {
+  local serial="$1"
+  local target_state="$2"
+
+  awk -v serial="$serial" -v target_state="$target_state" '
+    function adb_state(line) {
+      if (line ~ /[[:space:]]unauthorized([[:space:]]|$)/) return "unauthorized"
+      if (line ~ /[[:space:]]offline([[:space:]]|$)/) return "offline"
+      if (line ~ /[[:space:]]device([[:space:]]|$)/) return "device"
+      return ""
+    }
+    NR > 1 && $0 !~ /^[[:space:]]*$/ {
+      if (serial != "" && index($0, serial) != 1) next
+      if (target_state == "visible" || adb_state($0) == target_state) count++
+    }
+    END { print count + 0 }
+  ' "$OUT_DIR/adb-devices.txt"
+}
+
 adb_cmd start-server >/dev/null
 adb_cmd devices -l > "$OUT_DIR/adb-devices.txt"
-if [[ -n "${ANDROID_SERIAL:-}" ]]; then
-  device_count="$(awk -v serial="$ANDROID_SERIAL" 'NR > 1 && $1 == serial && $2 == "device" { count++ } END { print count + 0 }' "$OUT_DIR/adb-devices.txt")"
-else
-  device_count="$(awk 'NR > 1 && $2 == "device" { count++ } END { print count + 0 }' "$OUT_DIR/adb-devices.txt")"
-fi
+visible_count="$(count_adb_rows "${ANDROID_SERIAL:-}" "visible")"
+device_count="$(count_adb_rows "${ANDROID_SERIAL:-}" "device")"
+unauthorized_count="$(count_adb_rows "${ANDROID_SERIAL:-}" "unauthorized")"
+offline_count="$(count_adb_rows "${ANDROID_SERIAL:-}" "offline")"
 
 if [[ "$device_count" -eq 1 ]]; then
   check_pass "exactly one authorized Android device is connected"
 else
   check_fail "exactly one authorized Android device is connected"
+  append_connection_hints "$visible_count" "$device_count" "$unauthorized_count" "$offline_count"
+  cat "$report"
+  echo
+  echo "Device readiness failed before device-dependent checks. Report: $report" >&2
+  exit 1
 fi
 
 if [[ "$device_count" -ge 1 ]]; then

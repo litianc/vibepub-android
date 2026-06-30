@@ -36,6 +36,26 @@ adb devices
 
 The device should show as `device`, not `unauthorized`.
 
+For a fast preflight that writes a diagnosis report:
+
+```bash
+CHECK_APK_INSTALL=false scripts/check-android-device-ready.sh
+```
+
+If `adb devices` has no device rows, this is below the app/test layer. Fix USB
+enumeration first: use a data-capable cable, connect directly to the Mac, keep
+the device unlocked, choose File transfer / MTP / `传输文件`, and toggle USB
+debugging off/on. If the report's macOS USB snapshot has no Android/Xiaomi/Redmi
+or MTP row, macOS is not seeing the tablet as a USB data device yet.
+
+If the row says `unauthorized`, unlock the device and accept the RSA fingerprint
+prompt. If the prompt does not appear, revoke USB debugging authorizations in
+Developer options, then unplug and reconnect.
+
+For wireless debugging, the Mac and Android device must be on the same reachable
+network. Use fresh pairing and connect ports from the current Wireless debugging
+screen; old pairing codes and ports expire.
+
 The default automated path uses a debug-only broadcast receiver and does not
 require simulated tap permission. If you explicitly use `AUTOMATION_MODE=ui-tap`,
 also check:

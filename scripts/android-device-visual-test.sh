@@ -140,45 +140,38 @@ require_cmd() {
 install_apk() {
   local apk_path="$1"
 
-  if adb_cmd install -r "$apk_path" > "$OUT_DIR/install.txt" 2>&1; then
+  CHECK_APK_INSTALL=true \
+  REQUIRE_UNLOCKED=true \
+  OUT_DIR="$OUT_DIR/install-readiness" \
+  "$ROOT_DIR/scripts/check-android-device-ready.sh" "$apk_path" \
+    > "$OUT_DIR/install-readiness-output.txt" 2>&1
+}
+
+reset_app_data() {
+  if adb_shell pm clear "$PACKAGE_NAME" > "$OUT_DIR/pm-clear-after-install.txt" 2>&1; then
     return 0
   fi
 
-  if grep -q "INSTALL_FAILED_UPDATE_INCOMPATIBLE" "$OUT_DIR/install.txt"; then
-    cat "$OUT_DIR/install.txt" >&2
-    cat >&2 <<EOF
-
-The installed package has a different debug signature. Uninstalling it and
-retrying because this is a deterministic smoke run.
+  cat "$OUT_DIR/pm-clear-after-install.txt" >&2
+  cat > "$OUT_DIR/run-as-clear-fallback.txt" <<EOF
+pm clear failed, so the smoke script is clearing the debug app private data with
+run-as. This fallback is intended for HyperOS/MIUI wireless-debugging sessions
+that reject pm clear while still allowing debug package access.
 EOF
-    adb_cmd uninstall "$PACKAGE_NAME" > "$OUT_DIR/install-uninstall-incompatible.txt" 2>&1 || true
-    if adb_cmd install -r "$apk_path" > "$OUT_DIR/install-after-uninstall.txt" 2>&1; then
-      return 0
-    fi
-    cp "$OUT_DIR/install-after-uninstall.txt" "$OUT_DIR/install.txt"
-  fi
 
-  if ! grep -q "INSTALL_FAILED_USER_RESTRICTED" "$OUT_DIR/install.txt"; then
-    cat "$OUT_DIR/install.txt" >&2
+  if ! adb_shell run-as "$PACKAGE_NAME" rm -rf \
+    cache \
+    code_cache \
+    files \
+    no_backup \
+    databases \
+    shared_prefs >> "$OUT_DIR/run-as-clear-fallback.txt" 2>&1; then
+    cat "$OUT_DIR/run-as-clear-fallback.txt" >&2
     return 1
   fi
 
-  cat "$OUT_DIR/install.txt" >&2
-  cat >&2 <<EOF
-
-The phone blocked streamed APK installation from adb.
-Trying the fallback device-side pm install path before giving up.
-EOF
-
-  adb_cmd push "$apk_path" /data/local/tmp/vibepub-app-debug.apk \
-    > "$OUT_DIR/install-fallback-push.txt" 2>&1
-  if adb_shell pm install -r -t -g /data/local/tmp/vibepub-app-debug.apk \
-    > "$OUT_DIR/install-fallback-pm.txt" 2>&1; then
-    return 0
-  fi
-
-  cat "$OUT_DIR/install-fallback-pm.txt" >&2
-  return 1
+  adb_shell am force-stop "$PACKAGE_NAME" \
+    >> "$OUT_DIR/run-as-clear-fallback.txt" 2>&1 || true
 }
 
 truthy() {
@@ -1454,23 +1447,8 @@ else
   assert_device_install_ready
   echo "Installing APK: $APK_PATH"
   if ! install_apk "$APK_PATH"; then
-    if [[ -f "$OUT_DIR/install.txt" ]] && grep -q "INSTALL_FAILED_USER_RESTRICTED" "$OUT_DIR/install.txt"; then
-      cat >&2 <<EOF
-
-The phone blocked APK installation from adb.
-
-On Xiaomi/MIUI/HyperOS devices, enable Developer options items usually named:
-  Install via USB
-  USB debugging (Security settings)
-
-Chinese labels may be:
-  USB 安装
-  USB 调试（安全设置）
-  允许通过 USB 调试修改权限或模拟点击
-
-Then reconnect USB if needed and rerun the script.
-EOF
-    fi
+    cat "$OUT_DIR/install-readiness-output.txt" >&2
+    echo "APK install failed. Readiness report: $OUT_DIR/install-readiness/readiness.md" >&2
     exit 1
   fi
 fi
@@ -1478,8 +1456,7 @@ mark_phase "install_checked"
 
 if truthy "$RESET_APP_DATA"; then
   echo "Clearing installed app data for deterministic test run..."
-  if ! adb_shell pm clear "$PACKAGE_NAME" > "$OUT_DIR/pm-clear-after-install.txt" 2>&1; then
-    cat "$OUT_DIR/pm-clear-after-install.txt" >&2
+  if ! reset_app_data; then
     exit 1
   fi
 fi
