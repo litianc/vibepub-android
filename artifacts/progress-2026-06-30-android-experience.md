@@ -1,8 +1,8 @@
 # VibePub Android Experience Progress - 2026-06-30
 
-记录时间：2026-06-30 17:14 CST  
+记录时间：2026-06-30 17:22 CST
 分支：`codex/android-experience-v1`  
-当前已推送提交：`94b2291 Persist recording duration in the Worker contract`
+当前已推送提交：`ec43c84 Keep home focus from trusting placeholder draft refs`
 
 ## 已验证
 
@@ -24,6 +24,10 @@
 - placeholder 草稿引用修复已验证并发布到 APK：
   - Android 提交：`ae943af Keep draft readiness from trusting placeholder values`
   - `"null"` / `"undefined"` 不再让详情/导出/诊断误判公众号草稿已就绪。
+- 首页重点进度卡也已复用 placeholder 草稿引用过滤：
+  - Android 提交：`ec43c84 Keep home focus from trusting placeholder draft refs`
+  - 新增 `HomeScreenTest` 回归用例，避免 `"null"` / `"undefined"` 把未完成草稿误判成已就绪。
+  - Android Tests：GitHub Actions run `28433787330` 成功。
 
 ### Worker/API 契约
 - placeholder 草稿引用在 Worker 层已过滤：
@@ -47,14 +51,10 @@
 
 ## 待验证
 
-### Android 未验证 WIP
-- 当前工作区有两个未提交 Android 小改动：
-  - `android/app/src/main/java/cn/litianc/vibepub/ui/screens/HomeScreen.kt`
-  - `android/app/src/test/java/cn/litianc/vibepub/ui/screens/HomeScreenTest.kt`
-- 目的：让首页重点进度卡也复用 placeholder 草稿引用过滤，避免 `"null"` / `"undefined"` 被当成草稿已就绪。
-- 状态：未提交、未验证。
-- 阻塞原因：本机当前没有可用 Android SDK 配置；`gradle :app:testDebugUnitTest ...` 因缺少 `ANDROID_HOME` / `android/local.properties` 失败。
-- 建议：下一轮先恢复 Android SDK 路径，再跑 `HomeScreenTest` 和完整 `:app:testDebugUnitTest`；通过后再提交。
+### 本机 Android 测试环境
+- GitHub Actions Android Tests 可用并已通过。
+- 本机当前仍没有可用 Android SDK 配置；`gradle :app:testDebugUnitTest ...` 会因缺少 `ANDROID_HOME` / `android/local.properties` 失败。
+- 建议：需要本机快速验证时，先配置 Android SDK 路径，避免每次都依赖远端 CI。
 
 ### 生产环境待验证
 - Worker `duration_ms` 迁移尚未部署到生产 D1。
@@ -79,6 +79,6 @@
   - 自动化测试产物需要稳定保存截图、UI dump、logcat、audit 结果。
 
 ## 当前注意事项
-- 不要把当前未提交 Android WIP 当作已完成能力。
 - 目前最新可安装 APK 仍是 `ae943af` 对应 Release。
+- `ec43c84` 只通过 Android Tests，尚未产出新的 APK。
 - `artifacts/` 下存在多批历史安装/CI 调试产物，当前记录未整理或删除它们。
