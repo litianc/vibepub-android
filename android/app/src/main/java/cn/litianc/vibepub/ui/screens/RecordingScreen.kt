@@ -43,8 +43,26 @@ import androidx.compose.ui.unit.dp
 import cn.litianc.vibepub.ui.theme.PrimaryRed
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlin.math.max
 import kotlin.math.ln
 import kotlin.math.roundToInt
+
+internal enum class RecordingAudioFeedbackState {
+    WARMING_UP,
+    TOO_QUIET,
+    HEARD_AUDIO,
+    READY,
+}
+
+internal data class RecordingAudioFeedback(
+    val state: RecordingAudioFeedbackState,
+    val statusLabel: String,
+    val hint: String,
+)
+
+private const val HEARD_AUDIO_LEVEL_THRESHOLD = 0.12f
+private const val LOW_VOLUME_LEVEL_THRESHOLD = 0.08f
+private const val LOW_VOLUME_GRACE_SECONDS = 5
 
 @Composable
 fun RecordingScreen(
@@ -55,6 +73,7 @@ fun RecordingScreen(
     var secondsElapsed by remember { mutableIntStateOf(0) }
     var isStopping by remember { mutableStateOf(false) }
     var amplitudeLevel by remember { mutableStateOf(0f) }
+    var hasHeardAudio by remember { mutableStateOf(false) }
     val minSeconds = 2
 
     LaunchedEffect(Unit) {
@@ -66,7 +85,9 @@ fun RecordingScreen(
 
     LaunchedEffect(amplitudeProvider) {
         while (true) {
-            amplitudeLevel = normalizeAmplitude(amplitudeProvider())
+            val nextLevel = normalizeAmplitude(amplitudeProvider())
+            amplitudeLevel = nextLevel
+            hasHeardAudio = updateHasHeardAudio(hasHeardAudio, nextLevel)
             delay(100)
         }
     }
@@ -75,6 +96,17 @@ fun RecordingScreen(
     val seconds = secondsElapsed % 60
     val timeString = "%02d:%02d".format(minutes, seconds)
     val canStop = canStopRecording(secondsElapsed, minSeconds, isStopping)
+    val audioFeedback = recordingAudioFeedback(
+        secondsElapsed = secondsElapsed,
+        minSeconds = minSeconds,
+        amplitudeLevel = amplitudeLevel,
+        hasHeardAudio = hasHeardAudio,
+    )
+    val meterColor = if (audioFeedback.state == RecordingAudioFeedbackState.TOO_QUIET) {
+        Color(0xFFF9A825)
+    } else {
+        PrimaryRed
+    }
 
     Column(
         modifier = Modifier
@@ -97,7 +129,7 @@ fun RecordingScreen(
             )
             Spacer(modifier = Modifier.width(8.dp))
             Text(
-                text = if (isStopping) "正在保存录音" else "正在录音",
+                text = if (isStopping) "正在保存录音" else audioFeedback.statusLabel,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 style = MaterialTheme.typography.bodyMedium,
             )
@@ -125,12 +157,12 @@ fun RecordingScreen(
                 .fillMaxWidth(0.58f)
                 .height(4.dp)
                 .testTag("RecordingAmplitudeMeter"),
-            color = PrimaryRed,
+            color = meterColor,
             trackColor = MaterialTheme.colorScheme.surfaceVariant,
         )
         Spacer(modifier = Modifier.height(8.dp))
         Text(
-            text = recordingHint(secondsElapsed, minSeconds, amplitudeLevel),
+            text = audioFeedback.hint,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             style = MaterialTheme.typography.bodySmall,
         )
@@ -227,11 +259,44 @@ internal fun normalizeAmplitude(amplitude: Int): Float {
     return normalized.toFloat().coerceIn(0f, 1f)
 }
 
-internal fun recordingHint(secondsElapsed: Int, minSeconds: Int, amplitudeLevel: Float): String {
+internal fun updateHasHeardAudio(previouslyHeard: Boolean, amplitudeLevel: Float): Boolean {
+    return previouslyHeard || amplitudeLevel >= HEARD_AUDIO_LEVEL_THRESHOLD
+}
+
+internal fun recordingAudioFeedback(
+    secondsElapsed: Int,
+    minSeconds: Int,
+    amplitudeLevel: Float,
+    hasHeardAudio: Boolean,
+    lowVolumeGraceSeconds: Int = LOW_VOLUME_GRACE_SECONDS,
+): RecordingAudioFeedback {
+    val graceSeconds = max(minSeconds + 1, lowVolumeGraceSeconds)
     return when {
-        secondsElapsed < minSeconds -> "再说一小会儿就可以保存"
-        amplitudeLevel < 0.08f -> "音量偏低，可以靠近麦克风一点"
-        else -> "停止后会自动上传并同步成文"
+        secondsElapsed < minSeconds -> RecordingAudioFeedback(
+            state = if (hasHeardAudio) RecordingAudioFeedbackState.HEARD_AUDIO else RecordingAudioFeedbackState.WARMING_UP,
+            statusLabel = if (hasHeardAudio) "正在录音" else "正在检测麦克风",
+            hint = "再说一小会儿就可以保存",
+        )
+        !hasHeardAudio && secondsElapsed < graceSeconds -> RecordingAudioFeedback(
+            state = RecordingAudioFeedbackState.WARMING_UP,
+            statusLabel = "正在检测麦克风",
+            hint = "说几句看看音量是否有反应",
+        )
+        !hasHeardAudio && amplitudeLevel < LOW_VOLUME_LEVEL_THRESHOLD -> RecordingAudioFeedback(
+            state = RecordingAudioFeedbackState.TOO_QUIET,
+            statusLabel = "还没听到明显声音",
+            hint = "可以靠近麦克风一点，或检查麦克风输入",
+        )
+        hasHeardAudio && amplitudeLevel < LOW_VOLUME_LEVEL_THRESHOLD -> RecordingAudioFeedback(
+            state = RecordingAudioFeedbackState.HEARD_AUDIO,
+            statusLabel = "正在录音",
+            hint = "已听到声音，停顿也没关系",
+        )
+        else -> RecordingAudioFeedback(
+            state = RecordingAudioFeedbackState.READY,
+            statusLabel = "麦克风正常",
+            hint = "停止后会自动上传并同步成文",
+        )
     }
 }
 
