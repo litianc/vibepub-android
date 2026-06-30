@@ -274,12 +274,13 @@ class RecordingPresentationTest {
 
         val steps = recording.workflowSteps()
 
-        assertEquals("已成文", recording.statusLabel())
+        assertEquals("草稿需处理", recording.statusLabel())
         assertTrue(recording.statusDetail().contains("公众号草稿创建失败"))
         assertTrue(recording.workflowNextActionLabel().contains("复制正文备用"))
         assertEquals("第 6/7 步", recording.workflowProgressLabel())
         assertEquals(WorkflowStepState.DONE, steps[4].state)
-        assertEquals(WorkflowStepState.CURRENT, steps[5].state)
+        assertEquals(WorkflowStepState.BLOCKED, steps[5].state)
+        assertEquals(WorkflowStepState.PENDING, steps[6].state)
         assertTrue(recording.hasDraftFailureMessage())
     }
 

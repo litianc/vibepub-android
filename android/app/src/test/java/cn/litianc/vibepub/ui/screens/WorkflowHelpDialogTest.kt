@@ -317,6 +317,8 @@ class WorkflowHelpDialogTest {
             )
         }
 
+        composeTestRule.onNodeWithText("草稿需处理").assertIsDisplayed()
+        composeTestRule.onNodeWithText("第 6/7 步").assertIsDisplayed()
         composeTestRule.onNodeWithText("同步草稿").assertIsDisplayed()
         composeTestRule.onNodeWithTag("DetailRecoveryButton").performClick()
 
@@ -324,6 +326,32 @@ class WorkflowHelpDialogTest {
             assertEquals(0, retryCount)
             assertEquals(1, refreshCount)
         }
+    }
+
+    @Test
+    fun detailStatusHelpShowsCompletedDraftFailureAsBlockedStep() {
+        composeTestRule.setContent {
+            DetailStatusCardPreview(
+                recording = RecordingEntity(
+                    filename = "VibePub-test.m4a",
+                    durationMs = 42_000L,
+                    timestamp = 1L,
+                    status = RecordingStatus.COMPLETED.value,
+                    articleTitle = "文章已生成",
+                    processingStage = "DRAFT_FAILED",
+                    lastError = "公众号草稿创建失败",
+                ),
+            )
+        }
+
+        composeTestRule.onNodeWithText("草稿需处理").assertIsDisplayed()
+        composeTestRule.onAllNodesWithText("公众号草稿 · 需处理").assertCountEquals(0)
+
+        composeTestRule.onNodeWithTag("DetailWorkflowHelpButton").performClick()
+
+        composeTestRule.onAllNodesWithText("文章改写 · 已完成").assertCountEquals(1)
+        composeTestRule.onAllNodesWithText("公众号草稿 · 需处理").assertCountEquals(1)
+        composeTestRule.onAllNodesWithText("人工发布确认 · 等待").assertCountEquals(1)
     }
 
     @Composable

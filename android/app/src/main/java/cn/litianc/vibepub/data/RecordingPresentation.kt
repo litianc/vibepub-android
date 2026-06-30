@@ -52,7 +52,11 @@ fun RecordingEntity.statusLabel(): String {
         RecordingStatus.UPLOADING -> "上传中"
         RecordingStatus.UPLOADED -> if (workflowIndexFromProcessingStage() == 2) "排队中" else "处理中"
         RecordingStatus.PROCESSING -> processingStatusLabel()
-        RecordingStatus.COMPLETED -> if (hasWechatDraftReference()) "草稿已就绪" else "已成文"
+        RecordingStatus.COMPLETED -> when {
+            hasWechatDraftReference() -> "草稿已就绪"
+            hasDraftFailureMessage() -> "草稿需处理"
+            else -> "已成文"
+        }
         RecordingStatus.FAILED -> "需要处理"
     }
 }
@@ -163,9 +167,15 @@ fun RecordingEntity.workflowCycleLabel(): String {
 fun RecordingEntity.workflowSteps(): List<RecordingWorkflowStep> {
     val status = status.asRecordingStatus()
     val currentIndex = workflowCurrentIndex(status)
+    val completedWithDraftFailure = status == RecordingStatus.COMPLETED &&
+        hasDraftFailureMessage() &&
+        !hasWechatDraftReference()
 
     return WORKFLOW_BASE_STEPS.mapIndexed { index, step ->
         val state = when {
+            completedWithDraftFailure && index < 5 -> WorkflowStepState.DONE
+            completedWithDraftFailure && index == 5 -> WorkflowStepState.BLOCKED
+            completedWithDraftFailure -> WorkflowStepState.PENDING
             status == RecordingStatus.COMPLETED && index <= currentIndex -> WorkflowStepState.DONE
             status == RecordingStatus.COMPLETED && index == currentIndex + 1 -> WorkflowStepState.CURRENT
             status == RecordingStatus.FAILED && index == currentIndex -> WorkflowStepState.BLOCKED
