@@ -81,7 +81,7 @@ class UploadWorker(
         if (entity.status == RecordingStatus.COMPLETED.value && status != RecordingStatus.COMPLETED) {
             return
         }
-        dao.insert(
+        dao.upsertBest(
             entity.copy(
                 status = status.value,
                 lastError = error,

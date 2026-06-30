@@ -4,6 +4,7 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.Transaction
 import kotlinx.coroutines.flow.Flow
 
 @Dao
@@ -64,6 +65,16 @@ interface RecordingDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(recording: RecordingEntity): Long
 
+    @Transaction
+    suspend fun upsertBest(recording: RecordingEntity): Long {
+        val existing = getRecordingByFilenameIncludingDeleted(recording.filename)
+        return if (existing == null || recording.id == existing.id || recording.shouldReplaceExisting(existing)) {
+            insert(recording.copy(id = if (recording.id == 0 && existing != null) existing.id else recording.id))
+        } else {
+            existing.id.toLong()
+        }
+    }
+
     @Query("DELETE FROM recordings WHERE filename = :filename")
     suspend fun deleteByFilename(filename: String): Int
 
@@ -103,3 +114,31 @@ interface RecordingDao {
     """)
     suspend fun getRecordingByFilenameIncludingDeleted(filename: String): RecordingEntity?
 }
+
+internal fun RecordingEntity.shouldReplaceExisting(existing: RecordingEntity): Boolean {
+    if (deletedAt == null && existing.deletedAt != null) return true
+    if (deletedAt != null && existing.deletedAt == null) return false
+    if (statusScore() != existing.statusScore()) return statusScore() > existing.statusScore()
+    if (hasArticlePayload() != existing.hasArticlePayload()) return hasArticlePayload()
+    if (hasPositiveDuration() != existing.hasPositiveDuration()) return hasPositiveDuration()
+    if (durationMs != existing.durationMs) return durationMs > existing.durationMs
+    if (timestamp != existing.timestamp) return timestamp < existing.timestamp
+    return id != 0 && (existing.id == 0 || id < existing.id)
+}
+
+private fun RecordingEntity.statusScore(): Int {
+    return when (status.asRecordingStatus()) {
+        RecordingStatus.COMPLETED -> 6
+        RecordingStatus.PROCESSING -> 5
+        RecordingStatus.UPLOADED -> 4
+        RecordingStatus.UPLOADING -> 3
+        RecordingStatus.LOCAL_RECORDED -> 2
+        RecordingStatus.FAILED -> 1
+    }
+}
+
+private fun RecordingEntity.hasArticlePayload(): Boolean {
+    return !articleTitle.isNullOrBlank() || !rawTextPreview.isNullOrBlank() || !wechatDraftId.isNullOrBlank() || !wechatUrl.isNullOrBlank()
+}
+
+private fun RecordingEntity.hasPositiveDuration(): Boolean = durationMs > 0L

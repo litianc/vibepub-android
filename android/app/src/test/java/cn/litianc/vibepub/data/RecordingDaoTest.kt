@@ -31,9 +31,9 @@ class RecordingDaoTest {
     }
 
     @Test
-    fun keepsOneRowPerFilenameThroughReplace() = runBlocking {
+    fun upsertBestKeepsCompletedRowOverZeroDurationDuplicate() = runBlocking {
         val dao = database.recordingDao()
-        dao.insert(
+        dao.upsertBest(
             RecordingEntity(
                 filename = "same.m4a",
                 durationMs = 32_000L,
@@ -41,7 +41,7 @@ class RecordingDaoTest {
                 status = RecordingStatus.COMPLETED.value,
             ),
         )
-        dao.insert(
+        dao.upsertBest(
             RecordingEntity(
                 filename = "same.m4a",
                 durationMs = 0L,
@@ -52,8 +52,65 @@ class RecordingDaoTest {
 
         val recordings = dao.getAllRecordings()
         assertEquals(1, recordings.size)
-        assertEquals(0L, recordings.first().durationMs)
-        assertEquals(RecordingStatus.LOCAL_RECORDED.value, recordings.first().status)
+        assertEquals(32_000L, recordings.first().durationMs)
+        assertEquals(RecordingStatus.COMPLETED.value, recordings.first().status)
+    }
+
+    @Test
+    fun updatesExistingRowWhenCallerCarriesExistingId() = runBlocking {
+        val dao = database.recordingDao()
+        val rowId = dao.upsertBest(
+            RecordingEntity(
+                filename = "uploading.m4a",
+                durationMs = 18_000L,
+                timestamp = 1L,
+                status = RecordingStatus.UPLOADING.value,
+            ),
+        ).toInt()
+
+        dao.upsertBest(
+            RecordingEntity(
+                id = rowId,
+                filename = "uploading.m4a",
+                durationMs = 18_000L,
+                timestamp = 1L,
+                status = RecordingStatus.UPLOADED.value,
+            ),
+        )
+
+        val recording = dao.getRecordingByFilename("uploading.m4a")
+        assertEquals(rowId, recording?.id)
+        assertEquals(RecordingStatus.UPLOADED.value, recording?.status)
+    }
+
+    @Test
+    fun doesNotReplaceCompletedArticleWithLongerFailedDuplicate() = runBlocking {
+        val dao = database.recordingDao()
+        dao.upsertBest(
+            RecordingEntity(
+                filename = "article.m4a",
+                durationMs = 18_000L,
+                timestamp = 1L,
+                status = RecordingStatus.COMPLETED.value,
+                articleTitle = "已成文标题",
+                rawTextPreview = "原始转录摘要",
+            ),
+        )
+
+        dao.upsertBest(
+            RecordingEntity(
+                filename = "article.m4a",
+                durationMs = 120_000L,
+                timestamp = 2L,
+                status = RecordingStatus.FAILED.value,
+                lastError = "后来的坏记录",
+            ),
+        )
+
+        val recording = dao.getRecordingByFilename("article.m4a")
+        assertEquals(18_000L, recording?.durationMs)
+        assertEquals(RecordingStatus.COMPLETED.value, recording?.status)
+        assertEquals("已成文标题", recording?.articleTitle)
     }
 
     @Test

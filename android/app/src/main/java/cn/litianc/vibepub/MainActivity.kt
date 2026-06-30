@@ -134,7 +134,7 @@ fun VibePubApp(
                     withContext(Dispatchers.IO) {
                         AppDatabase.getDatabase(context)
                             .recordingDao()
-                            .insert(recording.copy(status = RecordingStatus.FAILED.value, lastError = "本地录音文件不存在"))
+                            .upsertBest(recording.copy(status = RecordingStatus.FAILED.value, lastError = "本地录音文件不存在"))
                     }
                     Toast.makeText(context, "本地录音文件不存在", Toast.LENGTH_SHORT).show()
                 } else {

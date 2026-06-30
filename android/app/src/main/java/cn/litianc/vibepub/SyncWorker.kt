@@ -227,7 +227,7 @@ class SyncWorker(
                         val existing = dao.getRecordingByFilenameIncludingDeleted(filename)
                         val merged = mergeRemoteRecordingFromListItem(recObj, existing)
                         if (merged != null) {
-                            dao.insert(merged)
+                            dao.upsertBest(merged)
                         }
                     }
                 }
@@ -269,7 +269,7 @@ class SyncWorker(
                         val transcriptProcessingStage = transcript.processingStageOrNull() ?: "COMPLETED"
                         val transcriptWechatDraftId = transcript.wechatDraftIdOrNull()
                         val transcriptWechatUrl = transcript.wechatUrlOrNull()
-                        dao.insert(
+                        dao.upsertBest(
                             recording.copy(
                                 status = RecordingStatus.COMPLETED.value,
                                 articleTitle = transcriptArticleTitleOrNull(transcript) ?: recording.articleTitle,
@@ -292,11 +292,11 @@ class SyncWorker(
                         when (classifySyncHttpFailure(responseCode)) {
                             SyncHttpFailure.MISSING_TRANSCRIPT -> {
                                 if (recording.status == RecordingStatus.UPLOADED.value || recording.status == RecordingStatus.UPLOADING.value) {
-                                    dao.insert(recording.copy(status = RecordingStatus.PROCESSING.value))
+                                    dao.upsertBest(recording.copy(status = RecordingStatus.PROCESSING.value))
                                 }
                             }
                             SyncHttpFailure.AUTH -> {
-                                dao.insert(
+                                dao.upsertBest(
                                     recording.copy(
                                         status = RecordingStatus.FAILED.value,
                                         lastError = "FILES_TOKEN 无效或没有权限，无法同步转录结果",
@@ -321,7 +321,7 @@ class SyncWorker(
                     val transcriptProcessingStage = transcript?.processingStageOrNull() ?: "COMPLETED"
                     val transcriptWechatDraftId = transcript?.wechatDraftIdOrNull()
                     val transcriptWechatUrl = transcript?.wechatUrlOrNull()
-                    dao.insert(
+                    dao.upsertBest(
                         recording.copy(
                             status = RecordingStatus.COMPLETED.value,
                             articleTitle = transcriptTitle ?: recording.articleTitle,
@@ -354,7 +354,7 @@ class SyncWorker(
         dao.getAllRecordings().forEach { recording ->
             val status = recording.status.asRecordingStatus()
             if (shouldMarkSyncConfigurationFailure(status, onlyActive)) {
-                dao.insert(
+                dao.upsertBest(
                     recording.copy(
                         status = RecordingStatus.FAILED.value,
                         lastError = message,

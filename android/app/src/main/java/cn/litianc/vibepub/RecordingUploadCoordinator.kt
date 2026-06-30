@@ -35,7 +35,7 @@ object RecordingUploadCoordinator {
 
         AppDatabase.getDatabase(context)
             .recordingDao()
-            .insert(
+            .upsertBest(
                 RecordingEntity(
                     filename = file.name,
                     durationMs = durationMs,
@@ -73,7 +73,7 @@ object RecordingUploadCoordinator {
             val dao = AppDatabase.getDatabase(context).recordingDao()
             val existing = dao.getRecordingByFilename(file.name)
             if (existing != null && existing.status != RecordingStatus.COMPLETED.value) {
-                dao.insert(
+                dao.upsertBest(
                     existing.copy(
                         status = RecordingStatus.UPLOADING.value,
                         localAudioPath = existing.localAudioPath ?: file.absolutePath,
@@ -127,7 +127,7 @@ object RecordingUploadCoordinator {
             val dao = AppDatabase.getDatabase(context).recordingDao()
             val existing = dao.getRecordingByFilename(filename)
             if (existing != null) {
-                dao.insert(
+                dao.upsertBest(
                     existing.copy(
                         status = RecordingStatus.FAILED.value,
                         lastError = error,
