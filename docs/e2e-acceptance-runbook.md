@@ -99,8 +99,9 @@ All gates must pass before declaring the flow complete.
      help entry, expected duration, and no escaped raw HTML tags.
    - `debug-detail-actions.json` proves the detail page actions are functional:
      local audio playback advanced past 0 ms, copying article text matched the
-     clipboard, the system share intent was sent, and the export package file
-     was created before launching the share sheet.
+     clipboard, the system share intent was sent, the export package file
+     was created before launching the share sheet, and the WeChat draft URL was
+     opened when a draft URL is available.
    - `logcat.txt` has no obvious upload, sync, transcript, database, or crash
      errors.
 

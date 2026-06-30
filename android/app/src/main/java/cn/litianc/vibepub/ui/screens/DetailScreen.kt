@@ -713,7 +713,17 @@ private fun shareArticle(context: Context, text: String) {
 private fun openWechatDraft(context: Context, url: String) {
     runCatching {
         context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
-    }.onFailure {
+    }.onSuccess {
+        recordDebugDetailEvidence(context, "openWechatDraft") {
+            put("sent", true)
+            put("url", url)
+        }
+    }.onFailure { error ->
+        recordDebugDetailEvidence(context, "openWechatDraft") {
+            put("sent", false)
+            put("url", url)
+            put("error", error.message.orEmpty())
+        }
         Toast.makeText(context, "无法打开草稿链接", Toast.LENGTH_SHORT).show()
     }
 }

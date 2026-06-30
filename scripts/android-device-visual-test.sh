@@ -537,6 +537,30 @@ if int(export.get("textLength") or 0) < 80:
     raise SystemExit(1)
 PY
 
+  check_acceptance "detail action opens WeChat draft when a draft URL is available" \
+    python3 - "$detail_actions_file" "$transcript_file" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+actions_path = Path(sys.argv[1])
+transcript_path = Path(sys.argv[2])
+if not transcript_path.exists():
+    raise SystemExit(1)
+transcript = json.loads(transcript_path.read_text())
+draft_url = transcript.get("wechatUrl") or transcript.get("wechat_url") or ""
+if not draft_url:
+    raise SystemExit(0)
+if not actions_path.exists():
+    raise SystemExit(1)
+actions = json.loads(actions_path.read_text())
+open_draft = actions.get("openWechatDraft") or {}
+if open_draft.get("sent") is not True:
+    raise SystemExit(1)
+if open_draft.get("url") != draft_url:
+    raise SystemExit(1)
+PY
+
   if (( failures == 0 )); then
     ACCEPTANCE_STATUS="passed"
     return 0
@@ -1166,6 +1190,15 @@ exercise_detail_actions() {
   if scroll_detail_to_text "复制标题"; then
     tap_text_center_in_xml "复制标题" "$OUT_DIR/action-window.xml" || true
     sleep 0.4
+  fi
+
+  if scroll_detail_to_text "打开公众号草稿"; then
+    tap_text_center_in_xml "打开公众号草稿" "$OUT_DIR/action-window.xml" || true
+    sleep 1
+    dump_current_window /sdcard/vibepub-draft-window.xml "$OUT_DIR/draft-window.xml"
+    adb_shell input keyevent KEYCODE_BACK >/dev/null 2>&1 || true
+    sleep 0.6
+    bring_detail_to_foreground
   fi
 
   if scroll_detail_to_text "复制正文"; then
