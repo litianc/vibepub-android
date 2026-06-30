@@ -77,8 +77,9 @@ for. During APK installs, HyperOS may also show a timed `USB安装提示` dialog
 `scripts/install-latest-android-apk.sh` and `scripts/check-android-device-ready.sh`
 auto-tap `继续安装` while `adb install` is waiting.
 If wireless debugging still returns `INSTALL_FAILED_USER_RESTRICTED` after those
-switches are enabled, connect the tablet with a USB data cable for installation,
-or install the APK manually first and rerun smoke tests with
+switches are enabled, or if `adb install` waits until
+`ADB_INSTALL_TIMEOUT_SECONDS`, connect the tablet with a USB data cable for
+installation, or install the APK manually first and rerun smoke tests with
 `SKIP_INSTALL=true RESET_APP_DATA=false`.
 If reset/uninstall fails with `DELETE_FAILED_INTERNAL_ERROR`, manually remove
 the app on the phone or enable the same USB install/security options.

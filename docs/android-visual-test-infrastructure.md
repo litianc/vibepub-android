@@ -81,9 +81,11 @@ the summary under the `USB调试（安全设置）` row. The install scripts als
 auto-confirm the timed `USB安装提示` dialog by tapping `继续安装` while `adb install`
 is running.
 Wireless debugging can still return `INSTALL_FAILED_USER_RESTRICTED` on HyperOS
-even when those switches are enabled. If that happens, use a USB data cable for
-the install step, or install the APK manually and rerun with
-`SKIP_INSTALL=true RESET_APP_DATA=false`.
+even when those switches are enabled, and some HyperOS builds can leave
+`adb install` waiting behind a device-side prompt. The readiness script fails
+with diagnostics after `ADB_INSTALL_TIMEOUT_SECONDS` instead of hanging forever.
+If that happens, use a USB data cable for the install step, or install the APK
+manually and rerun with `SKIP_INSTALL=true RESET_APP_DATA=false`.
 If uninstall/reset fails with `DELETE_FAILED_INTERNAL_ERROR`, remove the app
 manually on the phone or enable the same USB install/security options before
 running deterministic tests.

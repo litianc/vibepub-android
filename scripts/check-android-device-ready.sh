@@ -13,6 +13,7 @@ REQUIRE_UNLOCKED="${REQUIRE_UNLOCKED:-false}"
 AUTO_CONFIRM_USB_INSTALL_PROMPT="${AUTO_CONFIRM_USB_INSTALL_PROMPT:-true}"
 AUTO_TAP_USB_INSTALL_PROMPT_FALLBACK="${AUTO_TAP_USB_INSTALL_PROMPT_FALLBACK:-true}"
 USB_INSTALL_PROMPT_TIMEOUT_SECONDS="${USB_INSTALL_PROMPT_TIMEOUT_SECONDS:-20}"
+ADB_INSTALL_TIMEOUT_SECONDS="${ADB_INSTALL_TIMEOUT_SECONDS:-120}"
 ALLOW_UNINSTALL_ON_SIGNATURE_MISMATCH="${ALLOW_UNINSTALL_ON_SIGNATURE_MISMATCH:-false}"
 
 usage() {
@@ -39,6 +40,10 @@ Environment:
                 observe the prompt. Default: true.
   USB_INSTALL_PROMPT_TIMEOUT_SECONDS
                 Prompt watcher timeout. Default: 20.
+  ADB_INSTALL_TIMEOUT_SECONDS
+                Maximum seconds to wait for each adb install attempt before
+                failing with diagnostics instead of hanging forever.
+                Default: 120.
   ALLOW_UNINSTALL_ON_SIGNATURE_MISMATCH
                 If adb install reports INSTALL_FAILED_UPDATE_INCOMPATIBLE,
                 uninstall the existing package and retry. This clears app data.
@@ -127,8 +132,32 @@ run_with_usb_install_prompt_taps() {
 
   "$@" > "$output_file" 2>&1 &
   local install_pid=$!
-  tap_usb_install_prompt_until "$label" "$install_pid"
-  wait "$install_pid"
+  tap_usb_install_prompt_until "$label" "$install_pid" &
+  local tap_pid=$!
+  local deadline=$((SECONDS + ADB_INSTALL_TIMEOUT_SECONDS))
+  local status=0
+
+  while kill -0 "$install_pid" >/dev/null 2>&1; do
+    if (( SECONDS >= deadline )); then
+      {
+        echo
+        echo "Timed out after ${ADB_INSTALL_TIMEOUT_SECONDS}s waiting for adb install to finish."
+        echo "This usually means HyperOS/MIUI is holding the install flow behind a device-side prompt or wireless ADB install restriction."
+      } >> "$output_file"
+      kill "$install_pid" >/dev/null 2>&1 || true
+      sleep 1
+      kill -9 "$install_pid" >/dev/null 2>&1 || true
+      wait "$install_pid" >/dev/null 2>&1 || true
+      wait "$tap_pid" >/dev/null 2>&1 || true
+      echo "adb install timed out after ${ADB_INSTALL_TIMEOUT_SECONDS}s" > "$OUT_DIR/${label}-timeout.txt"
+      return 124
+    fi
+    sleep 0.2
+  done
+
+  wait "$install_pid" || status=$?
+  wait "$tap_pid" >/dev/null 2>&1 || true
+  return "$status"
 }
 
 install_apk() {
@@ -392,6 +421,10 @@ elif [[ -n "$APK_PATH" ]]; then
         check_pass "ADB can install the APK"
       else
         check_fail "ADB can install the APK"
+        if [[ -f "$OUT_DIR/install-timeout.txt" ]]; then
+          echo "  - adb install timed out; see install.txt and install-timeout.txt." >> "$report"
+          echo "  - On HyperOS/MIUI, prefer a USB data connection for APK installation, or install the APK manually and rerun with SKIP_INSTALL=true RESET_APP_DATA=false." >> "$report"
+        fi
         if grep -q "INSTALL_FAILED_USER_RESTRICTED" "$OUT_DIR/install.txt"; then
           echo "  - Enable USB 安装 / Install via USB on the phone." >> "$report"
           if grep -Eq '^[^[:space:]]+:[0-9]+[[:space:]]+device|_adb-tls-connect\._tcp[[:space:]]+device' \
