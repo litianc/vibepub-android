@@ -191,13 +191,34 @@ adb_shell() {
 }
 
 grant_recording_permissions() {
-  adb_shell pm grant "$PACKAGE_NAME" android.permission.RECORD_AUDIO >/dev/null 2>&1 || true
-  adb_shell pm grant "$PACKAGE_NAME" android.permission.ACCESS_COARSE_LOCATION >/dev/null 2>&1 || true
-  adb_shell pm grant "$PACKAGE_NAME" android.permission.POST_NOTIFICATIONS >/dev/null 2>&1 || true
+  local label="${1:-permissions}"
+
+  adb_shell pm grant "$PACKAGE_NAME" android.permission.RECORD_AUDIO \
+    > "$OUT_DIR/pm-grant-record-audio-$label.txt" 2>&1 || true
+  adb_shell pm grant "$PACKAGE_NAME" android.permission.ACCESS_COARSE_LOCATION \
+    > "$OUT_DIR/pm-grant-coarse-location-$label.txt" 2>&1 || true
+  adb_shell pm grant "$PACKAGE_NAME" android.permission.POST_NOTIFICATIONS \
+    > "$OUT_DIR/pm-grant-post-notifications-$label.txt" 2>&1 || true
   if truthy "$FORCE_RECORD_AUDIO_APPOPS"; then
-    adb_shell cmd appops set "$PACKAGE_NAME" RECORD_AUDIO allow >/dev/null 2>&1 || true
-    adb_shell appops set "$PACKAGE_NAME" RECORD_AUDIO allow >/dev/null 2>&1 || true
+    adb_shell cmd appops set "$PACKAGE_NAME" RECORD_AUDIO allow \
+      > "$OUT_DIR/cmd-appops-record-audio-$label.txt" 2>&1 || true
+    adb_shell appops set "$PACKAGE_NAME" RECORD_AUDIO allow \
+      > "$OUT_DIR/appops-set-record-audio-$label.txt" 2>&1 || true
   fi
+}
+
+capture_recording_permission_evidence() {
+  local label="${1:-}"
+  local package_file="$OUT_DIR/package-after-permissions.txt"
+  local appops_file="$OUT_DIR/appops-record-audio.txt"
+
+  if [[ -n "$label" ]]; then
+    package_file="$OUT_DIR/package-after-permissions-$label.txt"
+    appops_file="$OUT_DIR/appops-record-audio-$label.txt"
+  fi
+
+  adb_shell dumpsys package "$PACKAGE_NAME" > "$package_file" 2>&1 || true
+  adb_shell appops get "$PACKAGE_NAME" RECORD_AUDIO > "$appops_file" 2>&1 || true
 }
 
 wake_device() {
@@ -1496,9 +1517,8 @@ fi
 mark_phase "app_data_ready"
 
 echo "Granting permissions where possible..."
-grant_recording_permissions
-adb_shell dumpsys package "$PACKAGE_NAME" > "$OUT_DIR/package-after-permissions.txt" 2>&1 || true
-adb_shell appops get "$PACKAGE_NAME" RECORD_AUDIO > "$OUT_DIR/appops-record-audio.txt" 2>&1 || true
+grant_recording_permissions "before-launch"
+capture_recording_permission_evidence "before-launch"
 
 write_app_preferences
 mark_phase "permissions_and_prefs"
@@ -1511,6 +1531,9 @@ adb_cmd logcat -c || true
 adb_shell am start -n "$PACKAGE_NAME/$ACTIVITY_NAME" > "$OUT_DIR/launch.txt"
 sleep 3
 wait_for_app_focus || true
+grant_recording_permissions "after-launch"
+capture_recording_permission_evidence
+capture_recording_permission_evidence "after-launch"
 
 echo "Capturing launch screenshot..."
 adb_shell screencap -p /sdcard/vibepub-launch.png
@@ -1606,7 +1629,7 @@ EOF
     wake_device
     adb_shell am start -n "$PACKAGE_NAME/$ACTIVITY_NAME" > "$OUT_DIR/foreground-before-recording.txt" 2>&1 || true
     wait_for_app_focus
-    grant_recording_permissions
+    grant_recording_permissions "before-recording"
     adb_shell dumpsys package "$PACKAGE_NAME" > "$OUT_DIR/package-before-recording.txt" 2>&1 || true
     adb_shell appops get "$PACKAGE_NAME" RECORD_AUDIO > "$OUT_DIR/appops-before-recording.txt" 2>&1 || true
     echo "Starting recording through debug broadcast..."
