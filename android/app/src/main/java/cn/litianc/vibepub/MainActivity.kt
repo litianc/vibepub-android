@@ -201,9 +201,9 @@ fun VibePubApp(
                     true
                 },
                 onFailure = {
-                    isRecording = true
-                    Toast.makeText(context, "保存录音失败，请再试一次", Toast.LENGTH_SHORT).show()
-                    false
+                    isRecording = false
+                    Toast.makeText(context, stopRecordingFailureToastMessage(), Toast.LENGTH_SHORT).show()
+                    shouldLeaveRecordingAfterStopFailure()
                 },
             )
         },
@@ -224,3 +224,9 @@ internal fun initialRecordingErrorForUploadToken(hasUploadToken: Boolean): Strin
 internal fun retryUploadToastMessage(queued: Boolean): String {
     return if (queued) "已重新加入上传队列" else "请先配置 FILES_TOKEN 后重试上传"
 }
+
+internal fun stopRecordingFailureToastMessage(): String {
+    return "保存录音失败，请重新开始录音"
+}
+
+internal fun shouldLeaveRecordingAfterStopFailure(): Boolean = true

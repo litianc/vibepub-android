@@ -105,4 +105,10 @@ class RecordingFilesTest {
         assertEquals("已重新加入上传队列", retryUploadToastMessage(queued = true))
         assertEquals("请先配置 FILES_TOKEN 后重试上传", retryUploadToastMessage(queued = false))
     }
+
+    @Test
+    fun stopRecordingFailureMessageAsksForFreshRecording() {
+        assertEquals("保存录音失败，请重新开始录音", stopRecordingFailureToastMessage())
+        assertTrue(shouldLeaveRecordingAfterStopFailure())
+    }
 }
