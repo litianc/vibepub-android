@@ -1,8 +1,8 @@
 # VibePub Android Experience Progress - 2026-06-30
 
-记录时间：2026-06-30 18:15 CST
+记录时间：2026-06-30 18:45 CST
 分支：`codex/android-experience-v1`  
-本次记录基线提交：`616408b Enable local Android build loop`
+本次记录基线提交：`f60e5c2 Add one-command local Android install entrypoint`
 
 ## 已验证
 
@@ -20,6 +20,7 @@
   - 详情页 Media3 本地播放、进度条、seek、标题/正文/原始识别展示。
   - 复制标题、复制正文、系统分享、导出材料包。
   - 状态提示 icon 可打开完整流程说明：保存录音 → 上传音频 → 云端排队 → 语音识别 → 文章改写 → 公众号草稿 → 人工发布确认。
+  - 详情页“公众号草稿审核”现在显示短阶段结果：`草稿已就绪`、`文章可用 · 草稿待同步`、`文章可用 · 草稿需处理`、`生成中 · 未到发布检查`、`结果不完整 · 建议刷新`。
   - 状态模型覆盖 `LOCAL_RECORDED`、`UPLOADING`、`UPLOADED`、`PROCESSING`、`COMPLETED`、`FAILED`。
 - placeholder 草稿引用修复已验证并发布到 APK：
   - Android 提交：`ae943af Keep draft readiness from trusting placeholder values`
@@ -68,11 +69,13 @@
 - 本地配置已写入被 git 忽略的 `android/local.properties`。
 - 新增本地构建脚本：`scripts/build-android-local.sh`
 - 新增本地构建并安装脚本：`scripts/install-android-local-apk.sh`
+- `scripts/build-android-local.sh` 已加固为默认强制 JDK 21；如需覆盖必须用 `ANDROID_LOCAL_JAVA_HOME`，避免外层 `JAVA_HOME` 指向 JDK 26 时触发 Robolectric class parsing 失败。
 - 本地验证已通过：
   - `scripts/build-android-local.sh test` 等价环境下，`gradle -p android :app:testDebugUnitTest` 成功，热启动后约 37 秒。
   - `gradle -p android :app:assembleDebug` 成功，首次本地打包约 1 分 22 秒。
   - `scripts/build-android-local.sh assemble` 成功，增量约 16 秒。
   - `scripts/install-android-local-apk.sh --help` 和 shell 语法检查通过。
+  - 本轮详情页阶段结果改动后，`DetailScreenTest`、`RecordingPresentationTest` 和 `scripts/build-android-local.sh test` 均通过；全量 Android 单测约 33 秒。
 - GitHub Actions Android Tests 可用并已通过。
 - 注意：本地单测必须使用 JDK 21；JDK 26 会导致 Robolectric 4.12 shadow class 解析失败。
 

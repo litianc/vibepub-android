@@ -71,6 +71,7 @@ class DetailScreenTest {
         )
 
         assertEquals("公众号草稿审核", summary.title)
+        assertEquals("草稿已就绪", summary.stageLabel)
         assertTrue(summary.nextStep.contains("草稿已创建"))
         assertTrue(summary.items.all { it.ready })
         assertEquals("MEDIA_ID_123", summary.items.last().value)
@@ -87,6 +88,7 @@ class DetailScreenTest {
             wechatUrl = "",
         )
 
+        assertEquals("文章可用 · 草稿待同步", summary.stageLabel)
         assertTrue(summary.nextStep.contains("还没拿到公众号草稿信息"))
         assertTrue(summary.items.first { it.label == "正文" }.ready)
         assertFalse(summary.items.first { it.label == "公众号草稿" }.ready)
@@ -105,6 +107,7 @@ class DetailScreenTest {
             processingStage = "ARTICLE_READY",
         )
 
+        assertEquals("文章可用 · 草稿待同步", summary.stageLabel)
         assertTrue(summary.nextStep.contains("文章已生成"))
         assertTrue(summary.nextStep.contains("刷新等待草稿状态"))
         assertTrue(summary.items.first { it.label == "正文" }.ready)
@@ -123,6 +126,7 @@ class DetailScreenTest {
             draftError = "公众号草稿创建失败：Request failed with status code 502",
         )
 
+        assertEquals("文章可用 · 草稿需处理", summary.stageLabel)
         assertTrue(summary.nextStep.contains("公众号草稿创建失败"))
         assertTrue(summary.items.first { it.label == "正文" }.ready)
         val draftItem = summary.items.first { it.label == "公众号草稿" }
@@ -144,6 +148,7 @@ class DetailScreenTest {
             processingStage = "DRAFT_FAILED",
         )
 
+        assertEquals("文章可用 · 草稿需处理", summary.stageLabel)
         assertTrue(summary.nextStep.contains("公众号草稿创建失败"))
         assertTrue(summary.nextStep.contains("先复制正文"))
         assertTrue(summary.items.first { it.label == "正文" }.ready)
@@ -197,6 +202,7 @@ class DetailScreenTest {
             processingStage = "ARTICLE_READY",
         )
 
+        assertEquals("结果不完整 · 建议刷新", summary.stageLabel)
         assertFalse(summary.items.first { it.label == "正文" }.ready)
         assertTrue(summary.nextStep.contains("正文还不完整"))
     }
@@ -213,6 +219,7 @@ class DetailScreenTest {
         )
 
         val draftItem = summary.items.first { it.label == "公众号草稿" }
+        assertEquals("草稿已就绪", summary.stageLabel)
         assertTrue(summary.nextStep.contains("草稿已创建"))
         assertTrue(draftItem.ready)
         assertEquals("https://mp.weixin.qq.com/draft", draftItem.value)
@@ -230,6 +237,7 @@ class DetailScreenTest {
         )
 
         val draftItem = summary.items.first { it.label == "公众号草稿" }
+        assertEquals("文章可用 · 草稿待同步", summary.stageLabel)
         assertTrue(summary.nextStep.contains("还没拿到公众号草稿信息"))
         assertFalse(draftItem.ready)
         assertEquals("等待云端创建草稿或返回草稿信息", draftItem.value)
@@ -246,6 +254,7 @@ class DetailScreenTest {
             wechatUrl = "",
         )
 
+        assertEquals("生成中 · 未到发布检查", summary.stageLabel)
         assertTrue(summary.nextStep.contains("文章还在生成中"))
         assertFalse(summary.items.first { it.label == "正文" }.ready)
         assertFalse(summary.items.first { it.label == "公众号草稿" }.ready)

@@ -4,7 +4,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ANDROID_HOME="${ANDROID_HOME:-/opt/homebrew/share/android-commandlinetools}"
 ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
-JAVA_HOME="${JAVA_HOME:-/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home}"
+JDK21_HOME="/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home"
+JAVA_HOME="${ANDROID_LOCAL_JAVA_HOME:-$JDK21_HOME}"
 TASK="${1:-all}"
 
 usage() {
@@ -17,9 +18,9 @@ GitHub Actions Android test environment without requiring Android Studio or an
 emulator.
 
 Environment:
-  ANDROID_HOME      Default: /opt/homebrew/share/android-commandlinetools
-  ANDROID_SDK_ROOT  Default: ANDROID_HOME
-  JAVA_HOME         Default: /opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home
+  ANDROID_HOME             Default: /opt/homebrew/share/android-commandlinetools
+  ANDROID_SDK_ROOT         Default: ANDROID_HOME
+  ANDROID_LOCAL_JAVA_HOME  Default: /opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home
 EOF
 }
 

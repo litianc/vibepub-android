@@ -108,6 +108,7 @@ internal data class ArticleReviewItem(
 
 internal data class ArticleReviewSummary(
     val title: String,
+    val stageLabel: String,
     val nextStep: String,
     val items: List<ArticleReviewItem>,
 )
@@ -590,6 +591,20 @@ private fun ArticleReviewCard(summary: ArticleReviewSummary) {
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(summary.title, fontWeight = FontWeight.SemiBold)
             }
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                    .padding(horizontal = 10.dp, vertical = 6.dp)
+                    .testTag("ArticleReviewStageLabel"),
+            ) {
+                Text(
+                    text = summary.stageLabel,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontWeight = FontWeight.Medium,
+                )
+            }
             Text(
                 summary.nextStep,
                 style = MaterialTheme.typography.bodyMedium,
@@ -966,6 +981,13 @@ internal fun buildArticleReviewSummary(
     val hasDraft = draftReference.isNotBlank()
     val draftFailed = (status == RecordingStatus.COMPLETED || stageDraftFailed) &&
         (draftError.isNotBlank() || stageDraftFailed)
+    val stageLabel = when {
+        hasDraft -> "草稿已就绪"
+        draftFailed && hasArticle -> "文章可用 · 草稿需处理"
+        hasArticle -> "文章可用 · 草稿待同步"
+        status != RecordingStatus.COMPLETED -> "生成中 · 未到发布检查"
+        else -> "结果不完整 · 建议刷新"
+    }
 
     val nextStep = when {
         hasDraft -> "草稿已创建。下一步到公众号后台打开草稿，再做最后一眼人工确认。"
@@ -977,6 +999,7 @@ internal fun buildArticleReviewSummary(
 
     return ArticleReviewSummary(
         title = "公众号草稿审核",
+        stageLabel = stageLabel,
         nextStep = nextStep,
         items = listOf(
             ArticleReviewItem(
