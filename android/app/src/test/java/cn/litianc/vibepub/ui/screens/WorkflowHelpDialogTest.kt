@@ -117,7 +117,7 @@ class WorkflowHelpDialogTest {
         composeTestRule.onNodeWithText("转录中").assertIsDisplayed()
         composeTestRule.onNodeWithText("第 4/7 步").assertIsDisplayed()
         composeTestRule.onAllNodesWithTag("RecordingCardSyncFreshness").assertCountEquals(1)
-        composeTestRule.onNodeWithTag("WorkflowHelpButton").assertIsDisplayed()
+        composeTestRule.onAllNodesWithTag("WorkflowHelpButton").assertCountEquals(1)
         composeTestRule.onAllNodesWithText("云端正在进行语音识别。").assertCountEquals(0)
     }
 
