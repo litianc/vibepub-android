@@ -75,4 +75,15 @@ npx wrangler deploy
 
 ## Current Blockers
 
-Cloudflare is not logged in on this machine. Run `npx wrangler login` interactively, or provide a scoped `CLOUDFLARE_API_TOKEN` for Worker/R2/DNS deployment.
+Cloudflare is logged in on this machine and Worker deployment is available with `npx wrangler`.
+
+Worker production still needs a `GITHUB_PAT` secret if uploads should wake the
+GitHub Actions mining workflow immediately. Without it, recordings are still
+processed by the scheduled mining job, but they can wait for the next cron run.
+Use an Actions-capable GitHub token and set it as both a GitHub Actions secret
+for `.github/workflows/deploy-worker.yml` and a Cloudflare Worker secret:
+
+```bash
+cd infra/worker
+npx wrangler secret put GITHUB_PAT
+```

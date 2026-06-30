@@ -30,10 +30,15 @@ creation failed after article generation.
 npm install
 npx wrangler r2 bucket create vibepub-files
 npx wrangler secret put FILES_TOKEN
+# Optional but recommended: lets /api/uploads immediately dispatch mining-job.yml.
+npx wrangler secret put GITHUB_PAT
 npx wrangler deploy
 ```
 
 The Worker route is configured for `vibepub.litianc.cn`.
+`GITHUB_PAT` must be able to create workflow dispatch events for
+`litianc/vibepub-android`; otherwise uploads still succeed, but processing waits
+for the scheduled mining workflow.
 
 ## Production Update Checklist
 
@@ -42,6 +47,7 @@ Run validation before deploying:
 ```bash
 npm run typecheck
 npm test
+npx wrangler deploy --dry-run
 ```
 
 Apply D1 migrations before or alongside Worker deploys when the Android display
