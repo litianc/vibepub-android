@@ -16,7 +16,10 @@ This repo is scoped for internal Android installation first. The Apple-specific 
 - Android package: `cn.litianc.vibepub`
 - Public API host: `https://vibepub.litianc.cn`
 - Distribution: internal APK artifact from GitHub Actions
-- Storage/API: Cloudflare Worker + R2
+- API service: Cloudflare Worker `vibepub-api`
+- Database: Cloudflare D1 `vibepub-db`
+- File storage: Cloudflare R2 `vibepub-files`
+- Background processing: GitHub Actions `mining-job.yml`
 - ASR: Volcengine
 - LLM: GLM-5.2
 - Publishing: WeChat Official Account draft publishing
@@ -31,20 +34,40 @@ This repo is scoped for internal Android installation first. The Apple-specific 
 - `.github/workflows/android-internal-build.yml` - internal APK build
 - `.github/workflows/deploy-worker.yml` - Worker deploy
 
+## Runtime Topology
+
+The Android app talks to the Cloudflare Worker API. The Worker stores upload
+metadata and pipeline status in D1, stores audio/transcript objects in R2, and
+dispatches the GitHub Actions mining workflow for the long ASR/article/draft
+pipeline. GitHub Actions is therefore the async job runner, not the production
+database or API host.
+
 ## Local Android Build
 
-This workspace currently does not include a local Android SDK/Gradle install. CI is configured to install Android SDK packages and Gradle.
+This Mac has the local Android toolchain configured for faster dogfood loops:
 
-When Android Studio is installed locally:
+- Android SDK command-line tools: `/opt/homebrew/share/android-commandlinetools`
+- JDK 21: `/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home`
+- SDK packages: `platforms;android-36`, `build-tools;36.0.0`, `platform-tools;37.0.0`
+- Local SDK path: `android/local.properties` (git-ignored)
+
+Run tests or build locally with the wrapper script so Robolectric uses JDK 21:
 
 ```bash
-gradle -p android :app:assembleDebug
+scripts/build-android-local.sh test
+scripts/build-android-local.sh assemble
 ```
 
 The APK will be under:
 
 ```text
 android/app/build/outputs/apk/debug/app-debug.apk
+```
+
+Install to a connected ADB device:
+
+```bash
+scripts/install-android-local-apk.sh --skip-build
 ```
 
 ## Cloudflare Worker
@@ -73,7 +96,7 @@ npx wrangler secret put FILES_TOKEN
 npx wrangler deploy
 ```
 
-## Current Blockers
+## Current Ops Notes
 
 Cloudflare is logged in on this machine and Worker deployment is available with `npx wrangler`.
 

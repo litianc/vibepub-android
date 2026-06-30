@@ -1,18 +1,19 @@
 # VibePub Android Experience Progress - 2026-06-30
 
-记录时间：2026-06-30 19:19 CST
+记录时间：2026-06-30 20:14 CST
 分支：`codex/android-experience-v1`  
-本次记录基线提交：`c70bb25 Document the remaining Worker dispatch secret`
+本次记录基线提交：`8424f32 Keep active progress sync from being swallowed`
 
 ## 已验证
 
 ### Android 最新 APK 渠道
-- GitHub Release：`build-20260630-092807-1054cc1`
-- APK：<https://github.com/litianc/vibepub-android/releases/download/build-20260630-092807-1054cc1/app-debug.apk>
-- SHA-256：`ac0082bb489ae2cc5c29fdcf765bb43848918c424e3adc983539148e673d7d94`
+- GitHub Release：`build-20260630-121346-8424f32`
+- APK：<https://github.com/litianc/vibepub-android/releases/download/build-20260630-121346-8424f32/app-debug.apk>
+- SHA-256：`5c13a492972c1a5efa2c98f56f05413b2b1a08ad919a9d4753b8ae091bda82e0`
+- Release Commit：`8424f32915f35b7083672232f9e3defb4d98f452`
 - Manifest 已指向该 Release：`artifacts/MANIFEST.md`
-- Android Tests：GitHub Actions run `28433787330` 成功
-- Android Build & Release：GitHub Actions run `28434107458` 成功
+- Android Tests：GitHub Actions run `28443221766` 成功
+- Android Build & Release：GitHub Actions run `28443222078` 成功
 
 ### Android 端已落地能力
 - 录音/首页/详情页已有体验优先版主干：
@@ -69,13 +70,15 @@
 - 当前 ADB 检查无设备在线：
   - 命令：`/opt/homebrew/share/android-commandlinetools/platform-tools/adb devices -l`
   - 输出：`List of devices attached` 后无设备。
-  - 下一次真机验证需要重新连接 USB 或重新打开无线调试配对/连接。
-- 当前最新 APK 已安装并启动：
+  - `adb mdns services` 可发现无线调试服务 `10.161.2.96:42327`，但 `adb connect 10.161.2.96:42327` 当前返回 `Connection refused`。
+  - 下一次真机验证需要重新连接 USB，或重新打开平板无线调试页面获取新的配对码/配对端口。
+- 上一轮 APK 已安装并启动，但不是当前最新 Release：
   - 安装证据：`artifacts/android-install/20260630-1054cc1/install/summary.md`
   - readiness：`artifacts/android-install/20260630-1054cc1/install/readiness/readiness.md`
   - 包版本：`versionName=0.1.0-debug`，`versionCode=1`
   - 签名摘要：`18a43bae`
   - 设备进程：`cn.litianc.vibepub` 已运行。
+  - 当前最新 `8424f32` APK 尚未完成真机安装/端到端验证。
 
 ## 待验证
 
@@ -111,6 +114,9 @@
   - 本轮 Android 同步映射改动后，`SyncWorkerTest`、`scripts/build-android-local.sh test`、`scripts/build-android-local.sh assemble`、`git diff --check` 均通过。
   - 本轮活跃进度同步调度改动后，`RecordingFilesTest`、`scripts/build-android-local.sh test`、`scripts/build-android-local.sh assemble`、`git diff --check` 均通过。
 - GitHub Actions Android Tests 可用并已通过。
+- 最新 GitHub Actions Android Tests run `28443221766` 已覆盖提交 `8424f32` 并成功。
+- 最新 GitHub Actions Android Build & Release run `28443222078` 已覆盖提交 `8424f32` 并成功创建 Release `build-20260630-121346-8424f32`。
+- GitHub Actions `mining-tests.yml` 文件目前不在默认分支，GitHub API 暂不能直接对该 workflow 发起 `workflow_dispatch`；本轮 mining 改动已用本地 `infra/mining` 测试和 typecheck 验证，后续合入默认分支后再补云端 mining-tests。
 - 注意：本地单测必须使用 JDK 21；JDK 26 会导致 Robolectric 4.12 shadow class 解析失败。
 
 ### 生产环境待验证
@@ -136,6 +142,13 @@
   - 或 `scripts/install-android-local-apk.sh --serial <new-adb-serial> --test`
   - 完整 dogfood E2E：`scripts/run-android-device-smoke.sh android/app/build/outputs/apk/debug/app-debug.apk`
 
+### 当前运行边界
+- Android App：端上录音、首页/详情状态、设置诊断、本地 Room、WorkManager、Media3 播放。
+- Cloudflare Worker：生产 API `vibepub-api`，提供 `/health`、上传、录音列表、转录文件、内部状态回写。
+- Cloudflare D1：生产数据库 `vibepub-db`，保存录音元数据、状态、阶段、错误和展示字段。
+- Cloudflare R2：生产文件桶 `vibepub-files`，保存上传音频和 transcript/article JSON。
+- GitHub Actions：`mining-job.yml` 是异步 job runner，负责 Volcengine ASR、GLM 改写、WeChat 草稿和状态回写；不是在线 API 或数据库。
+
 ### 产品体验待完善
 - 继续按体验优先版计划推进：
   - mining `ARTICLE_READY` 进度回写需要随分支进入生产 workflow 后，用真机新录音验证首页/详情是否先显示“文章已生成”再进入草稿阶段。
@@ -143,5 +156,5 @@
   - 自动化测试产物需要稳定保存截图、UI dump、logcat、audit 结果。
 
 ## 当前注意事项
-- 目前最新可安装 APK 是 `1054cc1` 对应 Release。
+- 目前最新可安装 APK 是 `8424f32` 对应 Release。
 - `artifacts/` 下存在多批历史安装/CI 调试产物，当前记录未整理或删除它们。
