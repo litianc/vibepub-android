@@ -1,4 +1,5 @@
 import OpenAI from "openai";
+import { buildWechatArticlePrompt } from "./styleProfile.js";
 
 const GLM_API_KEY = process.env.GLM_API_KEY!;
 const GLM_BASE_URL = process.env.GLM_BASE_URL || "https://open.bigmodel.cn/api/paas/v4/";
@@ -10,21 +11,7 @@ const openai = new OpenAI({
 });
 
 export async function processAudioText(rawText: string): Promise<{ title: string; content: string; imagePrompt: string }> {
-  // Style Distillation Prompt
-  // We want the AI to clean up the transcript but maintain the original voice.
-  const prompt = `你是一个顶级的个人文字助理，擅长“风格蒸馏（Style Distillation）”。
-我通过录音口述了一段想法，以下是语音转文字的原始草稿。
-请你帮我把它整理成一篇结构清晰、逻辑连贯、适合发布在微信公众号的文章。
-
-【重要原则】
-1. 保持“我”的第一人称视角。
-2. 保留观点，剔除废话。
-3. 适当分段并加上小标题。
-4. 核心：请根据文章内容，高度浓缩一句用于 AI 绘图的纯英文画面描述 (imagePrompt)。最好是写实摄影风格，不要带文字。
-5. 返回 JSON，包含 title（文章标题）, content（正文, 支持HTML排版）, imagePrompt（英文绘图提示词）。
-
-【原始录音文本】
-${rawText}`;
+  const prompt = buildWechatArticlePrompt(rawText);
 
   const response = await openai.chat.completions.create({
     model: GLM_MODEL,
