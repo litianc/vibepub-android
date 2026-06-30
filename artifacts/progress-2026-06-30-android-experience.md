@@ -97,6 +97,7 @@
   - 本轮录音停止失败恢复改动后，`RecordingFilesTest`、`scripts/build-android-local.sh test`、`scripts/build-android-local.sh assemble` 均通过。
   - 本轮首页本机待上传恢复提示改动后，`HomeScreenTest`、`scripts/build-android-local.sh test`、`scripts/build-android-local.sh assemble`、`git diff --check` 均通过。
   - 本轮诊断最近录音摘要改动后，`SettingsScreenTest`、`scripts/build-android-local.sh test`、`scripts/build-android-local.sh assemble`、`git diff --check` 均通过。
+  - 本轮真机自动化脚本改动后，`scripts/android-device-visual-test.sh` 默认等待 Worker 自动创建的 `workflow_dispatch` run；acceptance 和 audit 都会校验 `mining-run.log` 引用了本次录音文件名。`bash -n`、脚本 `--help`、`git diff --check` 均通过。
 - GitHub Actions Android Tests 可用并已通过。
 - 注意：本地单测必须使用 JDK 21；JDK 26 会导致 Robolectric 4.12 shadow class 解析失败。
 
@@ -117,10 +118,11 @@
   - Token 错误时显示配置错误和可恢复路径。
 - 本地 APK 已生成：`android/app/build/outputs/apk/debug/app-debug.apk`
   - 当前本地 APK SHA-256：`8f135fa16b46fc75b972ee9756ab9f0872dba7dfe1df2ecf14fedbea98579feb`
-- 待恢复 ADB 后安装本地 APK：当前 `10.161.2.96` 网络可 ping 通，但无线调试端口 `42327` / `43355` 均 connection refused，需要重新打开平板无线调试页面获取新端口，或改用 USB。
+- 待恢复 ADB 后安装本地 APK：当前 `adb devices -l` 无设备在线，需要重新连接 USB，或重新打开平板无线调试页面获取新端口。
 - ADB 恢复后可直接运行：
   - `scripts/install-android-local-apk.sh --serial <new-adb-serial> --skip-build`
   - 或 `scripts/install-android-local-apk.sh --serial <new-adb-serial> --test`
+  - 完整 dogfood E2E：`scripts/run-android-device-smoke.sh android/app/build/outputs/apk/debug/app-debug.apk`
 
 ### 产品体验待完善
 - 继续按体验优先版计划推进：

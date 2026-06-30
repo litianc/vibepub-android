@@ -58,6 +58,7 @@ require_file "$OUT_DIR/expected-duration-text.txt"
 require_file "$OUT_DIR/backend-recording-status.txt"
 require_file "$OUT_DIR/mining-run-id.txt"
 require_file "$OUT_DIR/mining-run-url.txt"
+require_file "$OUT_DIR/mining-run.log"
 require_file "$OUT_DIR/recordings-api.json"
 require_file "$OUT_DIR/debug-device-test-status.json"
 require_file "$OUT_DIR/appops-record-audio.txt"
@@ -84,7 +85,9 @@ grep -Fq "$filename" "$OUT_DIR/recordings-api.json" \
   || fail "recordings API evidence does not reference latest filename"
 grep -Fq "\"status\": \"COMPLETED\"" "$OUT_DIR/recordings-api.json" \
   || fail "recordings API evidence does not contain COMPLETED status"
-pass "debug status and recordings API reference latest filename"
+grep -Fq "$filename" "$OUT_DIR/mining-run.log" \
+  || fail "mining workflow log does not reference latest filename"
+pass "debug status, recordings API, and mining log reference latest filename"
 
 grep -Fq "Transcript detail status: \`completed\`" "$OUT_DIR/checklist.md" \
   || fail "checklist did not record completed detail assertion"

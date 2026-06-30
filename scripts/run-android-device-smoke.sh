@@ -23,6 +23,10 @@ Environment:
   TRIGGER_MINING_JOB
                    Trigger and wait for mining-job.yml before final detail
                    assertion. Default: true.
+  MINING_TRIGGER_MODE
+                   auto waits for the Worker-created workflow_dispatch run,
+                   manual dispatches from the script, and auto_or_manual waits
+                   first then dispatches manually as fallback. Default: auto.
 
 When no APK path is passed, the latest successful GitHub Actions debug APK is
 downloaded through scripts/download-latest-android-apk.sh.
@@ -73,6 +77,7 @@ POST_STOP_WAIT_SECONDS="${POST_STOP_WAIT_SECONDS:-2}" \
 DETAIL_WAIT_SECONDS="${DETAIL_WAIT_SECONDS:-2}" \
 DETAIL_READY_WAIT_SECONDS="${DETAIL_READY_WAIT_SECONDS:-30}" \
 TRIGGER_MINING_JOB="${TRIGGER_MINING_JOB:-true}" \
+MINING_TRIGGER_MODE="${MINING_TRIGGER_MODE:-auto}" \
 MINING_WAIT_SECONDS="${MINING_WAIT_SECONDS:-300}" \
 BACKEND_COMPLETION_WAIT_SECONDS="${BACKEND_COMPLETION_WAIT_SECONDS:-90}" \
 BACKEND_POLL_INTERVAL_SECONDS="${BACKEND_POLL_INTERVAL_SECONDS:-2}" \

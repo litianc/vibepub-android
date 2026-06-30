@@ -30,6 +30,7 @@ TRIGGER_MINING_JOB="${TRIGGER_MINING_JOB:-false}"
 MINING_WORKFLOW_ID="${MINING_WORKFLOW_ID:-mining-job.yml}"
 DEFAULT_MINING_WORKFLOW_REF="$(git -C "$ROOT_DIR" branch --show-current 2>/dev/null || true)"
 MINING_WORKFLOW_REF="${MINING_WORKFLOW_REF:-${DEFAULT_MINING_WORKFLOW_REF:-main}}"
+MINING_TRIGGER_MODE="${MINING_TRIGGER_MODE:-auto}"
 MINING_WAIT_SECONDS="${MINING_WAIT_SECONDS:-240}"
 BACKEND_UPLOAD_WAIT_SECONDS="${BACKEND_UPLOAD_WAIT_SECONDS:-90}"
 BACKEND_COMPLETION_WAIT_SECONDS="${BACKEND_COMPLETION_WAIT_SECONDS:-60}"
@@ -77,6 +78,10 @@ Environment:
   TRIGGER_MINING_JOB
                   Trigger and wait for GitHub Actions mining-job.yml after the
                   phone upload appears in the backend. Default: false.
+  MINING_TRIGGER_MODE
+                  auto waits for the Worker-created workflow_dispatch run,
+                  manual dispatches from this script, and auto_or_manual waits
+                  first then dispatches manually as fallback. Default: auto.
   MINING_WORKFLOW_ID
                   GitHub Actions workflow to dispatch. Default: mining-job.yml.
   MINING_WORKFLOW_REF Git ref for workflow_dispatch. Default: current git branch,
@@ -438,6 +443,20 @@ has_draft_ref = bool(recording.get("wechat_draft_id") or recording.get("wechat_u
 if stage == "COMPLETED" and not has_draft_ref:
     raise SystemExit(1)
 if stage == "DRAFT_FAILED" and not recording.get("error_message"):
+    raise SystemExit(1)
+PY
+
+  check_acceptance "mining workflow log references the target recording" \
+    python3 - "$OUT_DIR/mining-run.log" "$LATEST_RECORDING_FILENAME" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+filename = sys.argv[2]
+if not path.exists() or not filename:
+    raise SystemExit(1)
+text = path.read_text(errors="ignore")
+if filename not in text:
     raise SystemExit(1)
 PY
 
@@ -883,14 +902,39 @@ latest_workflow_dispatch_run_id() {
     --jq '.[0].databaseId // ""' 2>/dev/null || true
 }
 
+wait_for_mining_job_dispatched_by_worker() {
+  local previous_run_id="$1"
+  local target_filename="$2"
+  local run_id=""
+  local deadline=$((SECONDS + MINING_WAIT_SECONDS))
+
+  echo "Waiting for Worker-dispatched GitHub Actions workflow: $MINING_WORKFLOW_ID ($MINING_WORKFLOW_REF)"
+  printf '%s\n' "auto" > "$OUT_DIR/mining-trigger-mode.txt"
+  if [[ -n "$target_filename" ]]; then
+    printf '%s\n' "$target_filename" > "$OUT_DIR/mining-target-filename.txt"
+  fi
+
+  while (( SECONDS < deadline )); do
+    run_id="$(latest_workflow_dispatch_run_id)"
+    if [[ -n "$run_id" && "$run_id" != "$previous_run_id" ]]; then
+      printf '%s\n' "$run_id" > "$OUT_DIR/mining-run-id.txt"
+      return 0
+    fi
+    sleep 3
+  done
+
+  echo "Could not find a Worker-dispatched mining workflow run." >&2
+  return 1
+}
+
 trigger_and_wait_for_mining_job() {
   local previous_run_id="$1"
   local target_filename="$2"
   local run_id=""
   local deadline=$((SECONDS + MINING_WAIT_SECONDS))
-  local run_tsv status conclusion run_url
 
   echo "Triggering GitHub Actions workflow: $MINING_WORKFLOW_ID ($MINING_WORKFLOW_REF)"
+  printf '%s\n' "manual" > "$OUT_DIR/mining-trigger-mode.txt"
   if truthy "$MINING_TARGETED" && [[ -n "$target_filename" ]]; then
     if ! gh workflow run "$MINING_WORKFLOW_ID" --ref "$MINING_WORKFLOW_REF" \
       -f "target_filename=$target_filename" \
@@ -929,6 +973,14 @@ EOF
   fi
 
   printf '%s\n' "$run_id" > "$OUT_DIR/mining-run-id.txt"
+  wait_for_mining_workflow_run "$run_id" "$deadline"
+}
+
+wait_for_mining_workflow_run() {
+  local run_id="$1"
+  local deadline="$2"
+  local run_tsv status conclusion run_url
+
   echo "Waiting for mining workflow run: $run_id"
 
   while (( SECONDS < deadline )); do
@@ -945,6 +997,12 @@ EOF
       if [[ "$status" == "completed" ]]; then
         gh run view "$run_id" --log > "$OUT_DIR/mining-run.log" 2>"$OUT_DIR/mining-run-log.err" || true
         if [[ "$conclusion" == "success" ]]; then
+          if [[ -n "${LATEST_RECORDING_FILENAME:-}" && -f "$OUT_DIR/mining-run.log" ]]; then
+            if ! grep -Fq "$LATEST_RECORDING_FILENAME" "$OUT_DIR/mining-run.log"; then
+              echo "Mining workflow log does not reference target filename: $LATEST_RECORDING_FILENAME" >&2
+              return 1
+            fi
+          fi
           return 0
         fi
         echo "Mining workflow completed with conclusion: $conclusion" >&2
@@ -966,6 +1024,8 @@ EOF
 maybe_run_mining_job_for_latest_recording() {
   local filename="$1"
   local previous_run_id
+  local deadline
+  local trigger_mode="$MINING_TRIGGER_MODE"
 
   if ! truthy "$TRIGGER_MINING_JOB"; then
     return 0
@@ -1001,7 +1061,30 @@ maybe_run_mining_job_for_latest_recording() {
   previous_run_id="$(latest_workflow_dispatch_run_id)"
   printf '%s\n' "$previous_run_id" > "$OUT_DIR/mining-previous-run-id.txt"
 
-  trigger_and_wait_for_mining_job "$previous_run_id" "$filename"
+  case "$trigger_mode" in
+    auto)
+      wait_for_mining_job_dispatched_by_worker "$previous_run_id" "$filename"
+      deadline=$((SECONDS + MINING_WAIT_SECONDS))
+      wait_for_mining_workflow_run "$(cat "$OUT_DIR/mining-run-id.txt")" "$deadline"
+      ;;
+    manual)
+      trigger_and_wait_for_mining_job "$previous_run_id" "$filename"
+      ;;
+    auto_or_manual)
+      if wait_for_mining_job_dispatched_by_worker "$previous_run_id" "$filename"; then
+        deadline=$((SECONDS + MINING_WAIT_SECONDS))
+        wait_for_mining_workflow_run "$(cat "$OUT_DIR/mining-run-id.txt")" "$deadline"
+      else
+        printf '%s\n' "auto_or_manual_fallback" > "$OUT_DIR/mining-trigger-mode.txt"
+        trigger_and_wait_for_mining_job "$previous_run_id" "$filename"
+      fi
+      ;;
+    *)
+      echo "Invalid MINING_TRIGGER_MODE: $MINING_TRIGGER_MODE" >&2
+      echo "Use auto, manual, or auto_or_manual." >&2
+      return 1
+      ;;
+  esac
   wait_for_backend_completion "$filename" "$BACKEND_COMPLETION_WAIT_SECONDS"
 }
 
@@ -1781,6 +1864,8 @@ cat > "$OUT_DIR/checklist.md" <<EOF
 - Debug audio mode: \`$DEBUG_AUDIO_MODE\`
 - Skip install: \`$SKIP_INSTALL\`
 - Trigger mining job: \`$TRIGGER_MINING_JOB\`
+- Mining trigger mode: \`$MINING_TRIGGER_MODE\`
+- Mining workflow ref: \`$MINING_WORKFLOW_REF\`
 - Latest recording filename: \`${LATEST_RECORDING_FILENAME:-not_captured}\`
 - Expected duration text: \`${EXPECTED_DURATION_TEXT:-not_checked}\`
 - Backend recording status: \`${BACKEND_RECORDING_STATUS:-not_checked}\`
