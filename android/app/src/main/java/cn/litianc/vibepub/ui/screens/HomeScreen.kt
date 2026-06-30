@@ -64,16 +64,17 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import cn.litianc.vibepub.data.RecordingEntity
+import cn.litianc.vibepub.data.RecordingRecoveryActionType
 import cn.litianc.vibepub.data.RecordingWorkflowStep
 import cn.litianc.vibepub.data.RecordingStatus
 import cn.litianc.vibepub.data.WorkflowStepState
 import cn.litianc.vibepub.data.asRecordingStatus
-import cn.litianc.vibepub.data.canRetryUpload
 import cn.litianc.vibepub.data.currentWorkflowStep
 import cn.litianc.vibepub.data.displayLabel
 import cn.litianc.vibepub.data.displayTitle
 import cn.litianc.vibepub.data.hasDraftFailureMessage
 import cn.litianc.vibepub.data.listDurationLabel
+import cn.litianc.vibepub.data.primaryRecoveryAction
 import cn.litianc.vibepub.data.statusDetail
 import cn.litianc.vibepub.data.statusLabel
 import cn.litianc.vibepub.data.workflowCycleLabel
@@ -263,6 +264,7 @@ fun HomeScreen(
                                 lastSyncAtMs = lastSyncAtMs,
                                 onClick = { onRecordingClick(recording) },
                                 onRetryUpload = { onRetryUpload(recording) },
+                                onRefresh = { requestRefresh() },
                                 onDeleteRecording = { onDeleteRecording(recording) },
                             )
                         }
@@ -562,10 +564,12 @@ fun RecordingCard(
     lastSyncAtMs: Long,
     onClick: () -> Unit,
     onRetryUpload: () -> Unit,
+    onRefresh: () -> Unit,
     onDeleteRecording: () -> Unit,
 ) {
     val dateString = SimpleDateFormat("M月d日 · HH:mm", Locale.getDefault()).format(Date(recording.timestamp))
     val status = recording.status.asRecordingStatus()
+    val recoveryAction = recording.primaryRecoveryAction()
     var showWorkflowHelp by remember { mutableStateOf(false) }
     var showDeleteConfirm by remember { mutableStateOf(false) }
 
@@ -701,11 +705,27 @@ fun RecordingCard(
                 }
                 Spacer(modifier = Modifier.height(10.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    if (recording.canRetryUpload()) {
-                        OutlinedButton(onClick = onRetryUpload, contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)) {
-                            Icon(Icons.Default.Upload, contentDescription = null, modifier = Modifier.size(16.dp))
+                    if (recoveryAction != null) {
+                        OutlinedButton(
+                            onClick = {
+                                when (recoveryAction.type) {
+                                    RecordingRecoveryActionType.RETRY_UPLOAD -> onRetryUpload()
+                                    RecordingRecoveryActionType.REFRESH_SYNC -> onRefresh()
+                                }
+                            },
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                            modifier = Modifier.testTag("RecordingRecoveryButton"),
+                        ) {
+                            Icon(
+                                imageVector = when (recoveryAction.type) {
+                                    RecordingRecoveryActionType.RETRY_UPLOAD -> Icons.Default.Upload
+                                    RecordingRecoveryActionType.REFRESH_SYNC -> Icons.Default.Refresh
+                                },
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp),
+                            )
                             Spacer(modifier = Modifier.width(4.dp))
-                            Text("重试")
+                            Text(recoveryAction.label)
                         }
                     }
                     OutlinedButton(

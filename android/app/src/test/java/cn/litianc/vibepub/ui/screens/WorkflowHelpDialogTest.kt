@@ -111,6 +111,7 @@ class WorkflowHelpDialogTest {
                 lastSyncAtMs = 1_000L,
                 onClick = {},
                 onRetryUpload = {},
+                onRefresh = {},
                 onDeleteRecording = {},
             )
         }
@@ -137,6 +138,7 @@ class WorkflowHelpDialogTest {
                 lastSyncAtMs = 1_000L,
                 onClick = {},
                 onRetryUpload = {},
+                onRefresh = {},
                 onDeleteRecording = { deleteCount++ },
             )
         }
@@ -155,6 +157,66 @@ class WorkflowHelpDialogTest {
 
         composeTestRule.runOnIdle {
             assertEquals(1, deleteCount)
+        }
+    }
+
+    @Test
+    fun recordingCardRecoveryButtonUsesUploadOnlyForUploadFailures() {
+        var retryCount = 0
+        var refreshCount = 0
+        composeTestRule.setContent {
+            RecordingCard(
+                recording = RecordingEntity(
+                    filename = "VibePub-test.m4a",
+                    durationMs = 42_000L,
+                    timestamp = 1L,
+                    status = RecordingStatus.FAILED.value,
+                    lastError = "FILES_TOKEN 无效",
+                ),
+                lastSyncAtMs = 1_000L,
+                onClick = {},
+                onRetryUpload = { retryCount++ },
+                onRefresh = { refreshCount++ },
+                onDeleteRecording = {},
+            )
+        }
+
+        composeTestRule.onNodeWithTag("RecordingRecoveryButton").performClick()
+
+        composeTestRule.runOnIdle {
+            assertEquals(1, retryCount)
+            assertEquals(0, refreshCount)
+        }
+    }
+
+    @Test
+    fun recordingCardRecoveryButtonSyncsCloudStageFailures() {
+        var retryCount = 0
+        var refreshCount = 0
+        composeTestRule.setContent {
+            RecordingCard(
+                recording = RecordingEntity(
+                    filename = "VibePub-test.m4a",
+                    durationMs = 42_000L,
+                    timestamp = 1L,
+                    status = RecordingStatus.FAILED.value,
+                    processingStage = "ASR_FAILED",
+                    lastError = "语音识别失败",
+                ),
+                lastSyncAtMs = 1_000L,
+                onClick = {},
+                onRetryUpload = { retryCount++ },
+                onRefresh = { refreshCount++ },
+                onDeleteRecording = {},
+            )
+        }
+
+        composeTestRule.onNodeWithText("同步状态").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("RecordingRecoveryButton").performClick()
+
+        composeTestRule.runOnIdle {
+            assertEquals(0, retryCount)
+            assertEquals(1, refreshCount)
         }
     }
 
@@ -210,6 +272,36 @@ class WorkflowHelpDialogTest {
         composeTestRule.onNodeWithTag("DetailWorkflowHelpButton").performClick()
 
         composeTestRule.onAllNodesWithText("上传音频 · 需处理").assertCountEquals(1)
+    }
+
+    @Test
+    fun detailStatusCardUsesSyncActionForDraftFailure() {
+        var retryCount = 0
+        var refreshCount = 0
+        composeTestRule.setContent {
+            StatusCard(
+                recording = RecordingEntity(
+                    filename = "VibePub-test.m4a",
+                    durationMs = 42_000L,
+                    timestamp = 1L,
+                    status = RecordingStatus.COMPLETED.value,
+                    articleTitle = "文章已生成",
+                    processingStage = "DRAFT_FAILED",
+                    lastError = "公众号草稿创建失败",
+                ),
+                lastSyncAtMs = 0L,
+                onRefresh = { refreshCount++ },
+                onRetryUpload = { retryCount++ },
+            )
+        }
+
+        composeTestRule.onNodeWithText("同步草稿").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("DetailRecoveryButton").performClick()
+
+        composeTestRule.runOnIdle {
+            assertEquals(0, retryCount)
+            assertEquals(1, refreshCount)
+        }
     }
 
     @Composable

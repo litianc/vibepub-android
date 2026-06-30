@@ -43,7 +43,42 @@ class RecordingPresentationTest {
 
         assertEquals("整理好的标题", recording.displayTitle())
         assertEquals("FILES_TOKEN 无效", recording.statusDetail())
-        assertTrue(recording.canRetryUpload())
+        assertEquals(RecordingRecoveryActionType.RETRY_UPLOAD, recording.primaryRecoveryAction()?.type)
+        assertEquals("重试上传", recording.primaryRecoveryAction()?.label)
+    }
+
+    @Test
+    fun recoveryActionDistinguishesUploadFailuresFromCloudFailures() {
+        val local = RecordingEntity(
+            filename = "local.m4a",
+            durationMs = 1_000L,
+            timestamp = 1L,
+            status = RecordingStatus.LOCAL_RECORDED.value,
+        )
+        val uploadFailed = local.copy(
+            status = RecordingStatus.FAILED.value,
+            lastError = "FILES_TOKEN 无效",
+        )
+        val asrFailed = local.copy(
+            status = RecordingStatus.FAILED.value,
+            processingStage = "ASR_FAILED",
+            lastError = "语音识别失败",
+        )
+        val draftFailed = local.copy(
+            status = RecordingStatus.COMPLETED.value,
+            processingStage = "DRAFT_FAILED",
+            articleTitle = "文章已生成",
+            lastError = "公众号草稿创建失败",
+        )
+
+        assertEquals(RecordingRecoveryActionType.RETRY_UPLOAD, local.primaryRecoveryAction()?.type)
+        assertEquals("上传", local.primaryRecoveryAction()?.label)
+        assertEquals(RecordingRecoveryActionType.RETRY_UPLOAD, uploadFailed.primaryRecoveryAction()?.type)
+        assertEquals("重试上传", uploadFailed.primaryRecoveryAction()?.label)
+        assertEquals(RecordingRecoveryActionType.REFRESH_SYNC, asrFailed.primaryRecoveryAction()?.type)
+        assertEquals("同步状态", asrFailed.primaryRecoveryAction()?.label)
+        assertEquals(RecordingRecoveryActionType.REFRESH_SYNC, draftFailed.primaryRecoveryAction()?.type)
+        assertEquals("同步草稿", draftFailed.primaryRecoveryAction()?.label)
     }
 
     @Test

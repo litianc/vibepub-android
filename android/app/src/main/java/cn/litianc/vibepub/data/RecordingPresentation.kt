@@ -19,6 +19,17 @@ data class RecordingWorkflowStep(
     val state: WorkflowStepState,
 )
 
+enum class RecordingRecoveryActionType {
+    RETRY_UPLOAD,
+    REFRESH_SYNC,
+}
+
+data class RecordingRecoveryAction(
+    val type: RecordingRecoveryActionType,
+    val label: String,
+    val detail: String,
+)
+
 fun RecordingEntity.displayTitle(locale: Locale = Locale.getDefault()): String {
     val title = articleTitle?.trim()
     if (!title.isNullOrBlank()) return title
@@ -70,9 +81,31 @@ fun RecordingEntity.workflowNextActionLabel(): String {
 
 fun RecordingEntity.isTerminalComplete(): Boolean = status.asRecordingStatus() == RecordingStatus.COMPLETED
 
-fun RecordingEntity.canRetryUpload(): Boolean {
-    return status.asRecordingStatus() == RecordingStatus.FAILED ||
-        status.asRecordingStatus() == RecordingStatus.LOCAL_RECORDED
+fun RecordingEntity.primaryRecoveryAction(): RecordingRecoveryAction? {
+    return when (status.asRecordingStatus()) {
+        RecordingStatus.LOCAL_RECORDED -> RecordingRecoveryAction(
+            type = RecordingRecoveryActionType.RETRY_UPLOAD,
+            label = "上传",
+            detail = "把本机录音重新加入上传队列。",
+        )
+        RecordingStatus.FAILED -> failedRecoveryAction()
+        RecordingStatus.UPLOADING,
+        RecordingStatus.UPLOADED,
+        RecordingStatus.PROCESSING -> RecordingRecoveryAction(
+            type = RecordingRecoveryActionType.REFRESH_SYNC,
+            label = "同步",
+            detail = "刷新云端状态，确认当前处理进度。",
+        )
+        RecordingStatus.COMPLETED -> if (hasDraftFailureMessage()) {
+            RecordingRecoveryAction(
+                type = RecordingRecoveryActionType.REFRESH_SYNC,
+                label = "同步草稿",
+                detail = "文章已可用，刷新草稿创建状态。",
+            )
+        } else {
+            null
+        }
+    }
 }
 
 fun RecordingEntity.workflowHelpTitle(): String {
@@ -409,6 +442,23 @@ private fun RecordingEntity.failureNextActionLabel(): String {
         failureWorkflowIndex() == 1 -> "下一步：点重试上传；如果仍失败，到设置页检查后端连接。"
         failureWorkflowIndex() == 5 -> "下一步：文章可能已生成，先复制正文；再检查公众号草稿配置。"
         else -> "下一步：点同步或重试；如果仍失败，复制诊断信息反馈。"
+    }
+}
+
+private fun RecordingEntity.failedRecoveryAction(): RecordingRecoveryAction {
+    val failedStepIndex = failureWorkflowIndex()
+    return if (failedStepIndex <= 1) {
+        RecordingRecoveryAction(
+            type = RecordingRecoveryActionType.RETRY_UPLOAD,
+            label = "重试上传",
+            detail = "重新上传本机录音，适合 Token、网络或本地上传失败。",
+        )
+    } else {
+        RecordingRecoveryAction(
+            type = RecordingRecoveryActionType.REFRESH_SYNC,
+            label = if (failedStepIndex == 5) "同步草稿" else "同步状态",
+            detail = "录音已进入云端流程，先同步最新处理结果；需要重跑时再重新上传。",
+        )
     }
 }
 

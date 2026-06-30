@@ -74,11 +74,13 @@ import cn.litianc.vibepub.BuildConfig
 import cn.litianc.vibepub.transcriptFileNameForRecording
 import cn.litianc.vibepub.data.AppDatabase
 import cn.litianc.vibepub.data.RecordingEntity
+import cn.litianc.vibepub.data.RecordingRecoveryActionType
 import cn.litianc.vibepub.data.RecordingStatus
 import cn.litianc.vibepub.data.asRecordingStatus
 import cn.litianc.vibepub.data.displayTitle
 import cn.litianc.vibepub.data.durationLabel
 import cn.litianc.vibepub.data.hasDraftFailureMessage
+import cn.litianc.vibepub.data.primaryRecoveryAction
 import cn.litianc.vibepub.data.statusDetail
 import cn.litianc.vibepub.data.statusLabel
 import cn.litianc.vibepub.data.workflowCycleLabel
@@ -440,6 +442,7 @@ internal fun StatusCard(
     onRetryUpload: () -> Unit,
 ) {
     val status = recording.status.asRecordingStatus()
+    val recoveryAction = recording.primaryRecoveryAction()
     var showWorkflowHelp by remember { mutableStateOf(false) }
 
     if (showWorkflowHelp) {
@@ -532,11 +535,26 @@ internal fun StatusCard(
                     Spacer(modifier = Modifier.width(6.dp))
                     Text("刷新")
                 }
-                if (status == RecordingStatus.FAILED || status == RecordingStatus.LOCAL_RECORDED) {
-                    Button(onClick = onRetryUpload) {
-                        Icon(Icons.Default.Upload, contentDescription = null, modifier = Modifier.size(16.dp))
+                if (recoveryAction != null) {
+                    Button(
+                        onClick = {
+                            when (recoveryAction.type) {
+                                RecordingRecoveryActionType.RETRY_UPLOAD -> onRetryUpload()
+                                RecordingRecoveryActionType.REFRESH_SYNC -> onRefresh()
+                            }
+                        },
+                        modifier = Modifier.testTag("DetailRecoveryButton"),
+                    ) {
+                        Icon(
+                            imageVector = when (recoveryAction.type) {
+                                RecordingRecoveryActionType.RETRY_UPLOAD -> Icons.Default.Upload
+                                RecordingRecoveryActionType.REFRESH_SYNC -> Icons.Default.Refresh
+                            },
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                        )
                         Spacer(modifier = Modifier.width(6.dp))
-                        Text("重试上传")
+                        Text(recoveryAction.label)
                     }
                 }
             }
