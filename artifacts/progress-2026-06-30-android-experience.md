@@ -60,9 +60,10 @@
   - 该 smoke 文件因无效音频被 mining job 从 R2 清理；D1 测试记录已手动删除，授权 `/api/recordings` 复查 `smoke_record_count=0`。
 
 ### 真机/ADB
-- 当前红米平板 ADB 在线：
-  - `10.161.2.96:43355`
-  - 状态：`device`
+- 当前 ADB 检查无设备在线：
+  - 命令：`/opt/homebrew/share/android-commandlinetools/platform-tools/adb devices -l`
+  - 输出：`List of devices attached` 后无设备。
+  - 下一次真机验证需要重新连接 USB 或重新打开无线调试配对/连接。
 - 当前最新 APK 已安装并启动：
   - 安装证据：`artifacts/android-install/20260630-1054cc1/install/summary.md`
   - readiness：`artifacts/android-install/20260630-1054cc1/install/readiness/readiness.md`
