@@ -168,6 +168,41 @@ install_apk() {
   adb_shell input keyevent KEYCODE_HOME >/dev/null 2>&1 || true
   sleep 0.3
 
+  install_from_device_tmp() {
+    local label="$1"
+
+    adb_cmd push "$apk_path" /data/local/tmp/vibepub-app-debug.apk \
+      > "$OUT_DIR/${label}-push.txt" 2>&1
+    run_with_usb_install_prompt_taps \
+      "$label-pm" \
+      "$OUT_DIR/${label}-pm.txt" \
+      adb_cmd shell pm install -r -t -g /data/local/tmp/vibepub-app-debug.apk
+  }
+
+  maybe_handle_signature_mismatch() {
+    local install_output="$1"
+    local retry_label="$2"
+
+    if ! grep -q "INSTALL_FAILED_UPDATE_INCOMPATIBLE" "$install_output"; then
+      return 1
+    fi
+
+    if ! truthy "$ALLOW_UNINSTALL_ON_SIGNATURE_MISMATCH"; then
+      {
+        echo "Existing $PACKAGE_NAME install has a different signing key."
+        echo "Refusing to uninstall automatically because that clears app data."
+        echo "Set ALLOW_UNINSTALL_ON_SIGNATURE_MISMATCH=true to allow a clean reinstall."
+      } > "$OUT_DIR/install-signature-mismatch.txt"
+      return 2
+    fi
+
+    adb_cmd uninstall "$PACKAGE_NAME" > "$OUT_DIR/install-uninstall-incompatible.txt" 2>&1 || true
+    if install_from_device_tmp "$retry_label"; then
+      return 0
+    fi
+    return 2
+  }
+
   if run_with_usb_install_prompt_taps \
     "install" \
     "$OUT_DIR/install.txt" \
@@ -175,36 +210,34 @@ install_apk() {
     return 0
   fi
 
-  if grep -q "INSTALL_FAILED_UPDATE_INCOMPATIBLE" "$OUT_DIR/install.txt"; then
-    if ! truthy "$ALLOW_UNINSTALL_ON_SIGNATURE_MISMATCH"; then
-      {
-        echo "Existing $PACKAGE_NAME install has a different signing key."
-        echo "Refusing to uninstall automatically because that clears app data."
-        echo "Set ALLOW_UNINSTALL_ON_SIGNATURE_MISMATCH=true to allow a clean reinstall."
-      } > "$OUT_DIR/install-signature-mismatch.txt"
-      return 1
-    fi
-
-    adb_cmd uninstall "$PACKAGE_NAME" > "$OUT_DIR/install-uninstall-incompatible.txt" 2>&1 || true
-    if run_with_usb_install_prompt_taps \
-      "install-after-uninstall" \
-      "$OUT_DIR/install-after-uninstall.txt" \
-      adb_cmd install -r -t -g "$apk_path"; then
-      return 0
-    fi
-    cp "$OUT_DIR/install-after-uninstall.txt" "$OUT_DIR/install.txt"
+  local mismatch_status=0
+  maybe_handle_signature_mismatch "$OUT_DIR/install.txt" "install-after-uninstall" || mismatch_status=$?
+  if [[ "$mismatch_status" -eq 0 ]]; then
+    return 0
   fi
-
-  if ! grep -q "INSTALL_FAILED_USER_RESTRICTED" "$OUT_DIR/install.txt"; then
+  if [[ "$mismatch_status" -ne 1 ]]; then
     return 1
   fi
 
-  adb_cmd push "$apk_path" /data/local/tmp/vibepub-app-debug.apk \
-    > "$OUT_DIR/install-fallback-push.txt" 2>&1
-  run_with_usb_install_prompt_taps \
-    "install-fallback-pm" \
-    "$OUT_DIR/install-fallback-pm.txt" \
-    adb_cmd shell pm install -r -t -g /data/local/tmp/vibepub-app-debug.apk
+  if ! grep -q "INSTALL_FAILED_USER_RESTRICTED" "$OUT_DIR/install.txt" &&
+    [[ ! -f "$OUT_DIR/install-timeout.txt" ]]; then
+    return 1
+  fi
+
+  if install_from_device_tmp "install-fallback"; then
+    return 0
+  fi
+
+  mismatch_status=0
+  maybe_handle_signature_mismatch "$OUT_DIR/install-fallback-pm.txt" "install-fallback-after-uninstall" || mismatch_status=$?
+  if [[ "$mismatch_status" -eq 0 ]]; then
+    return 0
+  fi
+  if [[ "$mismatch_status" -ne 1 ]]; then
+    return 1
+  fi
+
+  return 1
 }
 
 mkdir -p "$OUT_DIR"

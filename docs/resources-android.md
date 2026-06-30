@@ -50,9 +50,12 @@ Needed from account:
 
 ### Android Signing
 
-Status: internal debug APK can be built by CI without a release keystore.
+Status: CI supports stable signing for the internal debug APK when Android
+signing secrets are configured. Without these secrets, GitHub Actions falls
+back to the runner debug key, but APKs from different runs may not update over
+each other on a real device.
 
-For a stable internal release channel, generate and keep:
+For a stable internal dogfood channel, generate and keep:
 
 - release keystore
 - `ANDROID_KEYSTORE_BASE64`
@@ -60,7 +63,9 @@ For a stable internal release channel, generate and keep:
 - `ANDROID_KEY_ALIAS`
 - `ANDROID_KEY_PASSWORD`
 
-This can be delayed until the first release APK is needed. Debug APK is enough for first device testing.
+The Android build maps these secrets into `VIBEPUB_RELEASE_*` Gradle
+properties and signs `assembleDebug` with that key when present. Keep using the
+same keystore for all internal APKs so ADB can install updates in place.
 
 ### ASR
 
