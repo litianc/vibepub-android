@@ -64,12 +64,17 @@ fun RecordingEntity.statusLabel(): String {
 fun RecordingEntity.statusDetail(): String {
     return when (status.asRecordingStatus()) {
         RecordingStatus.LOCAL_RECORDED -> "录音已保存，等待上传。"
-        RecordingStatus.UPLOADING -> "正在上传录音，网络恢复后会自动继续。"
+        RecordingStatus.UPLOADING -> retryableUploadDetail()
         RecordingStatus.UPLOADED -> "录音已到云端，正在排队转录。"
         RecordingStatus.PROCESSING -> processingStatusDetail()
         RecordingStatus.COMPLETED -> completedStatusDetail()
         RecordingStatus.FAILED -> lastError?.takeIf { it.isNotBlank() } ?: "这条录音处理失败，可以重试。"
     }
+}
+
+fun RecordingEntity.shouldShowStatusDetailInline(): Boolean {
+    return status.asRecordingStatus() == RecordingStatus.FAILED ||
+        (status.asRecordingStatus() == RecordingStatus.UPLOADING && !lastError.isNullOrBlank())
 }
 
 fun RecordingEntity.workflowNextActionLabel(): String {
@@ -438,6 +443,17 @@ private fun RecordingEntity.completedStatusDetail(): String {
         hasWechatDraftReference() -> "文章已生成，公众号草稿也已准备好。"
         hasDraftFailureMessage() -> "文章已生成，但公众号草稿创建失败。可以先复制正文，稍后再重试草稿。"
         else -> "文章已生成，正在等待公众号草稿信息同步。"
+    }
+}
+
+private fun RecordingEntity.retryableUploadDetail(): String {
+    val error = lastError?.trim().orEmpty()
+    return if (error.isBlank()) {
+        "正在上传录音，网络恢复后会自动继续。"
+    } else if (error.contains("自动重试")) {
+        "最近上传问题：$error。"
+    } else {
+        "最近上传问题：$error；会自动重试。"
     }
 }
 

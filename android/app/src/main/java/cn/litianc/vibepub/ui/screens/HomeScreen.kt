@@ -75,6 +75,7 @@ import cn.litianc.vibepub.data.displayTitle
 import cn.litianc.vibepub.data.hasDraftFailureMessage
 import cn.litianc.vibepub.data.listDurationLabel
 import cn.litianc.vibepub.data.primaryRecoveryAction
+import cn.litianc.vibepub.data.shouldShowStatusDetailInline
 import cn.litianc.vibepub.data.statusDetail
 import cn.litianc.vibepub.data.statusLabel
 import cn.litianc.vibepub.data.workflowCycleLabel
@@ -693,7 +694,7 @@ fun RecordingCard(
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.testTag("RecordingCardSyncFreshness"),
                 )
-                if (status == RecordingStatus.FAILED) {
+                if (recording.shouldShowStatusDetailInline()) {
                     Spacer(modifier = Modifier.height(6.dp))
                     Text(
                         text = recording.statusDetail(),

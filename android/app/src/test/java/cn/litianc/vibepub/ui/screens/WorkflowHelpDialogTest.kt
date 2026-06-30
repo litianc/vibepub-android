@@ -124,6 +124,29 @@ class WorkflowHelpDialogTest {
     }
 
     @Test
+    fun recordingCardShowsRetryableUploadProblemInline() {
+        composeTestRule.setContent {
+            RecordingCard(
+                recording = RecordingEntity(
+                    filename = "VibePub-test.m4a",
+                    durationMs = 42_000L,
+                    timestamp = 1L,
+                    status = RecordingStatus.UPLOADING.value,
+                    lastError = "网络异常，稍后自动重试",
+                ),
+                lastSyncAtMs = 1_000L,
+                onClick = {},
+                onRetryUpload = {},
+                onRefresh = {},
+                onDeleteRecording = {},
+            )
+        }
+
+        composeTestRule.onNodeWithText("上传中").assertIsDisplayed()
+        composeTestRule.onNodeWithText("最近上传问题：网络异常，稍后自动重试。").assertIsDisplayed()
+    }
+
+    @Test
     fun recordingCardRequiresConfirmationBeforeDeleting() {
         var deleteCount = 0
         composeTestRule.setContent {

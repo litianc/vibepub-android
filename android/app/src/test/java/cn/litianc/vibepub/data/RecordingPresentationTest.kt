@@ -48,6 +48,26 @@ class RecordingPresentationTest {
     }
 
     @Test
+    fun retryableUploadProblemStaysVisibleWithoutMarkingRecordingFailed() {
+        val recording = RecordingEntity(
+            filename = "VibePub-test.m4a",
+            durationMs = 1_000L,
+            timestamp = 1L,
+            status = RecordingStatus.UPLOADING.value,
+            lastError = "网络异常，稍后自动重试",
+        )
+
+        assertEquals("上传中", recording.statusLabel())
+        assertTrue(recording.statusDetail().contains("最近上传问题：网络异常"))
+        assertTrue(recording.statusDetail().contains("会自动重试"))
+        assertEquals(
+            "最近上传问题：服务器暂时不可用；会自动重试。",
+            recording.copy(lastError = "服务器暂时不可用").statusDetail(),
+        )
+        assertTrue(recording.shouldShowStatusDetailInline())
+    }
+
+    @Test
     fun recoveryActionDistinguishesUploadFailuresFromCloudFailures() {
         val local = RecordingEntity(
             filename = "local.m4a",
