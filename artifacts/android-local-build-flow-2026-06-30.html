@@ -423,8 +423,8 @@ yes | sdkmanager --licenses
 sdkmanager "platforms;android-36" "build-tools;36.0.0"</code></pre>
 
         <pre><code># 日常快速闭环
-gradle -p android :app:testDebugUnitTest
-gradle -p android :app:assembleDebug
+scripts/build-android-local.sh test
+scripts/build-android-local.sh assemble
 adb -s 10.161.2.96:43355 install -r android/app/build/outputs/apk/debug/app-debug.apk
 adb -s 10.161.2.96:43355 shell am start -n cn.litianc.vibepub/.MainActivity</code></pre>
       </div>
@@ -435,11 +435,11 @@ adb -s 10.161.2.96:43355 shell am start -n cn.litianc.vibepub/.MainActivity</cod
       <div class="status-grid">
         <article class="status ok">
           <h3>已完成</h3>
-          <p><code>android-commandlinetools</code> 已安装；<code>adb</code> 和 <code>gradle</code> 已存在。</p>
+          <p>最小 Android SDK、JDK 21、本地单测和本地 <code>assembleDebug</code> 已跑通。</p>
         </article>
         <article class="status todo">
           <h3>下一步</h3>
-          <p>安装 <code>platforms;android-36</code> 和 <code>build-tools;36.0.0</code>，写入本地 SDK 配置。</p>
+          <p>恢复 ADB 无线调试端口或改用 USB，把本地 APK 直接安装到平板。</p>
         </article>
         <article class="status later">
           <h3>仍保留</h3>

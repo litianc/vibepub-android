@@ -1,8 +1,8 @@
 # VibePub Android Experience Progress - 2026-06-30
 
-记录时间：2026-06-30 17:30 CST
+记录时间：2026-06-30 18:08 CST
 分支：`codex/android-experience-v1`  
-当前已推送提交：`ec43c84 Keep home focus from trusting placeholder draft refs`
+当前已推送提交：`797f823 Visualize local Android build loop`
 
 ## 已验证
 
@@ -59,9 +59,19 @@
 ### 本机 Android 测试环境
 - 本地快速编译流程图：`artifacts/android-local-build-flow-2026-06-30.html`
 - `android-commandlinetools` 已安装到 `/opt/homebrew/share/android-commandlinetools`。
+- Android SDK 包已安装：
+  - `platforms;android-36`
+  - `build-tools;36.0.0`
+  - `platform-tools;37.0.0`
+- JDK 21 已安装到 `/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home`。
+- 本地配置已写入被 git 忽略的 `android/local.properties`。
+- 新增本地构建脚本：`scripts/build-android-local.sh`
+- 本地验证已通过：
+  - `scripts/build-android-local.sh test` 等价环境下，`gradle -p android :app:testDebugUnitTest` 成功，热启动后约 37 秒。
+  - `gradle -p android :app:assembleDebug` 成功，首次本地打包约 1 分 22 秒。
+  - `scripts/build-android-local.sh assemble` 成功，增量约 16 秒。
 - GitHub Actions Android Tests 可用并已通过。
-- 本机仍待补齐 Android platform/build-tools：`platforms;android-36`、`build-tools;36.0.0`。
-- 建议：下一步接受 SDK licenses、安装上述 SDK 包并写入 `android/local.properties`，把本地 `testDebugUnitTest`、`assembleDebug`、ADB 安装串成快速闭环。
+- 注意：本地单测必须使用 JDK 21；JDK 26 会导致 Robolectric 4.12 shadow class 解析失败。
 
 ### 生产环境待验证
 - Worker `duration_ms` 迁移尚未部署到生产 D1。
@@ -78,6 +88,8 @@
   - 播放按钮可播放本地录音，进度变化。
   - 复制/分享/导出入口可点击。
   - Token 错误时显示配置错误和可恢复路径。
+- 本地 APK 已生成：`android/app/build/outputs/apk/debug/app-debug.apk`
+- 待恢复 ADB 后安装本地 APK：当前 `10.161.2.96` 网络可 ping 通，但无线调试端口 `42327` / `43355` 均 connection refused，需要重新打开平板无线调试页面获取新端口，或改用 USB。
 
 ### 产品体验待完善
 - 继续按体验优先版计划推进：
