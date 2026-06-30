@@ -99,4 +99,10 @@ class RecordingFilesTest {
             initialRecordingErrorForUploadToken(hasUploadToken = false),
         )
     }
+
+    @Test
+    fun retryUploadMessageMatchesWhetherWorkWasQueued() {
+        assertEquals("已重新加入上传队列", retryUploadToastMessage(queued = true))
+        assertEquals("请先配置 FILES_TOKEN 后重试上传", retryUploadToastMessage(queued = false))
+    }
 }

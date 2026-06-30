@@ -1,8 +1,8 @@
 # VibePub Android Experience Progress - 2026-06-30
 
-记录时间：2026-06-30 19:05 CST
+记录时间：2026-06-30 19:20 CST
 分支：`codex/android-experience-v1`  
-本次记录基线提交：`929fd7f Clarify article-to-draft progress in detail review`
+本次记录基线提交：`c1433f6 Surface last sync state in Android settings`
 
 ## 已验证
 
@@ -22,6 +22,7 @@
   - 状态提示 icon 可打开完整流程说明：保存录音 → 上传音频 → 云端排队 → 语音识别 → 文章改写 → 公众号草稿 → 人工发布确认。
   - 详情页“公众号草稿审核”现在显示短阶段结果：`草稿已就绪`、`文章可用 · 草稿待同步`、`文章可用 · 草稿需处理`、`生成中 · 未到发布检查`、`结果不完整 · 建议刷新`。
   - 设置页配置中心可直接看到最近一次云端同步状态；未同步时显示 `尚未同步`，已同步时显示具体时间。
+  - 重试上传时会根据真实排队结果反馈：只有实际进入 WorkManager 上传队列才显示 `已重新加入上传队列`；缺少 `FILES_TOKEN` 时提示先配置后重试。
   - 状态模型覆盖 `LOCAL_RECORDED`、`UPLOADING`、`UPLOADED`、`PROCESSING`、`COMPLETED`、`FAILED`。
 - placeholder 草稿引用修复已验证并发布到 APK：
   - Android 提交：`ae943af Keep draft readiness from trusting placeholder values`
@@ -78,6 +79,7 @@
   - `scripts/install-android-local-apk.sh --help` 和 shell 语法检查通过。
   - 本轮详情页阶段结果改动后，`DetailScreenTest`、`RecordingPresentationTest` 和 `scripts/build-android-local.sh test` 均通过；全量 Android 单测约 33 秒。
   - 本轮设置页最近同步状态改动后，`SettingsScreenTest`、`scripts/build-android-local.sh test`、`scripts/build-android-local.sh assemble` 均通过。
+  - 本轮重试上传反馈改动后，`RecordingFilesTest`、`scripts/build-android-local.sh test`、`scripts/build-android-local.sh assemble` 均通过。
 - GitHub Actions Android Tests 可用并已通过。
 - 注意：本地单测必须使用 JDK 21；JDK 26 会导致 Robolectric 4.12 shadow class 解析失败。
 
@@ -97,7 +99,7 @@
   - 复制/分享/导出入口可点击。
   - Token 错误时显示配置错误和可恢复路径。
 - 本地 APK 已生成：`android/app/build/outputs/apk/debug/app-debug.apk`
-  - 当前本地 APK SHA-256：`7d9f0bb9c15643bbe444420312b627c77656d21ac25a853b519a6e89d8371557`
+  - 当前本地 APK SHA-256：`7a853f946ff2deb3ff50add59ce684d7e7bfb93ae6aee5178290141cc4d74938`
 - 待恢复 ADB 后安装本地 APK：当前 `10.161.2.96` 网络可 ping 通，但无线调试端口 `42327` / `43355` 均 connection refused，需要重新打开平板无线调试页面获取新端口，或改用 USB。
 - ADB 恢复后可直接运行：
   - `scripts/install-android-local-apk.sh --serial <new-adb-serial> --skip-build`

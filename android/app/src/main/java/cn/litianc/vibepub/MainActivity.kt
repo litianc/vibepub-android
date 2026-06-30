@@ -133,8 +133,8 @@ fun VibePubApp(
                     }
                     Toast.makeText(context, "本地录音文件不存在", Toast.LENGTH_SHORT).show()
                 } else {
-                    enqueueUpload(file, replaceExistingUpload = true)
-                    Toast.makeText(context, "已重新加入上传队列", Toast.LENGTH_SHORT).show()
+                    val queued = enqueueUpload(file, replaceExistingUpload = true)
+                    Toast.makeText(context, retryUploadToastMessage(queued), Toast.LENGTH_SHORT).show()
                 }
             }
         },
@@ -219,4 +219,8 @@ internal fun initialRecordingStatusForUploadToken(hasUploadToken: Boolean): Stri
 
 internal fun initialRecordingErrorForUploadToken(hasUploadToken: Boolean): String? {
     return if (hasUploadToken) null else "请先在设置中配置 FILES_TOKEN"
+}
+
+internal fun retryUploadToastMessage(queued: Boolean): String {
+    return if (queued) "已重新加入上传队列" else "请先配置 FILES_TOKEN 后重试上传"
 }
