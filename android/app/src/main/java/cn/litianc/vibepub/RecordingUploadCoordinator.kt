@@ -60,6 +60,7 @@ object RecordingUploadCoordinator {
         preferences: AppPreferences,
         file: File,
         addUploadJobTag: Boolean = true,
+        replaceExistingUpload: Boolean = false,
     ): Boolean {
         val token = preferences.filesToken
         if (token.isBlank()) {
@@ -101,10 +102,14 @@ object RecordingUploadCoordinator {
 
         WorkManager.getInstance(context).enqueueUniqueWork(
             uniqueUploadWorkName(file.name),
-            ExistingWorkPolicy.KEEP,
+            uploadExistingWorkPolicy(replaceExistingUpload),
             requestBuilder.build(),
         )
         return true
+    }
+
+    internal fun uploadExistingWorkPolicy(replaceExistingUpload: Boolean): ExistingWorkPolicy {
+        return if (replaceExistingUpload) ExistingWorkPolicy.REPLACE else ExistingWorkPolicy.KEEP
     }
 
     internal fun uniqueUploadWorkName(filename: String): String {

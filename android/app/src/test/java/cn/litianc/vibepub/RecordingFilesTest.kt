@@ -1,5 +1,6 @@
 package cn.litianc.vibepub
 
+import androidx.work.ExistingWorkPolicy
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -66,5 +67,17 @@ class RecordingFilesTest {
         assertFalse(first.contains("090000"))
         assertFalse(first.contains(".m4a"))
         assertFalse(first == other)
+    }
+
+    @Test
+    fun explicitUploadRetryReplacesStaleUniqueWork() {
+        assertEquals(
+            ExistingWorkPolicy.KEEP,
+            RecordingUploadCoordinator.uploadExistingWorkPolicy(replaceExistingUpload = false),
+        )
+        assertEquals(
+            ExistingWorkPolicy.REPLACE,
+            RecordingUploadCoordinator.uploadExistingWorkPolicy(replaceExistingUpload = true),
+        )
     }
 }
