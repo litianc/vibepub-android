@@ -58,8 +58,10 @@ class RecordingPresentationTest {
         )
 
         assertEquals("上传中", recording.statusLabel())
-        assertTrue(recording.statusDetail().contains("最近上传问题：网络异常"))
-        assertTrue(recording.statusDetail().contains("会自动重试"))
+        assertEquals(
+            "最近上传问题：网络异常，稍后自动重试。",
+            recording.statusDetail(),
+        )
         assertEquals(
             "最近上传问题：服务器暂时不可用；会自动重试。",
             recording.copy(lastError = "服务器暂时不可用").statusDetail(),
