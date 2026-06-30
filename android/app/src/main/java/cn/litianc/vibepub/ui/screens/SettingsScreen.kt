@@ -32,6 +32,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Link
+import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.AlertDialog
@@ -52,6 +53,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -92,6 +94,7 @@ import java.net.URL
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.TimeZone
 
 internal enum class ConnectionCheckState {
     PASSED,
@@ -141,6 +144,9 @@ fun SettingsScreen(
     var connectionResult by remember { mutableStateOf<ConnectionTestResult?>(null) }
     var showDiagnostics by remember { mutableStateOf(false) }
     var diagnostics by remember { mutableStateOf("") }
+    val lastSyncAtMs by remember(preferences) {
+        preferences.lastSyncAtMsFlow()
+    }.collectAsState(initial = preferences.lastSyncAtMs)
     var lastTestedConfig by remember {
         mutableStateOf(SettingsConnectionConfig(apiBaseUrl, filesToken).normalized())
     }
@@ -272,6 +278,19 @@ fun SettingsScreen(
                         subtitle = "由云端 mining job 创建草稿，Android 只展示状态",
                         value = "云端托管",
                         valueColor = Color(0xFF2E7D32),
+                        onClick = {},
+                    )
+                }
+            }
+
+            item {
+                SettingsGroup(title = "同步") {
+                    SettingsItem(
+                        iconContent = { SettingsIcon(Color(0xFFEAF2FF)) { Icon(Icons.Default.Sync, contentDescription = null, tint = Color(0xFF2762C7)) } },
+                        title = "最近同步",
+                        subtitle = settingsLastSyncDetail(lastSyncAtMs),
+                        value = settingsLastSyncValue(lastSyncAtMs),
+                        modifier = Modifier.testTag("SettingsLastSyncItem"),
                         onClick = {},
                     )
                 }
@@ -467,6 +486,29 @@ internal fun shouldAutoTestSettingsConnection(
     currentConfig: SettingsConnectionConfig,
 ): Boolean {
     return lastTestedConfig.normalized() != currentConfig.normalized()
+}
+
+internal fun settingsLastSyncValue(
+    lastSyncAtMs: Long,
+    locale: Locale = Locale.getDefault(),
+    timeZone: TimeZone = TimeZone.getDefault(),
+): String {
+    if (lastSyncAtMs <= 0L) return "尚未同步"
+    return SimpleDateFormat("MM-dd HH:mm", locale).apply {
+        this.timeZone = timeZone
+    }.format(Date(lastSyncAtMs))
+}
+
+internal fun settingsLastSyncDetail(
+    lastSyncAtMs: Long,
+    locale: Locale = Locale.getDefault(),
+    timeZone: TimeZone = TimeZone.getDefault(),
+): String {
+    if (lastSyncAtMs <= 0L) return "还没有从云端同步过录音状态"
+    val formatted = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", locale).apply {
+        this.timeZone = timeZone
+    }.format(Date(lastSyncAtMs))
+    return "上次从云端同步录音和成文状态：$formatted"
 }
 
 private suspend fun testBackendConnection(apiBaseUrl: String, filesToken: String): ConnectionTestResult =

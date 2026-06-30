@@ -6,8 +6,28 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.util.Locale
+import java.util.TimeZone
 
 class SettingsScreenTest {
+    @Test
+    fun settingsLastSyncLabelShowsUninitializedStatePlainly() {
+        assertEquals("尚未同步", settingsLastSyncValue(0L))
+        assertEquals("还没有从云端同步过录音状态", settingsLastSyncDetail(0L))
+    }
+
+    @Test
+    fun settingsLastSyncLabelShowsConcreteTimestamp() {
+        val timestamp = 1_782_804_000_000L
+        val timeZone = TimeZone.getTimeZone("Asia/Shanghai")
+
+        assertEquals("06-30 15:20", settingsLastSyncValue(timestamp, Locale.US, timeZone))
+        assertEquals(
+            "上次从云端同步录音和成文状态：2026-06-30 15:20:00",
+            settingsLastSyncDetail(timestamp, Locale.US, timeZone),
+        )
+    }
+
     @Test
     fun connectionResultSummarizesHealthyBackendAndToken() {
         val result = buildConnectionResult(
