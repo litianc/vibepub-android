@@ -361,6 +361,7 @@ test("dispatches mining workflow for the uploaded filename", async () => {
       createEnv({
         FILES_BUCKET: bucket,
         GITHUB_PAT: "github-token",
+        GITHUB_WORKFLOW_REF: "codex/android-experience-v1",
       }),
       context,
     );
@@ -378,7 +379,7 @@ test("dispatches mining workflow for the uploaded filename", async () => {
     "https://api.github.com/repos/litianc/vibepub-android/actions/workflows/mining-job.yml/dispatches",
   );
   assert.equal(dispatches[0].init.method, "POST");
-  assert.equal(dispatches[0].body.ref, "main");
+  assert.equal(dispatches[0].body.ref, "codex/android-experience-v1");
   assert.deepEqual(dispatches[0].body.inputs, {
     target_filename: "VibePub-2026-06-30-160000-0m18s-Tue-Afternoon.m4a",
   });

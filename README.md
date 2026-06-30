@@ -77,13 +77,18 @@ npx wrangler deploy
 
 Cloudflare is logged in on this machine and Worker deployment is available with `npx wrangler`.
 
-Worker production still needs a `GITHUB_PAT` secret if uploads should wake the
-GitHub Actions mining workflow immediately. Without it, recordings are still
-processed by the scheduled mining job, but they can wait for the next cron run.
-Use an Actions-capable GitHub token and set it as both a GitHub Actions secret
-for `.github/workflows/deploy-worker.yml` and a Cloudflare Worker secret:
+Uploads wake the GitHub Actions mining workflow immediately through a
+Cloudflare Worker secret named `GITHUB_PAT`. GitHub Actions repository secrets
+cannot use the `GITHUB_` prefix, so `.github/workflows/deploy-worker.yml` reads
+the token from `WORKFLOW_DISPATCH_PAT` and writes it into the Worker as
+`GITHUB_PAT`.
 
 ```bash
 cd infra/worker
 npx wrangler secret put GITHUB_PAT
 ```
+
+`GITHUB_WORKFLOW_REF` is currently set to `codex/android-experience-v1` in
+`infra/worker/wrangler.toml` because that branch contains the targeted
+`mining-job.yml` input. Switch it back to `main` after the workflow input lands
+there.

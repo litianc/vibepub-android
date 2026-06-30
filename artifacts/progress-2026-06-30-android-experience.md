@@ -1,8 +1,8 @@
 # VibePub Android Experience Progress - 2026-06-30
 
-记录时间：2026-06-30 19:04 CST
+记录时间：2026-06-30 19:19 CST
 分支：`codex/android-experience-v1`  
-本次记录基线提交：`903b513 Target mining dispatches at uploaded files`
+本次记录基线提交：`c70bb25 Document the remaining Worker dispatch secret`
 
 ## 已验证
 
@@ -48,13 +48,16 @@
   - 本地验证：`npm run typecheck`、`npm test`、`git diff --check` 均通过。
   - Worker validate：GitHub Actions run `28433259609` 成功
   - 生产 D1 已应用 `0004_recording_duration_ms.sql`，`npx wrangler d1 migrations list vibepub-db --remote` 显示无待应用迁移。
-  - 生产 Worker 已部署，当前版本 ID：`f2c5b850-a9f9-4b3f-8229-d90015abdc5b`。
+  - 生产 Worker 已部署，当前版本 ID：`8e4bf574-827e-49dc-be7b-f1027c086fe0`。
   - 生产验证：`GET https://vibepub.litianc.cn/health` 返回 `ok: true`；授权 `GET /api/recordings` 返回 30 条记录，字段包含 `duration_ms`，第一条 `duration_ms` 为 number。
 - Worker 上传后会把刚上传的文件名传给 GitHub Actions mining workflow：
   - `/api/uploads` 触发 `mining-job.yml` 时带上 `inputs.target_filename`。
   - mining workflow 已支持 `TARGET_FILENAME`，因此后台可以优先点名处理本次录音，减少等待定时扫描和处理整个 inbox 的延迟。
   - 本地验证：`infra/worker` 下 `npm test`、`npm run typecheck` 均通过。
-  - 生产 Worker 已部署该代码，但 `npx wrangler secret list` 当前只显示 `FILES_TOKEN`，缺少 `GITHUB_PAT`；因此自动唤起 GitHub Actions 仍待配置 secret 后验证。
+  - GitHub Actions secret 已配置为 `WORKFLOW_DISPATCH_PAT`；Cloudflare Worker secret 已配置为 `GITHUB_PAT`。
+  - 生产 Worker 当前 `GITHUB_WORKFLOW_REF` 指向 `codex/android-experience-v1`，因为该分支的 `mining-job.yml` 已支持 `target_filename`；合入 main 后应切回 `main`。
+  - 生产验证：上传 `VibePub-20260630111621-0m0s-Codex-Dispatch-Smoke.m4a` 后触发 GitHub Actions run `28440265834`，事件为 `workflow_dispatch`，分支为 `codex/android-experience-v1`，日志显示 `TARGET_FILENAME` 与目标文件名匹配。
+  - 该 smoke 文件因无效音频被 mining job 从 R2 清理；D1 测试记录已手动删除，授权 `/api/recordings` 复查 `smoke_record_count=0`。
 
 ### 真机/ADB
 - 当前红米平板 ADB 在线：
@@ -97,11 +100,11 @@
 - 注意：本地单测必须使用 JDK 21；JDK 26 会导致 Robolectric 4.12 shadow class 解析失败。
 
 ### 生产环境待验证
-- `GITHUB_PAT` 尚未配置为 Worker secret；需要配置后验证 `/api/uploads` 能立即触发 GitHub Actions mining run。
 - 需要下一次真机/上传流程验证：
   - 新上传录音在 D1 中写入稳定 `duration_ms`。
-  - 上传新录音后 GitHub Actions mining run 接收到对应 `target_filename`，而不是只等待 10 分钟定时扫描。
+  - 真机上传新录音后 GitHub Actions mining run 接收到对应 `target_filename`，而不是只等待 10 分钟定时扫描。
   - Android 首页与详情页时长显示不依赖文件名兜底。
+  - `target_filename` 支持合入 `main` 后，将 Worker `GITHUB_WORKFLOW_REF` 切回 `main` 并重新部署。
 
 ### 真机端到端待验证
 - 需要使用准备好的音频 `/Users/xyli/Documents/Code/revoice-project/.data/test_clips/speaker_boundary_18_48s.mp3` 跑完整流程：

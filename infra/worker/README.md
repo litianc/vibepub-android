@@ -30,7 +30,7 @@ creation failed after article generation.
 npm install
 npx wrangler r2 bucket create vibepub-files
 npx wrangler secret put FILES_TOKEN
-# Optional but recommended: lets /api/uploads immediately dispatch mining-job.yml.
+# Runtime secret name used by the Worker.
 npx wrangler secret put GITHUB_PAT
 npx wrangler deploy
 ```
@@ -39,6 +39,13 @@ The Worker route is configured for `vibepub.litianc.cn`.
 `GITHUB_PAT` must be able to create workflow dispatch events for
 `litianc/vibepub-android`; otherwise uploads still succeed, but processing waits
 for the scheduled mining workflow.
+GitHub Actions repository secrets cannot use the `GITHUB_` prefix, so the deploy
+workflow reads this token from `WORKFLOW_DISPATCH_PAT` and writes it to the
+Worker as `GITHUB_PAT`.
+`GITHUB_WORKFLOW_REF` controls which Git ref receives the workflow dispatch. The
+current dogfood deployment points it at `codex/android-experience-v1` because
+that branch contains the `target_filename` workflow input; switch it back to
+`main` after the workflow input lands on `main`.
 
 ## Production Update Checklist
 

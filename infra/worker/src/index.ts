@@ -4,6 +4,7 @@ export interface Env {
   FILES_TOKEN: string;
   PUBLIC_BASE_URL: string;
   GITHUB_PAT?: string;
+  GITHUB_WORKFLOW_REF?: string;
 }
 
 const corsHeaders = {
@@ -193,6 +194,7 @@ async function triggerGitHubAction(env: Env, targetFilename: string): Promise<vo
   const repo = "litianc/vibepub-android";
   const workflowId = "mining-job.yml";
   const url = `https://api.github.com/repos/${repo}/actions/workflows/${workflowId}/dispatches`;
+  const workflowRef = env.GITHUB_WORKFLOW_REF?.trim() || "main";
   
   const response = await fetch(url, {
     method: "POST",
@@ -203,7 +205,7 @@ async function triggerGitHubAction(env: Env, targetFilename: string): Promise<vo
       "Content-Type": "application/json"
     },
     body: JSON.stringify({
-      ref: "main",
+      ref: workflowRef,
       inputs: {
         target_filename: targetFilename,
       },

@@ -69,12 +69,12 @@ jobs:
       - name: Install dependencies
         run: npm install
 
-      - name: Set Secrets
-        if: env.GITHUB_PAT != ''
-        run: echo "$GITHUB_PAT" | npx wrangler secret put GITHUB_PAT
+      - name: Set Workflow Dispatch Secret
+        if: env.WORKFLOW_DISPATCH_PAT != ''
+        run: printf '%s' "$WORKFLOW_DISPATCH_PAT" | npx wrangler secret put GITHUB_PAT
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          GITHUB_PAT: ${{ secrets.GITHUB_PAT }}
+          WORKFLOW_DISPATCH_PAT: ${{ secrets.WORKFLOW_DISPATCH_PAT }}
 
       - name: Deploy
         run: npx wrangler deploy
