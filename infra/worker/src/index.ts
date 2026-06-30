@@ -206,7 +206,7 @@ async function listUploads(env: Env, url: URL): Promise<Response> {
 async function listRecordings(env: Env): Promise<Response> {
   const userId = "default_user";
   try {
-    return json({ recordings: await queryRecordings(env, userId, "full") });
+    return json({ recordings: withRecordingDisplayFields(await queryRecordings(env, userId, "full")) });
   } catch (dbErr: any) {
     const message = String(dbErr?.message || "");
     if (!message.includes("no such column")) {
@@ -216,10 +216,10 @@ async function listRecordings(env: Env): Promise<Response> {
 
     try {
       return json({
-        recordings: (await queryRecordings(env, userId, "withoutProcessingStage")).map((recording: any) => ({
-          ...recording,
-          processing_stage: null,
-        })),
+        recordings: withRecordingDisplayFields(
+          await queryRecordings(env, userId, "withoutProcessingStage"),
+          { processing_stage: null },
+        ),
       });
     } catch (legacyDbErr: any) {
       const legacyMessage = String(legacyDbErr?.message || "");
@@ -234,18 +234,51 @@ async function listRecordings(env: Env): Promise<Response> {
       .bind(userId)
       .all();
       return json({
-        recordings: results.map((recording: any) => ({
-          ...recording,
+        recordings: withRecordingDisplayFields(results, {
           article_title: null,
           raw_text_preview: null,
           processing_stage: null,
           wechat_url: null,
           wechat_draft_id: null,
           error_message: null,
-        })),
+        }),
       });
     }
   }
+}
+
+function withRecordingDisplayFields(
+  recordings: unknown[],
+  defaults: Record<string, unknown> = {},
+): unknown[] {
+  return recordings.map((recording: any) => {
+    const durationMs =
+      positiveIntegerOrNull(recording?.duration_ms) ??
+      positiveIntegerOrNull(recording?.durationMs) ??
+      parseDurationMsFromRecordingFilename(recording?.filename);
+
+    return {
+      ...recording,
+      ...defaults,
+      duration_ms: durationMs,
+    };
+  });
+}
+
+function positiveIntegerOrNull(value: unknown): number | null {
+  const parsed = typeof value === "number" ? value : Number.parseInt(String(value), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+function parseDurationMsFromRecordingFilename(filename: unknown): number | null {
+  if (typeof filename !== "string") return null;
+  const match = filename.match(/-(\d+)m(\d+)s(?:-|\.|$)/);
+  if (!match) return null;
+
+  const minutes = Number.parseInt(match[1], 10);
+  const seconds = Number.parseInt(match[2], 10);
+  if (!Number.isFinite(minutes) || !Number.isFinite(seconds)) return null;
+  return ((minutes * 60) + seconds) * 1_000;
 }
 
 async function queryRecordings(

@@ -12,8 +12,10 @@ Cloudflare Worker API for Android audio uploads.
 - `GET /api/files/:key` - fetch an R2 object; requires token
 
 `/api/recordings` returns the Android display contract: `filename`, `status`,
-`created_at`, `updated_at`, optional `article_title`, `raw_text_preview`,
+`created_at`, `updated_at`, `duration_ms`, optional `article_title`, `raw_text_preview`,
 `processing_stage`, `wechat_url`, `wechat_draft_id`, and `error_message`.
+`duration_ms` is preserved from storage when present, otherwise derived from the
+standard VibePub filename duration segment such as `0m18s`.
 `processing_stage` is a narrow progress hint for the current pipeline step:
 `QUEUED`, `ASR`, `REWRITING`, `DRAFTING`, `ARTICLE_READY`,
 `COMPLETED`, or `FAILED`.

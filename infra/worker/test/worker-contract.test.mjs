@@ -20,7 +20,7 @@ test("lists Android recording display fields including processing stage", async 
   const db = createDb([
     {
       id: 1,
-      filename: "voice.m4a",
+      filename: "VibePub-2026-06-29-160846-0m6s-Mon-Afternoon-Beijing-Chaoyang.m4a",
       status: "PROCESSING",
       created_at: "2026-06-29 08:00:00",
       updated_at: "2026-06-29 08:01:00",
@@ -41,10 +41,43 @@ test("lists Android recording display fields including processing stage", async 
 
   assert.equal(response.status, 200);
   const body = await response.json();
-  assert.equal(body.recordings[0].filename, "voice.m4a");
+  assert.equal(
+    body.recordings[0].filename,
+    "VibePub-2026-06-29-160846-0m6s-Mon-Afternoon-Beijing-Chaoyang.m4a",
+  );
+  assert.equal(body.recordings[0].duration_ms, 6_000);
   assert.equal(body.recordings[0].article_title, "整理好的标题");
   assert.equal(body.recordings[0].processing_stage, "DRAFTING");
   assert.equal(body.recordings[0].wechat_draft_id, "MEDIA_ID_123");
+});
+
+test("preserves explicit recording duration when D1 starts returning it", async () => {
+  const db = createDb([
+    {
+      id: 1,
+      filename: "VibePub-2026-06-29-160846-0m6s-Mon-Afternoon-Beijing-Chaoyang.m4a",
+      status: "COMPLETED",
+      created_at: "2026-06-29 08:00:00",
+      updated_at: "2026-06-29 08:01:00",
+      duration_ms: 6_250,
+      article_title: "整理好的标题",
+      raw_text_preview: "这是一段原始识别结果",
+      processing_stage: "COMPLETED",
+      wechat_url: null,
+      wechat_draft_id: "MEDIA_ID_123",
+      error_message: null,
+    },
+  ]);
+
+  const response = await worker.fetch(
+    authorizedRequest("https://example.test/api/recordings"),
+    createEnv({ DB: db }),
+    createExecutionContext(),
+  );
+
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.recordings[0].duration_ms, 6_250);
 });
 
 test("keeps rich recording fields when only processing_stage is not migrated yet", async () => {
@@ -92,6 +125,7 @@ test("keeps rich recording fields when only processing_stage is not migrated yet
   const body = await response.json();
   assert.equal(body.recordings[0].article_title, "旧库文章");
   assert.equal(body.recordings[0].processing_stage, null);
+  assert.equal(body.recordings[0].duration_ms, null);
   assert.equal(body.recordings[0].wechat_draft_id, "MEDIA_ID_OLD");
 });
 
