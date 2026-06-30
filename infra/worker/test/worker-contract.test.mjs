@@ -80,6 +80,35 @@ test("preserves explicit recording duration when D1 starts returning it", async 
   assert.equal(body.recordings[0].duration_ms, 6_250);
 });
 
+test("lists placeholder draft references as missing values", async () => {
+  const db = createDb([
+    {
+      id: 1,
+      filename: "VibePub-2026-06-29-160846-0m6s-Mon-Afternoon-Beijing-Chaoyang.m4a",
+      status: "COMPLETED",
+      created_at: "2026-06-29 08:00:00",
+      updated_at: "2026-06-29 08:01:00",
+      article_title: "整理好的标题",
+      raw_text_preview: "这是一段原始识别结果",
+      processing_stage: "COMPLETED",
+      wechat_url: "null",
+      wechat_draft_id: "undefined",
+      error_message: null,
+    },
+  ]);
+
+  const response = await worker.fetch(
+    authorizedRequest("https://example.test/api/recordings"),
+    createEnv({ DB: db }),
+    createExecutionContext(),
+  );
+
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.recordings[0].wechat_url, null);
+  assert.equal(body.recordings[0].wechat_draft_id, null);
+});
+
 test("keeps rich recording fields when only processing_stage is not migrated yet", async () => {
   let calls = 0;
   const db = {
@@ -174,6 +203,75 @@ test("persists mining status metadata for Android progress display", async () =>
     null,
     "default_user",
     "voice.m4a",
+  ]);
+});
+
+test("does not persist placeholder draft references from status updates", async () => {
+  let boundValues = [];
+  const db = {
+    prepare(sql) {
+      assert.match(sql, /wechat_url = COALESCE/);
+      assert.match(sql, /wechat_draft_id = COALESCE/);
+      return statement({
+        run: async (values) => {
+          boundValues = values;
+          return { meta: { changes: 1 } };
+        },
+      });
+    },
+  };
+
+  const response = await worker.fetch(
+    authorizedRequest("https://example.test/api/internal/status", {
+      method: "PUT",
+      body: JSON.stringify({
+        filename: "voice.m4a",
+        status: "COMPLETED",
+        processingStage: "COMPLETED",
+        wechatUrl: " null ",
+        wechatDraftId: "undefined",
+      }),
+    }),
+    createEnv({ DB: db }),
+    createExecutionContext(),
+  );
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(boundValues.slice(5, 7), [null, null]);
+});
+
+test("keeps valid draft URL and ID from status updates", async () => {
+  let boundValues = [];
+  const db = {
+    prepare() {
+      return statement({
+        run: async (values) => {
+          boundValues = values;
+          return { meta: { changes: 1 } };
+        },
+      });
+    },
+  };
+
+  const response = await worker.fetch(
+    authorizedRequest("https://example.test/api/internal/status", {
+      method: "PUT",
+      body: JSON.stringify({
+        filename: "voice.m4a",
+        status: "COMPLETED",
+        processingStage: "COMPLETED",
+        wechatUrl: " https://mp.weixin.qq.com/draft ",
+        wechatDraftId: " MEDIA_ID_123 ",
+      }),
+    }),
+    createEnv({ DB: db }),
+    createExecutionContext(),
+  );
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(boundValues.slice(5, 7), [
+    "https://mp.weixin.qq.com/draft",
+    "MEDIA_ID_123",
   ]);
 });
 

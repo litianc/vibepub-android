@@ -261,6 +261,8 @@ function withRecordingDisplayFields(
       ...recording,
       ...defaults,
       duration_ms: durationMs,
+      wechat_url: normalizeRemoteReference(recording?.wechat_url),
+      wechat_draft_id: normalizeRemoteReference(recording?.wechat_draft_id),
     };
   });
 }
@@ -384,8 +386,8 @@ async function updateStatus(request: Request, env: Env): Promise<Response> {
           articleTitle || null,
           articleContent || null,
           stage,
-          wechatUrl || null,
-          wechatDraftId || null,
+          normalizeRemoteReference(wechatUrl),
+          normalizeRemoteReference(wechatDraftId),
           statusError.shouldSet ? 1 : 0,
           statusError.value,
           "default_user",
@@ -446,8 +448,8 @@ async function updateStatusWithoutProcessingStage(
         body.rawText || null,
         body.articleTitle || null,
         body.articleContent || null,
-        body.wechatUrl || null,
-        body.wechatDraftId || null,
+        normalizeRemoteReference(body.wechatUrl),
+        normalizeRemoteReference(body.wechatDraftId),
         body.errorMessage.shouldSet ? 1 : 0,
         body.errorMessage.value,
         "default_user",
@@ -521,6 +523,14 @@ function statusKeyOf(value: string): string {
 
 function normalizeOptionalString(value: unknown): string | null {
   return typeof value === "string" ? value.trim() || null : null;
+}
+
+function normalizeRemoteReference(value: unknown): string | null {
+  const normalized = normalizeOptionalString(value);
+  if (!normalized) return null;
+
+  const lowered = normalized.toLowerCase();
+  return lowered === "null" || lowered === "undefined" ? null : normalized;
 }
 
 function hasOwn(value: object, key: string): boolean {
