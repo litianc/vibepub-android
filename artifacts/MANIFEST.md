@@ -9,10 +9,10 @@
 
 ## Latest Release Channel
 - **Source of Truth**: GitHub Releases
-- **Latest Version**: `build-20260630-013310-61f51ea`
-- **Published**: 2026-06-30T01:33:14Z
-- **Release Commit**: `61f51eaa48118ab6486491ed4a93b1b5a4b12192`
-- **Release Digest**: `7c918a56c4ae1fa043cf824cfef52860aebd5a233b775f58c69bca7c321b65ce`
-- **APK URL**: <https://github.com/litianc/vibepub-android/releases/download/build-20260630-013310-61f51ea/app-debug.apk>
+- **Latest Version**: `build-20260630-014735-573107f`
+- **Published**: 2026-06-30T01:47:40Z
+- **Release Commit**: `573107ff89a8d144235338c69b57ece193ef1a1c`
+- **Release Digest**: `ec0d99690cfbd85d2760856125e35ac2e0cc59b5a2d3c1152b826d14b0700263`
+- **APK URL**: <https://github.com/litianc/vibepub-android/releases/download/build-20260630-014735-573107f/app-debug.apk>
 
 **Note**: For all internal testing and dogfooding, always download the latest APK from GitHub Releases rather than relying on local `artifacts/` snapshots.
