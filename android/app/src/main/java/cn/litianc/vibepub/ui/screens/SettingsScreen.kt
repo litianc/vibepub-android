@@ -51,6 +51,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -78,6 +79,7 @@ import cn.litianc.vibepub.data.statusLabel
 import cn.litianc.vibepub.data.workflowCurrentNodeLabel
 import cn.litianc.vibepub.data.workflowNextActionLabel
 import cn.litianc.vibepub.data.workflowProgressLabel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -107,6 +109,20 @@ internal data class ConnectionTestResult(
     val checks: List<ConnectionCheckItem>,
 )
 
+internal data class SettingsConnectionConfig(
+    val apiBaseUrl: String,
+    val filesToken: String,
+) {
+    fun normalized(): SettingsConnectionConfig {
+        return SettingsConnectionConfig(
+            apiBaseUrl = apiBaseUrl.trim(),
+            filesToken = filesToken.trim(),
+        )
+    }
+}
+
+private const val SETTINGS_AUTO_CONNECTION_TEST_DELAY_MS = 900L
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(
@@ -122,6 +138,25 @@ fun SettingsScreen(
     var connectionResult by remember { mutableStateOf<ConnectionTestResult?>(null) }
     var showDiagnostics by remember { mutableStateOf(false) }
     var diagnostics by remember { mutableStateOf("") }
+    var lastTestedConfig by remember {
+        mutableStateOf(SettingsConnectionConfig(apiBaseUrl, filesToken).normalized())
+    }
+
+    LaunchedEffect(apiBaseUrl, filesToken) {
+        val currentConfig = SettingsConnectionConfig(apiBaseUrl, filesToken).normalized()
+        if (!shouldAutoTestSettingsConnection(lastTestedConfig, currentConfig)) {
+            return@LaunchedEffect
+        }
+        delay(SETTINGS_AUTO_CONNECTION_TEST_DELAY_MS)
+        isTesting = true
+        connectionResult = null
+        try {
+            connectionResult = testBackendConnection(currentConfig.apiBaseUrl, currentConfig.filesToken)
+            lastTestedConfig = currentConfig
+        } finally {
+            isTesting = false
+        }
+    }
 
     Scaffold(
         topBar = {
@@ -201,8 +236,10 @@ fun SettingsScreen(
                             onClick = {
                                 isTesting = true
                                 connectionResult = null
+                                val currentConfig = SettingsConnectionConfig(apiBaseUrl, filesToken).normalized()
                                 scope.launch {
-                                    connectionResult = testBackendConnection(apiBaseUrl, filesToken)
+                                    connectionResult = testBackendConnection(currentConfig.apiBaseUrl, currentConfig.filesToken)
+                                    lastTestedConfig = currentConfig
                                     isTesting = false
                                 }
                             },
@@ -420,6 +457,13 @@ private fun SettingsIcon(color: Color, content: @Composable () -> Unit) {
     ) {
         content()
     }
+}
+
+internal fun shouldAutoTestSettingsConnection(
+    lastTestedConfig: SettingsConnectionConfig,
+    currentConfig: SettingsConnectionConfig,
+): Boolean {
+    return lastTestedConfig.normalized() != currentConfig.normalized()
 }
 
 private suspend fun testBackendConnection(apiBaseUrl: String, filesToken: String): ConnectionTestResult =

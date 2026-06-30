@@ -29,6 +29,33 @@ class SettingsScreenTest {
     }
 
     @Test
+    fun autoConnectionTestRunsOnlyWhenNormalizedConfigChanges() {
+        val tested = SettingsConnectionConfig(
+            apiBaseUrl = "https://api.example.com",
+            filesToken = "TOKEN",
+        )
+
+        assertFalse(
+            shouldAutoTestSettingsConnection(
+                lastTestedConfig = tested,
+                currentConfig = SettingsConnectionConfig(" https://api.example.com ", " TOKEN "),
+            ),
+        )
+        assertTrue(
+            shouldAutoTestSettingsConnection(
+                lastTestedConfig = tested,
+                currentConfig = SettingsConnectionConfig("https://api.example.com", "NEW_TOKEN"),
+            ),
+        )
+        assertTrue(
+            shouldAutoTestSettingsConnection(
+                lastTestedConfig = tested,
+                currentConfig = SettingsConnectionConfig("https://other.example.com", "TOKEN"),
+            ),
+        )
+    }
+
+    @Test
     fun connectionResultSeparatesBackendFailureFromTokenFailure() {
         val result = buildConnectionResult(
             healthStatusCode = 503,
