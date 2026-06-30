@@ -1,19 +1,19 @@
 # VibePub Android Experience Progress - 2026-06-30
 
-记录时间：2026-06-30 20:53 CST
+记录时间：2026-06-30 21:23 CST
 分支：`codex/android-experience-v1`  
-本次记录基线提交：`3b27081 Protect completed recordings from duplicate bad rows`
+本次记录基线提交：`8f43de6 Make workflow stalls visible in the Android app`
 
 ## 已验证
 
 ### Android 最新 APK 渠道
-- GitHub Release：`build-20260630-125130-3b27081`
-- APK：<https://github.com/litianc/vibepub-android/releases/download/build-20260630-125130-3b27081/app-debug.apk>
-- SHA-256：`0721173540c67519245209db19003e91e184e403451202c090f650c4558f5326`
-- Release Commit：`3b27081d8891347fc5390c21416f66d40c7b833b`
+- GitHub Release：`build-20260630-132053-8f43de6`
+- APK：<https://github.com/litianc/vibepub-android/releases/download/build-20260630-132053-8f43de6/app-debug.apk>
+- SHA-256：`3d73eee55cb6626cace70d04f3a3e32766d70ca48edb5e38ca9d84ec8bcf4610`
+- Release Commit：`8f43de6254190be2294a93753ed26a42c4cf53e1`
 - Manifest 已指向该 Release：`artifacts/MANIFEST.md`
-- Android Tests：GitHub Actions run `28445437927` 成功
-- Android Build & Release：GitHub Actions run `28445437515` 成功
+- Android Tests：GitHub Actions run `28447258290` 成功
+- Android Build & Release：GitHub Actions run `28447258407` 成功
 
 ### Android 端已落地能力
 - 录音/首页/详情页已有体验优先版主干：
@@ -69,18 +69,26 @@
 
 ### 真机/ADB
 - 当前 ADB 检查无设备在线：
-  - 命令：`/opt/homebrew/share/android-commandlinetools/platform-tools/adb devices -l`
+  - 命令：`adb devices -l`
   - 输出：`List of devices attached` 后无设备。
-  - `adb mdns services` 可发现无线调试服务 `10.161.2.96:42327`，但 `adb connect 10.161.2.96:42327` 当前返回 `Connection refused`。
+  - `adb kill-server && adb start-server && adb devices -l` 后仍无设备。
+  - `adb mdns services` 当前没有发现无线调试服务。
+  - `system_profiler SPUSBDataType` 当前只看到 Mac USB bus，没有枚举出 Android/Redmi 设备；这表示有线连接还没进入系统可见状态。
+  - `nc -vz -w 3 10.161.2.96 43355` 返回 `Connection refused`；该同网段无线调试端口当前已失效或未开放。
+  - Mac 当前 Wi-Fi 地址是 `10.161.2.226/24`，和此前的 `10.161.2.96` 在同网段；但 `192.168.31.72` 不在当前网段，不能作为当前有效无线调试目标。
   - `scripts/check-android-device-ready.sh` 现在会自动保存 `adb-mdns-services.txt`、尝试连接 `_adb-tls-connect` 端点，并把 `adb-wireless-connect.txt` 写进 readiness 报告；当前证据见 `artifacts/android-device-readiness/latest/readiness.md`。
-  - 下一次真机验证需要重新连接 USB，或重新打开平板无线调试页面获取新的配对码/配对端口。
+  - 下一次真机验证需要先让设备出现在 `adb devices -l`；可选路径是重新插拔数据线并确认 USB 模式/调试授权，或重新打开平板无线调试页面获取新的配对码和新的连接端口。
+- 当前卡住原因归因：
+  - 不在代码层：本地 Android 单测、assemble、体验审计均已通过。
+  - 不在 GitHub Actions 层：Android Tests 和 Android Build & Release 都已成功，最新 Release 已生成。
+  - 卡在设备连接层：Mac 既看不到 USB 设备，也连不上无线调试端口，因此不能安装最新 APK，也不能跑真机端到端自动化。
 - 上一轮 APK 已安装并启动，但不是当前最新 Release：
   - 安装证据：`artifacts/android-install/20260630-1054cc1/install/summary.md`
   - readiness：`artifacts/android-install/20260630-1054cc1/install/readiness/readiness.md`
   - 包版本：`versionName=0.1.0-debug`，`versionCode=1`
   - 签名摘要：`18a43bae`
   - 设备进程：`cn.litianc.vibepub` 已运行。
-  - 当前最新 `3b27081` APK 尚未完成真机安装/端到端验证。
+  - 当前最新 `8f43de6` APK 尚未完成真机安装/端到端验证。
 
 ## 待验证
 
@@ -120,8 +128,8 @@
   - 本轮 DAO 写入保护改动后，`RecordingDao.upsertBest` 会在同 filename 新记录竞争时保留更高质量记录，避免 0 秒或更差状态覆盖已有非零/已完成记录；显式携带已有 id 的状态更新仍可正常更新。`scripts/build-android-local.sh test`、`scripts/build-android-local.sh assemble`、`scripts/audit-android-experience-readiness.sh`、`git diff --check` 均通过。
   - 本轮流程关注提示改动后，`RecordingPresentationTest` 覆盖可行动状态和长时间无进展提示，`WorkflowHelpDialogTest` 覆盖列表/详情/弹窗可见性；`scripts/build-android-local.sh` 已支持透传 `--tests`，避免定向测试误跑全量。`scripts/build-android-local.sh test`、`scripts/build-android-local.sh assemble`、`scripts/audit-android-experience-readiness.sh`、`git diff --check` 均通过。
 - GitHub Actions Android Tests 可用并已通过。
-- 最新 GitHub Actions Android Tests run `28445437927` 已覆盖提交 `3b27081` 并成功。
-- 最新 GitHub Actions Android Build & Release run `28445437515` 已覆盖提交 `3b27081` 并成功创建 Release `build-20260630-125130-3b27081`。
+- 最新 GitHub Actions Android Tests run `28447258290` 已覆盖提交 `8f43de6` 并成功。
+- 最新 GitHub Actions Android Build & Release run `28447258407` 已覆盖提交 `8f43de6` 并成功创建 Release `build-20260630-132053-8f43de6`。
 - GitHub Actions `mining-tests.yml` 文件目前不在默认分支，GitHub API 暂不能直接对该 workflow 发起 `workflow_dispatch`；本轮 mining 改动已用本地 `infra/mining` 测试和 typecheck 验证，后续合入默认分支后再补云端 mining-tests。
 - 注意：本地单测必须使用 JDK 21；JDK 26 会导致 Robolectric 4.12 shadow class 解析失败。
 
@@ -141,7 +149,7 @@
   - 复制/分享/导出入口可点击。
   - Token 错误时显示配置错误和可恢复路径。
 - 本地 APK 已生成：`android/app/build/outputs/apk/debug/app-debug.apk`
-  - 当前本地 APK SHA-256：`338ba4f1fec9f4bc88baae2937286134323b3bebe01ac95809096b22e170753e`
+  - 当前本地 APK SHA-256：`4a5890221e4ddd36bf0a24598ba2a89d2e9a59f6519af3c0abc1a14117f0382b`
 - 待恢复 ADB 后安装本地 APK：当前 `adb devices -l` 无设备在线，需要重新连接 USB，或重新打开平板无线调试页面获取新端口。
 - ADB 恢复后可直接运行：
   - `scripts/install-android-local-apk.sh --serial <new-adb-serial> --skip-build`
@@ -162,5 +170,6 @@
   - 自动化测试产物需要稳定保存截图、UI dump、logcat、audit 结果。
 
 ## 当前注意事项
-- 目前最新可安装 APK 是 `3b27081` 对应 Release。
+- 目前最新可安装 APK 是 `8f43de6` 对应 Release。
+- 最新 Release asset 元数据已经给出 SHA-256；本机用 `gh release download` 复核时遇到一次 `release-assets.githubusercontent.com` 连接超时，不影响 Release 已成功生成的结论。
 - `artifacts/` 下存在多批历史安装/CI 调试产物，当前记录未整理或删除它们。
