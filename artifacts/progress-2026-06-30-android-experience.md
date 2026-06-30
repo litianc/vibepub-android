@@ -1,19 +1,19 @@
 # VibePub Android Experience Progress - 2026-06-30
 
-记录时间：2026-06-30 20:14 CST
+记录时间：2026-06-30 20:53 CST
 分支：`codex/android-experience-v1`  
-本次记录基线提交：`8424f32 Keep active progress sync from being swallowed`
+本次记录基线提交：`3b27081 Protect completed recordings from duplicate bad rows`
 
 ## 已验证
 
 ### Android 最新 APK 渠道
-- GitHub Release：`build-20260630-121346-8424f32`
-- APK：<https://github.com/litianc/vibepub-android/releases/download/build-20260630-121346-8424f32/app-debug.apk>
-- SHA-256：`5c13a492972c1a5efa2c98f56f05413b2b1a08ad919a9d4753b8ae091bda82e0`
-- Release Commit：`8424f32915f35b7083672232f9e3defb4d98f452`
+- GitHub Release：`build-20260630-125130-3b27081`
+- APK：<https://github.com/litianc/vibepub-android/releases/download/build-20260630-125130-3b27081/app-debug.apk>
+- SHA-256：`0721173540c67519245209db19003e91e184e403451202c090f650c4558f5326`
+- Release Commit：`3b27081d8891347fc5390c21416f66d40c7b833b`
 - Manifest 已指向该 Release：`artifacts/MANIFEST.md`
-- Android Tests：GitHub Actions run `28443221766` 成功
-- Android Build & Release：GitHub Actions run `28443222078` 成功
+- Android Tests：GitHub Actions run `28445437927` 成功
+- Android Build & Release：GitHub Actions run `28445437515` 成功
 
 ### Android 端已落地能力
 - 录音/首页/详情页已有体验优先版主干：
@@ -79,7 +79,7 @@
   - 包版本：`versionName=0.1.0-debug`，`versionCode=1`
   - 签名摘要：`18a43bae`
   - 设备进程：`cn.litianc.vibepub` 已运行。
-  - 当前最新 `8424f32` APK 尚未完成真机安装/端到端验证。
+  - 当前最新 `3b27081` APK 尚未完成真机安装/端到端验证。
 
 ## 待验证
 
@@ -118,8 +118,8 @@
   - 本轮体验版完成度审计脚本 `scripts/audit-android-experience-readiness.sh` 已新增；它会检查需求文档、Android 状态/Room/UI/设置证据、Worker/mining 字段、Release manifest、真机 smoke 脚本，并把当前无 ADB 的真机门禁标为 `[~]`。本地运行结果：自动源代码/测试/发布失败数 `0`，设备门禁项 `2`，报告见 `artifacts/android-experience-readiness/latest/readiness.md`。
   - 本轮 DAO 写入保护改动后，`RecordingDao.upsertBest` 会在同 filename 新记录竞争时保留更高质量记录，避免 0 秒或更差状态覆盖已有非零/已完成记录；显式携带已有 id 的状态更新仍可正常更新。`scripts/build-android-local.sh test`、`scripts/build-android-local.sh assemble`、`scripts/audit-android-experience-readiness.sh`、`git diff --check` 均通过。
 - GitHub Actions Android Tests 可用并已通过。
-- 最新 GitHub Actions Android Tests run `28443221766` 已覆盖提交 `8424f32` 并成功。
-- 最新 GitHub Actions Android Build & Release run `28443222078` 已覆盖提交 `8424f32` 并成功创建 Release `build-20260630-121346-8424f32`。
+- 最新 GitHub Actions Android Tests run `28445437927` 已覆盖提交 `3b27081` 并成功。
+- 最新 GitHub Actions Android Build & Release run `28445437515` 已覆盖提交 `3b27081` 并成功创建 Release `build-20260630-125130-3b27081`。
 - GitHub Actions `mining-tests.yml` 文件目前不在默认分支，GitHub API 暂不能直接对该 workflow 发起 `workflow_dispatch`；本轮 mining 改动已用本地 `infra/mining` 测试和 typecheck 验证，后续合入默认分支后再补云端 mining-tests。
 - 注意：本地单测必须使用 JDK 21；JDK 26 会导致 Robolectric 4.12 shadow class 解析失败。
 
@@ -160,5 +160,5 @@
   - 自动化测试产物需要稳定保存截图、UI dump、logcat、audit 结果。
 
 ## 当前注意事项
-- 目前最新可安装 APK 是 `8424f32` 对应 Release。
+- 目前最新可安装 APK 是 `3b27081` 对应 Release。
 - `artifacts/` 下存在多批历史安装/CI 调试产物，当前记录未整理或删除它们。
