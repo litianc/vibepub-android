@@ -7,15 +7,23 @@ ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
 JDK21_HOME="/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home"
 JAVA_HOME="${ANDROID_LOCAL_JAVA_HOME:-$JDK21_HOME}"
 TASK="${1:-all}"
+if [[ $# -gt 0 ]]; then
+  shift
+fi
+GRADLE_ARGS=("$@")
 
 usage() {
   cat <<EOF
 Usage:
-  scripts/build-android-local.sh [test|assemble|all]
+  scripts/build-android-local.sh [test|assemble|all] [gradle args...]
 
 Runs Android Gradle tasks with the local minimal SDK and JDK 21, matching the
 GitHub Actions Android test environment without requiring Android Studio or an
 emulator.
+
+Examples:
+  scripts/build-android-local.sh test --tests cn.litianc.vibepub.data.RecordingPresentationTest
+  scripts/build-android-local.sh assemble --rerun-tasks
 
 Environment:
   ANDROID_HOME             Default: /opt/homebrew/share/android-commandlinetools
@@ -64,12 +72,12 @@ run_gradle() {
 
 case "$TASK" in
   test)
-    run_gradle :app:testDebugUnitTest
+    run_gradle :app:testDebugUnitTest "${GRADLE_ARGS[@]}"
     ;;
   assemble)
-    run_gradle :app:assembleDebug
+    run_gradle :app:assembleDebug "${GRADLE_ARGS[@]}"
     ;;
   all)
-    run_gradle :app:testDebugUnitTest :app:assembleDebug
+    run_gradle :app:testDebugUnitTest :app:assembleDebug "${GRADLE_ARGS[@]}"
     ;;
 esac

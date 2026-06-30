@@ -30,6 +30,7 @@
   - 设置页诊断弹窗支持长内容滚动，并保留一键复制，避免最近录音摘要变长后在真机上看不到底部错误信息。
   - Android 同步 `/api/recordings` 时会把 `ARTICLE_READY`、`DRAFT_FAILED` 等远端阶段稳定映射进本地 Room 字段，避免端上看不到文章已生成/草稿失败的中间态。
   - 首页/详情页活跃录音的自动同步请求会替换旧的 one-time sync work，避免旧请求卡住时新的进度刷新被 WorkManager `KEEP` 吞掉。
+  - 首页重点卡、列表卡、详情状态卡和状态说明弹窗现在共用 `workflowAttention`，对本机待上传、失败、文章已可用、草稿待同步、草稿失败和长时间无进展状态显示一致的“需要关注”提示。
   - 状态模型覆盖 `LOCAL_RECORDED`、`UPLOADING`、`UPLOADED`、`PROCESSING`、`COMPLETED`、`FAILED`。
 - placeholder 草稿引用修复已验证并发布到 APK：
   - Android 提交：`ae943af Keep draft readiness from trusting placeholder values`
@@ -117,6 +118,7 @@
   - 本轮 ADB readiness 自动连接诊断改动后，`bash -n scripts/check-android-device-ready.sh scripts/install-latest-android-apk.sh scripts/run-android-device-smoke.sh`、`CHECK_APK_INSTALL=false scripts/check-android-device-ready.sh`、`RecordingFilesTest`、`scripts/build-android-local.sh test`、`git diff --check` 均通过；preflight 正确记录当前无线调试端口 `Connection refused`。
   - 本轮体验版完成度审计脚本 `scripts/audit-android-experience-readiness.sh` 已新增；它会检查需求文档、Android 状态/Room/UI/设置证据、Worker/mining 字段、Release manifest、真机 smoke 脚本，并把当前无 ADB 的真机门禁标为 `[~]`。本地运行结果：自动源代码/测试/发布失败数 `0`，设备门禁项 `2`，报告见 `artifacts/android-experience-readiness/latest/readiness.md`。
   - 本轮 DAO 写入保护改动后，`RecordingDao.upsertBest` 会在同 filename 新记录竞争时保留更高质量记录，避免 0 秒或更差状态覆盖已有非零/已完成记录；显式携带已有 id 的状态更新仍可正常更新。`scripts/build-android-local.sh test`、`scripts/build-android-local.sh assemble`、`scripts/audit-android-experience-readiness.sh`、`git diff --check` 均通过。
+  - 本轮流程关注提示改动后，`RecordingPresentationTest` 覆盖可行动状态和长时间无进展提示，`WorkflowHelpDialogTest` 覆盖列表/详情/弹窗可见性；`scripts/build-android-local.sh` 已支持透传 `--tests`，避免定向测试误跑全量。`scripts/build-android-local.sh test`、`scripts/build-android-local.sh assemble`、`scripts/audit-android-experience-readiness.sh`、`git diff --check` 均通过。
 - GitHub Actions Android Tests 可用并已通过。
 - 最新 GitHub Actions Android Tests run `28445437927` 已覆盖提交 `3b27081` 并成功。
 - 最新 GitHub Actions Android Build & Release run `28445437515` 已覆盖提交 `3b27081` 并成功创建 Release `build-20260630-125130-3b27081`。

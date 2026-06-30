@@ -44,8 +44,10 @@ class WorkflowHelpDialogTest {
         composeTestRule.onNodeWithText("当前状态说明").assertIsDisplayed()
         composeTestRule.onNodeWithText("当前节点").assertIsDisplayed()
         composeTestRule.onAllNodesWithText("当前节点：4. 语音识别 · 当前", substring = true).assertCountEquals(2)
-        composeTestRule.onNodeWithText("下一步建议").assertIsDisplayed()
-        composeTestRule.onNodeWithText("下一步：等待云端转录；如果长时间没有更新，点同步刷新。").assertIsDisplayed()
+        composeTestRule.onNodeWithText("下一步建议").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithText("下一步：等待云端转录；如果长时间没有更新，点同步刷新。")
+            .performScrollTo()
+            .assertIsDisplayed()
         composeTestRule.onNodeWithText("完整流程周期").performScrollTo().assertIsDisplayed()
         composeTestRule.onNodeWithText("保存录音 → 上传音频 → 云端排队 → 语音识别 → 文章改写 → 公众号草稿 → 人工发布确认")
             .performScrollTo()
@@ -93,6 +95,8 @@ class WorkflowHelpDialogTest {
         }
 
         composeTestRule.onAllNodesWithText("上传音频 · 需处理").assertCountEquals(1)
+        composeTestRule.onNodeWithText("需要关注").assertIsDisplayed()
+        composeTestRule.onNodeWithText("需要处理：到设置页更新 FILES_TOKEN，并用“测试后端连接”确认授权。").assertIsDisplayed()
         composeTestRule.onAllNodesWithText("失败后可以先重试；如果仍失败，到设置页检查后端连接和 FILES_TOKEN。").assertCountEquals(1)
     }
 
@@ -144,6 +148,29 @@ class WorkflowHelpDialogTest {
 
         composeTestRule.onNodeWithText("上传中").assertIsDisplayed()
         composeTestRule.onNodeWithText("最近上传问题：网络异常，稍后自动重试。").assertIsDisplayed()
+    }
+
+    @Test
+    fun recordingCardShowsActionableAttentionCalloutForLocalRecordings() {
+        composeTestRule.setContent {
+            RecordingCard(
+                recording = RecordingEntity(
+                    filename = "VibePub-test.m4a",
+                    durationMs = 42_000L,
+                    timestamp = 1L,
+                    status = RecordingStatus.LOCAL_RECORDED.value,
+                ),
+                lastSyncAtMs = 1_000L,
+                onClick = {},
+                onRetryUpload = {},
+                onRefresh = {},
+                onDeleteRecording = {},
+            )
+        }
+
+        composeTestRule.onAllNodesWithTag("WorkflowAttentionCallout", useUnmergedTree = true).assertCountEquals(1)
+        composeTestRule.onAllNodesWithText("需要上传").assertCountEquals(1)
+        composeTestRule.onAllNodesWithText("录音只在本机，点上传后才会进入云端转录和成文流程。").assertCountEquals(1)
     }
 
     @Test
@@ -260,7 +287,7 @@ class WorkflowHelpDialogTest {
 
         composeTestRule.onNodeWithText("生成草稿中").assertIsDisplayed()
         composeTestRule.onNodeWithText("第 6/7 步").assertIsDisplayed()
-        composeTestRule.onNodeWithText("当前阶段更新：", substring = true).assertIsDisplayed()
+        composeTestRule.onAllNodesWithText("当前阶段更新：", substring = true).assertCountEquals(2)
         composeTestRule.onNodeWithTag("DetailWorkflowHelpButton").assertIsDisplayed()
         composeTestRule.onAllNodesWithText("文章改写 · 已完成").assertCountEquals(0)
         composeTestRule.onAllNodesWithText("公众号草稿 · 当前").assertCountEquals(0)
@@ -292,6 +319,8 @@ class WorkflowHelpDialogTest {
 
         composeTestRule.onNodeWithText("文章已生成").assertIsDisplayed()
         composeTestRule.onNodeWithText("第 6/7 步").assertIsDisplayed()
+        composeTestRule.onNodeWithText("文章可用").assertIsDisplayed()
+        composeTestRule.onNodeWithText("正文已经生成，可以先阅读、复制或分享；后台会继续同步草稿状态。").assertIsDisplayed()
         composeTestRule.onNodeWithText("下一步：可以先查看、复制或分享正文；点同步等待公众号草稿状态。").assertIsDisplayed()
         composeTestRule.onAllNodesWithText("生成草稿中").assertCountEquals(0)
     }
@@ -310,8 +339,9 @@ class WorkflowHelpDialogTest {
             )
         }
 
-        composeTestRule.onNodeWithText("需要处理").assertIsDisplayed()
+        composeTestRule.onAllNodesWithText("需要处理").assertCountEquals(2)
         composeTestRule.onNodeWithText("第 2/7 步").assertIsDisplayed()
+        composeTestRule.onNodeWithText("到设置页更新 FILES_TOKEN，并用“测试后端连接”确认授权。").assertIsDisplayed()
         composeTestRule.onAllNodesWithText("上传音频 · 需处理").assertCountEquals(0)
 
         composeTestRule.onNodeWithTag("DetailWorkflowHelpButton").performClick()
@@ -340,8 +370,9 @@ class WorkflowHelpDialogTest {
             )
         }
 
-        composeTestRule.onNodeWithText("草稿需处理").assertIsDisplayed()
+        composeTestRule.onAllNodesWithText("草稿需处理").assertCountEquals(2)
         composeTestRule.onNodeWithText("第 6/7 步").assertIsDisplayed()
+        composeTestRule.onNodeWithText("文章已可用，可以先复制正文；修复公众号草稿问题后再同步。").assertIsDisplayed()
         composeTestRule.onNodeWithText("同步草稿").assertIsDisplayed()
         composeTestRule.onNodeWithTag("DetailRecoveryButton").performClick()
 
@@ -367,7 +398,7 @@ class WorkflowHelpDialogTest {
             )
         }
 
-        composeTestRule.onNodeWithText("草稿需处理").assertIsDisplayed()
+        composeTestRule.onAllNodesWithText("草稿需处理").assertCountEquals(2)
         composeTestRule.onAllNodesWithText("公众号草稿 · 需处理").assertCountEquals(0)
 
         composeTestRule.onNodeWithTag("DetailWorkflowHelpButton").performClick()

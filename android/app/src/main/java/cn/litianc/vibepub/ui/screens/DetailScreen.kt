@@ -87,6 +87,7 @@ import cn.litianc.vibepub.data.sanitizedRemoteReference
 import cn.litianc.vibepub.data.wechatDraftReferenceOrNull
 import cn.litianc.vibepub.data.workflowCycleLabel
 import cn.litianc.vibepub.data.workflowCurrentNodeLabel
+import cn.litianc.vibepub.data.workflowAttention
 import cn.litianc.vibepub.data.workflowFreshnessLabel
 import cn.litianc.vibepub.data.workflowNextActionLabel
 import cn.litianc.vibepub.data.workflowProgressFraction
@@ -449,6 +450,7 @@ internal fun StatusCard(
 ) {
     val status = recording.status.asRecordingStatus()
     val recoveryAction = recording.primaryRecoveryAction()
+    val attention = recording.workflowAttention()
     var showWorkflowHelp by remember { mutableStateOf(false) }
 
     if (showWorkflowHelp) {
@@ -520,6 +522,10 @@ internal fun StatusCard(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            if (attention != null) {
+                Spacer(modifier = Modifier.height(8.dp))
+                WorkflowAttentionCallout(attention = attention)
+            }
             if (recording.remoteStatusUpdatedAt?.isNotBlank() == true) {
                 Spacer(modifier = Modifier.height(6.dp))
                 Text(

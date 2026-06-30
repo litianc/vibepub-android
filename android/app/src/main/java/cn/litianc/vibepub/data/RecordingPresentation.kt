@@ -12,6 +12,18 @@ enum class WorkflowStepState {
     BLOCKED,
 }
 
+enum class RecordingWorkflowAttentionLevel {
+    INFO,
+    WARNING,
+    ERROR,
+}
+
+data class RecordingWorkflowAttention(
+    val title: String,
+    val detail: String,
+    val level: RecordingWorkflowAttentionLevel,
+)
+
 data class RecordingWorkflowStep(
     val number: Int,
     val title: String,
@@ -162,6 +174,45 @@ fun RecordingEntity.workflowFreshnessLabel(nowMs: Long = System.currentTimeMilli
         RecordingStatus.PROCESSING -> "当前阶段更新：$age"
         RecordingStatus.COMPLETED -> "完成时间：$age"
         RecordingStatus.FAILED -> "失败时间：$age"
+    }
+}
+
+fun RecordingEntity.workflowAttention(nowMs: Long = System.currentTimeMillis()): RecordingWorkflowAttention? {
+    val normalizedStatus = status.asRecordingStatus()
+    val nextAction = workflowNextActionLabel().removePrefix("下一步：")
+    return when {
+        normalizedStatus == RecordingStatus.LOCAL_RECORDED -> RecordingWorkflowAttention(
+            title = "需要上传",
+            detail = "录音只在本机，点上传后才会进入云端转录和成文流程。",
+            level = RecordingWorkflowAttentionLevel.WARNING,
+        )
+        normalizedStatus == RecordingStatus.FAILED -> RecordingWorkflowAttention(
+            title = "需要处理",
+            detail = nextAction,
+            level = RecordingWorkflowAttentionLevel.ERROR,
+        )
+        normalizedStatus == RecordingStatus.COMPLETED && hasDraftFailureMessage() -> RecordingWorkflowAttention(
+            title = "草稿需处理",
+            detail = "文章已可用，可以先复制正文；修复公众号草稿问题后再同步。",
+            level = RecordingWorkflowAttentionLevel.WARNING,
+        )
+        normalizedStatus == RecordingStatus.COMPLETED && !hasWechatDraftReference() -> RecordingWorkflowAttention(
+            title = "草稿待同步",
+            detail = "文章已生成，可以先复制或分享正文；点同步等待公众号草稿信息。",
+            level = RecordingWorkflowAttentionLevel.INFO,
+        )
+        normalizedStatus == RecordingStatus.PROCESSING &&
+            processingStageKind() == ProcessingStageKind.ARTICLE_READY -> RecordingWorkflowAttention(
+                title = "文章可用",
+                detail = "正文已经生成，可以先阅读、复制或分享；后台会继续同步草稿状态。",
+                level = RecordingWorkflowAttentionLevel.INFO,
+            )
+        normalizedStatus in ACTIVE_CLOUD_WORK_STATUSES && workflowStaleForAttention(nowMs) -> RecordingWorkflowAttention(
+            title = "进度可能停住",
+            detail = "${workflowFreshnessLabel(nowMs)}，点同步确认后台是否已有新结果。",
+            level = RecordingWorkflowAttentionLevel.WARNING,
+        )
+        else -> null
     }
 }
 
@@ -379,6 +430,12 @@ private fun RecordingEntity.workflowFreshnessAnchorMs(): Long? {
     }
 }
 
+private fun RecordingEntity.workflowStaleForAttention(nowMs: Long): Boolean {
+    val anchorMs = workflowFreshnessAnchorMs() ?: return false
+    val elapsedMs = (nowMs - anchorMs).coerceAtLeast(0L)
+    return elapsedMs >= STALE_WORKFLOW_ATTENTION_MS
+}
+
 private fun relativeWorkflowAgeLabel(anchorMs: Long, nowMs: Long): String {
     val elapsedSeconds = ((nowMs - anchorMs).coerceAtLeast(0L) / 1000L).toInt()
     return when {
@@ -406,6 +463,14 @@ private fun String?.toWorkflowTimestampMs(): Long? {
         }.getOrNull()
     }
 }
+
+private val ACTIVE_CLOUD_WORK_STATUSES = setOf(
+    RecordingStatus.UPLOADING,
+    RecordingStatus.UPLOADED,
+    RecordingStatus.PROCESSING,
+)
+
+private const val STALE_WORKFLOW_ATTENTION_MS = 10L * 60L * 1000L
 
 private val WORKFLOW_BASE_STEPS = listOf(
     RecordingWorkflowStep(

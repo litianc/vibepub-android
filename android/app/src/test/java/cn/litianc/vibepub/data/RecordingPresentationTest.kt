@@ -389,4 +389,60 @@ class RecordingPresentationTest {
         assertEquals(WorkflowStepState.BLOCKED, steps[5].state)
         assertEquals(WorkflowStepState.PENDING, steps[6].state)
     }
+
+    @Test
+    fun workflowAttentionExplainsActionableStates() {
+        val local = RecordingEntity(
+            filename = "local.m4a",
+            durationMs = 1_000L,
+            timestamp = 1L,
+            status = RecordingStatus.LOCAL_RECORDED.value,
+        )
+        val failed = local.copy(
+            status = RecordingStatus.FAILED.value,
+            lastError = "FILES_TOKEN 无效",
+        )
+        val articleReady = local.copy(
+            status = RecordingStatus.PROCESSING.value,
+            articleTitle = "文章已生成",
+            rawTextPreview = "原始识别",
+            processingStage = "ARTICLE_READY",
+        )
+        val completedWithoutDraft = local.copy(
+            status = RecordingStatus.COMPLETED.value,
+            articleTitle = "文章已生成",
+        )
+        val draftFailed = completedWithoutDraft.copy(
+            processingStage = "DRAFT_FAILED",
+            lastError = "公众号草稿创建失败",
+        )
+
+        assertEquals("需要上传", local.workflowAttention()?.title)
+        assertEquals(RecordingWorkflowAttentionLevel.WARNING, local.workflowAttention()?.level)
+        assertEquals("需要处理", failed.workflowAttention()?.title)
+        assertEquals(RecordingWorkflowAttentionLevel.ERROR, failed.workflowAttention()?.level)
+        assertEquals("文章可用", articleReady.workflowAttention()?.title)
+        assertEquals("草稿待同步", completedWithoutDraft.workflowAttention()?.title)
+        assertEquals("草稿需处理", draftFailed.workflowAttention()?.title)
+    }
+
+    @Test
+    fun workflowAttentionWarnsWhenActiveCloudWorkIsStale() {
+        val recording = RecordingEntity(
+            filename = "VibePub-test.m4a",
+            durationMs = 1_000L,
+            timestamp = 1_000L,
+            status = RecordingStatus.PROCESSING.value,
+            processingStage = "ASR",
+            remoteStatusUpdatedAt = "2026-06-30T03:00:00Z",
+        )
+
+        val fresh = recording.workflowAttention(nowMs = 1_782_788_200_000L)
+        val stale = recording.workflowAttention(nowMs = 1_782_789_000_000L)
+
+        assertEquals(null, fresh)
+        assertEquals("进度可能停住", stale?.title)
+        assertEquals(RecordingWorkflowAttentionLevel.WARNING, stale?.level)
+        assertTrue(stale?.detail.orEmpty().contains("点同步"))
+    }
 }

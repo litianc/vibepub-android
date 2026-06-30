@@ -65,6 +65,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import cn.litianc.vibepub.data.RecordingEntity
 import cn.litianc.vibepub.data.RecordingRecoveryActionType
+import cn.litianc.vibepub.data.RecordingWorkflowAttention
+import cn.litianc.vibepub.data.RecordingWorkflowAttentionLevel
 import cn.litianc.vibepub.data.RecordingWorkflowStep
 import cn.litianc.vibepub.data.RecordingStatus
 import cn.litianc.vibepub.data.WorkflowStepState
@@ -80,6 +82,7 @@ import cn.litianc.vibepub.data.statusDetail
 import cn.litianc.vibepub.data.statusLabel
 import cn.litianc.vibepub.data.workflowCycleLabel
 import cn.litianc.vibepub.data.workflowCurrentNodeLabel
+import cn.litianc.vibepub.data.workflowAttention
 import cn.litianc.vibepub.data.workflowFreshnessLabel
 import cn.litianc.vibepub.data.workflowHelpSummary
 import cn.litianc.vibepub.data.workflowHelpTitle
@@ -363,6 +366,7 @@ private fun HomeWorkflowOverviewCard(
 ) {
     val status = recording.status.asRecordingStatus()
     val currentStep = recording.currentWorkflowStep()
+    val attention = recording.workflowAttention()
     var showWorkflowHelp by remember { mutableStateOf(false) }
 
     if (showWorkflowHelp) {
@@ -470,6 +474,9 @@ private fun HomeWorkflowOverviewCard(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
+            if (attention != null) {
+                WorkflowAttentionCallout(attention = attention)
+            }
             Text(
                 text = recording.workflowNextActionLabel(),
                 style = MaterialTheme.typography.bodySmall,
@@ -574,6 +581,7 @@ fun RecordingCard(
     val dateString = SimpleDateFormat("M月d日 · HH:mm", Locale.getDefault()).format(Date(recording.timestamp))
     val status = recording.status.asRecordingStatus()
     val recoveryAction = recording.primaryRecoveryAction()
+    val attention = recording.workflowAttention()
     var showWorkflowHelp by remember { mutableStateOf(false) }
     var showDeleteConfirm by remember { mutableStateOf(false) }
 
@@ -707,6 +715,10 @@ fun RecordingCard(
                         overflow = TextOverflow.Ellipsis,
                     )
                 }
+                if (attention != null) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    WorkflowAttentionCallout(attention = attention)
+                }
                 Spacer(modifier = Modifier.height(10.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     if (recoveryAction != null) {
@@ -744,6 +756,50 @@ fun RecordingCard(
                 }
             }
         }
+    }
+}
+
+@Composable
+internal fun WorkflowAttentionCallout(attention: RecordingWorkflowAttention) {
+    val color = workflowAttentionColor(attention.level)
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .background(color.copy(alpha = 0.1f))
+            .padding(horizontal = 10.dp, vertical = 8.dp)
+            .testTag("WorkflowAttentionCallout"),
+        verticalAlignment = Alignment.Top,
+    ) {
+        Box(
+            modifier = Modifier
+                .padding(top = 3.dp)
+                .size(8.dp)
+                .clip(CircleShape)
+                .background(color),
+        )
+        Spacer(modifier = Modifier.width(8.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = attention.title,
+                style = MaterialTheme.typography.labelMedium,
+                color = color,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                text = attention.detail,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+        }
+    }
+}
+
+private fun workflowAttentionColor(level: RecordingWorkflowAttentionLevel): Color {
+    return when (level) {
+        RecordingWorkflowAttentionLevel.INFO -> PrimaryRed
+        RecordingWorkflowAttentionLevel.WARNING -> Color(0xFFF9A825)
+        RecordingWorkflowAttentionLevel.ERROR -> Color(0xFFC62828)
     }
 }
 
@@ -824,6 +880,7 @@ fun WorkflowHelpDialog(
         title = { Text(recording.workflowHelpTitle()) },
         text = {
             val currentStep = recording.currentWorkflowStep()
+            val attention = recording.workflowAttention()
             Column(
                 modifier = Modifier
                     .heightIn(max = 420.dp)
@@ -839,6 +896,12 @@ fun WorkflowHelpDialog(
                     label = "当前状态说明",
                     value = recording.statusDetail(),
                 )
+                if (attention != null) {
+                    WorkflowHelpSection(
+                        label = "需要关注",
+                        value = "${attention.title}：${attention.detail}",
+                    )
+                }
                 WorkflowHelpSection(
                     label = "当前节点",
                     value = "${recording.workflowCurrentNodeLabel()}\n${currentStep.detail}",
