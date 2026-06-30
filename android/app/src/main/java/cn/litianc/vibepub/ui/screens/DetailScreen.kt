@@ -204,8 +204,17 @@ fun DetailScreen(
             .ifBlank { currentRecording.articleTitle.orEmpty() }
             .ifBlank { currentRecording.displayTitle() }
         val rawText = transcript?.optString("rawText", "")?.ifBlank { currentRecording.rawTextPreview.orEmpty() }.orEmpty()
-        val articleContent = transcript?.optString("articleContent", "")?.ifBlank { rawText }?.let(::renderArticleText)
+        val generatedArticleContent = transcript?.optString("articleContent", "").orEmpty().trim()
+        val articleContentSource = generatedArticleContent.ifBlank { rawText }
+        val articleContent = articleContentSource
+            .takeIf { it.isNotBlank() }
+            ?.let(::renderArticleText)
             ?: currentRecording.statusDetail()
+        val articleContentIsGenerated = generatedArticleContent.isNotBlank()
+        val transcriptProcessingStage = transcript?.optString("processingStage", "").orEmpty()
+            .ifBlank { transcript?.optString("processing_stage", "").orEmpty() }
+        val effectiveProcessingStage = transcriptProcessingStage
+            .ifBlank { currentRecording.processingStage.orEmpty() }
         val wechatDraftId = transcript?.optString("wechatDraftId", "").orEmpty()
             .ifBlank { transcript?.optString("mediaId", "").orEmpty() }
             .ifBlank { transcript?.optString("wechat_draft_id", "").orEmpty() }
@@ -222,10 +231,12 @@ fun DetailScreen(
             status = currentRecording.status.asRecordingStatus(),
             articleTitle = articleTitle,
             articleContent = articleContent,
+            articleContentIsGenerated = articleContentIsGenerated,
             rawText = rawText,
             wechatDraftId = wechatDraftId,
             wechatUrl = wechatUrl,
             draftError = draftError,
+            processingStage = effectiveProcessingStage,
         )
         val draftAction = buildWeChatDraftAction(
             wechatDraftId = wechatDraftId,
@@ -827,28 +838,56 @@ internal fun exportFileName(articleTitle: String, filename: String): String {
     return "$base.txt"
 }
 
+private val ARTICLE_READY_STAGES = setOf(
+    "ARTICLE_READY",
+    "WECHAT",
+    "DRAFT",
+    "DRAFTING",
+    "CREATING_DRAFT",
+    "PUBLISHING_DRAFT",
+    "COMPLETED",
+    "DONE",
+)
+
+private val DRAFT_FAILED_STAGES = setOf(
+    "DRAFT_FAILED",
+    "WECHAT_FAILED",
+)
+
 internal fun buildArticleReviewSummary(
     status: RecordingStatus,
     articleTitle: String,
     articleContent: String,
+    articleContentIsGenerated: Boolean = status == RecordingStatus.COMPLETED,
     rawText: String,
     wechatDraftId: String,
     wechatUrl: String,
     draftError: String = "",
+    processingStage: String = "",
 ): ArticleReviewSummary {
     val hasTitle = articleTitle.isNotBlank() && !articleTitle.contains("录音片段")
     val contentChars = articleContent.trim().length
-    val hasArticle = status == RecordingStatus.COMPLETED && contentChars >= 80
+    val stage = processingStage
+        .trim()
+        .uppercase(Locale.ROOT)
+        .replace("-", "_")
+        .replace(" ", "_")
+    val stageHasArticle = stage in ARTICLE_READY_STAGES
+    val stageDraftFailed = stage in DRAFT_FAILED_STAGES
+    val hasArticle = (status == RecordingStatus.COMPLETED || stageHasArticle || stageDraftFailed) &&
+        articleContentIsGenerated &&
+        contentChars >= 80
     val hasRawText = rawText.isNotBlank()
     val draftReference = wechatDraftId.ifBlank { wechatUrl }
-    val hasDraft = status == RecordingStatus.COMPLETED && draftReference.isNotBlank()
-    val draftFailed = status == RecordingStatus.COMPLETED && draftError.isNotBlank()
+    val hasDraft = draftReference.isNotBlank()
+    val draftFailed = (status == RecordingStatus.COMPLETED || stageDraftFailed) &&
+        (draftError.isNotBlank() || stageDraftFailed)
 
     val nextStep = when {
-        status != RecordingStatus.COMPLETED -> "文章还在生成中，完成后这里会变成发布前检查清单。"
         hasDraft -> "草稿已创建。下一步到公众号后台打开草稿，再做最后一眼人工确认。"
         draftFailed && hasArticle -> "文章已生成，但公众号草稿创建失败。可以先复制正文，稍后再重试草稿。"
         hasArticle -> "文章已生成，但还没拿到公众号草稿信息。可以先复制正文，或刷新等待草稿状态。"
+        status != RecordingStatus.COMPLETED -> "文章还在生成中，完成后这里会变成发布前检查清单。"
         else -> "流程显示完成，但正文还不完整。请刷新同步，或检查诊断信息后重试。"
     }
 
@@ -876,6 +915,7 @@ internal fun buildArticleReviewSummary(
                 value = when {
                     hasDraft -> draftReference
                     draftFailed -> draftError
+                        .ifBlank { "公众号草稿创建失败。文章已可复制，稍后可重试草稿。" }
                     else -> "等待云端创建草稿或返回草稿信息"
                 },
                 ready = hasDraft,

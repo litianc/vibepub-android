@@ -58,6 +58,25 @@ class DetailScreenTest {
     }
 
     @Test
+    fun reviewSummaryTreatsArticleReadyStageAsConsumableBeforeDraftCompletes() {
+        val summary = buildArticleReviewSummary(
+            status = RecordingStatus.PROCESSING,
+            articleTitle = "一篇整理好的文章",
+            articleContent = "这是一段已经整理好的正文。".repeat(12),
+            articleContentIsGenerated = true,
+            rawText = "原始识别文本",
+            wechatDraftId = "",
+            wechatUrl = "",
+            processingStage = "ARTICLE_READY",
+        )
+
+        assertTrue(summary.nextStep.contains("文章已生成"))
+        assertTrue(summary.nextStep.contains("刷新等待草稿状态"))
+        assertTrue(summary.items.first { it.label == "正文" }.ready)
+        assertFalse(summary.items.first { it.label == "公众号草稿" }.ready)
+    }
+
+    @Test
     fun reviewSummaryShowsDraftFailureWhileKeepingArticleReady() {
         val summary = buildArticleReviewSummary(
             status = RecordingStatus.COMPLETED,
@@ -74,6 +93,45 @@ class DetailScreenTest {
         val draftItem = summary.items.first { it.label == "公众号草稿" }
         assertFalse(draftItem.ready)
         assertTrue(draftItem.value.contains("502"))
+    }
+
+    @Test
+    fun reviewSummaryKeepsDraftFailureActionableWhenStageFailsBeforeCompletedStatus() {
+        val summary = buildArticleReviewSummary(
+            status = RecordingStatus.PROCESSING,
+            articleTitle = "一篇整理好的文章",
+            articleContent = "这是一段已经整理好的正文。".repeat(12),
+            articleContentIsGenerated = true,
+            rawText = "原始识别文本",
+            wechatDraftId = "",
+            wechatUrl = "",
+            draftError = "公众号草稿创建失败：Request failed with status code 502",
+            processingStage = "DRAFT_FAILED",
+        )
+
+        assertTrue(summary.nextStep.contains("公众号草稿创建失败"))
+        assertTrue(summary.nextStep.contains("先复制正文"))
+        assertTrue(summary.items.first { it.label == "正文" }.ready)
+        val draftItem = summary.items.first { it.label == "公众号草稿" }
+        assertFalse(draftItem.ready)
+        assertTrue(draftItem.value.contains("502"))
+    }
+
+    @Test
+    fun reviewSummaryDoesNotTreatRawTranscriptFallbackAsGeneratedArticle() {
+        val summary = buildArticleReviewSummary(
+            status = RecordingStatus.COMPLETED,
+            articleTitle = "一篇整理好的文章",
+            articleContent = "这是原始识别文本，不是整理后的公众号正文。".repeat(12),
+            articleContentIsGenerated = false,
+            rawText = "这是原始识别文本，不是整理后的公众号正文。",
+            wechatDraftId = "",
+            wechatUrl = "",
+            processingStage = "ARTICLE_READY",
+        )
+
+        assertFalse(summary.items.first { it.label == "正文" }.ready)
+        assertTrue(summary.nextStep.contains("正文还不完整"))
     }
 
     @Test
