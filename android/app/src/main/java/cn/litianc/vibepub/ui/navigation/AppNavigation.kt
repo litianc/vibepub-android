@@ -22,6 +22,7 @@ import cn.litianc.vibepub.data.AppDatabase
 fun AppNavigation(
     preferences: AppPreferences,
     onRefresh: () -> Unit,
+    onAutoRefresh: () -> Unit,
     onRetryUpload: (RecordingEntity) -> Unit,
     onDeleteRecording: (RecordingEntity) -> Unit,
     onStartRecording: () -> Boolean,
@@ -56,6 +57,7 @@ fun AppNavigation(
                 lastSyncAtMs = lastSyncAtMs,
                 onSettingsClick = { navController.navigate("settings") },
                 onRefresh = onRefresh,
+                onAutoRefresh = onAutoRefresh,
                 onRetryUpload = onRetryUpload,
                 onDeleteRecording = onDeleteRecording,
                 onRecordClick = {

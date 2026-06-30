@@ -12,6 +12,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
 import androidx.work.Constraints
+import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
@@ -27,6 +28,9 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.concurrent.TimeUnit
 
+private const val PERIODIC_SYNC_WORK_NAME = "sync_transcripts"
+private const val ONE_TIME_SYNC_WORK_NAME = "sync_transcripts_now"
+
 class MainActivity : ComponentActivity() {
     private lateinit var preferences: AppPreferences
     private lateinit var recorder: AudioRecorder
@@ -41,10 +45,14 @@ class MainActivity : ComponentActivity() {
         val syncRequest = PeriodicWorkRequestBuilder<SyncWorker>(15, TimeUnit.MINUTES)
             .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
             .build()
-        workManager.enqueueUniquePeriodicWork("sync_transcripts", ExistingPeriodicWorkPolicy.KEEP, syncRequest)
+        workManager.enqueueUniquePeriodicWork(PERIODIC_SYNC_WORK_NAME, ExistingPeriodicWorkPolicy.KEEP, syncRequest)
         
         // Also run once immediately on startup
-        workManager.enqueue(OneTimeWorkRequestBuilder<SyncWorker>().build())
+        workManager.enqueueUniqueWork(
+            ONE_TIME_SYNC_WORK_NAME,
+            ExistingWorkPolicy.KEEP,
+            OneTimeWorkRequestBuilder<SyncWorker>().build(),
+        )
 
         setContent {
             VibePubTheme {
@@ -67,7 +75,11 @@ fun VibePubApp(
 
     fun runSync() {
         WorkManager.getInstance(context)
-            .enqueue(OneTimeWorkRequestBuilder<SyncWorker>().build())
+            .enqueueUniqueWork(
+                ONE_TIME_SYNC_WORK_NAME,
+                ExistingWorkPolicy.KEEP,
+                OneTimeWorkRequestBuilder<SyncWorker>().build(),
+            )
     }
 
     fun enqueueUpload(file: File): Boolean {
@@ -100,6 +112,9 @@ fun VibePubApp(
         onRefresh = {
             runSync()
             Toast.makeText(context, "正在同步云端状态", Toast.LENGTH_SHORT).show()
+        },
+        onAutoRefresh = {
+            runSync()
         },
         onRetryUpload = { recording ->
             scope.launch {

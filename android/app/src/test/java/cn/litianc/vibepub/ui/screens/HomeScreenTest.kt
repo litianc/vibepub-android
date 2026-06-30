@@ -151,6 +151,73 @@ class HomeScreenTest {
         assertEquals("newer-processing.m4a", focus?.filename)
     }
 
+    @Test
+    fun homeActiveCloudWorkOnlyIncludesCloudPipelineStatuses() {
+        assertEquals(false, homeHasActiveCloudWork(emptyList()))
+        assertEquals(false, homeHasActiveCloudWork(listOf(recording(status = RecordingStatus.LOCAL_RECORDED))))
+        assertEquals(false, homeHasActiveCloudWork(listOf(recording(status = RecordingStatus.COMPLETED))))
+        assertEquals(false, homeHasActiveCloudWork(listOf(recording(status = RecordingStatus.FAILED))))
+        assertEquals(true, homeHasActiveCloudWork(listOf(recording(status = RecordingStatus.UPLOADING))))
+        assertEquals(true, homeHasActiveCloudWork(listOf(recording(status = RecordingStatus.UPLOADED))))
+        assertEquals(true, homeHasActiveCloudWork(listOf(recording(status = RecordingStatus.PROCESSING))))
+    }
+
+    @Test
+    fun autoRefreshActiveWorkSkipsWhenNothingIsRunningOrSyncIsFresh() {
+        assertEquals(
+            false,
+            shouldAutoRefreshActiveWork(
+                recordings = listOf(recording(status = RecordingStatus.COMPLETED)),
+                lastSyncAtMs = 0L,
+                lastAutoRefreshRequestAtMs = 0L,
+                nowMs = 60_000L,
+            ),
+        )
+
+        assertEquals(
+            false,
+            shouldAutoRefreshActiveWork(
+                recordings = listOf(recording(status = RecordingStatus.PROCESSING)),
+                lastSyncAtMs = 50_000L,
+                lastAutoRefreshRequestAtMs = 0L,
+                nowMs = 60_000L,
+            ),
+        )
+    }
+
+    @Test
+    fun autoRefreshActiveWorkRunsInitiallyAndThenWaitsForInterval() {
+        val active = listOf(recording(status = RecordingStatus.PROCESSING))
+
+        assertEquals(
+            true,
+            shouldAutoRefreshActiveWork(
+                recordings = active,
+                lastSyncAtMs = 0L,
+                lastAutoRefreshRequestAtMs = 0L,
+                nowMs = 60_000L,
+            ),
+        )
+        assertEquals(
+            false,
+            shouldAutoRefreshActiveWork(
+                recordings = active,
+                lastSyncAtMs = 0L,
+                lastAutoRefreshRequestAtMs = 45_000L,
+                nowMs = 60_000L,
+            ),
+        )
+        assertEquals(
+            true,
+            shouldAutoRefreshActiveWork(
+                recordings = active,
+                lastSyncAtMs = 0L,
+                lastAutoRefreshRequestAtMs = 30_000L,
+                nowMs = 60_000L,
+            ),
+        )
+    }
+
     private fun recording(status: RecordingStatus): RecordingEntity {
         return recording(
             status = status,
