@@ -293,6 +293,19 @@ class DetailScreenTest {
     }
 
     @Test
+    fun draftActionIgnoresNullStringUrlWhenMediaIdExists() {
+        val action = buildWeChatDraftAction(
+            wechatDraftId = "MEDIA_ID_123",
+            wechatUrl = "null",
+        )
+
+        checkNotNull(action)
+        assertEquals("草稿 ID 已同步", action.label)
+        assertFalse(action.enabled)
+        assertEquals("", action.url)
+    }
+
+    @Test
     fun draftActionStaysHiddenWhenDraftReferenceIsMissing() {
         val action = buildWeChatDraftAction(
             wechatDraftId = "",

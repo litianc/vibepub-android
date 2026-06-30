@@ -541,7 +541,12 @@ transcript_path = Path(sys.argv[2])
 if not transcript_path.exists():
     raise SystemExit(1)
 transcript = json.loads(transcript_path.read_text())
-draft_url = transcript.get("wechatUrl") or transcript.get("wechat_url") or ""
+def clean(value):
+    if value is None:
+        return ""
+    text = str(value).strip()
+    return "" if text.lower() == "null" else text
+draft_url = clean(transcript.get("wechatUrl") or transcript.get("wechat_url"))
 if not draft_url:
     raise SystemExit(0)
 if not actions_path.exists():
@@ -659,6 +664,28 @@ read_debug_status() {
 read_debug_detail_actions() {
   adb_cmd shell "run-as '$PACKAGE_NAME' cat files/debug-detail-actions.json" \
     > "$OUT_DIR/debug-detail-actions.json" 2>/dev/null
+}
+
+has_real_wechat_draft_url() {
+  local transcript_file="$OUT_DIR/local-transcript.json"
+
+  [[ -f "$transcript_file" ]] || return 1
+  python3 - "$transcript_file" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+def clean(value):
+    if value is None:
+        return ""
+    text = str(value).strip()
+    return "" if text.lower() == "null" else text
+
+path = Path(sys.argv[1])
+data = json.loads(path.read_text())
+draft_url = clean(data.get("wechatUrl") or data.get("wechat_url"))
+raise SystemExit(0 if draft_url else 1)
+PY
 }
 
 require_debug_status() {
@@ -1032,17 +1059,23 @@ try:
 finally:
     connection.close()
 
+def clean(value):
+    if value is None:
+        return ""
+    text = str(value).strip()
+    return "" if text.lower() == "null" else text
+
 print(json.dumps({
     "filename": filename,
     "count": int(row[0] or 0),
     "durationMs": int(row[1] or 0),
-    "status": row[2],
-    "articleTitle": row[3],
-    "rawTextPreview": row[4],
-    "processingStage": row[5],
-    "wechatDraftId": row[6],
-    "wechatUrl": row[7],
-    "lastError": row[8],
+    "status": clean(row[2]),
+    "articleTitle": clean(row[3]),
+    "rawTextPreview": clean(row[4]),
+    "processingStage": clean(row[5]),
+    "wechatDraftId": clean(row[6]),
+    "wechatUrl": clean(row[7]),
+    "lastError": clean(row[8]),
 }, ensure_ascii=False, indent=2))
 PY
 }
@@ -1185,7 +1218,7 @@ exercise_detail_actions() {
     sleep 0.4
   fi
 
-  if scroll_detail_to_text "打开公众号草稿"; then
+  if has_real_wechat_draft_url && scroll_detail_to_text "打开公众号草稿"; then
     tap_text_center_in_xml "打开公众号草稿" "$OUT_DIR/action-window.xml" || true
     sleep 1
     dump_current_window /sdcard/vibepub-draft-window.xml "$OUT_DIR/draft-window.xml"

@@ -830,10 +830,14 @@ internal fun renderArticleText(content: String): String {
 internal fun JSONObject?.optTranscriptString(vararg keys: String): String {
     if (this == null) return ""
     return keys.firstNotNullOfOrNull { key ->
-        optString(key, "").trim().takeUnless { value ->
-            value.isBlank() || value.equals("null", ignoreCase = true)
-        }
+        optString(key, "").trim().blankToMissingString()
     }.orEmpty()
+}
+
+private fun String.blankToMissingString(): String? {
+    return takeUnless { value ->
+        value.isBlank() || value.equals("null", ignoreCase = true)
+    }
 }
 
 internal fun buildArticleExportText(
@@ -1006,8 +1010,8 @@ internal fun buildWeChatDraftAction(
     wechatDraftId: String,
     wechatUrl: String,
 ): WeChatDraftAction? {
-    val draftUrl = wechatUrl.trim()
-    val draftId = wechatDraftId.trim()
+    val draftUrl = wechatUrl.trim().blankToMissingString().orEmpty()
+    val draftId = wechatDraftId.trim().blankToMissingString().orEmpty()
 
     return when {
         draftUrl.isNotBlank() -> WeChatDraftAction(
