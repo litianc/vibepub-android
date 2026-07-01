@@ -253,55 +253,52 @@ async function listRecordings(env: Env): Promise<Response> {
       return json({ error: "database_error", details: dbErr.message }, 500);
     }
 
-    try {
-      return json({
-        recordings: withRecordingDisplayFields(
-          await queryRecordings(env, userId, "withoutDuration"),
-          { duration_ms: null },
-        ),
-      });
-    } catch (legacyDbErr: any) {
-      const legacyMessage = String(legacyDbErr?.message || "");
-      if (!legacyMessage.includes("no such column")) {
-        console.error("Failed to fetch from D1:", legacyDbErr);
-        return json({ error: "database_error", details: legacyDbErr.message }, 500);
-      }
+    const legacyShapes: Array<{
+      shape: QueryRecordingShape;
+      defaults: Record<string, unknown>;
+    }> = [
+      { shape: "withoutCoverImageUrl", defaults: { cover_image_url: null } },
+      { shape: "withoutDuration", defaults: { duration_ms: null, cover_image_url: null } },
+      {
+        shape: "withoutProcessingStage",
+        defaults: { duration_ms: null, processing_stage: null, cover_image_url: null },
+      },
+    ];
 
+    for (const legacyShape of legacyShapes) {
       try {
         return json({
           recordings: withRecordingDisplayFields(
-            await queryRecordings(env, userId, "withoutProcessingStage"),
-            {
-              duration_ms: null,
-              processing_stage: null,
-            },
+            await queryRecordings(env, userId, legacyShape.shape),
+            legacyShape.defaults,
           ),
         });
-      } catch (oldDbErr: any) {
-        const oldMessage = String(oldDbErr?.message || "");
-        if (!oldMessage.includes("no such column")) {
-          console.error("Failed to fetch from D1:", oldDbErr);
-          return json({ error: "database_error", details: oldDbErr.message }, 500);
+      } catch (legacyDbErr: any) {
+        const legacyMessage = String(legacyDbErr?.message || "");
+        if (!legacyMessage.includes("no such column")) {
+          console.error("Failed to fetch from D1:", legacyDbErr);
+          return json({ error: "database_error", details: legacyDbErr.message }, 500);
         }
-
-        const { results } = await env.DB.prepare(
-          `SELECT id, filename, status, created_at, updated_at FROM recordings WHERE user_id = ? ORDER BY created_at DESC LIMIT 100`
-        )
-        .bind(userId)
-        .all();
-        return json({
-          recordings: withRecordingDisplayFields(results, {
-            article_title: null,
-            raw_text_preview: null,
-            duration_ms: null,
-            processing_stage: null,
-            wechat_url: null,
-            wechat_draft_id: null,
-            error_message: null,
-          }),
-        });
       }
     }
+
+    const { results } = await env.DB.prepare(
+      `SELECT id, filename, status, created_at, updated_at FROM recordings WHERE user_id = ? ORDER BY created_at DESC LIMIT 100`
+    )
+    .bind(userId)
+    .all();
+    return json({
+      recordings: withRecordingDisplayFields(results, {
+        article_title: null,
+        raw_text_preview: null,
+        duration_ms: null,
+        processing_stage: null,
+        wechat_url: null,
+        wechat_draft_id: null,
+        cover_image_url: null,
+        error_message: null,
+      }),
+    });
   }
 }
 
@@ -314,9 +311,11 @@ async function deleteRecording(env: Env, filename: string): Promise<Response> {
   const userId = "default_user";
   const r2Keys = new Set<string>();
   const transcriptKey = `transcripts/${safeName.replace(/\.[^/.]+$/, ".json")}`;
+  const coverKey = `covers/${safeName.replace(/\.[^/.]+$/, ".png")}`;
 
   r2Keys.add(`inbox/${safeName}`);
   r2Keys.add(transcriptKey);
+  r2Keys.add(coverKey);
 
   try {
     const { results } = await env.DB.prepare(
@@ -379,11 +378,12 @@ function withRecordingDisplayFields(
       positiveIntegerOrNull(recording?.duration_ms) ??
       positiveIntegerOrNull(recording?.durationMs) ??
       parseDurationMsFromRecordingFilename(recording?.filename);
-
     return {
       ...recording,
       ...defaults,
       duration_ms: durationMs,
+      cover_image_url: normalizeOptionalString(recording?.cover_image_url) ??
+        normalizeOptionalString(recording?.coverImageUrl),
       wechat_url: normalizeRemoteReference(recording?.wechat_url),
       wechat_draft_id: normalizeRemoteReference(recording?.wechat_draft_id),
     };
@@ -406,85 +406,86 @@ function parseDurationMsFromRecordingFilename(filename: unknown): number | null 
   return ((minutes * 60) + seconds) * 1_000;
 }
 
+type QueryRecordingShape =
+  | "full"
+  | "withoutCoverImageUrl"
+  | "withoutDuration"
+  | "withoutProcessingStage";
+
 async function queryRecordings(
   env: Env,
   userId: string,
-  shape: "full" | "withoutDuration" | "withoutProcessingStage",
+  shape: QueryRecordingShape,
 ): Promise<unknown[]> {
-  if (shape === "full") {
-    const { results } = await env.DB.prepare(
-      `
-      SELECT
-        id,
-        filename,
-        status,
-        duration_ms,
-        created_at,
-        updated_at,
-        article_title,
-        substr(raw_text, 1, 120) AS raw_text_preview,
-        processing_stage,
-        wechat_url,
-        wechat_draft_id,
-        error_message
-      FROM recordings
-      WHERE user_id = ?
-      ORDER BY created_at DESC
-      LIMIT 100
-      `
-    )
-    .bind(userId)
-    .all();
-    return results;
-  }
-
-  if (shape === "withoutDuration") {
-    const { results } = await env.DB.prepare(
-      `
-      SELECT
-        id,
-        filename,
-        status,
-        created_at,
-        updated_at,
-        article_title,
-        substr(raw_text, 1, 120) AS raw_text_preview,
-        processing_stage,
-        wechat_url,
-        wechat_draft_id,
-        error_message
-      FROM recordings
-      WHERE user_id = ?
-      ORDER BY created_at DESC
-      LIMIT 100
-      `
-    )
-    .bind(userId)
-    .all();
-    return results;
-  }
+  const selectColumnsByShape: Record<QueryRecordingShape, string[]> = {
+    full: [
+      "id",
+      "filename",
+      "status",
+      "duration_ms",
+      "created_at",
+      "updated_at",
+      "article_title",
+      "substr(raw_text, 1, 120) AS raw_text_preview",
+      "processing_stage",
+      "wechat_url",
+      "wechat_draft_id",
+      "cover_image_url",
+      "error_message",
+    ],
+    withoutCoverImageUrl: [
+      "id",
+      "filename",
+      "status",
+      "duration_ms",
+      "created_at",
+      "updated_at",
+      "article_title",
+      "substr(raw_text, 1, 120) AS raw_text_preview",
+      "processing_stage",
+      "wechat_url",
+      "wechat_draft_id",
+      "error_message",
+    ],
+    withoutDuration: [
+      "id",
+      "filename",
+      "status",
+      "created_at",
+      "updated_at",
+      "article_title",
+      "substr(raw_text, 1, 120) AS raw_text_preview",
+      "processing_stage",
+      "wechat_url",
+      "wechat_draft_id",
+      "error_message",
+    ],
+    withoutProcessingStage: [
+      "id",
+      "filename",
+      "status",
+      "created_at",
+      "updated_at",
+      "article_title",
+      "substr(raw_text, 1, 120) AS raw_text_preview",
+      "wechat_url",
+      "wechat_draft_id",
+      "error_message",
+    ],
+  };
 
   const { results } = await env.DB.prepare(
     `
     SELECT
-      id,
-      filename,
-      status,
-      created_at,
-      updated_at,
-      article_title,
-      substr(raw_text, 1, 120) AS raw_text_preview,
-      wechat_url,
-      wechat_draft_id,
-      error_message
+      ${selectColumnsByShape[shape].join(",\n      ")}
     FROM recordings
     WHERE user_id = ?
     ORDER BY created_at DESC
     LIMIT 100
     `
-    )
-    .bind(userId)
-    .all();
+  )
+  .bind(userId)
+  .all();
   return results;
 }
 
@@ -501,6 +502,8 @@ async function updateStatus(request: Request, env: Env): Promise<Response> {
       processing_stage,
       wechatUrl,
       wechatDraftId,
+      coverImageUrl,
+      cover_image_url,
       errorMessage,
       error_message,
     } = body;
@@ -508,6 +511,7 @@ async function updateStatus(request: Request, env: Env): Promise<Response> {
       return json({ error: "missing_fields" }, 400);
     }
     const stage = processingStage || processing_stage || null;
+    const normalizedCoverImageUrl = normalizeRemoteReference(coverImageUrl ?? cover_image_url);
     const statusError = resolveStatusErrorUpdate({
       status,
       processingStage: stage,
@@ -524,6 +528,7 @@ async function updateStatus(request: Request, env: Env): Promise<Response> {
         processing_stage = COALESCE(?, processing_stage),
         wechat_url = COALESCE(?, wechat_url),
         wechat_draft_id = COALESCE(?, wechat_draft_id),
+        cover_image_url = COALESCE(?, cover_image_url),
         error_message = CASE WHEN ? = 1 THEN ? ELSE error_message END,
         updated_at = CURRENT_TIMESTAMP
       WHERE user_id = ? AND filename = ?
@@ -538,6 +543,7 @@ async function updateStatus(request: Request, env: Env): Promise<Response> {
           stage,
           normalizeRemoteReference(wechatUrl),
           normalizeRemoteReference(wechatDraftId),
+          normalizedCoverImageUrl,
           statusError.shouldSet ? 1 : 0,
           statusError.value,
           "default_user",
@@ -547,16 +553,23 @@ async function updateStatus(request: Request, env: Env): Promise<Response> {
     } catch (dbErr: any) {
       const message = String(dbErr?.message || "");
       if (!message.includes("no such column")) throw dbErr;
-      await updateStatusWithoutProcessingStage(env, {
+      const legacyUpdate = {
         filename,
         status,
         rawText,
         articleTitle,
         articleContent,
+        processingStage: stage,
         wechatUrl,
         wechatDraftId,
+        coverImageUrl: normalizedCoverImageUrl,
         errorMessage: statusError,
-      });
+      };
+      if (message.includes("cover_image_url")) {
+        await updateStatusWithoutCoverImageUrl(env, legacyUpdate);
+      } else {
+        await updateStatusWithoutProcessingStage(env, legacyUpdate);
+      }
     }
     return json({ ok: true });
   } catch (e: any) {
@@ -624,6 +637,57 @@ async function updateStatusWithoutProcessingStage(
         body.filename,
       )
       .run();
+  }
+}
+
+async function updateStatusWithoutCoverImageUrl(
+  env: Env,
+  body: {
+    filename: string;
+    status: string;
+    rawText?: string;
+    articleTitle?: string;
+    articleContent?: string;
+    processingStage?: string | null;
+    wechatUrl?: string;
+    wechatDraftId?: string;
+    errorMessage: StatusErrorUpdate;
+  },
+): Promise<void> {
+  const statement = `
+    UPDATE recordings
+    SET
+      status = ?,
+      raw_text = COALESCE(?, raw_text),
+      article_title = COALESCE(?, article_title),
+      article_content = COALESCE(?, article_content),
+      processing_stage = COALESCE(?, processing_stage),
+      wechat_url = COALESCE(?, wechat_url),
+      wechat_draft_id = COALESCE(?, wechat_draft_id),
+      error_message = CASE WHEN ? = 1 THEN ? ELSE error_message END,
+      updated_at = CURRENT_TIMESTAMP
+    WHERE user_id = ? AND filename = ?
+    `;
+  try {
+    await env.DB.prepare(statement)
+      .bind(
+        body.status,
+        body.rawText || null,
+        body.articleTitle || null,
+        body.articleContent || null,
+        body.processingStage || null,
+        normalizeRemoteReference(body.wechatUrl),
+        normalizeRemoteReference(body.wechatDraftId),
+        body.errorMessage.shouldSet ? 1 : 0,
+        body.errorMessage.value,
+        "default_user",
+        body.filename,
+      )
+      .run();
+  } catch (dbErr: any) {
+    const message = String(dbErr?.message || "");
+    if (!message.includes("no such column")) throw dbErr;
+    await updateStatusWithoutProcessingStage(env, body);
   }
 }
 

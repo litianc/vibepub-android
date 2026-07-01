@@ -92,6 +92,12 @@ internal fun transcriptRawTextOrNull(transcript: JSONObject?): String? {
         .blankToNullValue()
 }
 
+internal fun JSONObject.coverImageUrlOrNull(): String? {
+    return optString("coverImageUrl", "")
+        .ifBlank { optString("cover_image_url", "") }
+        .blankToNullValue()
+}
+
 internal fun String.blankToNullValue(): String? {
     val value = trim()
     return value.takeUnless { it.isBlank() || it.equals("null", ignoreCase = true) }
@@ -131,6 +137,7 @@ internal fun mergeRemoteRecordingFromListItem(
         .ifBlank { recObj.optString("mediaId", "") }
         .blankToNullValue()
     val wechatUrl = recObj.wechatUrlOrNull()
+    val coverImageUrl = recObj.coverImageUrlOrNull()
     val processingStage = recObj.processingStageOrNull()
 
     if (existing == null) {
@@ -146,6 +153,7 @@ internal fun mergeRemoteRecordingFromListItem(
             completedAt = if (remoteStatus == RecordingStatus.COMPLETED) nowMs else null,
             wechatDraftId = wechatDraftId,
             wechatUrl = wechatUrl,
+            coverImageUrl = coverImageUrl,
             processingStage = processingStage,
         )
     }
@@ -180,6 +188,7 @@ internal fun mergeRemoteRecordingFromListItem(
         },
         wechatDraftId = wechatDraftId ?: existing.wechatDraftId,
         wechatUrl = wechatUrl ?: existing.wechatUrl,
+        coverImageUrl = coverImageUrl ?: existing.coverImageUrl,
         processingStage = processingStage ?: existing.processingStage,
     )
 }
@@ -269,6 +278,13 @@ class SyncWorker(
                         val transcriptProcessingStage = transcript.processingStageOrNull() ?: "COMPLETED"
                         val transcriptWechatDraftId = transcript.wechatDraftIdOrNull()
                         val transcriptWechatUrl = transcript.wechatUrlOrNull()
+                        val transcriptCoverImageUrl = transcript.coverImageUrlOrNull()
+                        downloadCoverImageIfNeeded(
+                            dir = dir,
+                            filename = recording.filename,
+                            coverImageUrl = transcriptCoverImageUrl ?: recording.coverImageUrl,
+                            filesToken = filesToken,
+                        )
                         dao.upsertBest(
                             recording.copy(
                                 status = RecordingStatus.COMPLETED.value,
@@ -285,6 +301,7 @@ class SyncWorker(
                                 completedAt = recording.completedAt ?: System.currentTimeMillis(),
                                 wechatDraftId = transcriptWechatDraftId ?: recording.wechatDraftId,
                                 wechatUrl = transcriptWechatUrl ?: recording.wechatUrl,
+                                coverImageUrl = transcriptCoverImageUrl ?: recording.coverImageUrl,
                                 processingStage = transcriptProcessingStage,
                             ),
                         )
@@ -314,8 +331,15 @@ class SyncWorker(
                     allSuccess = false
                 }
             } else {
+                val transcript = runCatching { JSONObject(jsonFile.readText()) }.getOrNull()
+                val transcriptCoverImageUrl = transcript?.coverImageUrlOrNull()
+                downloadCoverImageIfNeeded(
+                    dir = dir,
+                    filename = recording.filename,
+                    coverImageUrl = transcriptCoverImageUrl ?: recording.coverImageUrl,
+                    filesToken = filesToken,
+                )
                 if (recording.status != RecordingStatus.COMPLETED.value) {
-                    val transcript = runCatching { JSONObject(jsonFile.readText()) }.getOrNull()
                     val transcriptTitle = transcriptArticleTitleOrNull(transcript)
                     val transcriptPreview = transcriptRawTextOrNull(transcript)?.take(80)?.blankToNullValue()
                     val transcriptProcessingStage = transcript?.processingStageOrNull() ?: "COMPLETED"
@@ -334,6 +358,7 @@ class SyncWorker(
                             completedAt = recording.completedAt ?: System.currentTimeMillis(),
                             wechatDraftId = transcriptWechatDraftId ?: recording.wechatDraftId,
                             wechatUrl = transcriptWechatUrl ?: recording.wechatUrl,
+                            coverImageUrl = transcriptCoverImageUrl ?: recording.coverImageUrl,
                             processingStage = transcriptProcessingStage,
                         ),
                     )
@@ -365,6 +390,45 @@ class SyncWorker(
     }
 
     private fun JSONObject.errorMessageOrNull(): String? = syncErrorMessageOrNull()
+
+    private fun downloadCoverImageIfNeeded(
+        dir: File,
+        filename: String,
+        coverImageUrl: String?,
+        filesToken: String,
+    ) {
+        val url = coverImageUrl?.trim()?.takeIf { it.isNotBlank() } ?: return
+        val file = File(dir, coverImageFileNameForRecording(filename))
+        if (file.exists() && file.length() > 0L) return
+
+        val tempFile = File(file.parentFile, "${file.name}.tmp")
+        runCatching {
+            dir.mkdirs()
+            tempFile.delete()
+            val connection = (URL(url).openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 10_000
+                readTimeout = 20_000
+                setRequestProperty("Authorization", "Bearer $filesToken")
+            }
+            try {
+                if (connection.responseCode in 200..299) {
+                    connection.inputStream.use { input ->
+                        tempFile.outputStream().use { output -> input.copyTo(output) }
+                    }
+                    if (file.exists() && file.length() == 0L) file.delete()
+                    if (!tempFile.renameTo(file)) {
+                        tempFile.copyTo(file, overwrite = true)
+                        tempFile.delete()
+                    }
+                }
+            } finally {
+                connection.disconnect()
+            }
+        }.onFailure {
+            tempFile.delete()
+        }
+    }
 }
 
 internal fun JSONObject.wechatDraftIdOrNull(): String? {

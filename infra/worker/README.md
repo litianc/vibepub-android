@@ -13,7 +13,7 @@ Cloudflare Worker API for Android audio uploads.
 
 `/api/recordings` returns the Android display contract: `filename`, `status`,
 `created_at`, `updated_at`, `duration_ms`, optional `article_title`, `raw_text_preview`,
-`processing_stage`, `wechat_url`, `wechat_draft_id`, and `error_message`.
+`processing_stage`, `wechat_url`, `wechat_draft_id`, `cover_image_url`, and `error_message`.
 `duration_ms` is preserved from storage when present, otherwise derived from the
 standard VibePub filename duration segment such as `0m18s`.
 `processing_stage` is a narrow progress hint for the current pipeline step:
@@ -23,6 +23,8 @@ standard VibePub filename duration segment such as `0m18s`.
 review while the WeChat draft step is still pending.
 `DRAFT_FAILED` means the article is ready and consumable but WeChat draft
 creation failed after article generation.
+`cover_image_url` points at the generated WeChat cover PNG in R2 when the mining
+job has saved one; older recordings may omit it.
 
 ## Setup
 

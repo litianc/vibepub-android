@@ -152,6 +152,7 @@ fun VibePubApp(
                     recording.localAudioPath?.let { File(it).delete() }
                     File(context.filesDir, "recordings/${recording.filename}").delete()
                     File(context.filesDir, "recordings/${transcriptFileNameForRecording(recording.filename)}").delete()
+                    File(context.filesDir, "recordings/${coverImageFileNameForRecording(recording.filename)}").delete()
                     deleteRemoteRecording(
                         apiBaseUrl = preferences.apiBaseUrl,
                         filesToken = preferences.filesToken,

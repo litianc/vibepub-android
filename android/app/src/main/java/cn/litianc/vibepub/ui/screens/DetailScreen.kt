@@ -4,9 +4,11 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.graphics.BitmapFactory
 import android.net.Uri
 import android.text.Html
 import android.widget.Toast
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -64,6 +66,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
@@ -74,6 +78,7 @@ import androidx.media3.common.MediaItem
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.core.content.FileProvider
 import cn.litianc.vibepub.BuildConfig
+import cn.litianc.vibepub.coverImageFileNameForRecording
 import cn.litianc.vibepub.transcriptFileNameForRecording
 import cn.litianc.vibepub.data.AppDatabase
 import cn.litianc.vibepub.data.RecordingEntity
@@ -239,6 +244,8 @@ fun DetailScreen(
             .ifBlank { sanitizedRemoteReference(currentRecording.wechatDraftId).orEmpty() }
         val wechatUrl = transcript.optTranscriptString("wechatUrl", "wechat_url")
             .ifBlank { sanitizedRemoteReference(currentRecording.wechatUrl).orEmpty() }
+        val coverImageUrl = transcript.optTranscriptString("coverImageUrl", "cover_image_url")
+            .ifBlank { currentRecording.coverImageUrl.orEmpty() }
         val transcriptError = transcript.optTranscriptString("errorMessage", "error_message")
         val draftError = when {
             currentRecording.hasDraftFailureMessage() -> currentRecording.lastError.orEmpty()
@@ -328,6 +335,11 @@ fun DetailScreen(
             }
 
             Spacer(modifier = Modifier.height(16.dp))
+            CoverImageCard(
+                filename = currentRecording.filename,
+                coverImageUrl = coverImageUrl,
+            )
+            Spacer(modifier = Modifier.height(16.dp))
             ArticleReviewCard(summary = reviewSummary)
             Spacer(modifier = Modifier.height(16.dp))
             ActionRow(
@@ -347,6 +359,67 @@ fun DetailScreen(
                 lineHeight = 28.sp,
             )
             Spacer(modifier = Modifier.height(40.dp))
+        }
+    }
+}
+
+@Composable
+private fun CoverImageCard(
+    filename: String,
+    coverImageUrl: String,
+) {
+    val context = LocalContext.current
+    val coverFile = remember(filename) {
+        File(context.filesDir, "recordings/${coverImageFileNameForRecording(filename)}")
+    }
+    val bitmap = remember(filename, coverFile.lastModified(), coverFile.length()) {
+        if (coverFile.exists() && coverFile.length() > 0L) {
+            BitmapFactory.decodeFile(coverFile.absolutePath)
+        } else {
+            null
+        }
+    }
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("WechatCoverCard"),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        shape = RoundedCornerShape(12.dp),
+    ) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text("公众号封面", fontWeight = FontWeight.SemiBold)
+            if (bitmap != null) {
+                Image(
+                    bitmap = bitmap.asImageBitmap(),
+                    contentDescription = "公众号封面预览",
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(170.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .testTag("WechatCoverImage"),
+                )
+            } else {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(120.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                        .testTag("WechatCoverPlaceholder"),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = if (coverImageUrl.isNotBlank()) "封面同步中，点刷新后查看" else "封面会在生成公众号草稿时出现",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
         }
     }
 }

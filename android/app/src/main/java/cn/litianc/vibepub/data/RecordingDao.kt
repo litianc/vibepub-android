@@ -141,7 +141,11 @@ private fun RecordingEntity.statusScore(): Int {
 }
 
 private fun RecordingEntity.hasArticlePayload(): Boolean {
-    return !articleTitle.isNullOrBlank() || !rawTextPreview.isNullOrBlank() || !wechatDraftId.isNullOrBlank() || !wechatUrl.isNullOrBlank()
+    return !articleTitle.isNullOrBlank() ||
+        !rawTextPreview.isNullOrBlank() ||
+        !coverImageUrl.isNullOrBlank() ||
+        !wechatDraftId.isNullOrBlank() ||
+        !wechatUrl.isNullOrBlank()
 }
 
 private fun RecordingEntity.hasPositiveDuration(): Boolean = durationMs > 0L

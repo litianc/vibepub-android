@@ -16,6 +16,7 @@ export type ArticleResult = {
   imagePrompt: string;
   coverTitle?: string[];
   coverSubtitle?: string;
+  coverImageUrl?: string;
 };
 
 export async function processAudioText(rawText: string): Promise<ArticleResult> {
