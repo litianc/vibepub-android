@@ -170,4 +170,65 @@ class RecordingDaoTest {
         val tombstone = dao.getRecordingByFilenameIncludingDeleted("deleted.m4a")
         assertEquals(123_000L, tombstone?.deletedAt)
     }
+
+    @Test
+    fun upsertBestDoesNotResurrectDeletedTombstone() = runBlocking {
+        val dao = database.recordingDao()
+        dao.insert(
+            RecordingEntity(
+                filename = "deleted.m4a",
+                durationMs = 32_000L,
+                timestamp = 1L,
+                status = RecordingStatus.FAILED.value,
+                lastError = "处理失败",
+            ),
+        )
+        dao.markDeletedByFilename("deleted.m4a", deletedAt = 123_000L)
+
+        dao.upsertBest(
+            RecordingEntity(
+                filename = "deleted.m4a",
+                durationMs = 32_000L,
+                timestamp = 2L,
+                status = RecordingStatus.COMPLETED.value,
+                articleTitle = "远端同步又回来了",
+            ),
+        )
+
+        assertEquals(emptyList<RecordingEntity>(), dao.getAllRecordings())
+        assertEquals(null, dao.getRecordingByFilename("deleted.m4a"))
+        val tombstone = dao.getRecordingByFilenameIncludingDeleted("deleted.m4a")
+        assertEquals(123_000L, tombstone?.deletedAt)
+        assertEquals(RecordingStatus.FAILED.value, tombstone?.status)
+    }
+
+    @Test
+    fun upsertBestDoesNotResurrectDeletedTombstoneFromStaleSameIdEntity() = runBlocking {
+        val dao = database.recordingDao()
+        val rowId = dao.insert(
+            RecordingEntity(
+                filename = "deleted.m4a",
+                durationMs = 32_000L,
+                timestamp = 1L,
+                status = RecordingStatus.UPLOADING.value,
+            ),
+        )
+        val staleWorkerCopy = dao.getRecordingByFilename("deleted.m4a")
+        dao.markDeletedByFilename("deleted.m4a", deletedAt = 123_000L)
+
+        dao.upsertBest(
+            requireNotNull(staleWorkerCopy).copy(
+                id = rowId.toInt(),
+                status = RecordingStatus.UPLOADED.value,
+                lastError = null,
+            ),
+        )
+
+        assertEquals(emptyList<RecordingEntity>(), dao.getAllRecordings())
+        assertEquals(null, dao.getRecordingByFilename("deleted.m4a"))
+        val tombstone = dao.getRecordingByFilenameIncludingDeleted("deleted.m4a")
+        assertEquals(rowId.toInt(), tombstone?.id)
+        assertEquals(123_000L, tombstone?.deletedAt)
+        assertEquals(RecordingStatus.UPLOADING.value, tombstone?.status)
+    }
 }

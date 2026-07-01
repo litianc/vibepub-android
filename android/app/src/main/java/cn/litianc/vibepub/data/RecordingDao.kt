@@ -68,6 +68,9 @@ interface RecordingDao {
     @Transaction
     suspend fun upsertBest(recording: RecordingEntity): Long {
         val existing = getRecordingByFilenameIncludingDeleted(recording.filename)
+        if (existing != null && recording.deletedAt == null && existing.deletedAt != null) {
+            return existing.id.toLong()
+        }
         return if (existing == null || recording.id == existing.id || recording.shouldReplaceExisting(existing)) {
             insert(recording.copy(id = if (recording.id == 0 && existing != null) existing.id else recording.id))
         } else {
@@ -116,7 +119,7 @@ interface RecordingDao {
 }
 
 internal fun RecordingEntity.shouldReplaceExisting(existing: RecordingEntity): Boolean {
-    if (deletedAt == null && existing.deletedAt != null) return true
+    if (deletedAt == null && existing.deletedAt != null) return false
     if (deletedAt != null && existing.deletedAt == null) return false
     if (statusScore() != existing.statusScore()) return statusScore() > existing.statusScore()
     if (hasArticlePayload() != existing.hasArticlePayload()) return hasArticlePayload()

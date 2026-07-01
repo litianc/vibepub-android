@@ -142,6 +142,7 @@ fun DetailScreen(
     val recording by recordingFlow.collectAsState(initial = null)
     var transcript by remember(filename) { mutableStateOf<JSONObject?>(null) }
     var lastAutoRefreshRequestAtMs by remember(filename) { mutableStateOf(0L) }
+    var deleteInProgress by remember(filename) { mutableStateOf(false) }
 
     LaunchedEffect(
         filename,
@@ -170,6 +171,12 @@ fun DetailScreen(
                 onAutoRefresh()
             }
             delay(ACTIVE_RECORDING_AUTO_REFRESH_INTERVAL_MS)
+        }
+    }
+
+    LaunchedEffect(deleteInProgress, recording) {
+        if (deleteInProgress && recording == null) {
+            onBackClick()
         }
     }
 
@@ -295,9 +302,10 @@ fun DetailScreen(
                 lastSyncAtMs = lastSyncAtMs,
                 onRefresh = onRefresh,
                 onRetryUpload = { onRetryUpload(currentRecording) },
+                deleteInProgress = deleteInProgress,
                 onDeleteRecording = {
+                    deleteInProgress = true
                     onDeleteRecording(currentRecording)
-                    onBackClick()
                 },
             )
             Spacer(modifier = Modifier.height(22.dp))
@@ -455,6 +463,7 @@ internal fun StatusCard(
     lastSyncAtMs: Long,
     onRefresh: () -> Unit,
     onRetryUpload: () -> Unit,
+    deleteInProgress: Boolean = false,
     onDeleteRecording: () -> Unit,
 ) {
     val status = recording.status.asRecordingStatus()
@@ -593,11 +602,12 @@ internal fun StatusCard(
                 }
                 OutlinedButton(
                     onClick = { showDeleteConfirm = true },
+                    enabled = !deleteInProgress,
                     modifier = Modifier.testTag("DetailDeleteRecordingButton"),
                 ) {
                     Icon(Icons.Default.Delete, contentDescription = null, modifier = Modifier.size(16.dp))
                     Spacer(modifier = Modifier.width(6.dp))
-                    Text("删除这条记录")
+                    Text(if (deleteInProgress) "删除中" else "删除这条记录")
                 }
             }
         }
