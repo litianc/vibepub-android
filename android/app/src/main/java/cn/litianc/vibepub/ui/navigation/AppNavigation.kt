@@ -100,6 +100,7 @@ fun AppNavigation(
                 onRefresh = onRefresh,
                 onAutoRefresh = onAutoRefresh,
                 onRetryUpload = onRetryUpload,
+                onDeleteRecording = onDeleteRecording,
             )
         }
     }

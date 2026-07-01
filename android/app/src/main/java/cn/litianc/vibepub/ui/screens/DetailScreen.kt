@@ -26,6 +26,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.OpenInNew
@@ -35,6 +36,7 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.TaskAlt
 import androidx.compose.material.icons.filled.Upload
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -47,6 +49,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -130,6 +133,7 @@ fun DetailScreen(
     onRefresh: () -> Unit,
     onAutoRefresh: () -> Unit,
     onRetryUpload: (RecordingEntity) -> Unit,
+    onDeleteRecording: (RecordingEntity) -> Unit,
 ) {
     val context = LocalContext.current
     val recordingFlow = remember(filename) {
@@ -291,6 +295,10 @@ fun DetailScreen(
                 lastSyncAtMs = lastSyncAtMs,
                 onRefresh = onRefresh,
                 onRetryUpload = { onRetryUpload(currentRecording) },
+                onDeleteRecording = {
+                    onDeleteRecording(currentRecording)
+                    onBackClick()
+                },
             )
             Spacer(modifier = Modifier.height(22.dp))
 
@@ -447,16 +455,28 @@ internal fun StatusCard(
     lastSyncAtMs: Long,
     onRefresh: () -> Unit,
     onRetryUpload: () -> Unit,
+    onDeleteRecording: () -> Unit,
 ) {
     val status = recording.status.asRecordingStatus()
     val recoveryAction = recording.primaryRecoveryAction()
     val attention = recording.workflowAttention()
     var showWorkflowHelp by remember { mutableStateOf(false) }
+    var showDeleteConfirm by remember { mutableStateOf(false) }
 
     if (showWorkflowHelp) {
         WorkflowHelpDialog(
             recording = recording,
             onDismiss = { showWorkflowHelp = false },
+        )
+    }
+    if (showDeleteConfirm) {
+        DetailDeleteRecordingDialog(
+            recording = recording,
+            onDismiss = { showDeleteConfirm = false },
+            onConfirm = {
+                showDeleteConfirm = false
+                onDeleteRecording()
+            },
         )
     }
 
@@ -541,37 +561,91 @@ internal fun StatusCard(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Spacer(modifier = Modifier.height(10.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick = onRefresh) {
-                    Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text("刷新")
-                }
-                if (recoveryAction != null) {
-                    Button(
-                        onClick = {
-                            when (recoveryAction.type) {
-                                RecordingRecoveryActionType.RETRY_UPLOAD -> onRetryUpload()
-                                RecordingRecoveryActionType.REFRESH_SYNC -> onRefresh()
-                            }
-                        },
-                        modifier = Modifier.testTag("DetailRecoveryButton"),
-                    ) {
-                        Icon(
-                            imageVector = when (recoveryAction.type) {
-                                RecordingRecoveryActionType.RETRY_UPLOAD -> Icons.Default.Upload
-                                RecordingRecoveryActionType.REFRESH_SYNC -> Icons.Default.Refresh
-                            },
-                            contentDescription = null,
-                            modifier = Modifier.size(16.dp),
-                        )
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = onRefresh) {
+                        Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
                         Spacer(modifier = Modifier.width(6.dp))
-                        Text(recoveryAction.label)
+                        Text("刷新")
                     }
+                    if (recoveryAction != null) {
+                        Button(
+                            onClick = {
+                                when (recoveryAction.type) {
+                                    RecordingRecoveryActionType.RETRY_UPLOAD -> onRetryUpload()
+                                    RecordingRecoveryActionType.REFRESH_SYNC -> onRefresh()
+                                }
+                            },
+                            modifier = Modifier.testTag("DetailRecoveryButton"),
+                        ) {
+                            Icon(
+                                imageVector = when (recoveryAction.type) {
+                                    RecordingRecoveryActionType.RETRY_UPLOAD -> Icons.Default.Upload
+                                    RecordingRecoveryActionType.REFRESH_SYNC -> Icons.Default.Refresh
+                                },
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp),
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(recoveryAction.label)
+                        }
+                    }
+                }
+                OutlinedButton(
+                    onClick = { showDeleteConfirm = true },
+                    modifier = Modifier.testTag("DetailDeleteRecordingButton"),
+                ) {
+                    Icon(Icons.Default.Delete, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("删除这条记录")
                 }
             }
         }
     }
+}
+
+@Composable
+private fun DetailDeleteRecordingDialog(
+    recording: RecordingEntity,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit,
+) {
+    AlertDialog(
+        modifier = Modifier.testTag("DetailDeleteRecordingDialog"),
+        onDismissRequest = onDismiss,
+        title = { Text("删除这条录音？") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    "将从本机移除录音、音频和结果文件，并尝试删除云端历史记录。",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    recording.displayTitle(),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = onConfirm,
+                modifier = Modifier.testTag("ConfirmDetailDeleteRecordingButton"),
+            ) {
+                Text("删除", color = MaterialTheme.colorScheme.error)
+            }
+        },
+        dismissButton = {
+            TextButton(
+                onClick = onDismiss,
+                modifier = Modifier.testTag("CancelDetailDeleteRecordingButton"),
+            ) {
+                Text("取消")
+            }
+        },
+    )
 }
 
 @Composable

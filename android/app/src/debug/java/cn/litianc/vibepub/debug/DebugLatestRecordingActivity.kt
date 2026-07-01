@@ -76,6 +76,9 @@ class DebugLatestRecordingActivity : ComponentActivity() {
                         onRetryUpload = {
                             Toast.makeText(context, "Debug detail retry requested", Toast.LENGTH_SHORT).show()
                         },
+                        onDeleteRecording = {
+                            Toast.makeText(context, "Debug detail delete requested", Toast.LENGTH_SHORT).show()
+                        },
                     )
                     loaded -> Text("No recordings available")
                     else -> Text("Loading latest recording...")

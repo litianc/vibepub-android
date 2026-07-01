@@ -367,6 +367,7 @@ class WorkflowHelpDialogTest {
                 lastSyncAtMs = 0L,
                 onRefresh = { refreshCount++ },
                 onRetryUpload = { retryCount++ },
+                onDeleteRecording = {},
             )
         }
 
@@ -379,6 +380,43 @@ class WorkflowHelpDialogTest {
         composeTestRule.runOnIdle {
             assertEquals(0, retryCount)
             assertEquals(1, refreshCount)
+        }
+    }
+
+    @Test
+    fun detailStatusCardRequiresConfirmationBeforeDeletingFailedRecording() {
+        var deleteCount = 0
+        composeTestRule.setContent {
+            StatusCard(
+                recording = RecordingEntity(
+                    filename = "VibePub-failed.m4a",
+                    durationMs = 42_000L,
+                    timestamp = 1L,
+                    status = RecordingStatus.FAILED.value,
+                    lastError = "处理失败",
+                ),
+                lastSyncAtMs = 0L,
+                onRefresh = {},
+                onRetryUpload = {},
+                onDeleteRecording = { deleteCount++ },
+            )
+        }
+
+        composeTestRule.onNodeWithTag("DetailDeleteRecordingButton").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("DetailDeleteRecordingButton").performClick()
+        composeTestRule.onNodeWithTag("DetailDeleteRecordingDialog").assertIsDisplayed()
+        composeTestRule.onNodeWithText("删除这条录音？").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("CancelDetailDeleteRecordingButton").performClick()
+
+        composeTestRule.runOnIdle {
+            assertEquals(0, deleteCount)
+        }
+
+        composeTestRule.onNodeWithTag("DetailDeleteRecordingButton").performClick()
+        composeTestRule.onNodeWithTag("ConfirmDetailDeleteRecordingButton").performClick()
+
+        composeTestRule.runOnIdle {
+            assertEquals(1, deleteCount)
         }
     }
 
@@ -415,6 +453,7 @@ class WorkflowHelpDialogTest {
             lastSyncAtMs = 0L,
             onRefresh = {},
             onRetryUpload = {},
+            onDeleteRecording = {},
         )
     }
 }
