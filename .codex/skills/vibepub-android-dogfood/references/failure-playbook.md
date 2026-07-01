@@ -8,10 +8,41 @@ Action:
 
 ```bash
 adb devices -l
-.codex/skills/vibepub-android-dogfood/scripts/run-device-dogfood.sh --serial <stable-host:port> --mode install
+.codex/skills/vibepub-android-dogfood/scripts/run-device-dogfood.sh --profile <profile> --mode install
 ```
 
 Use the explicit direct serial the user provided, for example `192.168.31.72:43201`.
+For a new WiFi network, add a new profile to `secrets/android-device-profiles.env` rather than editing the skill script.
+
+## Changed WiFi Network
+
+Symptom: the old fixed IP no longer connects, or wireless debugging shows a new host:port.
+
+Action:
+
+1. Ask for or inspect the new wireless debugging host:port.
+2. Add or update a local profile in `secrets/android-device-profiles.env`.
+3. Run with `--profile <name>` so the script attempts `adb connect` before install/smoke.
+
+Example:
+
+```bash
+VIBEPUB_DEVICE_REDMI_CAFE_SERIAL="10.0.8.42:37123"
+VIBEPUB_DEVICE_REDMI_CAFE_CONNECT_TARGETS="10.0.8.42:37123"
+```
+
+If the tablet keeps the same IP but wireless debugging rotates ports, keep multiple candidates:
+
+```bash
+VIBEPUB_DEVICE_REDMI_CAFE_SERIALS="10.0.8.42:37123 10.0.8.42:40211"
+VIBEPUB_DEVICE_REDMI_CAFE_CONNECT_TARGETS="10.0.8.42:37123 10.0.8.42:40211"
+```
+
+Then:
+
+```bash
+.codex/skills/vibepub-android-dogfood/scripts/run-device-dogfood.sh --profile redmi-cafe --mode install
+```
 
 ## Locked Device
 

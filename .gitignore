@@ -22,6 +22,7 @@ artifacts/android-device-visual/
 artifacts/android-device-readiness/
 artifacts/android-experience-readiness/
 artifacts/android-db-inspect/
+artifacts/android-install-local/
 artifacts/apk/
 artifacts/ci-test-report-*/
 artifacts/vibepub-debug-apk/

@@ -83,6 +83,16 @@ direct script entry for stable-signed local build/install:
 .codex/skills/vibepub-android-dogfood/scripts/run-device-dogfood.sh --mode install --serial <adb-serial>
 ```
 
+If the Android device moves across WiFi networks, record local profiles in
+`secrets/android-device-profiles.env` and use:
+
+```bash
+.codex/skills/vibepub-android-dogfood/scripts/run-device-dogfood.sh --mode install --profile <profile-name>
+```
+
+Profiles can keep multiple wireless debugging candidates, so changing WiFi or
+rotating ADB ports does not require editing the command itself.
+
 ## Cloudflare Worker
 
 The Worker expects:
