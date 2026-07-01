@@ -45,9 +45,8 @@ GitHub Actions repository secrets cannot use the `GITHUB_` prefix, so the deploy
 workflow reads this token from `WORKFLOW_DISPATCH_PAT` and writes it to the
 Worker as `GITHUB_PAT`.
 `GITHUB_WORKFLOW_REF` controls which Git ref receives the workflow dispatch. The
-current dogfood deployment points it at `codex/android-experience-v1` because
-that branch contains the `target_filename` workflow input; switch it back to
-`main` after the workflow input lands on `main`.
+dogfood deployment points at `main` so immediate upload-triggered mining uses the
+same code path as scheduled mining.
 
 ## Production Update Checklist
 
