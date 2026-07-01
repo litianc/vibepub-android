@@ -17,6 +17,13 @@ class RecordingFilesTest {
     }
 
     @Test
+    fun mapsAnyAudioExtensionToCoverPng() {
+        assertEquals("voice-cover.png", coverImageFileNameForRecording("voice.m4a"))
+        assertEquals("voice-cover.png", coverImageFileNameForRecording("voice.mp3"))
+        assertEquals("voice-cover.png", coverImageFileNameForRecording("voice"))
+    }
+
+    @Test
     fun choosesUploadContentTypeFromExtension() {
         assertEquals("audio/mp4", audioContentTypeForFilename("voice.m4a"))
         assertEquals("audio/mpeg", audioContentTypeForFilename("voice.mp3"))

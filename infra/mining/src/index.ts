@@ -1,4 +1,4 @@
-import { listUnprocessedFiles, createPresignedDownloadUrl, deleteFile, uploadTranscript } from "./r2.js";
+import { listUnprocessedFiles, createPresignedDownloadUrl, deleteFile, uploadCoverImage, uploadTranscript } from "./r2.js";
 import { transcribeAudioUrl } from "./asr.js";
 import { processAudioText } from "./llm.js";
 import { generateWechatCoverBuffer } from "./coverRenderer.js";
@@ -59,6 +59,7 @@ type StatusMetadata = {
   rawText?: string;
   articleTitle?: string;
   articleContent?: string;
+  coverImageUrl?: string;
   processingStage?: string;
   wechatUrl?: string;
   wechatDraftId?: string;
@@ -69,6 +70,7 @@ type ArticleResult = Awaited<ReturnType<typeof processAudioText>>;
 
 type TranscriptMetadata = {
   processingStage: string;
+  coverImageUrl?: string;
   wechatDraftId?: string;
   wechatUrl?: string;
   errorMessage?: string;
@@ -108,6 +110,16 @@ function transcriptJsonKey(fileKey: string): string {
   return fileKey.replace("inbox/", "transcripts/").replace(/\.[^/.]+$/, ".json");
 }
 
+function coverImageKey(fileKey: string): string {
+  return fileKey.replace("inbox/", "covers/").replace(/\.[^/.]+$/, ".png");
+}
+
+function publicFileUrl(key: string): string | undefined {
+  const baseUrl = process.env.PUBLIC_BASE_URL?.trim();
+  if (!baseUrl) return undefined;
+  return `${baseUrl.replace(/\/+$/, "")}/api/files/${encodeURIComponent(key)}`;
+}
+
 export function buildArticleTranscriptPayload(
   rawText: string,
   article: ArticleResult,
@@ -117,6 +129,7 @@ export function buildArticleTranscriptPayload(
     rawText,
     articleTitle: article.title,
     articleContent: article.content,
+    coverImageUrl: metadata.coverImageUrl,
     processingStage: metadata.processingStage,
     wechatDraftId: metadata.wechatDraftId,
     wechatUrl: metadata.wechatUrl,
@@ -133,6 +146,13 @@ async function saveArticleTranscript(
   const jsonKey = transcriptJsonKey(fileKey);
   console.log(`Saving transcript JSON to ${jsonKey}...`);
   await uploadTranscript(jsonKey, JSON.stringify(buildArticleTranscriptPayload(rawText, article, metadata)));
+}
+
+async function saveCoverImage(fileKey: string, coverBuffer: Buffer): Promise<string | undefined> {
+  const key = coverImageKey(fileKey);
+  console.log(`Saving WeChat cover image to ${key}...`);
+  await uploadCoverImage(key, coverBuffer);
+  return publicFileUrl(key);
 }
 
 function buildDraftFailureMessage(error: unknown): string {
@@ -154,6 +174,7 @@ async function completeWithArticleOnly(
   try {
     await saveArticleTranscript(fileKey, rawText, article, {
       processingStage: "DRAFT_FAILED",
+      coverImageUrl: article.coverImageUrl,
       errorMessage,
     });
     transcriptSaved = true;
@@ -169,6 +190,7 @@ async function completeWithArticleOnly(
     rawText,
     articleTitle: article.title,
     articleContent: article.content,
+    coverImageUrl: article.coverImageUrl,
     processingStage: "DRAFT_FAILED",
     errorMessage,
   });
@@ -280,6 +302,8 @@ export async function main() {
         titleLines: article.coverTitle,
         subtitle: article.coverSubtitle,
       });
+      const coverImageUrl = await saveCoverImage(fileKey, coverBuffer);
+      article = { ...article, coverImageUrl };
       
       // 6. WeChat: Publish Draft
       console.log("Getting WeChat Access Token...");
@@ -292,6 +316,7 @@ export async function main() {
       try {
         await saveArticleTranscript(fileKey, rawText, article, {
           processingStage: "COMPLETED",
+          coverImageUrl,
           wechatDraftId: mediaId,
         });
         articleTranscriptSaved = true;
@@ -314,6 +339,7 @@ export async function main() {
         rawText,
         articleTitle: article.title,
         articleContent: article.content,
+        coverImageUrl,
         processingStage: "COMPLETED",
         wechatDraftId: mediaId,
       });

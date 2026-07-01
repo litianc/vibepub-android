@@ -13,6 +13,7 @@ CREATE TABLE recordings (
     processing_stage TEXT,
     wechat_url TEXT,
     wechat_draft_id TEXT,
+    cover_image_url TEXT,
     error_message TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,

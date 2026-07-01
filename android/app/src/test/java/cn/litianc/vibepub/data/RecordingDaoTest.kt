@@ -152,6 +152,24 @@ class RecordingDaoTest {
     }
 
     @Test
+    fun persistsCoverImageMetadata() = runBlocking {
+        val dao = database.recordingDao()
+        dao.insert(
+            RecordingEntity(
+                filename = "cover.m4a",
+                durationMs = 32_000L,
+                timestamp = 1L,
+                status = RecordingStatus.COMPLETED.value,
+                coverImageUrl = "https://vibepub.example.test/api/files/covers%2Fcover.png",
+            ),
+        )
+
+        val recording = dao.getRecordingByFilename("cover.m4a")
+
+        assertEquals("https://vibepub.example.test/api/files/covers%2Fcover.png", recording?.coverImageUrl)
+    }
+
+    @Test
     fun localDeletionHidesRecordingButKeepsTombstoneForSync() = runBlocking {
         val dao = database.recordingDao()
         dao.insert(

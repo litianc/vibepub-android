@@ -33,6 +33,7 @@ class DetailScreenTest {
               "article_title": "后端标题",
               "article_content": "<p>正文</p>",
               "raw_text": "原始转录",
+              "cover_image_url": "https://vibepub.example.test/api/files/covers%2Fvoice.png",
               "error_message": "公众号草稿创建失败"
             }
             """.trimIndent(),
@@ -41,6 +42,7 @@ class DetailScreenTest {
         assertEquals("后端标题", transcript.optTranscriptString("articleTitle", "article_title"))
         assertEquals("<p>正文</p>", transcript.optTranscriptString("articleContent", "article_content"))
         assertEquals("原始转录", transcript.optTranscriptString("rawText", "raw_text"))
+        assertEquals("https://vibepub.example.test/api/files/covers%2Fvoice.png", transcript.optTranscriptString("coverImageUrl", "cover_image_url"))
         assertEquals("公众号草稿创建失败", transcript.optTranscriptString("errorMessage", "error_message"))
     }
 

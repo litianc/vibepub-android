@@ -29,6 +29,7 @@ test("lists Android recording display fields including processing stage", async 
       processing_stage: "DRAFTING",
       wechat_url: null,
       wechat_draft_id: "MEDIA_ID_123",
+      cover_image_url: "https://example.test/api/files/covers%2FVibePub-2026-06-29-160846-0m6s-Mon-Afternoon-Beijing-Chaoyang.png",
       error_message: null,
     },
   ]);
@@ -49,6 +50,7 @@ test("lists Android recording display fields including processing stage", async 
   assert.equal(body.recordings[0].article_title, "整理好的标题");
   assert.equal(body.recordings[0].processing_stage, "DRAFTING");
   assert.equal(body.recordings[0].wechat_draft_id, "MEDIA_ID_123");
+  assert.equal(body.recordings[0].cover_image_url, "https://example.test/api/files/covers%2FVibePub-2026-06-29-160846-0m6s-Mon-Afternoon-Beijing-Chaoyang.png");
 });
 
 test("preserves explicit recording duration when D1 starts returning it", async () => {
@@ -169,6 +171,7 @@ test("deletes a recording and its remote files", async () => {
     "VibePub-2026-06-30-214139-0m30s-Debug-Audio-Import.mp3",
   ]);
   assert.deepEqual(deletedKeys.sort(), [
+    "covers/VibePub-2026-06-30-214139-0m30s-Debug-Audio-Import.png",
     "inbox/VibePub-2026-06-30-214139-0m30s-Debug-Audio-Import.mp3",
     "inbox/custom-upload-key.m4a",
     "transcripts/VibePub-2026-06-30-214139-0m30s-Debug-Audio-Import.json",
@@ -202,6 +205,16 @@ test("keeps rich recording fields when only processing_stage is not migrated yet
         });
       }
       if (calls === 2) {
+        assert.match(sql, /duration_ms/);
+        assert.match(sql, /processing_stage/);
+        assert.doesNotMatch(sql, /cover_image_url/);
+        return statement({
+          all: async () => {
+            throw new Error("D1_ERROR: no such column: processing_stage");
+          },
+        });
+      }
+      if (calls === 3) {
         assert.doesNotMatch(sql, /duration_ms/);
         assert.match(sql, /processing_stage/);
         return statement({
@@ -245,6 +258,7 @@ test("keeps rich recording fields when only processing_stage is not migrated yet
   assert.equal(body.recordings[0].processing_stage, null);
   assert.equal(body.recordings[0].duration_ms, null);
   assert.equal(body.recordings[0].wechat_draft_id, "MEDIA_ID_OLD");
+  assert.equal(body.recordings[0].cover_image_url, null);
 });
 
 test("keeps processing stage when only duration column is not migrated yet", async () => {
@@ -255,6 +269,16 @@ test("keeps processing stage when only duration column is not migrated yet", asy
       if (calls === 1) {
         assert.match(sql, /duration_ms/);
         assert.match(sql, /processing_stage/);
+        return statement({
+          all: async () => {
+            throw new Error("D1_ERROR: no such column: duration_ms");
+          },
+        });
+      }
+      if (calls === 2) {
+        assert.match(sql, /duration_ms/);
+        assert.match(sql, /processing_stage/);
+        assert.doesNotMatch(sql, /cover_image_url/);
         return statement({
           all: async () => {
             throw new Error("D1_ERROR: no such column: duration_ms");
@@ -295,6 +319,7 @@ test("keeps processing stage when only duration column is not migrated yet", asy
   const body = await response.json();
   assert.equal(body.recordings[0].duration_ms, null);
   assert.equal(body.recordings[0].processing_stage, "DRAFTING");
+  assert.equal(body.recordings[0].cover_image_url, null);
 });
 
 test("stores parsed duration on upload when duration column exists", async () => {
@@ -483,6 +508,7 @@ test("persists mining status metadata for Android progress display", async () =>
         articleContent: "整理正文",
         processingStage: "DRAFTING",
         wechatDraftId: "MEDIA_ID_123",
+        coverImageUrl: "https://example.test/api/files/covers%2Fvoice.png",
       }),
     }),
     createEnv({ DB: db }),
@@ -491,6 +517,62 @@ test("persists mining status metadata for Android progress display", async () =>
 
   assert.equal(response.status, 200);
   assert.deepEqual(boundValues, [
+    "PROCESSING",
+    "口述内容",
+    "整理标题",
+    "整理正文",
+    "DRAFTING",
+    null,
+    "MEDIA_ID_123",
+    "https://example.test/api/files/covers%2Fvoice.png",
+    1,
+    null,
+    "default_user",
+    "voice.m4a",
+  ]);
+});
+
+test("keeps rich status updates before cover image column is migrated", async () => {
+  const sqlCalls = [];
+  const valueCalls = [];
+  const db = {
+    prepare(sql) {
+      sqlCalls.push(sql);
+      const prepareIndex = sqlCalls.length;
+      return statement({
+        run: async (values) => {
+          valueCalls.push(values);
+          if (prepareIndex === 1) {
+            throw new Error("D1_ERROR: no such column: cover_image_url");
+          }
+          return { meta: { changes: 1 } };
+        },
+      });
+    },
+  };
+
+  const response = await worker.fetch(
+    authorizedRequest("https://example.test/api/internal/status", {
+      method: "PUT",
+      body: JSON.stringify({
+        filename: "voice.m4a",
+        status: "PROCESSING",
+        rawText: "口述内容",
+        articleTitle: "整理标题",
+        articleContent: "整理正文",
+        processingStage: "DRAFTING",
+        wechatDraftId: "MEDIA_ID_123",
+        coverImageUrl: "https://example.test/api/files/covers%2Fvoice.png",
+      }),
+    }),
+    createEnv({ DB: db }),
+    createExecutionContext(),
+  );
+
+  assert.equal(response.status, 200);
+  assert.match(String(sqlCalls[0]), /cover_image_url = COALESCE/);
+  assert.doesNotMatch(String(sqlCalls[1]), /cover_image_url/);
+  assert.deepEqual(valueCalls[1], [
     "PROCESSING",
     "口述内容",
     "整理标题",
@@ -536,7 +618,7 @@ test("does not persist placeholder draft references from status updates", async 
   );
 
   assert.equal(response.status, 200);
-  assert.deepEqual(boundValues.slice(5, 7), [null, null]);
+  assert.deepEqual(boundValues.slice(5, 8), [null, null, null]);
 });
 
 test("keeps valid draft URL and ID from status updates", async () => {
@@ -568,9 +650,10 @@ test("keeps valid draft URL and ID from status updates", async () => {
   );
 
   assert.equal(response.status, 200);
-  assert.deepEqual(boundValues.slice(5, 7), [
+  assert.deepEqual(boundValues.slice(5, 8), [
     "https://mp.weixin.qq.com/draft",
     "MEDIA_ID_123",
+    null,
   ]);
 });
 
@@ -601,7 +684,7 @@ test("clears stale status error when progress resumes without an error message",
   );
 
   assert.equal(response.status, 200);
-  assert.deepEqual(boundValues.slice(7, 9), [1, null]);
+  assert.deepEqual(boundValues.slice(8, 10), [1, null]);
 });
 
 test("preserves stale status error when failed update has no replacement message", async () => {
@@ -631,7 +714,7 @@ test("preserves stale status error when failed update has no replacement message
   );
 
   assert.equal(response.status, 200);
-  assert.deepEqual(boundValues.slice(7, 9), [0, null]);
+  assert.deepEqual(boundValues.slice(8, 10), [0, null]);
 });
 
 test("persists snake_case status error for draft failure metadata", async () => {
@@ -662,7 +745,7 @@ test("persists snake_case status error for draft failure metadata", async () => 
   );
 
   assert.equal(response.status, 200);
-  assert.deepEqual(boundValues.slice(7, 9), [1, "公众号草稿创建失败：502"]);
+  assert.deepEqual(boundValues.slice(8, 10), [1, "公众号草稿创建失败：502"]);
 });
 
 async function loadWorker() {

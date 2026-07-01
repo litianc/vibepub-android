@@ -10,6 +10,11 @@ fun transcriptFileNameForRecording(filename: String): String {
     return "$baseName.json"
 }
 
+fun coverImageFileNameForRecording(filename: String): String {
+    val baseName = filename.substringBeforeLast('.', filename)
+    return "$baseName-cover.png"
+}
+
 fun audioContentTypeForFilename(filename: String): String {
     return when (filename.substringAfterLast('.', "").lowercase(Locale.US)) {
         "mp3" -> "audio/mpeg"

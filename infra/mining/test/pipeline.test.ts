@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import { processAudioText } from '../src/llm.js';
 import { generateWechatCoverBuffer } from '../src/coverRenderer.js';
 import { getAccessToken, publishDraft } from '../src/wechat.js';
-import { createPresignedDownloadUrl, deleteFile, listUnprocessedFiles, uploadTranscript } from '../src/r2.js';
+import { createPresignedDownloadUrl, deleteFile, listUnprocessedFiles, uploadCoverImage, uploadTranscript } from '../src/r2.js';
 import { transcribeAudioUrl } from '../src/asr.js';
 import { buildArticleTranscriptPayload, filterTargetFiles, main } from '../src/index.js';
 
@@ -24,6 +24,7 @@ vi.mock('../src/r2.js', () => ({
   listUnprocessedFiles: vi.fn(),
   createPresignedDownloadUrl: vi.fn(),
   deleteFile: vi.fn(),
+  uploadCoverImage: vi.fn(),
   uploadTranscript: vi.fn()
 }));
 
@@ -121,6 +122,7 @@ describe('VibePub Cloud Pipeline', () => {
       },
       {
         processingStage: 'DRAFT_FAILED',
+        coverImageUrl: 'https://vibepub.example.test/api/files/covers%2FArticle.png',
         errorMessage: '公众号草稿创建失败：502',
       },
     );
@@ -129,6 +131,7 @@ describe('VibePub Cloud Pipeline', () => {
       rawText: 'raw transcript',
       articleTitle: 'Article title',
       articleContent: '<p>Article body</p>',
+      coverImageUrl: 'https://vibepub.example.test/api/files/covers%2FArticle.png',
       processingStage: 'DRAFT_FAILED',
       errorMessage: '公众号草稿创建失败：502',
     });
@@ -152,6 +155,7 @@ describe('VibePub Cloud Pipeline', () => {
     vi.mocked(generateWechatCoverBuffer).mockResolvedValue(Buffer.from('fake-cover'));
     vi.mocked(getAccessToken).mockResolvedValue('wechat-token');
     vi.mocked(publishDraft).mockResolvedValue('MEDIA_ID_123');
+    vi.mocked(uploadCoverImage).mockResolvedValue();
     vi.mocked(uploadTranscript).mockResolvedValue();
     vi.mocked(deleteFile).mockResolvedValue();
 
@@ -178,11 +182,16 @@ describe('VibePub Cloud Pipeline', () => {
       titleLines: article.coverTitle,
       subtitle: article.coverSubtitle,
     });
+    expect(uploadCoverImage).toHaveBeenCalledWith(
+      'covers/VibePub-2026-06-30-044540-0m30s-Debug-Audio-Import.png',
+      Buffer.from('fake-cover'),
+    );
     expect(fetchCalls).toContainEqual(expect.objectContaining({
       filename,
       status: 'COMPLETED',
       articleTitle: article.title,
       articleContent: article.content,
+      coverImageUrl: 'https://vibepub.example.test/api/files/covers%2FVibePub-2026-06-30-044540-0m30s-Debug-Audio-Import.png',
       processingStage: 'COMPLETED',
       wechatDraftId: 'MEDIA_ID_123',
     }));
@@ -206,6 +215,7 @@ describe('VibePub Cloud Pipeline', () => {
     vi.mocked(generateWechatCoverBuffer).mockResolvedValue(Buffer.from('fake-cover'));
     vi.mocked(getAccessToken).mockResolvedValue('wechat-token');
     vi.mocked(publishDraft).mockRejectedValue(new Error('Request failed with status code 502'));
+    vi.mocked(uploadCoverImage).mockResolvedValue();
     vi.mocked(uploadTranscript).mockResolvedValue();
     vi.mocked(deleteFile).mockResolvedValue();
 
@@ -223,6 +233,7 @@ describe('VibePub Cloud Pipeline', () => {
       status: 'COMPLETED',
       articleTitle: article.title,
       articleContent: article.content,
+      coverImageUrl: 'https://vibepub.example.test/api/files/covers%2FVibePub-2026-06-30-044540-0m30s-Debug-Audio-Import.png',
       processingStage: 'DRAFT_FAILED',
     }));
     expect(fetchCalls.some(call =>

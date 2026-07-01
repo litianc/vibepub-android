@@ -122,6 +122,19 @@ class SyncWorkerTest {
     }
 
     @Test
+    fun coverImageUrlAcceptsCamelAndSnakeCaseFields() {
+        assertEquals(
+            "https://vibepub.example.test/api/files/covers%2Fvoice.png",
+            JSONObject("""{"coverImageUrl":"https://vibepub.example.test/api/files/covers%2Fvoice.png"}""").coverImageUrlOrNull(),
+        )
+        assertEquals(
+            "https://vibepub.example.test/api/files/covers%2Fvoice.png",
+            JSONObject("""{"cover_image_url":"https://vibepub.example.test/api/files/covers%2Fvoice.png"}""").coverImageUrlOrNull(),
+        )
+        assertEquals(null, JSONObject("""{"coverImageUrl":" null "}""").coverImageUrlOrNull())
+    }
+
+    @Test
     fun blankToNullValueTreatsJsonNullStringAsMissing() {
         assertEquals("草稿ID", " 草稿ID ".blankToNullValue())
         assertEquals(null, "null".blankToNullValue())
@@ -156,6 +169,7 @@ class SyncWorkerTest {
               "duration_ms": 18480,
               "article_title": "把口述想法变成公众号文章",
               "raw_text_preview": "今天我想说一下如何减少写作成本",
+              "cover_image_url": "https://vibepub.example.test/api/files/covers%2FArticle-Ready.png",
               "processing_stage": "ARTICLE_READY",
               "wechat_draft_id": null,
               "wechat_url": null,
@@ -176,6 +190,7 @@ class SyncWorkerTest {
         assertEquals(RecordingStatus.PROCESSING.value, recording.status)
         assertEquals("把口述想法变成公众号文章", recording.articleTitle)
         assertEquals("今天我想说一下如何减少写作成本", recording.rawTextPreview)
+        assertEquals("https://vibepub.example.test/api/files/covers%2FArticle-Ready.png", recording.coverImageUrl)
         assertEquals("ARTICLE_READY", recording.processingStage)
         assertEquals("2026-06-30T05:56:20Z", recording.remoteStatusUpdatedAt)
         assertEquals(null, recording.completedAt)
