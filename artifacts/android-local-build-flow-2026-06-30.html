@@ -1,0 +1,576 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VibePub Android 开发闭环全景图</title>
+  <style>
+    :root {
+      --paper: #f5f7fb;
+      --ink: #17202a;
+      --muted: #5c6675;
+      --line: #d7dde6;
+      --card: #ffffff;
+      --local: #2f6fbd;
+      --local-soft: #e7f0ff;
+      --cloud: #23835d;
+      --cloud-soft: #e6f4ee;
+      --runner: #9a6218;
+      --runner-soft: #fff0d8;
+      --device: #b43f4d;
+      --device-soft: #fee9ee;
+      --shadow: 0 12px 28px rgba(20, 31, 45, 0.08);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--paper);
+      color: var(--ink);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      line-height: 1.5;
+    }
+
+    main {
+      width: min(1260px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 28px 0 44px;
+    }
+
+    header {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 24px;
+      align-items: end;
+      padding: 22px 0 24px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(30px, 4vw, 50px);
+      line-height: 1.08;
+      letter-spacing: 0;
+    }
+
+    .subtitle {
+      margin: 12px 0 0;
+      max-width: 820px;
+      color: var(--muted);
+      font-size: 17px;
+    }
+
+    .stamp {
+      width: 258px;
+      padding: 14px 16px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--card);
+      box-shadow: var(--shadow);
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    section {
+      margin-top: 28px;
+    }
+
+    h2 {
+      margin: 0 0 14px;
+      font-size: 23px;
+      letter-spacing: 0;
+    }
+
+    .compare {
+      display: grid;
+      grid-template-columns: 0.9fr 1.1fr;
+      gap: 18px;
+    }
+
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--card);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    .panel-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      padding: 16px 18px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .panel h3 {
+      margin: 0;
+      font-size: 19px;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      min-height: 28px;
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-weight: 700;
+      font-size: 13px;
+      white-space: nowrap;
+    }
+
+    .badge.old {
+      background: var(--device-soft);
+      color: var(--device);
+    }
+
+    .badge.new {
+      background: var(--cloud-soft);
+      color: var(--cloud);
+    }
+
+    .flow {
+      display: grid;
+      gap: 10px;
+      padding: 16px 18px 18px;
+    }
+
+    .step {
+      position: relative;
+      display: grid;
+      grid-template-columns: 34px 1fr;
+      gap: 10px;
+      align-items: start;
+      min-height: 66px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fbfcfe;
+    }
+
+    .step::after {
+      content: "";
+      position: absolute;
+      left: 28px;
+      bottom: -11px;
+      width: 2px;
+      height: 10px;
+      background: var(--line);
+    }
+
+    .step:last-child::after {
+      display: none;
+    }
+
+    .num {
+      display: grid;
+      place-items: center;
+      width: 30px;
+      height: 30px;
+      border-radius: 50%;
+      color: white;
+      font-weight: 800;
+      font-size: 14px;
+    }
+
+    .old-flow .num {
+      background: var(--device);
+    }
+
+    .new-flow .num {
+      background: var(--cloud);
+    }
+
+    .step strong {
+      display: block;
+      margin-bottom: 3px;
+      font-size: 15px;
+    }
+
+    .step span {
+      display: block;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .swimlane {
+      display: grid;
+      grid-template-columns: 1.05fr 1.15fr 1.05fr 1fr;
+      gap: 12px;
+      align-items: stretch;
+    }
+
+    .lane {
+      display: grid;
+      grid-template-rows: auto 1fr;
+      min-height: 420px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--card);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    .lane-title {
+      padding: 13px 15px;
+      font-weight: 800;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .lane.local .lane-title {
+      background: var(--local-soft);
+      color: var(--local);
+    }
+
+    .lane.cloud .lane-title {
+      background: var(--cloud-soft);
+      color: var(--cloud);
+    }
+
+    .lane.runner .lane-title {
+      background: var(--runner-soft);
+      color: var(--runner);
+    }
+
+    .lane.device .lane-title {
+      background: var(--device-soft);
+      color: var(--device);
+    }
+
+    .lane-body {
+      display: grid;
+      align-content: start;
+      gap: 12px;
+      padding: 14px;
+    }
+
+    .node {
+      min-height: 88px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fbfcfe;
+    }
+
+    .node strong {
+      display: block;
+      margin-bottom: 5px;
+      font-size: 15px;
+    }
+
+    .node p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .arrow {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .arrow::before,
+    .arrow::after {
+      content: "";
+      height: 1px;
+      flex: 1;
+      background: var(--line);
+    }
+
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .metric {
+      min-height: 152px;
+      padding: 16px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--card);
+      box-shadow: var(--shadow);
+    }
+
+    .metric b {
+      display: block;
+      margin-bottom: 8px;
+      font-size: 28px;
+      line-height: 1;
+    }
+
+    .metric strong {
+      display: block;
+      margin-bottom: 7px;
+      font-size: 16px;
+    }
+
+    .metric p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .commands {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px;
+    }
+
+    pre {
+      margin: 0;
+      padding: 14px;
+      overflow-x: auto;
+      border: 1px solid #c6d0dc;
+      border-radius: 8px;
+      background: #101820;
+      color: #ecf2f8;
+      line-height: 1.45;
+    }
+
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+      font-size: 13px;
+    }
+
+    .status-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .status {
+      min-height: 132px;
+      padding: 15px;
+      border: 1px solid var(--line);
+      border-left-width: 6px;
+      border-radius: 8px;
+      background: var(--card);
+      box-shadow: var(--shadow);
+    }
+
+    .status h3 {
+      margin: 0 0 7px;
+      font-size: 16px;
+    }
+
+    .status p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .ok {
+      border-left-color: var(--cloud);
+    }
+
+    .todo {
+      border-left-color: var(--runner);
+    }
+
+    .risk {
+      border-left-color: var(--device);
+    }
+
+    footer {
+      margin-top: 28px;
+      color: var(--muted);
+      text-align: center;
+      font-size: 13px;
+    }
+
+    @media (max-width: 960px) {
+      header,
+      .compare,
+      .swimlane,
+      .metrics,
+      .commands,
+      .status-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .stamp {
+        width: auto;
+      }
+
+      .lane {
+        min-height: 0;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <h1>VibePub Android 开发闭环从“等发布”改成“真机快速验证”</h1>
+        <p class="subtitle">
+          这张图记录 2026-06-30 的流程改造：Android 可以在本机完成编译、安装和真机自动化；上传后的云端处理仍由 Cloudflare Worker、D1、R2 和 GitHub Actions mining job 协作完成。
+        </p>
+      </div>
+      <div class="stamp">
+        分支：codex/android-experience-v1<br>
+        设备策略：红米真机优先<br>
+        后端：Cloudflare + GitHub Actions
+      </div>
+    </header>
+
+    <section>
+      <h2>为什么这次流程会变快</h2>
+      <div class="compare">
+        <article class="panel old-flow">
+          <div class="panel-head">
+            <h3>之前：每轮都等线上 APK</h3>
+            <span class="badge old">适合发布确认</span>
+          </div>
+          <div class="flow">
+            <div class="step"><div class="num">1</div><div><strong>本地改代码</strong><span>Android 或 Worker 修改完成后不能马上上机看效果。</span></div></div>
+            <div class="step"><div class="num">2</div><div><strong>提交并推送</strong><span>必须走 GitHub Actions 之后才有新 APK。</span></div></div>
+            <div class="step"><div class="num">3</div><div><strong>远端排队打包</strong><span>runner 启动、拉代码、跑测试、生成 Release。</span></div></div>
+            <div class="step"><div class="num">4</div><div><strong>下载再安装</strong><span>回到 Mac 下载 APK，然后手动或 ADB 安装。</span></div></div>
+            <div class="step"><div class="num">5</div><div><strong>再看真机结果</strong><span>一次小改动也会被远端打包周期拉长。</span></div></div>
+          </div>
+        </article>
+
+        <article class="panel new-flow">
+          <div class="panel-head">
+            <h3>现在：本地先闭环，线上做共享</h3>
+            <span class="badge new">适合日常迭代</span>
+          </div>
+          <div class="flow">
+            <div class="step"><div class="num">1</div><div><strong>本地测试</strong><span><code>scripts/build-android-local.sh test</code> 固定使用 JDK 21，避免 Robolectric 被外层 JDK 影响。</span></div></div>
+            <div class="step"><div class="num">2</div><div><strong>本地打包</strong><span><code>scripts/build-android-local.sh assemble</code> 生成 <code>app-debug.apk</code>。</span></div></div>
+            <div class="step"><div class="num">3</div><div><strong>ADB 安装到真机</strong><span><code>scripts/install-android-local-apk.sh</code> 可测试、打包、安装、启动一条命令完成。</span></div></div>
+            <div class="step"><div class="num">4</div><div><strong>录音上传后自动触发处理</strong><span>Cloudflare Worker 收到上传后点名触发 mining job，不再只等定时扫描。</span></div></div>
+            <div class="step"><div class="num">5</div><div><strong>自动化收证据</strong><span>真机 smoke 保存截图、UI dump、logcat、mining run 和 audit 结果。</span></div></div>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <section>
+      <h2>系统协作泳道</h2>
+      <div class="swimlane">
+        <article class="lane local">
+          <div class="lane-title">Mac 本地开发</div>
+          <div class="lane-body">
+            <div class="node"><strong>Android 代码与单测</strong><p>Compose、Room、WorkManager、Media3 的体验改动先在本机验证。</p></div>
+            <div class="arrow">build</div>
+            <div class="node"><strong>本地 APK</strong><p>输出 <code>android/app/build/outputs/apk/debug/app-debug.apk</code>，不必等待 Release。</p></div>
+            <div class="arrow">install</div>
+            <div class="node"><strong>ADB 脚本</strong><p>安装、启动、权限、导入测试音频和视觉 smoke 都由脚本串起来。</p></div>
+          </div>
+        </article>
+
+        <article class="lane device">
+          <div class="lane-title">红米真机</div>
+          <div class="lane-body">
+            <div class="node"><strong>真实 App 体验</strong><p>首页状态、录音详情、播放、复制、分享、诊断都在真机上看。</p></div>
+            <div class="arrow">upload</div>
+            <div class="node"><strong>录音文件</strong><p>测试音频模拟用户说话，目标是一条非零秒记录，不出现重复零秒项。</p></div>
+            <div class="arrow">audit</div>
+            <div class="node"><strong>视觉证据</strong><p>截图、UI XML、logcat 与 audit markdown 保存到 <code>artifacts/</code>。</p></div>
+          </div>
+        </article>
+
+        <article class="lane cloud">
+          <div class="lane-title">Cloudflare 服务</div>
+          <div class="lane-body">
+            <div class="node"><strong>Worker API</strong><p><code>/api/uploads</code> 接收录音，<code>/api/recordings</code> 返回状态、时长、标题和错误信息。</p></div>
+            <div class="arrow">store</div>
+            <div class="node"><strong>R2 + D1</strong><p>R2 保存音频文件，D1 保存记录状态、<code>duration_ms</code> 和处理进度字段。</p></div>
+            <div class="arrow">dispatch</div>
+            <div class="node"><strong>点名触发</strong><p>Worker 带 <code>target_filename</code> 触发 GitHub Actions，减少等待下一次扫描。</p></div>
+          </div>
+        </article>
+
+        <article class="lane runner">
+          <div class="lane-title">GitHub Actions</div>
+          <div class="lane-body">
+            <div class="node"><strong>Mining Job</strong><p>读取目标录音，执行 ASR、文章生成和公众号草稿链路。</p></div>
+            <div class="arrow">sync</div>
+            <div class="node"><strong>状态回写</strong><p>完成后端可被 App 同步为处理中、完成或失败，错误原因进入可诊断路径。</p></div>
+            <div class="arrow">release</div>
+            <div class="node"><strong>Release APK</strong><p>仍保留作为团队共享安装包和发布记录，不再阻塞每次开发验证。</p></div>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <section>
+      <h2>速度与证据</h2>
+      <div class="metrics">
+        <article class="metric">
+          <b>~33s</b>
+          <strong>Android 全量单测</strong>
+          <p>本机 JDK 21 环境下，体验改动后可快速回归。</p>
+        </article>
+        <article class="metric">
+          <b>~16s</b>
+          <strong>增量 assemble</strong>
+          <p>已有构建缓存时，本地生成 debug APK 的等待明显缩短。</p>
+        </article>
+        <article class="metric">
+          <b>1 条</b>
+          <strong>目标录音处理</strong>
+          <p>Worker dispatch 带 <code>target_filename</code>，mining job 优先处理本次上传。</p>
+        </article>
+        <article class="metric">
+          <b>4 类</b>
+          <strong>真机证据</strong>
+          <p>截图、UI dump、logcat、audit 结果组成 dogfood 回归材料。</p>
+        </article>
+      </div>
+    </section>
+
+    <section>
+      <h2>日常命令入口</h2>
+      <div class="commands">
+        <pre><code># 本地测试和打包
+scripts/build-android-local.sh test
+scripts/build-android-local.sh assemble
+
+# 本地 APK
+android/app/build/outputs/apk/debug/app-debug.apk</code></pre>
+
+        <pre><code># 安装到已连接真机
+scripts/install-android-local-apk.sh --serial &lt;adb-serial&gt; --test
+
+# 完整 dogfood E2E
+scripts/run-android-device-smoke.sh \
+  android/app/build/outputs/apk/debug/app-debug.apk</code></pre>
+      </div>
+    </section>
+
+    <section>
+      <h2>当前状态</h2>
+      <div class="status-grid">
+        <article class="status ok">
+          <h3>已验证</h3>
+          <p>本地 Android SDK、JDK 21、单测、assemble、Worker targeted dispatch、Cloudflare 生产部署均已跑通并记录。</p>
+        </article>
+        <article class="status todo">
+          <h3>待真机补证</h3>
+          <p>ADB 当前无设备在线。恢复 USB 或无线调试后，用准备好的 18.48 秒音频跑完整 E2E。</p>
+        </article>
+        <article class="status risk">
+          <h3>后续切换点</h3>
+          <p><code>target_filename</code> 合入 main 后，将 Worker 的 <code>GITHUB_WORKFLOW_REF</code> 从当前 dogfood 分支切回 main。</p>
+        </article>
+      </div>
+    </section>
+
+    <footer>
+      VibePub Android development loop artifact. Generated for the 2026-06-30 dogfood infrastructure change.
+    </footer>
+  </main>
+</body>
+</html>

@@ -1,10 +1,29 @@
 name: Deploy Worker
 
 on:
+  pull_request:
+    paths:
+      - "infra/worker/**"
+      - ".github/workflows/deploy-worker.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "infra/worker/**"
+      - ".github/workflows/deploy-worker.yml"
   workflow_dispatch:
+    inputs:
+      deploy:
+        description: Deploy the Worker after validation
+        required: true
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
 
 jobs:
-  deploy:
+  validate:
     runs-on: ubuntu-latest
 
     defaults:
@@ -26,12 +45,36 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
-      - name: Set Secrets
-        if: env.GITHUB_PAT != ''
-        run: echo "$GITHUB_PAT" | npx wrangler secret put GITHUB_PAT
+      - name: Test
+        run: npm test
+
+  deploy:
+    if: github.event_name == 'workflow_dispatch' && inputs.deploy == 'true'
+    needs: validate
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: infra/worker
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Set Workflow Dispatch Secret
+        if: env.WORKFLOW_DISPATCH_PAT != ''
+        run: printf '%s' "$WORKFLOW_DISPATCH_PAT" | npx wrangler secret put GITHUB_PAT
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          GITHUB_PAT: ${{ secrets.GITHUB_PAT }}
+          WORKFLOW_DISPATCH_PAT: ${{ secrets.WORKFLOW_DISPATCH_PAT }}
 
       - name: Deploy
         run: npx wrangler deploy

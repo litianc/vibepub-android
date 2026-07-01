@@ -7,7 +7,14 @@ ACTIVITY_NAME="${ACTIVITY_NAME:-.MainActivity}"
 APK_PATH="${1:-$ROOT_DIR/android/app/build/outputs/apk/debug/app-debug.apk}"
 RUN_ID="$(date +'%Y%m%d-%H%M%S')"
 OUT_DIR="${OUT_DIR:-$ROOT_DIR/artifacts/android-device-visual/$RUN_ID}"
-RECORD_SECONDS="${RECORD_SECONDS:-20}"
+DEBUG_AUDIO_MODE="${DEBUG_AUDIO_MODE:-import}"
+if [[ -z "${RECORD_SECONDS:-}" ]]; then
+  if [[ "$DEBUG_AUDIO_MODE" == "import" ]]; then
+    RECORD_SECONDS=15
+  else
+    RECORD_SECONDS=20
+  fi
+fi
 AUDIO_FILE="${AUDIO_FILE:-}"
 API_BASE_URL="${API_BASE_URL:-}"
 FILES_TOKEN="${FILES_TOKEN:-}"
@@ -18,21 +25,33 @@ SKIP_INSTALL="${SKIP_INSTALL:-false}"
 START_DELAY_SECONDS="${START_DELAY_SECONDS:-1}"
 POST_STOP_WAIT_SECONDS="${POST_STOP_WAIT_SECONDS:-5}"
 DETAIL_WAIT_SECONDS="${DETAIL_WAIT_SECONDS:-8}"
+DETAIL_SCROLL_PAGES="${DETAIL_SCROLL_PAGES:-3}"
 TRIGGER_MINING_JOB="${TRIGGER_MINING_JOB:-false}"
 MINING_WORKFLOW_ID="${MINING_WORKFLOW_ID:-mining-job.yml}"
-MINING_WORKFLOW_REF="${MINING_WORKFLOW_REF:-main}"
+DEFAULT_MINING_WORKFLOW_REF="$(git -C "$ROOT_DIR" branch --show-current 2>/dev/null || true)"
+MINING_WORKFLOW_REF="${MINING_WORKFLOW_REF:-${DEFAULT_MINING_WORKFLOW_REF:-main}}"
+MINING_TRIGGER_MODE="${MINING_TRIGGER_MODE:-auto}"
 MINING_WAIT_SECONDS="${MINING_WAIT_SECONDS:-240}"
+MINING_RUN_SEARCH_LIMIT="${MINING_RUN_SEARCH_LIMIT:-8}"
 BACKEND_UPLOAD_WAIT_SECONDS="${BACKEND_UPLOAD_WAIT_SECONDS:-90}"
 BACKEND_COMPLETION_WAIT_SECONDS="${BACKEND_COMPLETION_WAIT_SECONDS:-60}"
+BACKEND_POLL_INTERVAL_SECONDS="${BACKEND_POLL_INTERVAL_SECONDS:-2}"
+DETAIL_READY_WAIT_SECONDS="${DETAIL_READY_WAIT_SECONDS:-30}"
+MINING_TARGETED="${MINING_TARGETED:-true}"
 FORCE_RECORD_AUDIO_APPOPS="${FORCE_RECORD_AUDIO_APPOPS:-true}"
 WAKE_DEVICE="${WAKE_DEVICE:-true}"
 DEBUG_START_ACTION="cn.litianc.vibepub.DEBUG_START_RECORDING"
 DEBUG_STOP_ACTION="cn.litianc.vibepub.DEBUG_STOP_RECORDING"
+DEBUG_IMPORT_AUDIO_ACTION="cn.litianc.vibepub.DEBUG_IMPORT_AUDIO"
 SCREENRECORD_PID=""
 DETAIL_STATUS="not_checked"
+ACCEPTANCE_STATUS="not_checked"
 BACKEND_RECORDING_STATUS=""
 LATEST_RECORDING_FILENAME=""
 EXPECTED_DURATION_TEXT=""
+DETAIL_ACTION_STATUS="not_checked"
+RUN_START_SECONDS="$SECONDS"
+PHASE_START_SECONDS="$SECONDS"
 
 usage() {
   cat <<EOF
@@ -41,30 +60,56 @@ Usage:
 
 Environment:
   OUT_DIR          Output directory for screenshots, video, logs.
-  RECORD_SECONDS  Screen recording length after launch. Default: 20.
+  RECORD_SECONDS  Screen recording length after launch. Default: 15 in
+                  DEBUG_AUDIO_MODE=import, otherwise 20.
   AUDIO_FILE      Optional local audio file. If set, the script automatically
-                  taps record, plays this audio through the Mac speaker, stops
-                  recording, opens the first recording, and captures evidence.
+                  drives the debug APK with this fixture, opens the first
+                  recording, and captures evidence.
   API_BASE_URL    Optional API base URL to inject into app preferences.
   FILES_TOKEN     Optional upload/files token to inject into app preferences.
   RESET_APP_DATA  Set to true to clear app data before the run. Default: false.
   REQUIRE_PREFS_INJECTION
                   Fail if API_BASE_URL/FILES_TOKEN injection fails. Default: true.
   AUTOMATION_MODE debug-broadcast or ui-tap. Default: debug-broadcast.
+  DEBUG_AUDIO_MODE
+                  import or speaker when AUTOMATION_MODE=debug-broadcast.
+                  import pushes AUDIO_FILE into the app and uploads it as one
+                  recording without relying on Mac audio output. Default: import.
   SKIP_INSTALL    Use the APK already installed on the phone. Default: false.
   TRIGGER_MINING_JOB
                   Trigger and wait for GitHub Actions mining-job.yml after the
                   phone upload appears in the backend. Default: false.
+  MINING_TRIGGER_MODE
+                  auto waits for the Worker-created workflow_dispatch run,
+                  manual dispatches from this script, and auto_or_manual waits
+                  first then dispatches manually as fallback. Default: auto.
   MINING_WORKFLOW_ID
                   GitHub Actions workflow to dispatch. Default: mining-job.yml.
-  MINING_WORKFLOW_REF Git ref for workflow_dispatch. Default: main.
+  MINING_WORKFLOW_REF Git ref for workflow_dispatch. Default: current git branch,
+                  falling back to main outside a branch checkout.
   MINING_WAIT_SECONDS Max seconds to wait for the workflow. Default: 240.
+  MINING_RUN_SEARCH_LIMIT
+                  Number of recent workflow_dispatch runs to scan for the
+                  target filename when the Worker dispatches before the smoke
+                  script snapshots the previous run id. Default: 8.
+  DETAIL_WAIT_SECONDS
+                  Seconds to wait after opening recording detail. Default: 8.
+  DETAIL_SCROLL_PAGES
+                  Extra detail-page scroll dumps to capture for assertions.
+                  Default: 3.
   BACKEND_UPLOAD_WAIT_SECONDS
                   Max seconds to wait for /api/recordings to show the upload.
                   Default: 90.
   BACKEND_COMPLETION_WAIT_SECONDS
                   Max seconds to wait for backend status COMPLETED after mining.
                   Default: 60.
+  BACKEND_POLL_INTERVAL_SECONDS
+                  Poll interval for backend status checks. Default: 2.
+  DETAIL_READY_WAIT_SECONDS
+                  Max seconds to wait for detail UI to become assertable after
+                  opening a recording. Default: 30.
+  MINING_TARGETED Dispatch mining-job.yml with target_filename when supported.
+                  Default: true.
   FORCE_RECORD_AUDIO_APPOPS
                   Also set RECORD_AUDIO appops to allow after permission grant.
                   Default: true.
@@ -77,6 +122,16 @@ Environment:
 This script uses a real USB-connected Android phone through adb. It does not
 install Android Studio, the Android SDK, or an emulator.
 EOF
+}
+
+mark_phase() {
+  local phase="$1"
+  local now elapsed total
+  now="$SECONDS"
+  elapsed=$((now - PHASE_START_SECONDS))
+  total=$((now - RUN_START_SECONDS))
+  printf '%s\t%s\t%s\n' "$phase" "$elapsed" "$total" >> "$OUT_DIR/timing.tsv"
+  PHASE_START_SECONDS="$now"
 }
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
@@ -92,22 +147,88 @@ require_cmd() {
   fi
 }
 
+install_apk() {
+  local apk_path="$1"
+
+  CHECK_APK_INSTALL=true \
+  REQUIRE_UNLOCKED=true \
+  OUT_DIR="$OUT_DIR/install-readiness" \
+  "$ROOT_DIR/scripts/check-android-device-ready.sh" "$apk_path" \
+    > "$OUT_DIR/install-readiness-output.txt" 2>&1
+}
+
+reset_app_data() {
+  if adb_shell pm clear "$PACKAGE_NAME" > "$OUT_DIR/pm-clear-after-install.txt" 2>&1; then
+    return 0
+  fi
+
+  cat "$OUT_DIR/pm-clear-after-install.txt" >&2
+  cat > "$OUT_DIR/run-as-clear-fallback.txt" <<EOF
+pm clear failed, so the smoke script is clearing the debug app private data with
+run-as. This fallback is intended for HyperOS/MIUI wireless-debugging sessions
+that reject pm clear while still allowing debug package access.
+EOF
+
+  if ! adb_shell run-as "$PACKAGE_NAME" rm -rf \
+    cache \
+    code_cache \
+    files \
+    no_backup \
+    databases \
+    shared_prefs >> "$OUT_DIR/run-as-clear-fallback.txt" 2>&1; then
+    cat "$OUT_DIR/run-as-clear-fallback.txt" >&2
+    return 1
+  fi
+
+  adb_shell am force-stop "$PACKAGE_NAME" \
+    >> "$OUT_DIR/run-as-clear-fallback.txt" 2>&1 || true
+}
+
 truthy() {
   [[ "${1:-}" == "true" || "${1:-}" == "1" || "${1:-}" == "yes" ]]
 }
 
+adb_cmd() {
+  if [[ -n "${ANDROID_SERIAL:-}" ]]; then
+    adb -s "$ANDROID_SERIAL" "$@"
+  else
+    adb "$@"
+  fi
+}
+
 adb_shell() {
-  adb shell "$@"
+  adb_cmd shell "$@"
 }
 
 grant_recording_permissions() {
-  adb_shell pm grant "$PACKAGE_NAME" android.permission.RECORD_AUDIO >/dev/null 2>&1 || true
-  adb_shell pm grant "$PACKAGE_NAME" android.permission.ACCESS_COARSE_LOCATION >/dev/null 2>&1 || true
-  adb_shell pm grant "$PACKAGE_NAME" android.permission.POST_NOTIFICATIONS >/dev/null 2>&1 || true
+  local label="${1:-permissions}"
+
+  adb_shell pm grant "$PACKAGE_NAME" android.permission.RECORD_AUDIO \
+    > "$OUT_DIR/pm-grant-record-audio-$label.txt" 2>&1 || true
+  adb_shell pm grant "$PACKAGE_NAME" android.permission.ACCESS_COARSE_LOCATION \
+    > "$OUT_DIR/pm-grant-coarse-location-$label.txt" 2>&1 || true
+  adb_shell pm grant "$PACKAGE_NAME" android.permission.POST_NOTIFICATIONS \
+    > "$OUT_DIR/pm-grant-post-notifications-$label.txt" 2>&1 || true
   if truthy "$FORCE_RECORD_AUDIO_APPOPS"; then
-    adb_shell cmd appops set "$PACKAGE_NAME" RECORD_AUDIO allow >/dev/null 2>&1 || true
-    adb_shell appops set "$PACKAGE_NAME" RECORD_AUDIO allow >/dev/null 2>&1 || true
+    adb_shell cmd appops set "$PACKAGE_NAME" RECORD_AUDIO allow \
+      > "$OUT_DIR/cmd-appops-record-audio-$label.txt" 2>&1 || true
+    adb_shell appops set "$PACKAGE_NAME" RECORD_AUDIO allow \
+      > "$OUT_DIR/appops-set-record-audio-$label.txt" 2>&1 || true
   fi
+}
+
+capture_recording_permission_evidence() {
+  local label="${1:-}"
+  local package_file="$OUT_DIR/package-after-permissions.txt"
+  local appops_file="$OUT_DIR/appops-record-audio.txt"
+
+  if [[ -n "$label" ]]; then
+    package_file="$OUT_DIR/package-after-permissions-$label.txt"
+    appops_file="$OUT_DIR/appops-record-audio-$label.txt"
+  fi
+
+  adb_shell dumpsys package "$PACKAGE_NAME" > "$package_file" 2>&1 || true
+  adb_shell appops get "$PACKAGE_NAME" RECORD_AUDIO > "$appops_file" 2>&1 || true
 }
 
 wake_device() {
@@ -117,6 +238,35 @@ wake_device() {
 
   adb_shell input keyevent KEYCODE_WAKEUP >/dev/null 2>&1 || true
   adb_shell wm dismiss-keyguard >/dev/null 2>&1 || true
+}
+
+device_is_locked() {
+  local window power
+  window="$(adb_shell dumpsys window 2>/dev/null || true)"
+  power="$(adb_shell dumpsys power 2>/dev/null || true)"
+
+  if printf '%s\n%s\n' "$window" "$power" | grep -Eq 'mDreamingLockscreen=true|mShowingLockscreen=true|mInputRestricted=true|isStatusBarKeyguard=true'; then
+    return 0
+  fi
+  return 1
+}
+
+assert_device_install_ready() {
+  wake_device
+  adb_shell dumpsys power > "$OUT_DIR/power-before-install.txt" 2>&1 || true
+  adb_shell dumpsys window > "$OUT_DIR/window-before-install.txt" 2>&1 || true
+
+  if device_is_locked; then
+    cat > "$OUT_DIR/blocker-device-locked.txt" <<EOF
+The device appears to be locked before APK installation.
+
+Unlock the phone/tablet, keep the screen awake, then rerun the smoke test.
+Installing while locked often causes HyperOS/MIUI confirmation prompts to be
+hidden, which makes the test appear slow or stuck before the app flow begins.
+EOF
+    cat "$OUT_DIR/blocker-device-locked.txt" >&2
+    return 1
+  fi
 }
 
 wait_for_app_focus() {
@@ -140,7 +290,7 @@ pull_if_exists() {
   local remote="$1"
   local local_path="$2"
   if adb_shell test -f "$remote" >/dev/null 2>&1; then
-    adb pull "$remote" "$local_path" >/dev/null
+    adb_cmd pull "$remote" "$local_path" >/dev/null
   fi
 }
 
@@ -171,6 +321,21 @@ evaluate_detail_result() {
     return 1
   fi
 
+  if ! grep -q "公众号草稿审核" "$xml_file"; then
+    DETAIL_STATUS="missing_review_card"
+    return 1
+  fi
+
+  if ! grep -q "导出材料包" "$xml_file"; then
+    DETAIL_STATUS="missing_export_action"
+    return 1
+  fi
+
+  if ! grep -q "查看处理进度说明" "$xml_file"; then
+    DETAIL_STATUS="missing_status_help"
+    return 1
+  fi
+
   if grep -q "原始识别结果\\|转录完成" "$xml_file"; then
     DETAIL_STATUS="completed"
     return 0
@@ -180,6 +345,339 @@ evaluate_detail_result() {
   return 1
 }
 
+evaluate_acceptance_result() {
+  local failures=0
+  local report="$OUT_DIR/acceptance-report.txt"
+  local xml_file="$OUT_DIR/window-all.xml"
+  local transcript_file="$OUT_DIR/local-transcript.json"
+  local recordings_file="$OUT_DIR/recordings-api.json"
+  local status_file="$OUT_DIR/debug-device-test-status.json"
+  local local_recording_file="$OUT_DIR/local-recording-row.json"
+  local detail_actions_file="$OUT_DIR/debug-detail-actions.json"
+
+  : > "$report"
+
+  check_acceptance() {
+    local label="$1"
+    shift
+    if "$@"; then
+      printf '[x] %s\n' "$label" >> "$report"
+    else
+      printf '[ ] %s\n' "$label" >> "$report"
+      failures=$((failures + 1))
+    fi
+  }
+
+  check_acceptance "debug import created exactly one non-zero recording" \
+    python3 - "$status_file" "$LATEST_RECORDING_FILENAME" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+expected_filename = sys.argv[2]
+if not path.exists():
+    raise SystemExit(1)
+data = json.loads(path.read_text())
+if data.get("status") != "IMPORTED":
+    raise SystemExit(1)
+if expected_filename and data.get("filename") != expected_filename:
+    raise SystemExit(1)
+if int(data.get("durationMs") or 0) <= 0:
+    raise SystemExit(1)
+PY
+
+  check_acceptance "local Room database has one non-zero row for the recording" \
+    python3 - "$local_recording_file" "$LATEST_RECORDING_FILENAME" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+filename = sys.argv[2]
+if not path.exists() or not filename:
+    raise SystemExit(1)
+data = json.loads(path.read_text())
+if data.get("filename") != filename:
+    raise SystemExit(1)
+if int(data.get("count") or 0) != 1:
+    raise SystemExit(1)
+if int(data.get("durationMs") or 0) <= 0:
+    raise SystemExit(1)
+if data.get("status") != "COMPLETED":
+    raise SystemExit(1)
+if not data.get("articleTitle"):
+    raise SystemExit(1)
+if not data.get("rawTextPreview"):
+    raise SystemExit(1)
+stage = data.get("processingStage")
+if stage not in {"COMPLETED", "DRAFT_FAILED", "ARTICLE_READY"}:
+    raise SystemExit(1)
+has_draft_ref = bool(data.get("wechatDraftId") or data.get("wechatUrl"))
+if stage == "COMPLETED" and not has_draft_ref:
+    raise SystemExit(1)
+if stage == "DRAFT_FAILED" and not data.get("lastError"):
+    raise SystemExit(1)
+PY
+
+  check_acceptance "backend recording is COMPLETED with article metadata" \
+    python3 - "$recordings_file" "$LATEST_RECORDING_FILENAME" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+filename = sys.argv[2]
+if not path.exists() or not filename:
+    raise SystemExit(1)
+data = json.loads(path.read_text())
+matches = [item for item in data.get("recordings", []) if item.get("filename") == filename]
+if len(matches) != 1:
+    raise SystemExit(1)
+recording = matches[0]
+if recording.get("status") != "COMPLETED":
+    raise SystemExit(1)
+if not recording.get("article_title"):
+    raise SystemExit(1)
+if not recording.get("raw_text_preview"):
+    raise SystemExit(1)
+stage = recording.get("processing_stage")
+if stage not in {"COMPLETED", "DRAFT_FAILED", "ARTICLE_READY"}:
+    raise SystemExit(1)
+has_draft_ref = bool(recording.get("wechat_draft_id") or recording.get("wechat_url") or recording.get("media_id"))
+if stage == "COMPLETED" and not has_draft_ref:
+    raise SystemExit(1)
+if stage == "DRAFT_FAILED" and not recording.get("error_message"):
+    raise SystemExit(1)
+PY
+
+  check_acceptance "mining workflow log references the target recording" \
+    python3 - "$OUT_DIR/mining-run.log" "$LATEST_RECORDING_FILENAME" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+filename = sys.argv[2]
+if not path.exists() or not filename:
+    raise SystemExit(1)
+text = path.read_text(errors="ignore")
+if filename not in text:
+    raise SystemExit(1)
+PY
+
+  check_acceptance "local transcript has title, raw text, body, and draft state" \
+    python3 - "$transcript_file" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+if not path.exists():
+    raise SystemExit(1)
+data = json.loads(path.read_text())
+if not data.get("articleTitle"):
+    raise SystemExit(1)
+if not data.get("rawText"):
+    raise SystemExit(1)
+if len(data.get("articleContent") or "") < 80:
+    raise SystemExit(1)
+if data.get("processingStage") not in {"COMPLETED", "DRAFT_FAILED", "ARTICLE_READY"}:
+    raise SystemExit(1)
+if data.get("processingStage") == "COMPLETED" and not (
+    data.get("wechatDraftId") or data.get("mediaId") or data.get("wechat_draft_id") or data.get("wechatUrl") or data.get("wechat_url")
+):
+    raise SystemExit(1)
+if data.get("processingStage") == "DRAFT_FAILED" and not (
+    data.get("errorMessage") or data.get("lastError") or data.get("error_message")
+):
+    raise SystemExit(1)
+PY
+
+  check_acceptance "detail UI shows review checklist and export/copy/share actions" \
+    python3 - "$xml_file" <<'PY'
+import sys
+from pathlib import Path
+
+text = Path(sys.argv[1]).read_text(errors="ignore")
+required = [
+    "公众号草稿审核",
+    "复制标题",
+    "复制正文",
+    "分享",
+    "导出材料包",
+    "查看处理进度说明",
+]
+if any(item not in text for item in required):
+    raise SystemExit(1)
+PY
+
+  check_acceptance "detail UI renders article text without raw HTML tags" \
+    python3 - "$xml_file" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+text = Path(sys.argv[1]).read_text(errors="ignore")
+if re.search(r"&lt;/?(p|h[1-6]|br|div|ul|ol|li)([\\s][^&]*)?&gt;", text):
+    raise SystemExit(1)
+PY
+
+  check_acceptance "detail UI shows expected recording duration" \
+    python3 - "$xml_file" "$EXPECTED_DURATION_TEXT" <<'PY'
+import sys
+from pathlib import Path
+
+expected = sys.argv[2]
+if not expected:
+    raise SystemExit(0)
+text = Path(sys.argv[1]).read_text(errors="ignore")
+if f'text="{expected}"' not in text:
+    raise SystemExit(1)
+PY
+
+  check_acceptance "detail actions play audio, copy article, share, and export" \
+    python3 - "$detail_actions_file" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+if not path.exists():
+    raise SystemExit(1)
+data = json.loads(path.read_text())
+
+playback = data.get("playbackProgress") or {}
+if int(playback.get("positionMs") or 0) <= 0:
+    raise SystemExit(1)
+if int(playback.get("durationMs") or 0) <= 0:
+    raise SystemExit(1)
+
+clipboard = data.get("clipboard") or {}
+if clipboard.get("label") != "VibePub 正文":
+    raise SystemExit(1)
+if not clipboard.get("clipboardMatches"):
+    raise SystemExit(1)
+if int(clipboard.get("textLength") or 0) < 80:
+    raise SystemExit(1)
+
+share = data.get("shareArticle") or {}
+if share.get("sent") is not True:
+    raise SystemExit(1)
+if int(share.get("textLength") or 0) < 80:
+    raise SystemExit(1)
+
+export = data.get("exportArticle") or {}
+if export.get("sent") is not True:
+    raise SystemExit(1)
+if export.get("fileExists") is not True:
+    raise SystemExit(1)
+if int(export.get("textLength") or 0) < 80:
+    raise SystemExit(1)
+PY
+
+  check_acceptance "detail action opens WeChat draft when a draft URL is available" \
+    python3 - "$detail_actions_file" "$transcript_file" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+actions_path = Path(sys.argv[1])
+transcript_path = Path(sys.argv[2])
+if not transcript_path.exists():
+    raise SystemExit(1)
+transcript = json.loads(transcript_path.read_text())
+def clean(value):
+    if value is None:
+        return ""
+    text = str(value).strip()
+    return "" if text.lower() == "null" else text
+draft_url = clean(transcript.get("wechatUrl") or transcript.get("wechat_url"))
+if not draft_url:
+    raise SystemExit(0)
+if not actions_path.exists():
+    raise SystemExit(1)
+actions = json.loads(actions_path.read_text())
+open_draft = actions.get("openWechatDraft") or {}
+if open_draft.get("sent") is not True:
+    raise SystemExit(1)
+if open_draft.get("url") != draft_url:
+    raise SystemExit(1)
+PY
+
+  if (( failures == 0 )); then
+    ACCEPTANCE_STATUS="passed"
+    return 0
+  fi
+
+  ACCEPTANCE_STATUS="failed"
+  return 1
+}
+
+capture_detail_scroll_evidence() {
+  local pages="${DETAIL_SCROLL_PAGES:-3}"
+  local width height tap_x start_y end_y i bounds
+  local xml_all="$OUT_DIR/window-all.xml"
+
+  if [[ ! "$pages" =~ ^[0-9]+$ ]]; then
+    return 0
+  fi
+  if (( pages <= 0 )); then
+    return 0
+  fi
+
+  bounds="$(
+    grep -o 'bounds="\[[0-9,]*\]\[[0-9,]*\]"' "$OUT_DIR/window.xml" \
+      | sed 's/bounds="\[\([0-9][0-9]*\),\([0-9][0-9]*\)\]\[\([0-9][0-9]*\),\([0-9][0-9]*\)\]"/\1 \2 \3 \4/' \
+      | awk '
+          {
+            width = $3 - $1
+            height = $4 - $2
+            area = width * height
+            if (area > maxArea) {
+              maxArea = area
+              bestWidth = width
+              bestHeight = height
+            }
+          }
+          END {
+            if (bestWidth > 0 && bestHeight > 0) {
+              print bestWidth, bestHeight
+            }
+          }
+        '
+  )"
+  if [[ -n "$bounds" ]]; then
+    width="$(printf '%s\n' "$bounds" | awk '{ print $1 }')"
+    height="$(printf '%s\n' "$bounds" | awk '{ print $2 }')"
+  else
+    width="$(screen_width)"
+    height="$(screen_height)"
+  fi
+
+  tap_x=$((width / 2))
+  start_y=$((height * 82 / 100))
+  end_y=$((height * 28 / 100))
+
+  : > "$xml_all"
+  if [[ -f "$OUT_DIR/window.xml" ]]; then
+    cat "$OUT_DIR/window.xml" >> "$xml_all"
+    printf '\n' >> "$xml_all"
+  fi
+
+  for ((i = 1; i <= pages; i++)); do
+    adb_shell input swipe "$tap_x" "$start_y" "$tap_x" "$end_y" 450 >/dev/null 2>&1 || true
+    sleep 1
+    adb_shell screencap -p "/sdcard/vibepub-detail-scroll-$i.png" >/dev/null 2>&1 || true
+    pull_if_exists "/sdcard/vibepub-detail-scroll-$i.png" "$OUT_DIR/detail-scroll-$i.png"
+    adb_shell uiautomator dump "/sdcard/vibepub-window-scroll-$i.xml" >/dev/null 2>&1 || true
+    pull_if_exists "/sdcard/vibepub-window-scroll-$i.xml" "$OUT_DIR/window-scroll-$i.xml"
+    if [[ -f "$OUT_DIR/window-scroll-$i.xml" ]]; then
+      cat "$OUT_DIR/window-scroll-$i.xml" >> "$xml_all"
+      printf '\n' >> "$xml_all"
+    fi
+  done
+}
+
 cleanup() {
   if [[ -n "${SCREENRECORD_PID:-}" ]]; then
     kill "$SCREENRECORD_PID" >/dev/null 2>&1 || true
@@ -187,7 +685,7 @@ cleanup() {
   fi
 
   if [[ -d "${OUT_DIR:-}" && ! -f "$OUT_DIR/logcat.txt" ]]; then
-    adb logcat -d > "$OUT_DIR/logcat.txt" 2>/dev/null || true
+    adb_cmd logcat -d > "$OUT_DIR/logcat.txt" 2>/dev/null || true
   fi
 }
 
@@ -204,8 +702,35 @@ supports_adb_tap() {
 }
 
 read_debug_status() {
-  adb shell "run-as '$PACKAGE_NAME' cat files/debug-device-test-status.json" \
+  adb_cmd shell "run-as '$PACKAGE_NAME' cat files/debug-device-test-status.json" \
     > "$OUT_DIR/debug-device-test-status.json" 2>/dev/null
+}
+
+read_debug_detail_actions() {
+  adb_cmd shell "run-as '$PACKAGE_NAME' cat files/debug-detail-actions.json" \
+    > "$OUT_DIR/debug-detail-actions.json" 2>/dev/null
+}
+
+has_real_wechat_draft_url() {
+  local transcript_file="$OUT_DIR/local-transcript.json"
+
+  [[ -f "$transcript_file" ]] || return 1
+  python3 - "$transcript_file" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+def clean(value):
+    if value is None:
+        return ""
+    text = str(value).strip()
+    return "" if text.lower() == "null" else text
+
+path = Path(sys.argv[1])
+data = json.loads(path.read_text())
+draft_url = clean(data.get("wechatUrl") or data.get("wechat_url"))
+raise SystemExit(0 if draft_url else 1)
+PY
 }
 
 require_debug_status() {
@@ -266,6 +791,28 @@ recording_duration_text_from_debug_status() {
   printf '%d:%02d\n' "$((duration_ms / 60000))" "$(((duration_ms % 60000) / 1000))"
 }
 
+import_audio_fixture_to_app() {
+  local source_file="$1"
+  local source_ext
+  local remote_path
+  source_ext="${source_file##*.}"
+  source_ext="$(printf '%s' "$source_ext" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9')"
+  if [[ -z "$source_ext" || "$source_ext" == "$source_file" ]]; then
+    source_ext="audio"
+  fi
+  remote_path="debug-input/audio-fixture.$source_ext"
+
+  echo "Pushing audio fixture into app private storage..." >&2
+  adb_cmd push "$source_file" /data/local/tmp/vibepub-audio-fixture \
+    > "$OUT_DIR/debug-audio-push.txt"
+  adb_cmd shell "run-as '$PACKAGE_NAME' sh -c 'mkdir -p files/debug-input && cat > \"files/$remote_path\"' < /data/local/tmp/vibepub-audio-fixture" \
+    > "$OUT_DIR/debug-audio-import-copy.txt" 2>&1
+  adb_shell rm -f /data/local/tmp/vibepub-audio-fixture >/dev/null 2>&1 || true
+
+  printf '%s\n' "$remote_path" > "$OUT_DIR/debug-audio-app-path.txt"
+  printf '%s\n' "$remote_path"
+}
+
 fetch_backend_recording_status() {
   local filename="$1"
   local api_base="${API_BASE_URL:-https://vibepub.litianc.cn}"
@@ -308,7 +855,7 @@ wait_for_backend_recording() {
       printf '%s\n' "$status" > "$OUT_DIR/backend-recording-status.txt"
       return 0
     fi
-    sleep 5
+    sleep "$BACKEND_POLL_INTERVAL_SECONDS"
   done
 
   cat >&2 <<EOF
@@ -345,7 +892,7 @@ wait_for_backend_completion() {
           ;;
       esac
     fi
-    sleep 5
+    sleep "$BACKEND_POLL_INTERVAL_SECONDS"
   done
 
   return 1
@@ -355,19 +902,111 @@ latest_workflow_dispatch_run_id() {
   gh run list \
     --workflow "$MINING_WORKFLOW_ID" \
     --event workflow_dispatch \
+    --branch "$MINING_WORKFLOW_REF" \
     --limit 1 \
     --json databaseId \
     --jq '.[0].databaseId // ""' 2>/dev/null || true
 }
 
+recent_workflow_dispatch_run_ids() {
+  gh run list \
+    --workflow "$MINING_WORKFLOW_ID" \
+    --event workflow_dispatch \
+    --branch "$MINING_WORKFLOW_REF" \
+    --limit "$MINING_RUN_SEARCH_LIMIT" \
+    --json databaseId \
+    --jq '.[].databaseId' 2>/dev/null || true
+}
+
+find_mining_run_referencing_target() {
+  local target_filename="$1"
+  local run_id candidate_log
+
+  if [[ -z "$target_filename" ]]; then
+    return 1
+  fi
+
+  while IFS= read -r run_id; do
+    if [[ -z "$run_id" ]]; then
+      continue
+    fi
+
+    candidate_log="$OUT_DIR/mining-run-candidate-$run_id.log"
+    if gh run view "$run_id" --log \
+      > "$candidate_log.tmp" 2>"$candidate_log.err"; then
+      mv "$candidate_log.tmp" "$candidate_log"
+      if grep -Fq "$target_filename" "$candidate_log"; then
+        printf '%s\n' "$run_id"
+        return 0
+      fi
+    else
+      rm -f "$candidate_log.tmp"
+    fi
+  done < <(recent_workflow_dispatch_run_ids)
+
+  return 1
+}
+
+wait_for_mining_job_dispatched_by_worker() {
+  local previous_run_id="$1"
+  local target_filename="$2"
+  local run_id=""
+  local target_run_id=""
+  local deadline=$((SECONDS + MINING_WAIT_SECONDS))
+
+  echo "Waiting for Worker-dispatched GitHub Actions workflow: $MINING_WORKFLOW_ID ($MINING_WORKFLOW_REF)"
+  printf '%s\n' "auto" > "$OUT_DIR/mining-trigger-mode.txt"
+  if [[ -n "$target_filename" ]]; then
+    printf '%s\n' "$target_filename" > "$OUT_DIR/mining-target-filename.txt"
+  fi
+
+  while (( SECONDS < deadline )); do
+    run_id="$(latest_workflow_dispatch_run_id)"
+    if [[ -n "$run_id" && "$run_id" != "$previous_run_id" ]]; then
+      printf '%s\n' "$run_id" > "$OUT_DIR/mining-run-id.txt"
+      return 0
+    fi
+
+    target_run_id="$(find_mining_run_referencing_target "$target_filename" || true)"
+    if [[ -n "$target_run_id" ]]; then
+      printf '%s\n' "$target_run_id" > "$OUT_DIR/mining-run-id.txt"
+      return 0
+    fi
+
+    sleep 3
+  done
+
+  echo "Could not find a Worker-dispatched mining workflow run." >&2
+  return 1
+}
+
 trigger_and_wait_for_mining_job() {
   local previous_run_id="$1"
+  local target_filename="$2"
   local run_id=""
   local deadline=$((SECONDS + MINING_WAIT_SECONDS))
-  local run_tsv status conclusion run_url
 
   echo "Triggering GitHub Actions workflow: $MINING_WORKFLOW_ID ($MINING_WORKFLOW_REF)"
-  if ! gh workflow run "$MINING_WORKFLOW_ID" --ref "$MINING_WORKFLOW_REF" \
+  printf '%s\n' "manual" > "$OUT_DIR/mining-trigger-mode.txt"
+  if truthy "$MINING_TARGETED" && [[ -n "$target_filename" ]]; then
+    if ! gh workflow run "$MINING_WORKFLOW_ID" --ref "$MINING_WORKFLOW_REF" \
+      -f "target_filename=$target_filename" \
+      > "$OUT_DIR/mining-workflow-dispatch.txt" 2>&1; then
+      cat "$OUT_DIR/mining-workflow-dispatch.txt" >&2
+      cat >&2 <<EOF
+Targeted mining dispatch failed. Retrying without target_filename so smoke
+tests still work against workflow refs that have not picked up the new input.
+EOF
+      cp "$OUT_DIR/mining-workflow-dispatch.txt" "$OUT_DIR/mining-workflow-dispatch-targeted-failed.txt"
+      if ! gh workflow run "$MINING_WORKFLOW_ID" --ref "$MINING_WORKFLOW_REF" \
+        > "$OUT_DIR/mining-workflow-dispatch.txt" 2>&1; then
+        cat "$OUT_DIR/mining-workflow-dispatch.txt" >&2
+        return 1
+      fi
+      printf 'fallback_untargeted\n' > "$OUT_DIR/mining-target-fallback.txt"
+    fi
+    printf '%s\n' "$target_filename" > "$OUT_DIR/mining-target-filename.txt"
+  elif ! gh workflow run "$MINING_WORKFLOW_ID" --ref "$MINING_WORKFLOW_REF" \
     > "$OUT_DIR/mining-workflow-dispatch.txt" 2>&1; then
     cat "$OUT_DIR/mining-workflow-dispatch.txt" >&2
     return 1
@@ -387,6 +1026,14 @@ trigger_and_wait_for_mining_job() {
   fi
 
   printf '%s\n' "$run_id" > "$OUT_DIR/mining-run-id.txt"
+  wait_for_mining_workflow_run "$run_id" "$deadline"
+}
+
+wait_for_mining_workflow_run() {
+  local run_id="$1"
+  local deadline="$2"
+  local run_tsv status conclusion run_url
+
   echo "Waiting for mining workflow run: $run_id"
 
   while (( SECONDS < deadline )); do
@@ -403,10 +1050,20 @@ trigger_and_wait_for_mining_job() {
       if [[ "$status" == "completed" ]]; then
         gh run view "$run_id" --log > "$OUT_DIR/mining-run.log" 2>"$OUT_DIR/mining-run-log.err" || true
         if [[ "$conclusion" == "success" ]]; then
+          if [[ -n "${LATEST_RECORDING_FILENAME:-}" && -f "$OUT_DIR/mining-run.log" ]]; then
+            if ! grep -Fq "$LATEST_RECORDING_FILENAME" "$OUT_DIR/mining-run.log"; then
+              echo "Mining workflow log does not reference target filename: $LATEST_RECORDING_FILENAME" >&2
+              return 1
+            fi
+          fi
           return 0
         fi
         echo "Mining workflow completed with conclusion: $conclusion" >&2
         gh run view "$run_id" --log-failed > "$OUT_DIR/mining-run-failed.log" 2>/dev/null || true
+        if wait_for_backend_completion "$LATEST_RECORDING_FILENAME" "$BACKEND_COMPLETION_WAIT_SECONDS"; then
+          echo "Target recording completed even though the mining workflow failed."
+          return 0
+        fi
         return 1
       fi
     fi
@@ -420,6 +1077,8 @@ trigger_and_wait_for_mining_job() {
 maybe_run_mining_job_for_latest_recording() {
   local filename="$1"
   local previous_run_id
+  local deadline
+  local trigger_mode="$MINING_TRIGGER_MODE"
 
   if ! truthy "$TRIGGER_MINING_JOB"; then
     return 0
@@ -455,8 +1114,377 @@ maybe_run_mining_job_for_latest_recording() {
   previous_run_id="$(latest_workflow_dispatch_run_id)"
   printf '%s\n' "$previous_run_id" > "$OUT_DIR/mining-previous-run-id.txt"
 
-  trigger_and_wait_for_mining_job "$previous_run_id"
+  case "$trigger_mode" in
+    auto)
+      wait_for_mining_job_dispatched_by_worker "$previous_run_id" "$filename"
+      deadline=$((SECONDS + MINING_WAIT_SECONDS))
+      wait_for_mining_workflow_run "$(cat "$OUT_DIR/mining-run-id.txt")" "$deadline"
+      ;;
+    manual)
+      trigger_and_wait_for_mining_job "$previous_run_id" "$filename"
+      ;;
+    auto_or_manual)
+      if wait_for_mining_job_dispatched_by_worker "$previous_run_id" "$filename"; then
+        deadline=$((SECONDS + MINING_WAIT_SECONDS))
+        wait_for_mining_workflow_run "$(cat "$OUT_DIR/mining-run-id.txt")" "$deadline"
+      else
+        printf '%s\n' "auto_or_manual_fallback" > "$OUT_DIR/mining-trigger-mode.txt"
+        trigger_and_wait_for_mining_job "$previous_run_id" "$filename"
+      fi
+      ;;
+    *)
+      echo "Invalid MINING_TRIGGER_MODE: $MINING_TRIGGER_MODE" >&2
+      echo "Use auto, manual, or auto_or_manual." >&2
+      return 1
+      ;;
+  esac
   wait_for_backend_completion "$filename" "$BACKEND_COMPLETION_WAIT_SECONDS"
+}
+
+transcript_file_name_for_recording() {
+  local filename="$1"
+  local base="$filename"
+  if [[ "$base" == *.* ]]; then
+    base="${base%.*}"
+  fi
+  printf '%s.json\n' "$base"
+}
+
+wait_for_local_transcript_file() {
+  local filename="$1"
+  local deadline=$((SECONDS + DETAIL_READY_WAIT_SECONDS))
+  local transcript_name
+  transcript_name="$(transcript_file_name_for_recording "$filename")"
+
+  while (( SECONDS < deadline )); do
+    if adb_cmd shell "run-as '$PACKAGE_NAME' test -s 'files/recordings/$transcript_name'" >/dev/null 2>&1; then
+      printf '%s\n' "$transcript_name" > "$OUT_DIR/local-transcript-filename.txt"
+      adb_cmd shell "run-as '$PACKAGE_NAME' cat 'files/recordings/$transcript_name'" \
+        > "$OUT_DIR/local-transcript.json" 2>/dev/null || true
+      return 0
+    fi
+    sleep 1
+  done
+
+  return 1
+}
+
+capture_local_recording_row() {
+  local filename="$1"
+  local db_file="$OUT_DIR/local-room-vibepub_database"
+
+  if [[ -z "$filename" ]]; then
+    return 1
+  fi
+
+  if ! adb_cmd shell "run-as '$PACKAGE_NAME' cat databases/vibepub_database" \
+    > "$db_file" 2>"$OUT_DIR/local-recording-row.err"; then
+    return 1
+  fi
+  adb_cmd shell "run-as '$PACKAGE_NAME' sh -c 'test -f databases/vibepub_database-wal && cat databases/vibepub_database-wal || true'" \
+    > "$db_file-wal" 2>/dev/null || true
+  adb_cmd shell "run-as '$PACKAGE_NAME' sh -c 'test -f databases/vibepub_database-shm && cat databases/vibepub_database-shm || true'" \
+    > "$db_file-shm" 2>/dev/null || true
+
+  python3 - "$db_file" "$filename" > "$OUT_DIR/local-recording-row.json" <<'PY'
+import json
+import sqlite3
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+filename = sys.argv[2]
+connection = sqlite3.connect(path)
+try:
+    row = connection.execute(
+        """
+        SELECT
+            COUNT(*),
+            COALESCE(MAX(durationMs), 0),
+            COALESCE(MAX(status), ''),
+            COALESCE(MAX(articleTitle), ''),
+            COALESCE(MAX(rawTextPreview), ''),
+            COALESCE(MAX(processingStage), ''),
+            COALESCE(MAX(wechatDraftId), ''),
+            COALESCE(MAX(wechatUrl), ''),
+            COALESCE(MAX(lastError), '')
+        FROM recordings
+        WHERE filename = ?
+        """,
+        (filename,),
+    ).fetchone()
+finally:
+    connection.close()
+
+def clean(value):
+    if value is None:
+        return ""
+    text = str(value).strip()
+    return "" if text.lower() == "null" else text
+
+print(json.dumps({
+    "filename": filename,
+    "count": int(row[0] or 0),
+    "durationMs": int(row[1] or 0),
+    "status": clean(row[2]),
+    "articleTitle": clean(row[3]),
+    "rawTextPreview": clean(row[4]),
+    "processingStage": clean(row[5]),
+    "wechatDraftId": clean(row[6]),
+    "wechatUrl": clean(row[7]),
+    "lastError": clean(row[8]),
+}, ensure_ascii=False, indent=2))
+PY
+}
+
+dump_current_window() {
+  local remote_path="$1"
+  local local_path="$2"
+  adb_shell uiautomator dump "$remote_path" >/dev/null 2>&1 || true
+  pull_if_exists "$remote_path" "$local_path"
+}
+
+tap_text_center_in_xml() {
+  local label="$1"
+  local xml_file="$2"
+  local coords
+
+  if [[ ! -f "$xml_file" ]]; then
+    return 1
+  fi
+
+  coords="$(python3 - "$xml_file" "$label" <<'PY'
+import re
+import sys
+import xml.etree.ElementTree as ET
+from pathlib import Path
+
+xml_file = Path(sys.argv[1])
+label = sys.argv[2]
+root = ET.fromstring(xml_file.read_text(errors="ignore"))
+
+for node in root.iter("node"):
+    if node.attrib.get("text") != label and node.attrib.get("content-desc") != label:
+        continue
+    bounds = node.attrib.get("bounds", "")
+    match = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", bounds)
+    if not match:
+        continue
+    left, top, right, bottom = map(int, match.groups())
+    print((left + right) // 2, (top + bottom) // 2)
+    raise SystemExit(0)
+
+raise SystemExit(1)
+PY
+)"
+
+  if [[ -z "$coords" ]]; then
+    return 1
+  fi
+
+  adb_shell input tap $coords
+}
+
+largest_window_bounds() {
+  local xml_file="$1"
+
+  if [[ ! -f "$xml_file" ]]; then
+    return 0
+  fi
+
+  grep -o 'bounds="\[[0-9,]*\]\[[0-9,]*\]"' "$xml_file" \
+    | sed 's/bounds="\[\([0-9][0-9]*\),\([0-9][0-9]*\)\]\[\([0-9][0-9]*\),\([0-9][0-9]*\)\]"/\1 \2 \3 \4/' \
+    | awk '
+        {
+          width = $3 - $1
+          height = $4 - $2
+          area = width * height
+          if (area > maxArea) {
+            maxArea = area
+            bestWidth = width
+            bestHeight = height
+          }
+        }
+        END {
+          if (bestWidth > 0 && bestHeight > 0) {
+            print bestWidth, bestHeight
+          }
+        }
+      '
+}
+
+scroll_detail_to_text() {
+  local label="$1"
+  local max_scrolls="${2:-5}"
+  local width height tap_x start_y end_y i bounds
+
+  dump_current_window /sdcard/vibepub-action-window.xml "$OUT_DIR/action-window.xml"
+  bounds="$(largest_window_bounds "$OUT_DIR/action-window.xml")"
+  if [[ -n "$bounds" ]]; then
+    width="$(printf '%s\n' "$bounds" | awk '{ print $1 }')"
+    height="$(printf '%s\n' "$bounds" | awk '{ print $2 }')"
+  else
+    width="$(screen_width)"
+    height="$(screen_height)"
+  fi
+  tap_x=$((width / 2))
+  start_y=$((height * 82 / 100))
+  end_y=$((height * 28 / 100))
+
+  for ((i = 0; i <= max_scrolls; i++)); do
+    dump_current_window /sdcard/vibepub-action-window.xml "$OUT_DIR/action-window.xml"
+    if [[ -f "$OUT_DIR/action-window.xml" ]] && grep -q "text=\"$label\"\\|content-desc=\"$label\"" "$OUT_DIR/action-window.xml"; then
+      return 0
+    fi
+    adb_shell input swipe "$tap_x" "$start_y" "$tap_x" "$end_y" 450 >/dev/null 2>&1 || true
+    sleep 0.7
+  done
+
+  return 1
+}
+
+bring_detail_to_foreground() {
+  if [[ -n "$LATEST_RECORDING_FILENAME" ]]; then
+    adb_shell am start \
+      -n "$PACKAGE_NAME/.debug.DebugLatestRecordingActivity" \
+      --es filename "$LATEST_RECORDING_FILENAME" \
+      > "$OUT_DIR/foreground-detail-after-action.txt" 2>&1 || true
+  else
+    adb_shell am start -n "$PACKAGE_NAME/.debug.DebugLatestRecordingActivity" \
+      > "$OUT_DIR/foreground-detail-after-action.txt" 2>&1 || true
+  fi
+  sleep 0.8
+}
+
+exercise_detail_actions() {
+  local share_or_export_opened=false
+
+  if [[ -z "$AUDIO_FILE" ]]; then
+    return 0
+  fi
+
+  echo "Exercising detail actions..."
+  reset_detail_scroll_to_top
+  dump_current_window /sdcard/vibepub-action-window.xml "$OUT_DIR/action-window.xml"
+  if tap_text_center_in_xml "Play" "$OUT_DIR/action-window.xml"; then
+    sleep 1.4
+  fi
+
+  if scroll_detail_to_text "复制标题"; then
+    tap_text_center_in_xml "复制标题" "$OUT_DIR/action-window.xml" || true
+    sleep 0.4
+  fi
+
+  if has_real_wechat_draft_url && scroll_detail_to_text "打开公众号草稿"; then
+    tap_text_center_in_xml "打开公众号草稿" "$OUT_DIR/action-window.xml" || true
+    sleep 1
+    dump_current_window /sdcard/vibepub-draft-window.xml "$OUT_DIR/draft-window.xml"
+    adb_shell input keyevent KEYCODE_BACK >/dev/null 2>&1 || true
+    sleep 0.6
+    bring_detail_to_foreground
+  fi
+
+  if scroll_detail_to_text "复制正文"; then
+    tap_text_center_in_xml "复制正文" "$OUT_DIR/action-window.xml" || true
+    sleep 0.4
+  fi
+
+  if scroll_detail_to_text "分享"; then
+    tap_text_center_in_xml "分享" "$OUT_DIR/action-window.xml" || true
+    sleep 1
+    dump_current_window /sdcard/vibepub-share-window.xml "$OUT_DIR/share-window.xml"
+    share_or_export_opened=true
+    adb_shell input keyevent KEYCODE_BACK >/dev/null 2>&1 || true
+    sleep 0.6
+    bring_detail_to_foreground
+  fi
+
+  if scroll_detail_to_text "导出材料包"; then
+    tap_text_center_in_xml "导出材料包" "$OUT_DIR/action-window.xml" || true
+    sleep 1
+    dump_current_window /sdcard/vibepub-export-window.xml "$OUT_DIR/export-window.xml"
+    share_or_export_opened=true
+    adb_shell input keyevent KEYCODE_BACK >/dev/null 2>&1 || true
+    sleep 0.6
+    bring_detail_to_foreground
+  fi
+
+  read_debug_detail_actions || true
+  if [[ "$share_or_export_opened" == true ]]; then
+    mark_phase "detail_actions_exercised"
+  fi
+}
+
+reset_detail_scroll_to_top() {
+  local width height tap_x start_y end_y i bounds
+
+  if [[ -f "$OUT_DIR/window.xml" ]]; then
+    bounds="$(
+      grep -o 'bounds="\[[0-9,]*\]\[[0-9,]*\]"' "$OUT_DIR/window.xml" \
+        | sed 's/bounds="\[\([0-9][0-9]*\),\([0-9][0-9]*\)\]\[\([0-9][0-9]*\),\([0-9][0-9]*\)\]"/\1 \2 \3 \4/' \
+        | awk '
+            {
+              width = $3 - $1
+              height = $4 - $2
+              area = width * height
+              if (area > maxArea) {
+                maxArea = area
+                bestWidth = width
+                bestHeight = height
+              }
+            }
+            END {
+              if (bestWidth > 0 && bestHeight > 0) {
+                print bestWidth, bestHeight
+              }
+            }
+          '
+    )"
+  else
+    bounds=""
+  fi
+
+  if [[ -n "$bounds" ]]; then
+    width="$(printf '%s\n' "$bounds" | awk '{ print $1 }')"
+    height="$(printf '%s\n' "$bounds" | awk '{ print $2 }')"
+  else
+    width="$(screen_width)"
+    height="$(screen_height)"
+  fi
+
+  tap_x=$((width / 2))
+  start_y=$((height * 28 / 100))
+  end_y=$((height * 82 / 100))
+
+  for ((i = 1; i <= 4; i++)); do
+    adb_shell input swipe "$tap_x" "$start_y" "$tap_x" "$end_y" 450 >/dev/null 2>&1 || true
+  done
+  sleep 1
+}
+
+wait_for_detail_assertable() {
+  local deadline=$((SECONDS + DETAIL_READY_WAIT_SECONDS))
+
+  while (( SECONDS < deadline )); do
+    adb_shell screencap -p /sdcard/vibepub-detail.png >/dev/null 2>&1 || true
+    pull_if_exists /sdcard/vibepub-detail.png "$OUT_DIR/03-detail.png"
+    dump_current_window /sdcard/vibepub-window.xml "$OUT_DIR/window.xml"
+    if [[ -f "$OUT_DIR/window.xml" ]] && grep -q "正在获取云端转录\\|正在转录" "$OUT_DIR/window.xml"; then
+      DETAIL_STATUS="pending"
+      sleep 2
+      continue
+    fi
+    capture_detail_scroll_evidence
+    if evaluate_detail_result "$OUT_DIR/window-all.xml"; then
+      return 0
+    fi
+    if [[ "$DETAIL_STATUS" != "pending" && "$DETAIL_STATUS" != "unknown" && "$DETAIL_STATUS" != "missing_review_card" ]]; then
+      return 1
+    fi
+    sleep 2
+  done
+
+  return 1
 }
 
 screen_width() {
@@ -494,10 +1522,10 @@ write_app_preferences() {
     printf '</map>\n'
   } > "$tmp_file"
 
-  adb push "$tmp_file" /data/local/tmp/vibepub-prefs.xml >/dev/null
+  adb_cmd push "$tmp_file" /data/local/tmp/vibepub-prefs.xml >/dev/null
   rm -f "$tmp_file"
 
-  if adb shell "cat /data/local/tmp/vibepub-prefs.xml | run-as '$PACKAGE_NAME' sh -c 'mkdir -p shared_prefs && cat > shared_prefs/vibepub.xml && chmod 600 shared_prefs/vibepub.xml'" >/dev/null 2>&1; then
+  if adb_cmd shell "cat /data/local/tmp/vibepub-prefs.xml | run-as '$PACKAGE_NAME' sh -c 'mkdir -p shared_prefs && cat > shared_prefs/vibepub.xml && chmod 600 shared_prefs/vibepub.xml'" >/dev/null 2>&1; then
     echo "Injected app preferences: API_BASE_URL=${api_value}, FILES_TOKEN=$(if [[ -n "$token_value" ]]; then printf 'set'; else printf 'empty'; fi)"
   else
     cat >&2 <<EOF
@@ -523,8 +1551,16 @@ if [[ "$AUTOMATION_MODE" != "debug-broadcast" && "$AUTOMATION_MODE" != "ui-tap" 
   exit 1
 fi
 
+if [[ "$DEBUG_AUDIO_MODE" != "import" && "$DEBUG_AUDIO_MODE" != "speaker" ]]; then
+  echo "Invalid DEBUG_AUDIO_MODE: $DEBUG_AUDIO_MODE" >&2
+  echo "Use import or speaker." >&2
+  exit 1
+fi
+
 if [[ -n "$AUDIO_FILE" ]]; then
-  require_cmd afplay
+  if [[ "$AUTOMATION_MODE" != "debug-broadcast" || "$DEBUG_AUDIO_MODE" == "speaker" ]]; then
+    require_cmd afplay
+  fi
   if [[ ! -f "$AUDIO_FILE" ]]; then
     echo "AUDIO_FILE not found: $AUDIO_FILE" >&2
     exit 1
@@ -542,13 +1578,14 @@ if [[ ! -f "$APK_PATH" ]]; then
 fi
 
 mkdir -p "$OUT_DIR"
+printf 'phase\telapsed_seconds\ttotal_seconds\n' > "$OUT_DIR/timing.tsv"
 
 echo "Checking connected Android device..."
-adb start-server >/dev/null
+adb_cmd start-server >/dev/null
 if [[ -n "${ANDROID_SERIAL:-}" ]]; then
-  device_count="$(adb devices | awk -v serial="$ANDROID_SERIAL" 'NR > 1 && $1 == serial && $2 == "device" { count++ } END { print count + 0 }')"
+  device_count="$(adb_cmd devices | awk -v serial="$ANDROID_SERIAL" 'NR > 1 && $1 == serial && $2 == "device" { count++ } END { print count + 0 }')"
 else
-  device_count="$(adb devices | awk 'NR > 1 && $2 == "device" { count++ } END { print count + 0 }')"
+  device_count="$(adb_cmd devices | awk 'NR > 1 && $2 == "device" { count++ } END { print count + 0 }')"
 fi
 if [[ "$device_count" -eq 0 ]]; then
   cat >&2 <<EOF
@@ -568,23 +1605,26 @@ fi
 
 if [[ "$device_count" -gt 1 ]]; then
   echo "More than one device is connected. Set ANDROID_SERIAL before running." >&2
-  adb devices >&2
+  adb_cmd devices >&2
   exit 1
 fi
 
 echo "Writing evidence to: $OUT_DIR"
-adb devices > "$OUT_DIR/adb-devices.txt"
+adb_cmd devices > "$OUT_DIR/adb-devices.txt"
 adb_shell getprop ro.product.model > "$OUT_DIR/device-model.txt" || true
 adb_shell getprop ro.build.version.release > "$OUT_DIR/android-version.txt" || true
+mark_phase "device_connected"
 
 if truthy "$RESET_APP_DATA" && ! truthy "$SKIP_INSTALL"; then
+  assert_device_install_ready
   echo "Uninstalling existing app for deterministic test run..."
-  if ! adb uninstall "$PACKAGE_NAME" > "$OUT_DIR/uninstall-for-reset.txt" 2>&1; then
+  if ! adb_cmd uninstall "$PACKAGE_NAME" > "$OUT_DIR/uninstall-for-reset.txt" 2>&1; then
     if ! grep -q "Unknown package" "$OUT_DIR/uninstall-for-reset.txt"; then
       cat "$OUT_DIR/uninstall-for-reset.txt" >&2
       exit 1
     fi
   fi
+  mark_phase "preinstall_uninstall"
 fi
 
 if truthy "$SKIP_INSTALL"; then
@@ -594,57 +1634,47 @@ if truthy "$SKIP_INSTALL"; then
     exit 1
   }
 else
+  assert_device_install_ready
   echo "Installing APK: $APK_PATH"
-  if ! adb install -r "$APK_PATH" > "$OUT_DIR/install.txt" 2>&1; then
-    cat "$OUT_DIR/install.txt" >&2
-    if grep -q "INSTALL_FAILED_USER_RESTRICTED" "$OUT_DIR/install.txt"; then
-      cat >&2 <<EOF
-
-The phone blocked APK installation from adb.
-
-On Xiaomi/MIUI/HyperOS devices, enable Developer options items usually named:
-  Install via USB
-  USB debugging (Security settings)
-
-Chinese labels may be:
-  USB 安装
-  USB 调试（安全设置）
-  允许通过 USB 调试修改权限或模拟点击
-
-Then reconnect USB if needed and rerun the script.
-EOF
-    fi
+  if ! install_apk "$APK_PATH"; then
+    cat "$OUT_DIR/install-readiness-output.txt" >&2
+    echo "APK install failed. Readiness report: $OUT_DIR/install-readiness/readiness.md" >&2
     exit 1
   fi
 fi
+mark_phase "install_checked"
 
 if truthy "$RESET_APP_DATA"; then
   echo "Clearing installed app data for deterministic test run..."
-  if ! adb_shell pm clear "$PACKAGE_NAME" > "$OUT_DIR/pm-clear-after-install.txt" 2>&1; then
-    cat "$OUT_DIR/pm-clear-after-install.txt" >&2
+  if ! reset_app_data; then
     exit 1
   fi
 fi
+mark_phase "app_data_ready"
 
 echo "Granting permissions where possible..."
-grant_recording_permissions
-adb_shell dumpsys package "$PACKAGE_NAME" > "$OUT_DIR/package-after-permissions.txt" 2>&1 || true
-adb_shell appops get "$PACKAGE_NAME" RECORD_AUDIO > "$OUT_DIR/appops-record-audio.txt" 2>&1 || true
+grant_recording_permissions "before-launch"
+capture_recording_permission_evidence "before-launch"
 
 write_app_preferences
+mark_phase "permissions_and_prefs"
 
 echo "Clearing logcat and launching app..."
 wake_device
 adb_shell dumpsys power > "$OUT_DIR/power-before-launch.txt" 2>&1 || true
 adb_shell dumpsys window > "$OUT_DIR/window-before-launch.txt" 2>&1 || true
-adb logcat -c || true
+adb_cmd logcat -c || true
 adb_shell am start -n "$PACKAGE_NAME/$ACTIVITY_NAME" > "$OUT_DIR/launch.txt"
 sleep 3
 wait_for_app_focus || true
+grant_recording_permissions "after-launch"
+capture_recording_permission_evidence
+capture_recording_permission_evidence "after-launch"
 
 echo "Capturing launch screenshot..."
 adb_shell screencap -p /sdcard/vibepub-launch.png
-adb pull /sdcard/vibepub-launch.png "$OUT_DIR/01-launch.png" >/dev/null
+adb_cmd pull /sdcard/vibepub-launch.png "$OUT_DIR/01-launch.png" >/dev/null
+mark_phase "launch_captured"
 
 if [[ -n "$AUDIO_FILE" ]]; then
   LATEST_RECORDING_FILENAME=""
@@ -685,6 +1715,9 @@ Automated mode is enabled.
 Mode:
   $AUTOMATION_MODE
 
+Debug audio mode:
+  $DEBUG_AUDIO_MODE
+
 Audio file:
   $AUDIO_FILE
 
@@ -692,37 +1725,65 @@ Tap coordinates:
   record:     $record_tap_x,$record_tap_y
   stop:       $stop_tap_x,$stop_tap_y
   first item: $first_item_tap_x,$first_item_tap_y
+EOF
+
+  if [[ "$AUTOMATION_MODE" != "debug-broadcast" || "$DEBUG_AUDIO_MODE" == "speaker" ]]; then
+    cat <<EOF
 
 Keep the phone near the Mac speaker in a quiet room. The app will record what
 the physical phone microphone hears from the Mac speaker.
 EOF
+  fi
 
   adb_shell rm -f /sdcard/vibepub-visual-test.mp4
   adb_shell screenrecord --time-limit "$RECORD_SECONDS" /sdcard/vibepub-visual-test.mp4 >/dev/null 2>&1 &
   SCREENRECORD_PID="$!"
 
   sleep "$START_DELAY_SECONDS"
-  if [[ "$AUTOMATION_MODE" == "debug-broadcast" ]]; then
+  if [[ "$AUTOMATION_MODE" == "debug-broadcast" && "$DEBUG_AUDIO_MODE" == "import" ]]; then
+    wake_device
+    adb_shell am start -n "$PACKAGE_NAME/$ACTIVITY_NAME" > "$OUT_DIR/foreground-before-import.txt" 2>&1 || true
+    wait_for_app_focus
+    local_audio_path="$(import_audio_fixture_to_app "$AUDIO_FILE")"
+    echo "Importing audio fixture through debug broadcast..."
+    adb_shell am broadcast \
+      -a "$DEBUG_IMPORT_AUDIO_ACTION" \
+      -p "$PACKAGE_NAME" \
+      --es audio_path "$local_audio_path" \
+      > "$OUT_DIR/debug-import-broadcast.txt"
+    require_debug_status "IMPORTED|IMPORTED_WITHOUT_UPLOAD_TOKEN" "import"
+    LATEST_RECORDING_FILENAME="$(recording_filename_from_debug_status || true)"
+    EXPECTED_DURATION_TEXT="$(recording_duration_text_from_debug_status || true)"
+    if [[ -n "$LATEST_RECORDING_FILENAME" ]]; then
+      printf '%s\n' "$LATEST_RECORDING_FILENAME" > "$OUT_DIR/latest-recording-filename.txt"
+    fi
+    if [[ -n "$EXPECTED_DURATION_TEXT" ]]; then
+      printf '%s\n' "$EXPECTED_DURATION_TEXT" > "$OUT_DIR/expected-duration-text.txt"
+    fi
+    mark_phase "audio_imported"
+  elif [[ "$AUTOMATION_MODE" == "debug-broadcast" ]]; then
     wake_device
     adb_shell am start -n "$PACKAGE_NAME/$ACTIVITY_NAME" > "$OUT_DIR/foreground-before-recording.txt" 2>&1 || true
     wait_for_app_focus
-    grant_recording_permissions
+    grant_recording_permissions "before-recording"
     adb_shell dumpsys package "$PACKAGE_NAME" > "$OUT_DIR/package-before-recording.txt" 2>&1 || true
     adb_shell appops get "$PACKAGE_NAME" RECORD_AUDIO > "$OUT_DIR/appops-before-recording.txt" 2>&1 || true
     echo "Starting recording through debug broadcast..."
     adb_shell am broadcast -a "$DEBUG_START_ACTION" -p "$PACKAGE_NAME" > "$OUT_DIR/debug-start-broadcast.txt"
     require_debug_status "STARTED" "start"
+    mark_phase "recording_started"
   else
     echo "Tapping record..."
     adb_shell input tap "$record_tap_x" "$record_tap_y"
+    sleep 1
+
+    echo "Playing audio through Mac speaker..."
+    afplay "$AUDIO_FILE"
+    sleep 1
+    mark_phase "ui_audio_played"
   fi
-  sleep 1
 
-  echo "Playing audio through Mac speaker..."
-  afplay "$AUDIO_FILE"
-  sleep 1
-
-  if [[ "$AUTOMATION_MODE" == "debug-broadcast" ]]; then
+  if [[ "$AUTOMATION_MODE" == "debug-broadcast" && "$DEBUG_AUDIO_MODE" == "speaker" ]]; then
     echo "Stopping recording through debug broadcast..."
     adb_shell am broadcast -a "$DEBUG_STOP_ACTION" -p "$PACKAGE_NAME" > "$OUT_DIR/debug-stop-broadcast.txt"
     require_debug_status "STOPPED|STOPPED_WITHOUT_UPLOAD_TOKEN" "stop"
@@ -734,18 +1795,22 @@ EOF
     if [[ -n "$EXPECTED_DURATION_TEXT" ]]; then
       printf '%s\n' "$EXPECTED_DURATION_TEXT" > "$OUT_DIR/expected-duration-text.txt"
     fi
-  else
+    mark_phase "recording_stopped"
+  elif [[ "$AUTOMATION_MODE" == "ui-tap" ]]; then
     echo "Tapping stop..."
     adb_shell input tap "$stop_tap_x" "$stop_tap_y"
+    mark_phase "recording_stopped"
   fi
   sleep "$POST_STOP_WAIT_SECONDS"
 
   echo "Capturing home-after-record screenshot..."
   adb_shell screencap -p /sdcard/vibepub-after-record.png
-  adb pull /sdcard/vibepub-after-record.png "$OUT_DIR/02-after-record.png" >/dev/null
+  adb_cmd pull /sdcard/vibepub-after-record.png "$OUT_DIR/02-after-record.png" >/dev/null
+  mark_phase "home_after_record_captured"
 
   if truthy "$TRIGGER_MINING_JOB"; then
     maybe_run_mining_job_for_latest_recording "$LATEST_RECORDING_FILENAME"
+    mark_phase "mining_completed"
   fi
 
   echo "Opening first recording..."
@@ -762,13 +1827,30 @@ EOF
     adb_shell input tap "$first_item_tap_x" "$first_item_tap_y"
   fi
   sleep "$DETAIL_WAIT_SECONDS"
+  dump_current_window /sdcard/vibepub-window.xml "$OUT_DIR/window.xml"
+  reset_detail_scroll_to_top
+  mark_phase "detail_opened"
 
   echo "Capturing detail screenshot..."
-  adb_shell screencap -p /sdcard/vibepub-detail.png
-  adb pull /sdcard/vibepub-detail.png "$OUT_DIR/03-detail.png" >/dev/null
+  if truthy "$TRIGGER_MINING_JOB"; then
+    if [[ -n "$LATEST_RECORDING_FILENAME" && "$BACKEND_RECORDING_STATUS" == "COMPLETED" ]]; then
+      wait_for_local_transcript_file "$LATEST_RECORDING_FILENAME" || true
+    fi
+    wait_for_detail_assertable || true
+  else
+    adb_shell screencap -p /sdcard/vibepub-detail.png >/dev/null 2>&1 || true
+    pull_if_exists /sdcard/vibepub-detail.png "$OUT_DIR/03-detail.png"
+    dump_current_window /sdcard/vibepub-window.xml "$OUT_DIR/window.xml"
+    capture_detail_scroll_evidence
+    evaluate_detail_result "$OUT_DIR/window-all.xml" || true
+  fi
+  mark_phase "detail_assertion_checked"
+
+  exercise_detail_actions
 
   wait "$SCREENRECORD_PID" || true
   SCREENRECORD_PID=""
+  mark_phase "screenrecord_finished"
 else
   cat <<EOF
 
@@ -790,20 +1872,37 @@ fi
 
 echo "Capturing final screenshot and UI dump..."
 adb_shell screencap -p /sdcard/vibepub-final.png
-adb pull /sdcard/vibepub-final.png "$OUT_DIR/final.png" >/dev/null
+adb_cmd pull /sdcard/vibepub-final.png "$OUT_DIR/final.png" >/dev/null
 pull_if_exists /sdcard/vibepub-visual-test.mp4 "$OUT_DIR/vibepub-visual-test.mp4"
 adb_shell uiautomator dump /sdcard/vibepub-window.xml >/dev/null 2>&1 || true
 pull_if_exists /sdcard/vibepub-window.xml "$OUT_DIR/window.xml"
 if [[ -n "$AUDIO_FILE" ]]; then
-  if evaluate_detail_result "$OUT_DIR/window.xml"; then
+  if [[ ! -f "$OUT_DIR/window-all.xml" ]]; then
+    capture_detail_scroll_evidence
+  fi
+fi
+if [[ -n "$AUDIO_FILE" ]]; then
+  if truthy "$TRIGGER_MINING_JOB" && [[ -n "$LATEST_RECORDING_FILENAME" ]]; then
+    wait_for_local_transcript_file "$LATEST_RECORDING_FILENAME" || true
+    capture_local_recording_row "$LATEST_RECORDING_FILENAME" || true
+  fi
+  if evaluate_detail_result "$OUT_DIR/window-all.xml"; then
     echo "Transcript detail assertion: completed"
   else
     echo "Transcript detail assertion: $DETAIL_STATUS" >&2
   fi
+  if truthy "$TRIGGER_MINING_JOB"; then
+    if evaluate_acceptance_result; then
+      echo "Acceptance assertion: passed"
+    else
+      echo "Acceptance assertion: failed" >&2
+    fi
+  fi
 fi
 
 echo "Collecting logs..."
-adb logcat -d > "$OUT_DIR/logcat.txt" || true
+adb_cmd logcat -d > "$OUT_DIR/logcat.txt" || true
+mark_phase "logs_collected"
 
 cat > "$OUT_DIR/checklist.md" <<EOF
 # VibePub Device Visual Test
@@ -815,12 +1914,17 @@ cat > "$OUT_DIR/checklist.md" <<EOF
 - API base URL: \`${API_BASE_URL:-app default}\`
 - Reset app data: \`$RESET_APP_DATA\`
 - Automation mode: \`$AUTOMATION_MODE\`
+- Debug audio mode: \`$DEBUG_AUDIO_MODE\`
 - Skip install: \`$SKIP_INSTALL\`
 - Trigger mining job: \`$TRIGGER_MINING_JOB\`
+- Mining trigger mode: \`$MINING_TRIGGER_MODE\`
+- Mining workflow ref: \`$MINING_WORKFLOW_REF\`
 - Latest recording filename: \`${LATEST_RECORDING_FILENAME:-not_captured}\`
 - Expected duration text: \`${EXPECTED_DURATION_TEXT:-not_checked}\`
 - Backend recording status: \`${BACKEND_RECORDING_STATUS:-not_checked}\`
 - Mining workflow run: \`$(if [[ -f "$OUT_DIR/mining-run-url.txt" ]]; then cat "$OUT_DIR/mining-run-url.txt"; else printf 'not_run'; fi)\`
+- Acceptance status: \`$ACCEPTANCE_STATUS\`
+- Detail action evidence: \`debug-detail-actions.json\`
 
 Review:
 
@@ -829,14 +1933,16 @@ Review:
 - [ ] \`02-after-record.png\` or \`final.png\` shows only one new recording for one recording attempt.
 - [ ] No duplicate 0-second rows appear for the same time.
 - [ ] \`03-detail.png\` or \`final.png\` shows transcript/article content after processing finishes.
+- [ ] \`debug-detail-actions.json\` shows playback progress and copy/share/export actions.
 - [ ] \`logcat.txt\` has no obvious upload/sync/transcript errors.
 
 Automated assertion:
 
 - Transcript detail status: \`$DETAIL_STATUS\`
+- Acceptance report: \`acceptance-report.txt\`
 EOF
 
-if [[ -n "$AUDIO_FILE" && "$DETAIL_STATUS" != "completed" ]]; then
+if [[ -n "$AUDIO_FILE" && "$DETAIL_STATUS" != "completed" ]] && truthy "$TRIGGER_MINING_JOB"; then
   case "$DETAIL_STATUS" in
     failed)
       echo "Transcript processing failed; see final.png, window.xml, and logcat.txt." >&2
@@ -848,6 +1954,11 @@ if [[ -n "$AUDIO_FILE" && "$DETAIL_STATUS" != "completed" ]]; then
       echo "Transcript assertion did not complete: $DETAIL_STATUS" >&2
       ;;
   esac
+  exit 1
+fi
+
+if [[ -n "$AUDIO_FILE" && "$ACCEPTANCE_STATUS" == "failed" ]] && truthy "$TRIGGER_MINING_JOB"; then
+  echo "Acceptance assertions failed; see $OUT_DIR/acceptance-report.txt" >&2
   exit 1
 fi
 

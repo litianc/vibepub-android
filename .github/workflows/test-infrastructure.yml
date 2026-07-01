@@ -31,4 +31,5 @@ jobs:
           scripts/android-device-visual-test.sh --help >/dev/null
           scripts/check-android-device-ready.sh --help >/dev/null
           scripts/download-latest-android-apk.sh --help >/dev/null
+          scripts/install-latest-android-apk.sh --help >/dev/null
           scripts/run-android-device-smoke.sh --help >/dev/null

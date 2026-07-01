@@ -4,7 +4,12 @@ on:
   schedule:
     # Run every 10 minutes
     - cron: '*/10 * * * *'
-  workflow_dispatch: # Allow manual triggering
+  workflow_dispatch:
+    inputs:
+      target_filename:
+        description: "Optional exact recording filename to process from R2 inbox"
+        required: false
+        type: string
 
 jobs:
   mine:
@@ -18,7 +23,7 @@ jobs:
         with:
           node-version: '20'
           cache: 'npm'
-          cache-dependency-path: 'infra/mining/package.json'
+          cache-dependency-path: 'infra/mining/package-lock.json'
 
       - name: Install dependencies
         working-directory: infra/mining
@@ -45,4 +50,5 @@ jobs:
           FILES_TOKEN: ${{ secrets.FILES_TOKEN }}
           PUBLIC_BASE_URL: "https://vibepub.litianc.cn"
           CLEANUP_PERMANENT_AUDIO_FAILURES: "true"
+          TARGET_FILENAME: ${{ inputs.target_filename }}
         run: npm start

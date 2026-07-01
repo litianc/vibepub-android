@@ -17,9 +17,16 @@ Environment:
   API_BASE_URL     Backend URL. Defaults to https://vibepub.litianc.cn.
   FILES_TOKEN      Backend token. Falls back to secrets/files-token.txt.
   SKIP_INSTALL     Use APK already installed on phone. Default: false.
+  CHECK_APK_INSTALL_IN_PREFLIGHT
+                   Let readiness preflight install/check the APK before the
+                   main smoke script. Default: false to avoid double install.
   TRIGGER_MINING_JOB
                    Trigger and wait for mining-job.yml before final detail
                    assertion. Default: true.
+  MINING_TRIGGER_MODE
+                   auto waits for the Worker-created workflow_dispatch run,
+                   manual dispatches from the script, and auto_or_manual waits
+                   first then dispatches manually as fallback. Default: auto.
 
 When no APK path is passed, the latest successful GitHub Actions debug APK is
 downloaded through scripts/download-latest-android-apk.sh.
@@ -55,6 +62,8 @@ if [[ ! -f "${AUDIO_FILE:-$DEFAULT_AUDIO_FILE}" ]]; then
   exit 1
 fi
 
+CHECK_APK_INSTALL="${CHECK_APK_INSTALL_IN_PREFLIGHT:-false}" \
+REQUIRE_UNLOCKED="${REQUIRE_UNLOCKED:-true}" \
 "$ROOT_DIR/scripts/check-android-device-ready.sh" "$APK_PATH"
 
 AUDIO_FILE="${AUDIO_FILE:-$DEFAULT_AUDIO_FILE}" \
@@ -63,10 +72,13 @@ FILES_TOKEN="$FILES_TOKEN" \
 AUTOMATION_MODE="${AUTOMATION_MODE:-debug-broadcast}" \
 RESET_APP_DATA="${RESET_APP_DATA:-true}" \
 SKIP_INSTALL="${SKIP_INSTALL:-false}" \
-RECORD_SECONDS="${RECORD_SECONDS:-70}" \
-POST_STOP_WAIT_SECONDS="${POST_STOP_WAIT_SECONDS:-10}" \
-DETAIL_WAIT_SECONDS="${DETAIL_WAIT_SECONDS:-12}" \
+RECORD_SECONDS="${RECORD_SECONDS:-15}" \
+POST_STOP_WAIT_SECONDS="${POST_STOP_WAIT_SECONDS:-2}" \
+DETAIL_WAIT_SECONDS="${DETAIL_WAIT_SECONDS:-2}" \
+DETAIL_READY_WAIT_SECONDS="${DETAIL_READY_WAIT_SECONDS:-30}" \
 TRIGGER_MINING_JOB="${TRIGGER_MINING_JOB:-true}" \
+MINING_TRIGGER_MODE="${MINING_TRIGGER_MODE:-auto}" \
 MINING_WAIT_SECONDS="${MINING_WAIT_SECONDS:-300}" \
 BACKEND_COMPLETION_WAIT_SECONDS="${BACKEND_COMPLETION_WAIT_SECONDS:-90}" \
+BACKEND_POLL_INTERVAL_SECONDS="${BACKEND_POLL_INTERVAL_SECONDS:-2}" \
 "$ROOT_DIR/scripts/android-device-visual-test.sh" "$APK_PATH"

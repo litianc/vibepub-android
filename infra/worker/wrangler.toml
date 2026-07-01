@@ -12,6 +12,7 @@ bucket_name = "vibepub-files"
 
 [vars]
 PUBLIC_BASE_URL = "https://vibepub.litianc.cn"
+GITHUB_WORKFLOW_REF = "codex/android-experience-v1"
 
 [[d1_databases]]
 binding = "DB"

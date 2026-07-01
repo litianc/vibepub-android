@@ -12,7 +12,8 @@ Usage:
 
 Checks that a real-device smoke run proved the current recording-to-transcript
 flow instead of passing on stale UI, pending backend state, raw HTML, duplicate
-local rows, or mismatched duration text.
+local rows, or mismatched duration text. Newer runs use window-all.xml so the
+audit can verify content that lives below the first detail-page viewport.
 EOF
 }
 
@@ -37,7 +38,7 @@ require_file() {
 
 xml_contains_text() {
   local text="$1"
-  grep -Fq "text=\"$text\"" "$OUT_DIR/window.xml"
+  grep -Fq "text=\"$text\"" "$UI_XML"
 }
 
 adb_cmd() {
@@ -57,10 +58,16 @@ require_file "$OUT_DIR/expected-duration-text.txt"
 require_file "$OUT_DIR/backend-recording-status.txt"
 require_file "$OUT_DIR/mining-run-id.txt"
 require_file "$OUT_DIR/mining-run-url.txt"
+require_file "$OUT_DIR/mining-run.log"
 require_file "$OUT_DIR/recordings-api.json"
 require_file "$OUT_DIR/debug-device-test-status.json"
 require_file "$OUT_DIR/appops-record-audio.txt"
 require_file "$OUT_DIR/package-after-permissions.txt"
+
+UI_XML="$OUT_DIR/window.xml"
+if [[ -f "$OUT_DIR/window-all.xml" ]]; then
+  UI_XML="$OUT_DIR/window-all.xml"
+fi
 
 filename="$(cat "$OUT_DIR/latest-recording-filename.txt")"
 duration_text="$(cat "$OUT_DIR/expected-duration-text.txt")"
@@ -78,7 +85,9 @@ grep -Fq "$filename" "$OUT_DIR/recordings-api.json" \
   || fail "recordings API evidence does not reference latest filename"
 grep -Fq "\"status\": \"COMPLETED\"" "$OUT_DIR/recordings-api.json" \
   || fail "recordings API evidence does not contain COMPLETED status"
-pass "debug status and recordings API reference latest filename"
+grep -Fq "$filename" "$OUT_DIR/mining-run.log" \
+  || fail "mining workflow log does not reference latest filename"
+pass "debug status, recordings API, and mining log reference latest filename"
 
 grep -Fq "Transcript detail status: \`completed\`" "$OUT_DIR/checklist.md" \
   || fail "checklist did not record completed detail assertion"
@@ -88,19 +97,29 @@ grep -Fq "$run_id" "$OUT_DIR/checklist.md" \
   || fail "checklist did not record mining run id/url"
 pass "checklist recorded completed UI, backend, and mining evidence"
 
-grep -Fq "原始识别结果" "$OUT_DIR/window.xml" \
+grep -Fq "原始识别结果" "$UI_XML" \
   || fail "UI dump does not show raw transcript preview"
-grep -Eq "&lt;/?(p|h[1-6]|br|div|ul|ol|li)([[:space:]][^&]*)?&gt;" "$OUT_DIR/window.xml" \
+grep -Eq "&lt;/?(p|h[1-6]|br|div|ul|ol|li)([[:space:]][^&]*)?&gt;" "$UI_XML" \
   && fail "UI dump still contains raw HTML tags"
 xml_contains_text "$duration_text" \
   || fail "UI dump does not contain expected duration text: $duration_text"
-grep -Fq "正在获取云端转录" "$OUT_DIR/window.xml" \
+grep -Fq "正在获取云端转录" "$UI_XML" \
   && fail "UI dump still shows pending transcript state"
-grep -Fq "正在转录" "$OUT_DIR/window.xml" \
+grep -Fq "正在转录" "$UI_XML" \
   && fail "UI dump still shows processing transcript state"
-grep -Fq "转录失败" "$OUT_DIR/window.xml" \
+grep -Fq "转录失败" "$UI_XML" \
   && fail "UI dump shows transcript failure"
 pass "UI dump shows transcript content, no raw HTML, and expected duration $duration_text"
+
+grep -Fq "公众号草稿审核" "$UI_XML" \
+  || fail "UI dump does not show article review card"
+grep -Fq "公众号草稿" "$UI_XML" \
+  || fail "UI dump does not show WeChat draft review item"
+grep -Fq "导出材料包" "$UI_XML" \
+  || fail "UI dump does not show export package action"
+grep -Fq "查看处理进度说明" "$UI_XML" \
+  || fail "UI dump does not expose status lifecycle help"
+pass "UI dump shows review card, WeChat draft readiness, export action, and status help"
 
 grep -Eq "RECORD_AUDIO: (allow|foreground)" "$OUT_DIR/appops-record-audio.txt" \
   || fail "RECORD_AUDIO appops was not allow/foreground"

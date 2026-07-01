@@ -2,6 +2,7 @@
 
 # Android / Gradle
 .gradle/
+android/.kotlin/
 **/build/
 local.properties
 
@@ -19,6 +20,7 @@ secrets/
 # Generated test evidence and downloaded APKs
 artifacts/android-device-visual/
 artifacts/android-device-readiness/
+artifacts/android-experience-readiness/
 artifacts/android-db-inspect/
 artifacts/apk/
 artifacts/ci-test-report-*/

@@ -8,6 +8,12 @@ ksp {
     arg("room.generateKotlin", "true")
 }
 
+val hasReleaseSigningConfig =
+    providers.gradleProperty("VIBEPUB_RELEASE_STORE_FILE").orNull?.isNotBlank() == true &&
+        providers.gradleProperty("VIBEPUB_RELEASE_STORE_PASSWORD").orNull?.isNotBlank() == true &&
+        providers.gradleProperty("VIBEPUB_RELEASE_KEY_ALIAS").orNull?.isNotBlank() == true &&
+        providers.gradleProperty("VIBEPUB_RELEASE_KEY_PASSWORD").orNull?.isNotBlank() == true
+
 android {
     namespace = "cn.litianc.vibepub"
     compileSdk = 36
@@ -23,6 +29,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     compileOptions {
@@ -60,6 +67,9 @@ android {
     buildTypes {
         debug {
             versionNameSuffix = "-debug"
+            if (hasReleaseSigningConfig) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
         release {
             isMinifyEnabled = false

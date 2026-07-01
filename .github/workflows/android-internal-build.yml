@@ -24,6 +24,8 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
 
       - name: Install Android SDK packages
         run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
@@ -32,6 +34,40 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "9.4.1"
+
+      - name: Configure Android signing
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          present=0
+          for value in "$ANDROID_KEYSTORE_BASE64" "$ANDROID_KEYSTORE_PASSWORD" "$ANDROID_KEY_ALIAS" "$ANDROID_KEY_PASSWORD"; do
+            if [[ -n "$value" ]]; then
+              present=$((present + 1))
+            fi
+          done
+
+          if [[ "$present" -eq 0 ]]; then
+            echo "No Android signing secrets configured; debug APK will use the runner debug key."
+            exit 0
+          fi
+
+          if [[ "$present" -ne 4 ]]; then
+            echo "Android signing secrets are partially configured. Set all of ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS, and ANDROID_KEY_PASSWORD." >&2
+            exit 1
+          fi
+
+          mkdir -p "$RUNNER_TEMP/android-signing"
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/android-signing/vibepub.keystore"
+          {
+            echo "VIBEPUB_RELEASE_STORE_FILE=$RUNNER_TEMP/android-signing/vibepub.keystore"
+            echo "VIBEPUB_RELEASE_STORE_PASSWORD=$ANDROID_KEYSTORE_PASSWORD"
+            echo "VIBEPUB_RELEASE_KEY_ALIAS=$ANDROID_KEY_ALIAS"
+            echo "VIBEPUB_RELEASE_KEY_PASSWORD=$ANDROID_KEY_PASSWORD"
+          } >> android/gradle.properties
+          echo "Configured stable Android signing for internal APKs."
 
       - name: Run automated tests
         run: gradle -p android :app:testDebugUnitTest
@@ -64,6 +100,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.internal_tag.outputs.tag_name }}
+          target_commitish: ${{ github.sha }}
           name: "Internal Build ${{ steps.internal_tag.outputs.tag_name }}"
           generate_release_notes: true
           files: android/app/build/outputs/apk/debug/app-debug.apk

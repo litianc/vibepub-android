@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
 import cn.litianc.vibepub.data.AppDatabase
+import cn.litianc.vibepub.data.RecordingStatus
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -22,6 +23,7 @@ class UploadWorker(
         val file = File(path)
 
         if (!file.exists()) {
+            updateLocalStatus(file.name, RecordingStatus.FAILED, "本地录音文件不存在")
             return@withContext Result.failure()
         }
 
@@ -33,7 +35,7 @@ class UploadWorker(
                 readTimeout = 60_000
                 doOutput = true
                 setRequestProperty("Authorization", "Bearer $filesToken")
-                setRequestProperty("Content-Type", "audio/mp4")
+                setRequestProperty("Content-Type", audioContentTypeForFilename(file.name))
                 setRequestProperty("X-File-Name", file.name)
                 setFixedLengthStreamingMode(file.length())
             }
@@ -44,25 +46,47 @@ class UploadWorker(
 
             val responseCode = connection.responseCode
             if (responseCode in 200..299) {
-                val dao = AppDatabase.getDatabase(applicationContext).recordingDao()
-                val entity = dao.getRecordingByFilename(file.name)
-                if (entity != null && entity.status != "COMPLETED") {
-                    dao.insert(entity.copy(status = "UPLOADED"))
-                }
+                updateLocalStatus(file.name, RecordingStatus.UPLOADED, null)
                 Result.success()
             } else if (responseCode >= 500) {
+                updateLocalStatus(file.name, RecordingStatus.UPLOADING, "服务器暂时不可用，稍后自动重试")
                 Result.retry()
             } else {
                 val body = connection.errorStream?.bufferedReader()?.use { it.readText() }.orEmpty()
+                val message = if (responseCode == 401 || responseCode == 403) {
+                    "FILES_TOKEN 无效或没有权限"
+                } else {
+                    "上传失败 HTTP $responseCode"
+                }
+                updateLocalStatus(file.name, RecordingStatus.FAILED, message)
                 Result.failure(
                     androidx.work.workDataOf(
                         KEY_ERROR to JSONObject.quote(body).take(256),
                     ),
                 )
             }
-        } catch (_: Exception) {
+        } catch (error: Exception) {
+            updateLocalStatus(file.name, RecordingStatus.UPLOADING, "网络异常，稍后自动重试")
             Result.retry()
         }
+    }
+
+    private suspend fun updateLocalStatus(
+        filename: String,
+        status: RecordingStatus,
+        error: String?,
+    ) {
+        val dao = AppDatabase.getDatabase(applicationContext).recordingDao()
+        val entity = dao.getRecordingByFilename(filename) ?: return
+        if (entity.status == RecordingStatus.COMPLETED.value && status != RecordingStatus.COMPLETED) {
+            return
+        }
+        dao.upsertBest(
+            entity.copy(
+                status = status.value,
+                lastError = error,
+            ),
+        )
     }
 
     companion object {

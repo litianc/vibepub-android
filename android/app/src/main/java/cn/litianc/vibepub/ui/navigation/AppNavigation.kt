@@ -2,6 +2,9 @@ package cn.litianc.vibepub.ui.navigation
 
 import android.net.Uri
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.LocalContext
 import androidx.navigation.compose.NavHost
@@ -13,18 +16,20 @@ import cn.litianc.vibepub.ui.screens.DetailScreen
 import cn.litianc.vibepub.ui.screens.HomeScreen
 import cn.litianc.vibepub.ui.screens.RecordingScreen
 import cn.litianc.vibepub.ui.screens.SettingsScreen
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.flow
-import java.io.File
-
 import cn.litianc.vibepub.data.AppDatabase
 
 @Composable
 fun AppNavigation(
     preferences: AppPreferences,
-    onStartRecording: () -> Unit,
-    onStopRecording: () -> Unit
+    onRefresh: () -> Unit,
+    onAutoRefresh: () -> Unit,
+    onRetryUpload: (RecordingEntity) -> Unit,
+    onDeleteRecording: (RecordingEntity) -> Unit,
+    onStartRecording: () -> Boolean,
+    onStopRecording: suspend () -> Boolean,
+    shouldOpenRecording: Boolean = false,
+    onRecordingOpened: () -> Unit = {},
+    currentRecordingAmplitude: () -> Int,
 ) {
     val navController = rememberNavController()
     val context = LocalContext.current
@@ -32,15 +37,33 @@ fun AppNavigation(
     val recordingsFlow = remember {
         AppDatabase.getDatabase(context).recordingDao().getAllRecordingsFlow()
     }
+    val lastSyncAtMs by remember(preferences) {
+        preferences.lastSyncAtMsFlow()
+    }.collectAsState(initial = preferences.lastSyncAtMs)
+
+    LaunchedEffect(shouldOpenRecording) {
+        if (shouldNavigateToRecording(shouldOpenRecording)) {
+            navController.navigate("recording") {
+                launchSingleTop = true
+            }
+            onRecordingOpened()
+        }
+    }
     
     NavHost(navController = navController, startDestination = "home") {
         composable("home") {
             HomeScreen(
                 recordingsFlow = recordingsFlow,
+                lastSyncAtMs = lastSyncAtMs,
                 onSettingsClick = { navController.navigate("settings") },
+                onRefresh = onRefresh,
+                onAutoRefresh = onAutoRefresh,
+                onRetryUpload = onRetryUpload,
+                onDeleteRecording = onDeleteRecording,
                 onRecordClick = {
-                    onStartRecording()
-                    navController.navigate("recording")
+                    if (onStartRecording()) {
+                        navController.navigate("recording")
+                    }
                 },
                 onRecordingClick = { recording ->
                     navController.navigate("detail/${Uri.encode(recording.filename)}")
@@ -50,9 +73,14 @@ fun AppNavigation(
         
         composable("recording") {
             RecordingScreen(
+                amplitudeProvider = currentRecordingAmplitude,
                 onStopClick = {
-                    onStopRecording()
-                    navController.popBackStack()
+                    if (onStopRecording()) {
+                        navController.popBackStack()
+                        true
+                    } else {
+                        false
+                    }
                 }
             )
         }
@@ -67,8 +95,15 @@ fun AppNavigation(
             val filename = backStackEntry.arguments?.getString("filename") ?: ""
             DetailScreen(
                 filename = filename,
-                onBackClick = { navController.popBackStack() }
+                lastSyncAtMs = lastSyncAtMs,
+                onBackClick = { navController.popBackStack() },
+                onRefresh = onRefresh,
+                onAutoRefresh = onAutoRefresh,
+                onRetryUpload = onRetryUpload,
+                onDeleteRecording = onDeleteRecording,
             )
         }
     }
 }
+
+internal fun shouldNavigateToRecording(shouldOpenRecording: Boolean): Boolean = shouldOpenRecording

@@ -1,11 +1,16 @@
 package cn.litianc.vibepub
 
+import androidx.activity.ComponentActivity
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
-import androidx.activity.ComponentActivity
 import cn.litianc.vibepub.ui.screens.SettingsScreen
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.async
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
-import org.junit.Ignore
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -19,7 +24,6 @@ class AppHealthCheckTest {
     @get:Rule
     val composeTestRule = createAndroidComposeRule<ComponentActivity>()
 
-    @Ignore("Temporarily failing in Robolectric due to ComponentActivity rendering issues")
     @Test
     fun testPreferencesTwoWayBinding() {
         val context = composeTestRule.activity
@@ -30,26 +34,24 @@ class AppHealthCheckTest {
             SettingsScreen(onBackClick = {})
         }
 
-        // Click FILES_TOKEN row to open dialog
-        composeTestRule.onNodeWithTag("FilesTokenItem").performClick()
+        composeTestRule.onNodeWithTag("FilesTokenField").performTextClearance()
+        composeTestRule.onNodeWithTag("FilesTokenField").performTextInput(testToken)
         
-        composeTestRule.waitUntil(timeoutMillis = 5000) {
-            composeTestRule.onAllNodes(hasSetTextAction()).fetchSemanticsNodes().isNotEmpty()
-        }
-        
-        // Clear and type into the dialog's text field
-        composeTestRule.onNode(hasSetTextAction()).performTextClearance()
-        composeTestRule.onNode(hasSetTextAction()).performTextInput(testToken)
-        
-        // Click save
-        composeTestRule.onNodeWithText("保存").performClick()
-        
-        // Wait until dialog closes
-        composeTestRule.waitUntil(timeoutMillis = 5000) {
-            composeTestRule.onAllNodes(hasSetTextAction()).fetchSemanticsNodes().isEmpty()
-        }
-        
-        // Assert that the AppPreferences instance reflects the typed token
         assertEquals(testToken, prefs.filesToken)
+    }
+
+    @Test
+    fun lastSyncAtMsFlowEmitsPreferenceUpdates() = runBlocking {
+        val context = composeTestRule.activity
+        val prefs = AppPreferences(context)
+        prefs.lastSyncAtMs = 0L
+
+        val update = async(start = CoroutineStart.UNDISPATCHED) {
+            prefs.lastSyncAtMsFlow().drop(1).first()
+        }
+
+        prefs.lastSyncAtMs = 123_456L
+
+        assertEquals(123_456L, withTimeout(2_000L) { update.await() })
     }
 }

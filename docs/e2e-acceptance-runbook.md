@@ -48,6 +48,17 @@ Useful Volcengine references:
 
 All gates must pass before declaring the flow complete.
 
+0. Android experience source readiness:
+
+   ```bash
+   scripts/audit-android-experience-readiness.sh
+   ```
+
+   Required evidence: the report has `Automated source/test/release failures:
+   0`. Manual/device-gated items are allowed at this stage only if they point to
+   the real-device smoke gates below; they are not proof of final E2E
+   completion.
+
 1. External service smoke:
 
    ```bash
@@ -71,18 +82,37 @@ All gates must pass before declaring the flow complete.
 3. Real-device Android smoke:
 
    ```bash
-   SKIP_INSTALL=true RESET_APP_DATA=false \
+   ANDROID_SERIAL=<device-serial> SKIP_INSTALL=true RESET_APP_DATA=false \
      scripts/run-android-device-smoke.sh artifacts/apk/latest/app-debug.apk
    ```
 
    Required evidence in `artifacts/android-device-visual/<run>/`:
 
-   - `debug-device-test-status.json` shows one stopped recording with non-zero
+   - `acceptance-report.txt` has every line checked (`[x]`).
+   - `debug-device-test-status.json` shows one imported recording with non-zero
      duration.
+   - `local-recording-row.json` shows exactly one Room row for the tested
+     filename, non-zero duration, status `COMPLETED`, title, raw-text preview,
+     and a terminal processing stage (`COMPLETED`, `DRAFT_FAILED`, or
+     `ARTICLE_READY`).
+   - `recordings-api.json` has exactly one object for the tested filename, with
+     status `COMPLETED`, `article_title`, `raw_text_preview`, and
+     terminal `processing_stage` (`COMPLETED` with a draft reference, or
+     `DRAFT_FAILED` with `error_message`, or `ARTICLE_READY` with generated
+     article metadata).
+   - `local-transcript.json` has `articleTitle`, `rawText`, `articleContent`,
+     and a terminal processing stage (`COMPLETED`, `DRAFT_FAILED`, or
+     `ARTICLE_READY`). When the stage is `COMPLETED`, it must include a WeChat
+     draft reference.
    - `window.xml` and `checklist.md` report `Transcript detail status:
      completed`.
-   - `02-after-record.png` or `final.png` shows only one new item for the
-     recording attempt.
+   - `window-all.xml` shows the review card, copy/share/export actions, status
+     help entry, expected duration, and no escaped raw HTML tags.
+   - `debug-detail-actions.json` proves the detail page actions are functional:
+     local audio playback advanced past 0 ms, copying article text matched the
+     clipboard, the system share intent was sent, the export package file
+     was created before launching the share sheet, and the WeChat draft URL was
+     opened when a draft URL is available.
    - `logcat.txt` has no obvious upload, sync, transcript, database, or crash
      errors.
 
@@ -93,7 +123,12 @@ All gates must pass before declaring the flow complete.
      https://vibepub.litianc.cn/api/recordings
    ```
 
-   Required evidence: the tested filename has status `COMPLETED`.
+   Required evidence: the tested filename has status `COMPLETED`, plus
+   `article_title`, `raw_text_preview`, and terminal `processing_stage`.
+   `COMPLETED` requires a draft reference; `DRAFT_FAILED` requires a visible
+   draft failure/error field; `ARTICLE_READY` requires generated article
+   metadata and means the article is consumable while the draft step is still
+   pending.
 
 ## Anti-False-Success Rules
 
@@ -103,5 +138,8 @@ All gates must pass before declaring the flow complete.
   marking the recording `FAILED`.
 - Do not accept a visual smoke run that exits before `Transcript detail status`
   is `completed`.
+- Do not accept a visual smoke run whose `Acceptance status` is not `passed`.
+- Do not accept a run that only proves buttons are visible; playback, clipboard,
+  share, and export behavior must be present in `debug-detail-actions.json`.
 - Do not accept old transcript fixtures or dummy recordings as proof for a new
   recording attempt.
