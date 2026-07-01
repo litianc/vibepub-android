@@ -281,23 +281,23 @@ fun HomeScreen(
 }
 
 internal fun homeFocusRecording(recordings: List<RecordingEntity>): RecordingEntity? {
-    return recordings.minWithOrNull(
-        compareBy<RecordingEntity> { homeFocusRank(it) }
-            .thenByDescending { it.timestamp },
-    )
+    return recordings
+        .mapNotNull { recording -> homeFocusRank(recording)?.let { rank -> rank to recording } }
+        .minWithOrNull(
+            compareBy<Pair<Int, RecordingEntity>> { it.first }
+                .thenByDescending { it.second.timestamp },
+        )
+        ?.second
 }
 
-private fun homeFocusRank(recording: RecordingEntity): Int {
+private fun homeFocusRank(recording: RecordingEntity): Int? {
     return when (recording.status.asRecordingStatus()) {
         RecordingStatus.FAILED -> 0
         RecordingStatus.UPLOADING,
         RecordingStatus.UPLOADED,
         RecordingStatus.PROCESSING -> 1
         RecordingStatus.LOCAL_RECORDED -> 2
-        RecordingStatus.COMPLETED -> {
-            val hasDraft = wechatDraftReferenceOrNull(recording.wechatDraftId, recording.wechatUrl) != null
-            if (recording.hasDraftFailureMessage() || !hasDraft) 3 else 4
-        }
+        RecordingStatus.COMPLETED -> if (recording.hasDraftFailureMessage()) 3 else null
     }
 }
 
@@ -360,13 +360,11 @@ private fun syncAgeLabel(elapsedMs: Long): String {
 }
 
 @Composable
-private fun HomeWorkflowOverviewCard(
+internal fun HomeWorkflowOverviewCard(
     recording: RecordingEntity,
     onClick: () -> Unit,
 ) {
     val status = recording.status.asRecordingStatus()
-    val currentStep = recording.currentWorkflowStep()
-    val attention = recording.workflowAttention()
     var showWorkflowHelp by remember { mutableStateOf(false) }
 
     if (showWorkflowHelp) {
@@ -387,14 +385,14 @@ private fun HomeWorkflowOverviewCard(
         elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
     ) {
         Column(
-            modifier = Modifier.padding(14.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Box(
                     modifier = Modifier
-                        .size(34.dp)
-                        .clip(RoundedCornerShape(8.dp))
+                        .size(28.dp)
+                        .clip(RoundedCornerShape(7.dp))
                         .background(IconLightRedBackground),
                     contentAlignment = Alignment.Center,
                 ) {
@@ -402,16 +400,11 @@ private fun HomeWorkflowOverviewCard(
                         Icons.Default.TaskAlt,
                         contentDescription = null,
                         tint = PrimaryRed,
-                        modifier = Modifier.size(19.dp),
+                        modifier = Modifier.size(16.dp),
                     )
                 }
                 Spacer(modifier = Modifier.width(10.dp))
                 Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "当前进度",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
                     Text(
                         text = recording.displayTitle(),
                         style = MaterialTheme.typography.titleSmall,
@@ -421,6 +414,22 @@ private fun HomeWorkflowOverviewCard(
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.testTag("HomeWorkflowOverviewTitle"),
                     )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            modifier = Modifier
+                                .size(7.dp)
+                                .clip(CircleShape)
+                                .background(statusColor(status)),
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "${recording.workflowProgressLabel()} · ${recording.statusLabel()}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
                 }
                 IconButton(
                     onClick = { showWorkflowHelp = true },
@@ -436,22 +445,6 @@ private fun HomeWorkflowOverviewCard(
                     )
                 }
             }
-
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(
-                    modifier = Modifier
-                        .size(8.dp)
-                        .clip(CircleShape)
-                        .background(statusColor(status)),
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    text = "${recording.workflowProgressLabel()} · ${recording.statusLabel()}",
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.SemiBold,
-                    color = MaterialTheme.colorScheme.onSurface,
-                )
-            }
             LinearProgressIndicator(
                 progress = { recording.workflowProgressFraction() },
                 modifier = Modifier
@@ -461,28 +454,11 @@ private fun HomeWorkflowOverviewCard(
                 trackColor = MaterialTheme.colorScheme.surfaceVariant,
             )
             Text(
-                text = "${currentStep.title}：${currentStep.detail}",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-            )
-            Text(
-                text = recording.workflowFreshnessLabel(),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            if (attention != null) {
-                WorkflowAttentionCallout(attention = attention)
-            }
-            Text(
                 text = recording.workflowNextActionLabel(),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurface,
                 fontWeight = FontWeight.Medium,
-                maxLines = 2,
+                maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
         }

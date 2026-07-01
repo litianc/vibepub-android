@@ -126,7 +126,7 @@ class HomeScreenTest {
     }
 
     @Test
-    fun homeFocusRecordingKeepsArticleWithoutDraftVisible() {
+    fun homeFocusRecordingDoesNotPinCompletedArticleWaitingForDraft() {
         val completedDraft = recording(
             status = RecordingStatus.COMPLETED,
             filename = "completed-draft.m4a",
@@ -141,11 +141,11 @@ class HomeScreenTest {
 
         val focus = homeFocusRecording(listOf(completedDraft, articleOnly))
 
-        assertEquals("article-only.m4a", focus?.filename)
+        assertNull(focus)
     }
 
     @Test
-    fun homeFocusRecordingDoesNotTreatPlaceholderDraftReferencesAsReady() {
+    fun homeFocusRecordingDoesNotPinCompletedArticleWithPlaceholderDraftReferences() {
         val completedDraft = recording(
             status = RecordingStatus.COMPLETED,
             filename = "completed-draft.m4a",
@@ -162,7 +162,28 @@ class HomeScreenTest {
 
         val focus = homeFocusRecording(listOf(completedDraft, placeholderDraft))
 
-        assertEquals("placeholder-draft.m4a", focus?.filename)
+        assertNull(focus)
+    }
+
+    @Test
+    fun homeFocusRecordingPinsCompletedArticleOnlyWhenDraftExplicitlyFailed() {
+        val completedDraft = recording(
+            status = RecordingStatus.COMPLETED,
+            filename = "completed-draft.m4a",
+            timestamp = 200L,
+            wechatDraftId = "MEDIA_ID_123",
+        )
+        val draftFailed = recording(
+            status = RecordingStatus.COMPLETED,
+            filename = "draft-failed.m4a",
+            timestamp = 100L,
+            processingStage = "DRAFT_FAILED",
+            lastError = "公众号草稿创建失败",
+        )
+
+        val focus = homeFocusRecording(listOf(completedDraft, draftFailed))
+
+        assertEquals("draft-failed.m4a", focus?.filename)
     }
 
     @Test
@@ -300,6 +321,8 @@ class HomeScreenTest {
         timestamp: Long,
         wechatDraftId: String? = null,
         wechatUrl: String? = null,
+        processingStage: String? = null,
+        lastError: String? = null,
     ): RecordingEntity {
         return RecordingEntity(
             filename = filename,
@@ -308,6 +331,8 @@ class HomeScreenTest {
             status = status.value,
             wechatDraftId = wechatDraftId,
             wechatUrl = wechatUrl,
+            processingStage = processingStage,
+            lastError = lastError,
         )
     }
 }
