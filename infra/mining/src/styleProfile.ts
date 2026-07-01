@@ -23,7 +23,9 @@ export const LITIAN_C_WECHAT_STYLE_PROFILE = `
 7. 如果原始材料里存在对比、测试、版本、方案优缺点，优先整理成表格。
 8. 不要编造原始录音中没有出现的事实、数据、案例、引用或参考资料。
 9. 如果信息不足，用稳妥的表达保留不确定性，不要强行写成定论。
-10. 生成 imagePrompt 时，用英文描述一张解释性封面图或概念图，避免文字、logo、水印、暗黑氛围和纯抽象渐变。
+10. coverTitle 是公众号封面主标题短句，必须从 title 压缩而来，2-3 行，每行尽量不超过 8 个中文字或 1 个英文短语；只保留宏大判断，不要解释性小字。
+11. coverSubtitle 是可选封面副标题，12 字以内，用来表达核心反差或风险判断；如果没有必要可以留空。
+12. imagePrompt 仅作为未来生成无字底图的备用字段，不要依赖它生成中文标题；如果返回 imagePrompt，必须要求无文字、无 logo、无水印、无暗黑氛围、无纯抽象渐变。
 `.trim();
 
 export function buildWechatArticlePrompt(rawText: string): string {
@@ -38,7 +40,9 @@ ${LITIAN_C_WECHAT_STYLE_PROFILE}
 JSON 必须包含：
 - title：文章标题，保持克制、有对象、有判断。
 - content：正文 HTML 片段，遵守上面的公众号排版要求。
-- imagePrompt：英文 AI 绘图提示词，用于生成公众号封面图，画面要能解释文章核心概念，不要包含文字。
+- coverTitle：公众号封面主标题短句数组，2-3 行，每行尽量不超过 8 个中文字或 1 个英文短语，例如 ["不建议", "Vibe Coding", "搭数据仪表盘"]。
+- coverSubtitle：可选封面副标题，12 字以内，例如 "原型速度 ≠ 数据可信度"。
+- imagePrompt：备用英文无字底图提示词；不要让图片模型生成中文标题。
 
 【原始录音文本】
 ${rawText.trim()}`;

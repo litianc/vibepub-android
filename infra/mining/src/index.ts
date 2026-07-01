@@ -1,6 +1,7 @@
 import { listUnprocessedFiles, createPresignedDownloadUrl, deleteFile, uploadTranscript } from "./r2.js";
 import { transcribeAudioUrl } from "./asr.js";
-import { processAudioText, generateCoverImageBuffer } from "./llm.js";
+import { processAudioText } from "./llm.js";
+import { generateWechatCoverBuffer } from "./coverRenderer.js";
 import { getAccessToken, publishDraft } from "./wechat.js";
 import path from "path";
 
@@ -130,9 +131,13 @@ async function main() {
       const article = await processAudioText(rawText);
       console.log(`Generated Article Title: ${article.title}`);
       
-      // 5.5 LLM: Image Generation
-      console.log(`Generating cover image with prompt: ${article.imagePrompt}`);
-      const coverBuffer = await generateCoverImageBuffer(article.imagePrompt);
+      // 5.5 Generate deterministic WeChat cover art.
+      console.log(`Generating WeChat cover from title: ${article.title}`);
+      const coverBuffer = await generateWechatCoverBuffer({
+        title: article.title,
+        titleLines: article.coverTitle,
+        subtitle: article.coverSubtitle,
+      });
       
       // 6. WeChat: Publish Draft
       console.log("Publishing to WeChat Drafts...");

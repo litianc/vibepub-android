@@ -24,6 +24,9 @@ jobs:
         working-directory: infra/mining
         run: npm ci || npm install
 
+      - name: Install CJK fonts
+        run: sudo apt-get update && sudo apt-get install -y fonts-noto-cjk
+
       - name: Run Mining Job
         working-directory: infra/mining
         env:

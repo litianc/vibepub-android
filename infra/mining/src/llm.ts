@@ -10,7 +10,15 @@ const openai = new OpenAI({
   baseURL: GLM_BASE_URL,
 });
 
-export async function processAudioText(rawText: string): Promise<{ title: string; content: string; imagePrompt: string }> {
+export type ArticleResult = {
+  title: string;
+  content: string;
+  imagePrompt: string;
+  coverTitle?: string[];
+  coverSubtitle?: string;
+};
+
+export async function processAudioText(rawText: string): Promise<ArticleResult> {
   const prompt = buildWechatArticlePrompt(rawText);
 
   const response = await openai.chat.completions.create({
@@ -33,6 +41,8 @@ export async function processAudioText(rawText: string): Promise<{ title: string
       title: result.title || "VibePub 语音随笔",
       content: result.content || responseText,
       imagePrompt: result.imagePrompt || "A serene and minimalist abstract background, cinematic lighting, 8k resolution, realistic photography",
+      coverTitle: Array.isArray(result.coverTitle) ? result.coverTitle : undefined,
+      coverSubtitle: typeof result.coverSubtitle === "string" ? result.coverSubtitle : undefined,
     };
   } catch (e) {
     console.warn("Failed to parse JSON, falling back to raw response");
@@ -42,24 +52,4 @@ export async function processAudioText(rawText: string): Promise<{ title: string
       imagePrompt: "A serene and minimalist abstract background, cinematic lighting, 8k resolution, realistic photography",
     };
   }
-}
-
-export async function generateCoverImageBuffer(prompt: string): Promise<Buffer> {
-  console.log(`Generating image with prompt: ${prompt}`);
-  const response = await openai.images.generate({
-    model: "cogview-4",
-    prompt: prompt,
-  });
-
-  const imageUrl = response.data?.[0]?.url;
-  if (!imageUrl) {
-    throw new Error("Failed to generate image, no URL returned.");
-  }
-
-  const imageRes = await fetch(imageUrl);
-  if (!imageRes.ok) {
-    throw new Error(`Failed to download generated image: ${imageRes.statusText}`);
-  }
-  const arrayBuffer = await imageRes.arrayBuffer();
-  return Buffer.from(arrayBuffer);
 }
