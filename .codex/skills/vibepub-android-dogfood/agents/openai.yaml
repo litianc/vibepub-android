@@ -1,0 +1,7 @@
+interface:
+  display_name: "VibePub Android Dogfood"
+  short_description: "Real-device Android build/install verification loop"
+  default_prompt: "Use $vibepub-android-dogfood to build, install, and verify the VibePub Android app on a real device."
+
+policy:
+  allow_implicit_invocation: true

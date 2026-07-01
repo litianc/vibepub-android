@@ -70,6 +70,19 @@ Install to a connected ADB device:
 scripts/install-android-local-apk.sh --skip-build
 ```
 
+For repeated real-device dogfood loops, use the project skill:
+
+```text
+$vibepub-android-dogfood
+```
+
+The skill lives at `.codex/skills/vibepub-android-dogfood/` and includes a
+direct script entry for stable-signed local build/install:
+
+```bash
+.codex/skills/vibepub-android-dogfood/scripts/run-device-dogfood.sh --mode install --serial <adb-serial>
+```
+
 ## Cloudflare Worker
 
 The Worker expects:
