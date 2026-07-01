@@ -5,7 +5,8 @@ import path from "path";
 // Run this script using: node --env-file=.env --import tsx src/test.ts
 
 import { transcribeAudioUrl } from "./asr.js";
-import { generateCoverImageBuffer, processAudioText } from "./llm.js";
+import { processAudioText } from "./llm.js";
+import { generateWechatCoverBuffer } from "./coverRenderer.js";
 import { getAccessToken, publishDraft } from "./wechat.js";
 
 async function runTests() {
@@ -42,7 +43,7 @@ async function runTests() {
     console.log("\n[!] Using mock transcript since ASR step was skipped.");
   }
 
-  let generatedArticle: {title: string; content: string; imagePrompt: string} | null = null;
+  let generatedArticle: Awaited<ReturnType<typeof processAudioText>> | null = null;
   
   try {
     console.log("\n[Test 2: LLM Style Distillation]");
@@ -65,8 +66,12 @@ async function runTests() {
       const token = await getAccessToken();
       console.log("✅ Token acquired.");
 
-      console.log("Generating cover image...");
-      const coverBuffer = await generateCoverImageBuffer(generatedArticle.imagePrompt);
+      console.log("Generating deterministic WeChat cover...");
+      const coverBuffer = await generateWechatCoverBuffer({
+        title: generatedArticle.title,
+        titleLines: generatedArticle.coverTitle,
+        subtitle: generatedArticle.coverSubtitle,
+      });
 
       console.log("Pushing draft to WeChat...");
       const mediaId = await publishDraft(token, generatedArticle.title, generatedArticle.content, coverBuffer);
