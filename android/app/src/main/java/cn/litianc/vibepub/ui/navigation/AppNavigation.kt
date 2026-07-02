@@ -26,6 +26,7 @@ fun AppNavigation(
     onRetryUpload: (RecordingEntity) -> Unit,
     onDeleteRecording: (RecordingEntity) -> Unit,
     onStartRecording: () -> Boolean,
+    onImportAudio: () -> Unit,
     onStopRecording: suspend () -> Boolean,
     shouldOpenRecording: Boolean = false,
     onRecordingOpened: () -> Unit = {},
@@ -65,6 +66,7 @@ fun AppNavigation(
                         navController.navigate("recording")
                     }
                 },
+                onImportAudioClick = onImportAudio,
                 onRecordingClick = { recording ->
                     navController.navigate("detail/${Uri.encode(recording.filename)}")
                 }

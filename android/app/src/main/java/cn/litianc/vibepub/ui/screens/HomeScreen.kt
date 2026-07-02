@@ -1,7 +1,9 @@
 package cn.litianc.vibepub.ui.screens
 
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -35,11 +37,11 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -106,7 +108,7 @@ internal data class HomeSyncNotice(
 private const val HOME_REFRESH_FINISH_DELAY_MS = 450L
 private const val HOME_REFRESH_TIMEOUT_MS = 3_500L
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun HomeScreen(
     recordingsFlow: Flow<List<RecordingEntity>>,
@@ -117,6 +119,7 @@ fun HomeScreen(
     onRetryUpload: (RecordingEntity) -> Unit,
     onDeleteRecording: (RecordingEntity) -> Unit,
     onRecordClick: () -> Unit,
+    onImportAudioClick: () -> Unit,
     onRecordingClick: (RecordingEntity) -> Unit,
 ) {
     val recordings by recordingsFlow.collectAsState(initial = emptyList())
@@ -125,6 +128,7 @@ fun HomeScreen(
     var isRefreshing by remember { mutableStateOf(false) }
     var refreshStartedSyncAtMs by remember { mutableStateOf<Long?>(null) }
     var lastAutoRefreshRequestAtMs by remember { mutableStateOf(0L) }
+    var showAudioImportSheet by remember { mutableStateOf(false) }
 
     fun requestRefresh() {
         refreshStartedSyncAtMs = lastSyncAtMs
@@ -159,6 +163,16 @@ fun HomeScreen(
             }
             delay(ACTIVE_RECORDING_AUTO_REFRESH_INTERVAL_MS)
         }
+    }
+
+    if (showAudioImportSheet) {
+        AudioImportOptionsSheet(
+            onDismiss = { showAudioImportSheet = false },
+            onChooseAudio = {
+                showAudioImportSheet = false
+                onImportAudioClick()
+            },
+        )
     }
 
     Scaffold(
@@ -196,17 +210,13 @@ fun HomeScreen(
             )
         },
         floatingActionButton = {
-            FloatingActionButton(
-                onClick = onRecordClick,
-                containerColor = PrimaryRed,
-                contentColor = Color.White,
-                shape = CircleShape,
+            RecordActionButton(
+                onRecordClick = onRecordClick,
+                onImportAudioClick = { showAudioImportSheet = true },
                 modifier = Modifier
                     .size(72.dp)
                     .testTag("RecordButton"),
-            ) {
-                Icon(Icons.Default.Mic, contentDescription = "Record", modifier = Modifier.size(32.dp))
-            }
+            )
         },
         floatingActionButtonPosition = androidx.compose.material3.FabPosition.Center,
         containerColor = MaterialTheme.colorScheme.background,
@@ -256,7 +266,7 @@ fun HomeScreen(
                 }
 
                 if (recordings.isEmpty()) {
-                    EmptyHome(onRecordClick = onRecordClick)
+                    EmptyHome()
                 } else {
                     LazyColumn(
                         modifier = Modifier.fillMaxSize(),
@@ -276,6 +286,97 @@ fun HomeScreen(
                     }
                 }
             }
+        }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun RecordActionButton(
+    onRecordClick: () -> Unit,
+    onImportAudioClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Box(
+        modifier = modifier
+            .clip(CircleShape)
+            .background(PrimaryRed)
+            .combinedClickable(
+                onClick = onRecordClick,
+                onLongClick = onImportAudioClick,
+                onLongClickLabel = "选择音频上传",
+            ),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            Icons.Default.Mic,
+            contentDescription = "Record",
+            tint = Color.White,
+            modifier = Modifier.size(32.dp),
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun AudioImportOptionsSheet(
+    onDismiss: () -> Unit,
+    onChooseAudio: () -> Unit,
+) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        modifier = Modifier.testTag("AudioImportSheet"),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text(
+                text = "上传录音",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .clickable(onClick = onChooseAudio)
+                    .testTag("ChooseAudioImportButton")
+                    .padding(horizontal = 12.dp, vertical = 14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(36.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(IconLightRedBackground),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        Icons.Default.Upload,
+                        contentDescription = null,
+                        tint = PrimaryRed,
+                        modifier = Modifier.size(20.dp),
+                    )
+                }
+                Spacer(modifier = Modifier.width(12.dp))
+                Text(
+                    text = "选择音频文件",
+                    style = MaterialTheme.typography.bodyLarge,
+                    fontWeight = FontWeight.Medium,
+                )
+            }
+            TextButton(
+                onClick = onDismiss,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("CancelAudioImportButton"),
+            ) {
+                Text("取消")
+            }
+            Spacer(modifier = Modifier.height(12.dp))
         }
     }
 }
@@ -511,7 +612,7 @@ private fun SyncNoticeCard(
 }
 
 @Composable
-private fun EmptyHome(onRecordClick: () -> Unit) {
+private fun EmptyHome() {
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -536,12 +637,6 @@ private fun EmptyHome(onRecordClick: () -> Unit) {
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        Spacer(modifier = Modifier.height(20.dp))
-        Button(onClick = onRecordClick) {
-            Icon(Icons.Default.Mic, contentDescription = null, modifier = Modifier.size(18.dp))
-            Spacer(modifier = Modifier.width(8.dp))
-            Text("开始录音")
-        }
     }
 }
 

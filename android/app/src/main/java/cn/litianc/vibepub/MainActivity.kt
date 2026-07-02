@@ -2,6 +2,7 @@ package cn.litianc.vibepub
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -117,6 +118,54 @@ fun VibePubApp(
         }
     }
 
+    fun handleImportedAudio(uri: Uri) {
+        scope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    val imported = AudioImportCoordinator.importAudio(context, uri)
+                    val hasUploadToken = preferences.filesToken.isNotBlank()
+                    val initialStatus = initialRecordingStatusForUploadToken(hasUploadToken)
+                    val initialError = initialRecordingErrorForUploadToken(hasUploadToken)
+                    val saved = RecordingUploadCoordinator.saveRecording(
+                        context = context,
+                        file = imported.file,
+                        durationMs = imported.durationMs,
+                        status = initialStatus,
+                        lastError = initialError,
+                    )
+                    Triple(imported.file, hasUploadToken, saved)
+                }
+            }
+
+            result.fold(
+                onSuccess = { (file, hasUploadToken, saved) ->
+                    if (!saved) {
+                        Toast.makeText(context, "音频太短，已丢弃", Toast.LENGTH_SHORT).show()
+                        return@fold
+                    }
+                    val queued = hasUploadToken && enqueueUpload(file)
+                    val message = if (queued) {
+                        "音频已导入，正在上传处理"
+                    } else {
+                        "音频已导入，请配置 FILES_TOKEN 后重试上传"
+                    }
+                    Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+                },
+                onFailure = {
+                    Toast.makeText(context, importedAudioFailureToastMessage(it), Toast.LENGTH_SHORT).show()
+                },
+            )
+        }
+    }
+
+    val audioImportLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        if (uri != null) {
+            handleImportedAudio(uri)
+        }
+    }
+
     AppNavigation(
         preferences = preferences,
         onRefresh = {
@@ -179,6 +228,9 @@ fun VibePubApp(
                 ))
                 false
             }
+        },
+        onImportAudio = {
+            audioImportLauncher.launch(arrayOf("audio/*", "video/mp4"))
         },
         onStopRecording = {
             if (!isRecording) return@AppNavigation true
@@ -248,6 +300,14 @@ internal fun stopRecordingFailureToastMessage(): String {
 }
 
 internal fun shouldLeaveRecordingAfterStopFailure(): Boolean = true
+
+internal fun importedAudioFailureToastMessage(error: Throwable): String {
+    return if (error is IllegalArgumentException) {
+        "请选择可读取的 m4a、mp3、mp4 或 wav 音频"
+    } else {
+        "导入音频失败，请重新选择"
+    }
+}
 
 internal fun syncWorkPolicyForRequest(kind: SyncRequestKind): ExistingWorkPolicy {
     return when (kind) {

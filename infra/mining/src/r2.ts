@@ -15,6 +15,14 @@ const s3 = new S3Client({
   },
 });
 
+const SUPPORTED_INBOX_AUDIO_EXTENSIONS = [".m4a", ".mp3", ".mp4", ".wav"];
+
+export function isSupportedInboxAudioKey(key: string): boolean {
+  const normalized = key.toLowerCase();
+  return key.startsWith("inbox/") &&
+    SUPPORTED_INBOX_AUDIO_EXTENSIONS.some(extension => normalized.endsWith(extension));
+}
+
 export async function listUnprocessedFiles(): Promise<string[]> {
   const command = new ListObjectsV2Command({
     Bucket: BUCKET_NAME,
@@ -25,10 +33,7 @@ export async function listUnprocessedFiles(): Promise<string[]> {
     return [];
   }
   
-  // Audio files uploaded by the app (e.g. .m4a or .mp3)
-  return response.Contents.map(c => c.Key!).filter(k =>
-    k.startsWith('inbox/') && (k.endsWith('.m4a') || k.endsWith('.mp3')),
-  );
+  return response.Contents.map(c => c.Key!).filter(isSupportedInboxAudioKey);
 }
 
 export async function downloadFile(key: string): Promise<Buffer> {
