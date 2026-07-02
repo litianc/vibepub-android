@@ -10,6 +10,10 @@ on:
         description: "Optional exact recording filename to process from R2 inbox"
         required: false
         type: string
+      revision_request_key:
+        description: "Optional R2 JSON key for a voice-driven article revision request"
+        required: false
+        type: string
 
 jobs:
   mine:
@@ -51,4 +55,5 @@ jobs:
           PUBLIC_BASE_URL: "https://vibepub.litianc.cn"
           CLEANUP_PERMANENT_AUDIO_FAILURES: "true"
           TARGET_FILENAME: ${{ inputs.target_filename }}
+          REVISION_REQUEST_KEY: ${{ inputs.revision_request_key }}
         run: npm start

@@ -191,6 +191,11 @@ fun RecordingEntity.workflowAttention(nowMs: Long = System.currentTimeMillis()):
             detail = nextAction,
             level = RecordingWorkflowAttentionLevel.ERROR,
         )
+        normalizedStatus == RecordingStatus.COMPLETED && hasRevisionFailureMessage() -> RecordingWorkflowAttention(
+            title = "修改未完成",
+            detail = "原文章仍可使用。可以重新说话修改，或稍后点同步查看云端结果。",
+            level = RecordingWorkflowAttentionLevel.WARNING,
+        )
         normalizedStatus == RecordingStatus.COMPLETED && hasDraftFailureMessage() -> RecordingWorkflowAttention(
             title = "草稿需处理",
             detail = "文章已可用，可以先复制正文；修复公众号草稿问题后再同步。",
@@ -317,6 +322,7 @@ private fun RecordingEntity.processingStatusDetail(): String {
         ProcessingStageKind.ASR_FAILED -> lastError?.takeIf { it.isNotBlank() } ?: "语音识别失败，可以重试或检查音频。"
         ProcessingStageKind.ARTICLE_FAILED -> lastError?.takeIf { it.isNotBlank() } ?: "文章生成失败，可以重试或反馈诊断信息。"
         ProcessingStageKind.WECHAT_FAILED -> lastError?.takeIf { it.isNotBlank() } ?: "公众号草稿创建失败，可以先复制正文。"
+        ProcessingStageKind.REVISION_FAILED -> lastError?.takeIf { it.isNotBlank() } ?: "这次说话修改失败，原文章仍可使用。"
         ProcessingStageKind.UNKNOWN -> when (processingWorkflowIndex()) {
             4 -> "已拿到识别结果，云端正在整理公众号文章。"
             5 -> "文章已生成，正在准备微信公众号草稿。"
@@ -336,7 +342,8 @@ private fun RecordingEntity.processingStatusLabel(): String {
         ProcessingStageKind.FAILED -> "需要处理"
         ProcessingStageKind.ASR_FAILED,
         ProcessingStageKind.ARTICLE_FAILED,
-        ProcessingStageKind.WECHAT_FAILED -> "需要处理"
+        ProcessingStageKind.WECHAT_FAILED,
+        ProcessingStageKind.REVISION_FAILED -> "需要处理"
         ProcessingStageKind.UNKNOWN -> if (processingWorkflowIndex() >= 4) "正在成文" else "转录中"
     }
 }
@@ -352,7 +359,8 @@ private fun RecordingEntity.processingNextActionLabel(): String {
         ProcessingStageKind.FAILED -> failureNextActionLabel()
         ProcessingStageKind.ASR_FAILED,
         ProcessingStageKind.ARTICLE_FAILED,
-        ProcessingStageKind.WECHAT_FAILED -> failureNextActionLabel()
+        ProcessingStageKind.WECHAT_FAILED,
+        ProcessingStageKind.REVISION_FAILED -> failureNextActionLabel()
         ProcessingStageKind.UNKNOWN -> when (processingWorkflowIndex()) {
             4 -> "下一步：等待文章标题和正文生成；完成后可以复制、分享或导出。"
             5 -> "下一步：等待公众号草稿创建；草稿可用后会显示打开入口。"
@@ -372,6 +380,7 @@ private enum class ProcessingStageKind {
     ASR_FAILED,
     ARTICLE_FAILED,
     WECHAT_FAILED,
+    REVISION_FAILED,
     UNKNOWN,
 }
 
@@ -386,6 +395,7 @@ private fun RecordingEntity.processingStageKind(): ProcessingStageKind {
         "ASR_FAILED", "TRANSCRIPTION_FAILED", "TRANSCRIBE_FAILED" -> ProcessingStageKind.ASR_FAILED
         "ARTICLE_FAILED", "REWRITE_FAILED", "LLM_FAILED" -> ProcessingStageKind.ARTICLE_FAILED
         "DRAFT_FAILED", "WECHAT_FAILED" -> ProcessingStageKind.WECHAT_FAILED
+        "REVISION_FAILED" -> ProcessingStageKind.REVISION_FAILED
         "FAILED", "ERROR" -> ProcessingStageKind.FAILED
         else -> ProcessingStageKind.UNKNOWN
     }
@@ -403,6 +413,7 @@ private fun RecordingEntity.workflowIndexFromProcessingStage(): Int? {
         ProcessingStageKind.ASR_FAILED -> 3
         ProcessingStageKind.ARTICLE_FAILED -> 4
         ProcessingStageKind.WECHAT_FAILED -> 5
+        ProcessingStageKind.REVISION_FAILED -> 4
         ProcessingStageKind.UNKNOWN -> null
     }
 }
@@ -519,6 +530,7 @@ private val WORKFLOW_BASE_STEPS = listOf(
 
 private fun RecordingEntity.completedStatusDetail(): String {
     return when {
+        hasRevisionFailureMessage() -> "原文章仍可使用，但这次说话修改没有完成。可以重新提交修改。"
         hasWechatDraftReference() -> "文章已生成，公众号草稿也已准备好。"
         hasDraftFailureMessage() -> "文章已生成，但公众号草稿创建失败。可以先复制正文，稍后再重试草稿。"
         else -> "文章已生成，正在等待公众号草稿信息同步。"
@@ -538,6 +550,7 @@ private fun RecordingEntity.retryableUploadDetail(): String {
 
 private fun RecordingEntity.completedNextActionLabel(): String {
     return when {
+        hasRevisionFailureMessage() -> "下一步：重新说话修改，或点同步查看云端是否已经恢复。"
         hasWechatDraftReference() -> "下一步：打开公众号草稿做最后一眼人工确认，再决定是否发布。"
         hasDraftFailureMessage() -> "下一步：先复制正文备用；修复公众号草稿问题后再同步或重试。"
         else -> "下一步：先复制或分享正文；如果需要草稿入口，点同步等待草稿信息。"
@@ -586,6 +599,14 @@ fun RecordingEntity.hasDraftFailureMessage(): Boolean {
         error.contains("公众号") ||
         error.contains("草稿") ||
         error.contains("wechat")
+}
+
+fun RecordingEntity.hasRevisionFailureMessage(): Boolean {
+    val error = lastError.orEmpty().lowercase(Locale.ROOT)
+    return processingStageKey() == "REVISION_FAILED" ||
+        error.contains("说话修改") ||
+        error.contains("修改失败") ||
+        error.contains("revision")
 }
 
 fun WorkflowStepState.displayLabel(): String {

@@ -1,8 +1,8 @@
-import { listUnprocessedFiles, createPresignedDownloadUrl, deleteFile, uploadCoverImage, uploadTranscript } from "./r2.js";
+import { listUnprocessedFiles, createPresignedDownloadUrl, deleteFile, downloadFile, uploadCoverImage, uploadTranscript } from "./r2.js";
 import { transcribeAudioUrl } from "./asr.js";
-import { processAudioText } from "./llm.js";
+import { processAudioText, reviseArticleWithInstruction } from "./llm.js";
 import { generateWechatCoverBuffer } from "./coverRenderer.js";
-import { getAccessToken, publishDraft } from "./wechat.js";
+import { getAccessToken, publishDraft, updateDraft } from "./wechat.js";
 import path from "path";
 import { pathToFileURL } from "url";
 
@@ -63,7 +63,7 @@ type StatusMetadata = {
   processingStage?: string;
   wechatUrl?: string;
   wechatDraftId?: string;
-  errorMessage?: string;
+  errorMessage?: string | null;
 };
 
 type ArticleResult = Awaited<ReturnType<typeof processAudioText>>;
@@ -74,6 +74,14 @@ type TranscriptMetadata = {
   wechatDraftId?: string;
   wechatUrl?: string;
   errorMessage?: string;
+};
+
+type RevisionRequest = {
+  revisionId?: string;
+  filename: string;
+  transcriptKey?: string;
+  audioKey: string;
+  createdAt?: string;
 };
 
 export function filterTargetFiles(files: string[], targetFilename?: string): string[] {
@@ -205,11 +213,182 @@ async function completeWithArticleOnly(
   return true;
 }
 
+function parseJsonBuffer(key: string, buffer: Buffer): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(buffer.toString("utf8"));
+    if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  } catch (error) {
+    throw new Error(`Invalid JSON in ${key}: ${getErrorMessage(error)}`);
+  }
+  throw new Error(`Invalid JSON in ${key}: expected object`);
+}
+
+function requiredStringField(record: Record<string, unknown>, ...fields: string[]): string {
+  const value = optionalStringField(record, ...fields);
+  if (!value) {
+    throw new Error(`Revision request is missing ${fields.join("/")}`);
+  }
+  return value;
+}
+
+function optionalStringField(record: Record<string, unknown>, ...fields: string[]): string | undefined {
+  for (const field of fields) {
+    const value = record[field];
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+  }
+  return undefined;
+}
+
+function revisionFailureMessage(error: unknown): string {
+  return `说话修改失败：${getErrorMessage(error).slice(0, 450)}`;
+}
+
+async function processRevisionRequest(revisionRequestKey: string): Promise<void> {
+  console.log(`Processing article revision request: ${revisionRequestKey}`);
+
+  const revisionRecord = parseJsonBuffer(
+    revisionRequestKey,
+    await downloadFile(revisionRequestKey),
+  );
+  const revisionRequest: RevisionRequest = {
+    revisionId: optionalStringField(revisionRecord, "revisionId", "revision_id"),
+    filename: requiredStringField(revisionRecord, "filename"),
+    transcriptKey: optionalStringField(revisionRecord, "transcriptKey", "transcript_key"),
+    audioKey: requiredStringField(revisionRecord, "audioKey", "audio_key"),
+    createdAt: optionalStringField(revisionRecord, "createdAt", "created_at"),
+  };
+  const filename = path.basename(revisionRequest.filename);
+  const transcriptKey = revisionRequest.transcriptKey || `transcripts/${filename.replace(/\.[^/.]+$/, ".json")}`;
+  const fileKey = `inbox/${filename}`;
+
+  try {
+    await updateStatus(filename, "PROCESSING", { processingStage: "ASR" });
+    const transcript = parseJsonBuffer(transcriptKey, await downloadFile(transcriptKey));
+    const rawText = optionalStringField(transcript, "rawText", "raw_text") || "";
+    const currentTitle = optionalStringField(transcript, "articleTitle", "article_title", "title") || "";
+    const currentContent = optionalStringField(transcript, "articleContent", "article_content", "content") || "";
+    const currentDraftId = optionalStringField(transcript, "wechatDraftId", "mediaId", "wechat_draft_id");
+    const currentWechatUrl = optionalStringField(transcript, "wechatUrl", "wechat_url");
+
+    if (!currentContent) {
+      throw new Error("原文章正文尚未生成");
+    }
+
+    console.log("Creating temporary revision instruction audio URL from R2...");
+    const audioUrl = await createPresignedDownloadUrl(revisionRequest.audioKey);
+    const ext = path.extname(revisionRequest.audioKey).slice(1);
+    console.log("Transcribing voice revision instruction via Volcengine ASR...");
+    const instructionText = (await transcribeAudioUrl(audioUrl, ext || "m4a")).trim();
+    if (!instructionText) {
+      throw new Error("修改语音没有识别到有效文字");
+    }
+
+    await updateStatus(filename, "PROCESSING", { processingStage: "REWRITING" });
+    console.log(`Voice revision instruction: ${instructionText.slice(0, 80)}...`);
+    const article = await reviseArticleWithInstruction({
+      rawText,
+      currentTitle,
+      currentContent,
+      instructionText,
+    });
+
+    await updateStatus(filename, "PROCESSING", {
+      processingStage: "ARTICLE_READY",
+      rawText,
+      articleTitle: article.title,
+      articleContent: article.content,
+    });
+
+    await updateStatus(filename, "PROCESSING", {
+      processingStage: "DRAFTING",
+      rawText,
+      articleTitle: article.title,
+      articleContent: article.content,
+    });
+
+    console.log(`Generating revised WeChat cover from title: ${article.title}`);
+    const coverBuffer = await generateWechatCoverBuffer({
+      title: article.title,
+      titleLines: article.coverTitle,
+      subtitle: article.coverSubtitle,
+    });
+    const coverImageUrl = await saveCoverImage(fileKey, coverBuffer);
+
+    if (currentDraftId) {
+      console.log(`Updating existing WeChat draft: ${currentDraftId}`);
+      const wxToken = await getAccessToken();
+      await updateDraft(wxToken, currentDraftId, article.title, article.content, coverBuffer);
+    } else {
+      console.warn(`No WeChat draft ID found for ${filename}. Saving revised article without updating WeChat draft.`);
+    }
+
+    const previousHistory = Array.isArray(transcript.revisionHistory)
+      ? transcript.revisionHistory
+      : [];
+    const updatedTranscript: Record<string, unknown> = {
+      ...transcript,
+      rawText,
+      articleTitle: article.title,
+      articleContent: article.content,
+      coverImageUrl,
+      processingStage: "COMPLETED",
+      wechatDraftId: currentDraftId,
+      wechatUrl: currentWechatUrl,
+      errorMessage: undefined,
+      revisionHistory: [
+        ...previousHistory,
+        {
+          revisionId: revisionRequest.revisionId,
+          revisionRequestKey,
+          audioKey: revisionRequest.audioKey,
+          createdAt: revisionRequest.createdAt || new Date().toISOString(),
+          instructionText,
+          previousArticleTitle: currentTitle,
+          articleTitle: article.title,
+          updatedWechatDraft: Boolean(currentDraftId),
+        },
+      ],
+    };
+
+    await uploadTranscript(transcriptKey, JSON.stringify(updatedTranscript, null, 2));
+    await updateStatus(filename, "COMPLETED", {
+      rawText,
+      articleTitle: article.title,
+      articleContent: article.content,
+      coverImageUrl,
+      processingStage: "COMPLETED",
+      wechatDraftId: currentDraftId,
+      wechatUrl: currentWechatUrl,
+      errorMessage: null,
+    });
+
+    console.log(`Finished article revision: ${filename}`);
+  } catch (error) {
+    console.error(`Failed to process article revision ${revisionRequestKey}:`, describeError(error));
+    await updateStatus(filename, "COMPLETED", {
+      processingStage: "REVISION_FAILED",
+      errorMessage: revisionFailureMessage(error),
+    });
+    throw error;
+  }
+}
+
 export async function main() {
   console.log("Starting VibePub Mining Job...");
   let failedCount = 0;
   let permanentFailedCount = 0;
   const targetFilename = process.env.TARGET_FILENAME?.trim();
+  const revisionRequestKey = process.env.REVISION_REQUEST_KEY?.trim();
+
+  if (revisionRequestKey) {
+    await processRevisionRequest(revisionRequestKey);
+    console.log("\nMining Job completed article revision successfully.");
+    return;
+  }
 
   // 1. Check for new audio files
   console.log("Fetching unprocessed files from R2...");

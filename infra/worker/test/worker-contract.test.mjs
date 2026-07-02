@@ -482,6 +482,117 @@ test("dispatches mining workflow for the uploaded filename", async () => {
   });
 });
 
+test("creates voice article revision request and dispatches mining workflow with revision key", async () => {
+  const originalFetch = globalThis.fetch;
+  const dispatches = [];
+  const putCalls = [];
+  const getCalls = [];
+  const sqlCalls = [];
+  const valueCalls = [];
+  const waitUntilPromises = [];
+  globalThis.fetch = async (url, init = {}) => {
+    dispatches.push({
+      url: String(url),
+      init,
+      body: JSON.parse(String(init.body || "{}")),
+    });
+    return new Response(null, { status: 204 });
+  };
+
+  try {
+    const bucket = {
+      async get(key) {
+        getCalls.push(key);
+        return { body: "transcript" };
+      },
+      async put(key, body, options) {
+        putCalls.push({ key, body, options });
+      },
+    };
+    const db = {
+      prepare(sql) {
+        sqlCalls.push(sql);
+        return statement({
+          run: async (values) => {
+            valueCalls.push(values);
+            return { meta: { changes: 1 } };
+          },
+        });
+      },
+    };
+    const context = {
+      waitUntil(promise) {
+        waitUntilPromises.push(promise);
+      },
+    };
+
+    const response = await worker.fetch(
+      authorizedRequest("https://example.test/api/recordings/VibePub-2026-07-02-160000-0m18s-Test.m4a/revisions", {
+        method: "POST",
+        headers: { "Content-Type": "audio/mp4" },
+        body: "revision audio",
+      }),
+      createEnv({
+        FILES_BUCKET: bucket,
+        DB: db,
+        GITHUB_PAT: "github-token",
+        GITHUB_WORKFLOW_REF: "main",
+      }),
+      context,
+    );
+
+    assert.equal(response.status, 202);
+    const body = await response.json();
+    assert.equal(body.status, "QUEUED");
+    assert.match(body.revision_request_key, /^revision-requests\/VibePub-2026-07-02-160000-0m18s-Test\/.+\.json$/);
+    assert.deepEqual(getCalls, [
+      "transcripts/VibePub-2026-07-02-160000-0m18s-Test.json",
+    ]);
+    assert.equal(putCalls.length, 2);
+    assert.match(putCalls[0].key, /^revision-requests\/VibePub-2026-07-02-160000-0m18s-Test\/.+\.m4a$/);
+    assert.equal(putCalls[0].options.httpMetadata.contentType, "audio/mp4");
+    assert.equal(putCalls[1].key, body.revision_request_key);
+    assert.match(sqlCalls[0], /processing_stage = \?/);
+    assert.deepEqual(valueCalls[0], [
+      "PROCESSING",
+      "REWRITING",
+      "default_user",
+      "VibePub-2026-07-02-160000-0m18s-Test.m4a",
+    ]);
+    assert.equal(waitUntilPromises.length, 1);
+    await Promise.all(waitUntilPromises);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(dispatches.length, 1);
+  assert.deepEqual(dispatches[0].body.inputs, {
+    target_filename: "VibePub-2026-07-02-160000-0m18s-Test.m4a",
+    revision_request_key: putCalls[1].key,
+  });
+});
+
+test("rejects article revision before transcript exists", async () => {
+  const bucket = {
+    async get() {
+      return null;
+    },
+  };
+
+  const response = await worker.fetch(
+    authorizedRequest("https://example.test/api/recordings/voice.m4a/revisions", {
+      method: "POST",
+      body: "revision audio",
+    }),
+    createEnv({ FILES_BUCKET: bucket }),
+    createExecutionContext(),
+  );
+
+  assert.equal(response.status, 409);
+  const body = await response.json();
+  assert.equal(body.error, "article_not_ready");
+});
+
 test("persists mining status metadata for Android progress display", async () => {
   let boundValues = [];
   const db = {

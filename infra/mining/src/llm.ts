@@ -29,7 +29,20 @@ type ParsedArticle = Partial<{
 
 export async function processAudioText(rawText: string): Promise<ArticleResult> {
   const prompt = buildWechatArticlePrompt(rawText);
+  return generateArticleFromPrompt(prompt);
+}
 
+export async function reviseArticleWithInstruction(input: {
+  rawText: string;
+  currentTitle: string;
+  currentContent: string;
+  instructionText: string;
+}): Promise<ArticleResult> {
+  const prompt = buildRevisionPrompt(input);
+  return generateArticleFromPrompt(prompt);
+}
+
+async function generateArticleFromPrompt(prompt: string): Promise<ArticleResult> {
   const response = await openai.chat.completions.create({
     model: GLM_MODEL,
     messages: [
@@ -55,6 +68,43 @@ export async function processAudioText(rawText: string): Promise<ArticleResult> 
     console.warn("Failed to parse JSON, falling back to raw response");
     return articleResultFromParsed({}, responseText);
   }
+}
+
+function buildRevisionPrompt(input: {
+  rawText: string;
+  currentTitle: string;
+  currentContent: string;
+  instructionText: string;
+}): string {
+  return `
+你是 VibePub 的公众号文章编辑。用户已经有一篇由口述生成的公众号草稿，现在又用语音说了一段修改要求。
+
+你的任务：
+1. 在保留原文章核心观点、作者口吻和公众号可读性的前提下，只根据“修改要求”更新文章。
+2. 优先修改现有文章，不要因为一次修改要求就另起炉灶。
+3. 如果修改要求里有明确删除、补充、换标题、调整结构、改变语气、增加例子等指令，必须执行。
+4. 如果修改要求模糊，做最小合理修改，并保持文章完整可发布。
+5. 输出必须是 JSON object，字段为：
+{
+  "title": "新版标题",
+  "content": "新版公众号正文，允许使用 <p>/<h3>/<ul>/<li> 等微信可接受 HTML",
+  "imagePrompt": "适合新版文章封面的英文图片提示词",
+  "coverTitle": ["封面标题第一行", "第二行", "可选第三行"],
+  "coverSubtitle": "封面副标题"
+}
+
+原始口述转录：
+${input.rawText}
+
+当前文章标题：
+${input.currentTitle}
+
+当前文章正文：
+${input.currentContent}
+
+用户这次说的修改要求：
+${input.instructionText}
+`.trim();
 }
 
 function articleResultFromParsed(result: ParsedArticle, fallbackContent: string): ArticleResult {

@@ -37,8 +37,15 @@ export default {
       return listUploads(env, url);
     }
 
-    if (request.method === "GET" && url.pathname === "/api/recordings") {
+  if (request.method === "GET" && url.pathname === "/api/recordings") {
       return listRecordings(env);
+    }
+
+    if (request.method === "POST" && isRecordingRevisionPath(url.pathname)) {
+      const filename = safeDecodeURIComponent(
+        url.pathname.slice("/api/recordings/".length, -"/revisions".length),
+      );
+      return createArticleRevision(request, env, ctx, filename);
     }
 
     if (request.method === "DELETE" && url.pathname.startsWith("/api/recordings/")) {
@@ -190,7 +197,11 @@ async function uploadAudio(request: Request, env: Env, ctx: ExecutionContext): P
   );
 }
 
-async function triggerGitHubAction(env: Env, targetFilename: string): Promise<void> {
+async function triggerGitHubAction(
+  env: Env,
+  targetFilename: string,
+  options: { revisionRequestKey?: string } = {},
+): Promise<void> {
   if (!env.GITHUB_PAT) {
     console.warn("GITHUB_PAT is not configured. Skipping immediate GitHub Action trigger.");
     return;
@@ -201,6 +212,13 @@ async function triggerGitHubAction(env: Env, targetFilename: string): Promise<vo
   const url = `https://api.github.com/repos/${repo}/actions/workflows/${workflowId}/dispatches`;
   const workflowRef = env.GITHUB_WORKFLOW_REF?.trim() || "main";
   
+  const inputs: Record<string, string> = {
+    target_filename: targetFilename,
+  };
+  if (options.revisionRequestKey) {
+    inputs.revision_request_key = options.revisionRequestKey;
+  }
+
   const response = await fetch(url, {
     method: "POST",
     headers: {
@@ -211,15 +229,124 @@ async function triggerGitHubAction(env: Env, targetFilename: string): Promise<vo
     },
     body: JSON.stringify({
       ref: workflowRef,
-      inputs: {
-        target_filename: targetFilename,
-      },
+      inputs,
     })
   });
   
   if (!response.ok) {
     const errorText = await response.text();
     throw new Error(`GitHub API returned ${response.status}: ${errorText}`);
+  }
+}
+
+function isRecordingRevisionPath(pathname: string): boolean {
+  return pathname.startsWith("/api/recordings/") && pathname.endsWith("/revisions");
+}
+
+async function createArticleRevision(
+  request: Request,
+  env: Env,
+  ctx: ExecutionContext,
+  filename: string,
+): Promise<Response> {
+  if (!request.body) {
+    return json({ error: "missing_body" }, 400);
+  }
+
+  const safeName = sanitizeFileName(filename);
+  if (!safeName) {
+    return json({ error: "missing_filename" }, 400);
+  }
+
+  const transcriptKey = `transcripts/${safeName.replace(/\.[^/.]+$/, ".json")}`;
+  const transcriptObject = await env.FILES_BUCKET.get(transcriptKey);
+  if (!transcriptObject) {
+    return json({
+      error: "article_not_ready",
+      message: "文章结果尚未生成，暂不能提交语音修改",
+    }, 409);
+  }
+
+  const revisionId = crypto.randomUUID();
+  const createdAt = new Date().toISOString();
+  const baseName = safeName.replace(/\.[^/.]+$/, "");
+  const audioKey = `revision-requests/${baseName}/${revisionId}.m4a`;
+  const revisionRequestKey = `revision-requests/${baseName}/${revisionId}.json`;
+  const contentType = request.headers.get("content-type") || "audio/mp4";
+
+  await env.FILES_BUCKET.put(audioKey, request.body, {
+    httpMetadata: { contentType },
+    customMetadata: {
+      filename: safeName,
+      revisionId,
+      createdAt,
+    },
+  });
+
+  await env.FILES_BUCKET.put(
+    revisionRequestKey,
+    JSON.stringify({
+      revisionId,
+      filename: safeName,
+      transcriptKey,
+      audioKey,
+      createdAt,
+    }, null, 2),
+    {
+      httpMetadata: { contentType: "application/json; charset=utf-8" },
+      customMetadata: {
+        filename: safeName,
+        revisionId,
+        createdAt,
+      },
+    },
+  );
+
+  await markRecordingRevisionQueued(env, safeName);
+
+  ctx.waitUntil(triggerGitHubAction(env, safeName, { revisionRequestKey }).catch((e) => {
+    console.error("Failed to trigger GitHub Action for article revision:", e);
+  }));
+
+  return json({
+    ok: true,
+    status: "QUEUED",
+    revision_id: revisionId,
+    revision_request_key: revisionRequestKey,
+  }, 202);
+}
+
+async function markRecordingRevisionQueued(env: Env, filename: string): Promise<void> {
+  try {
+    await env.DB.prepare(
+      `
+      UPDATE recordings
+      SET status = ?, processing_stage = ?, error_message = NULL, updated_at = CURRENT_TIMESTAMP
+      WHERE user_id = ? AND filename = ?
+      `,
+    )
+      .bind("PROCESSING", "REWRITING", "default_user", filename)
+      .run();
+  } catch (dbErr: any) {
+    const message = String(dbErr?.message || "");
+    if (!message.includes("no such column")) {
+      console.error("Failed to mark article revision queued:", dbErr);
+      return;
+    }
+
+    try {
+      await env.DB.prepare(
+        `
+        UPDATE recordings
+        SET status = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE user_id = ? AND filename = ?
+        `,
+      )
+        .bind("PROCESSING", "default_user", filename)
+        .run();
+    } catch (legacyErr) {
+      console.error("Failed to mark article revision queued:", legacyErr);
+    }
   }
 }
 

@@ -41,6 +41,18 @@ async function uploadCoverImage(accessToken: string, imageBuffer: Buffer): Promi
   return response.data.media_id;
 }
 
+function buildDraftArticle(title: string, content: string, thumbMediaId: string) {
+  return {
+    title,
+    content,
+    author: "VibePub",
+    thumb_media_id: thumbMediaId,
+    show_cover_pic: 0,
+    need_open_comment: 1,
+    only_fans_can_comment: 0,
+  };
+}
+
 /**
  * Pushes a draft article to WeChat Official Account
  */
@@ -53,17 +65,7 @@ export async function publishDraft(accessToken: string, title: string, content: 
   // Format as WeChat FreePublish API expects
   const payload = {
     articles: [
-      {
-        title: title,
-        content: content,
-        author: "VibePub", // Or fetch from some configuration
-        // thumb_media_id is usually required for a cover image, but we might be able to skip it or use a default one
-        // thumb_media_id is mandatory in WeChat
-        thumb_media_id: thumbMediaId,
-        show_cover_pic: 0,
-        need_open_comment: 1,
-        only_fans_can_comment: 0
-      }
+      buildDraftArticle(title, content, thumbMediaId),
     ]
   };
 
@@ -76,4 +78,31 @@ export async function publishDraft(accessToken: string, title: string, content: 
   }
   
   return data.media_id; // returns the draft media_id
+}
+
+/**
+ * Updates the first article in an existing WeChat draft.
+ */
+export async function updateDraft(
+  accessToken: string,
+  mediaId: string,
+  title: string,
+  content: string,
+  coverBuffer: Buffer,
+): Promise<void> {
+  console.log("Uploading revised cover to WeChat...");
+  const thumbMediaId = await uploadCoverImage(accessToken, coverBuffer);
+  const url = `${WECHAT_PROXY}/cgi-bin/draft/update?access_token=${accessToken}`;
+  const payload = {
+    media_id: mediaId,
+    index: 0,
+    articles: buildDraftArticle(title, content, thumbMediaId),
+  };
+
+  const response = await axios.post(url, payload);
+  const data = response.data;
+
+  if (data.errcode && data.errcode !== 0) {
+    throw new Error(`WeChat draft update error: ${data.errcode} - ${data.errmsg}`);
+  }
 }

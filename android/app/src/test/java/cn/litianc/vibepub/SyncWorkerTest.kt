@@ -10,6 +10,7 @@ import org.json.JSONObject
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import java.io.File
 import java.time.Instant
 
 @RunWith(RobolectricTestRunner::class)
@@ -155,6 +156,31 @@ class SyncWorkerTest {
         assertTrue(shouldSkipRemoteRecording(tombstone))
         assertFalse(shouldSkipRemoteRecording(tombstone.copy(deletedAt = null)))
         assertFalse(shouldSkipRemoteRecording(null))
+    }
+
+    @Test
+    fun fetchesRemoteTranscriptAgainWhenCloudResultIsNewerThanLocalJson() {
+        val jsonFile = File.createTempFile("vibepub-transcript", ".json").apply {
+            writeText("""{"articleTitle":"旧标题"}""")
+            setLastModified(Instant.parse("2026-07-02T08:00:00Z").toEpochMilli())
+            deleteOnExit()
+        }
+        val recording = RecordingEntity(
+            filename = "voice.m4a",
+            durationMs = 18_000L,
+            timestamp = 1L,
+            status = RecordingStatus.COMPLETED.value,
+            remoteStatusUpdatedAt = "2026-07-02T08:05:00Z",
+            processingStage = "COMPLETED",
+        )
+
+        assertTrue(shouldFetchRemoteTranscript(jsonFile, recording))
+        assertFalse(
+            shouldFetchRemoteTranscript(
+                jsonFile,
+                recording.copy(remoteStatusUpdatedAt = "2026-07-02T07:59:00Z"),
+            ),
+        )
     }
 
     @Test

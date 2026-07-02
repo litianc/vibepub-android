@@ -1,13 +1,17 @@
 package cn.litianc.vibepub.ui.screens
 
+import android.Manifest
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.text.Html
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -30,18 +34,21 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.TaskAlt
 import androidx.compose.material.icons.filled.Upload
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -62,6 +69,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -77,6 +85,10 @@ import androidx.compose.ui.unit.sp
 import androidx.media3.common.MediaItem
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.core.content.FileProvider
+import androidx.core.content.ContextCompat
+import cn.litianc.vibepub.AppPreferences
+import cn.litianc.vibepub.ArticleRevisionApi
+import cn.litianc.vibepub.ArticleRevisionRecorder
 import cn.litianc.vibepub.BuildConfig
 import cn.litianc.vibepub.coverImageFileNameForRecording
 import cn.litianc.vibepub.transcriptFileNameForRecording
@@ -101,6 +113,7 @@ import cn.litianc.vibepub.data.workflowNextActionLabel
 import cn.litianc.vibepub.data.workflowProgressFraction
 import cn.litianc.vibepub.data.workflowProgressLabel
 import cn.litianc.vibepub.ui.theme.PrimaryRed
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import org.json.JSONObject
 import java.io.File
@@ -108,6 +121,8 @@ import java.security.MessageDigest
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+
+private const val MIN_ARTICLE_REVISION_RECORDING_MS = 1_000L
 
 internal data class ArticleReviewItem(
     val label: String,
@@ -129,6 +144,14 @@ internal data class WeChatDraftAction(
     val helperText: String,
 )
 
+internal enum class ArticleRevisionUiState {
+    IDLE,
+    RECORDING,
+    UPLOADING,
+    QUEUED,
+    FAILED,
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DetailScreen(
@@ -141,6 +164,9 @@ fun DetailScreen(
     onDeleteRecording: (RecordingEntity) -> Unit,
 ) {
     val context = LocalContext.current
+    val preferences = remember { AppPreferences(context.applicationContext) }
+    val revisionRecorder = remember { ArticleRevisionRecorder(context.applicationContext) }
+    val coroutineScope = rememberCoroutineScope()
     val recordingFlow = remember(filename) {
         AppDatabase.getDatabase(context).recordingDao().observeRecordingByFilename(filename)
     }
@@ -148,6 +174,89 @@ fun DetailScreen(
     var transcript by remember(filename) { mutableStateOf<JSONObject?>(null) }
     var lastAutoRefreshRequestAtMs by remember(filename) { mutableStateOf(0L) }
     var deleteInProgress by remember(filename) { mutableStateOf(false) }
+    var revisionUiState by remember(filename) { mutableStateOf(ArticleRevisionUiState.IDLE) }
+    var revisionMessage by remember(filename) { mutableStateOf("") }
+    var revisionStartedAtMs by remember(filename) { mutableLongStateOf(0L) }
+    var revisionElapsedMs by remember(filename) { mutableLongStateOf(0L) }
+
+    fun startRevisionRecording() {
+        runCatching {
+            revisionRecorder.start()
+        }.onSuccess {
+            revisionStartedAtMs = System.currentTimeMillis()
+            revisionElapsedMs = 0L
+            revisionMessage = "正在听你的修改要求。说完后点停止。"
+            revisionUiState = ArticleRevisionUiState.RECORDING
+        }.onFailure { error ->
+            revisionMessage = error.message ?: "无法开始录制修改要求"
+            revisionUiState = ArticleRevisionUiState.FAILED
+        }
+    }
+
+    val revisionPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        if (granted) {
+            startRevisionRecording()
+        } else {
+            revisionMessage = "需要麦克风权限，才能用语音修改文章"
+            revisionUiState = ArticleRevisionUiState.FAILED
+        }
+    }
+
+    fun requestStartRevisionRecording() {
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+            startRevisionRecording()
+        } else {
+            revisionPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
+
+    fun stopAndSubmitRevision(currentRecording: RecordingEntity) {
+        val recorded = runCatching { revisionRecorder.stop() }.getOrElse { error ->
+            revisionMessage = error.message ?: "无法停止录制修改要求"
+            revisionUiState = ArticleRevisionUiState.FAILED
+            return
+        }
+        if (recorded.durationMs < MIN_ARTICLE_REVISION_RECORDING_MS) {
+            recorded.file.delete()
+            revisionMessage = "修改要求太短，请重新说一遍"
+            revisionUiState = ArticleRevisionUiState.FAILED
+            return
+        }
+
+        revisionUiState = ArticleRevisionUiState.UPLOADING
+        revisionMessage = "正在提交修改要求..."
+        coroutineScope.launch {
+            runCatching {
+                ArticleRevisionApi.submitVoiceRevision(
+                    apiBaseUrl = preferences.apiBaseUrl,
+                    filesToken = preferences.filesToken,
+                    filename = currentRecording.filename,
+                    audioFile = recorded.file,
+                )
+            }.onSuccess {
+                recorded.file.delete()
+                revisionUiState = ArticleRevisionUiState.QUEUED
+                revisionMessage = "修改要求已提交，云端正在生成新版文章。刷新后可查看进度。"
+                onRefresh()
+            }.onFailure { error ->
+                revisionUiState = ArticleRevisionUiState.FAILED
+                revisionMessage = error.message ?: "提交修改失败，请稍后重试"
+            }
+        }
+    }
+
+    DisposableEffect(revisionRecorder) {
+        onDispose { revisionRecorder.cancel() }
+    }
+
+    LaunchedEffect(revisionUiState, revisionStartedAtMs) {
+        while (revisionUiState == ArticleRevisionUiState.RECORDING) {
+            revisionElapsedMs = (System.currentTimeMillis() - revisionStartedAtMs).coerceAtLeast(0L)
+            delay(250)
+        }
+    }
 
     LaunchedEffect(
         filename,
@@ -341,6 +450,16 @@ fun DetailScreen(
             )
             Spacer(modifier = Modifier.height(16.dp))
             ArticleReviewCard(summary = reviewSummary)
+            Spacer(modifier = Modifier.height(16.dp))
+            ArticleRevisionCard(
+                enabled = articleContentIsGenerated,
+                state = revisionUiState,
+                message = revisionMessage,
+                elapsedLabel = formatDurationLabel(revisionElapsedMs),
+                onStart = { requestStartRevisionRecording() },
+                onStop = { stopAndSubmitRevision(currentRecording) },
+                onRefresh = onRefresh,
+            )
             Spacer(modifier = Modifier.height(16.dp))
             ActionRow(
                 articleTitle = articleTitle,
@@ -804,6 +923,135 @@ private fun ArticleReviewItemRow(item: ArticleReviewItem) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
+    }
+}
+
+@Composable
+private fun ArticleRevisionCard(
+    enabled: Boolean,
+    state: ArticleRevisionUiState,
+    message: String,
+    elapsedLabel: String,
+    onStart: () -> Unit,
+    onStop: () -> Unit,
+    onRefresh: () -> Unit,
+) {
+    val active = state == ArticleRevisionUiState.RECORDING || state == ArticleRevisionUiState.UPLOADING
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("ArticleRevisionCard"),
+        colors = CardDefaults.cardColors(
+            containerColor = if (active) Color(0xFFFFF4F2) else MaterialTheme.colorScheme.surface,
+        ),
+        shape = RoundedCornerShape(12.dp),
+    ) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Default.Mic,
+                    contentDescription = null,
+                    tint = if (enabled) PrimaryRed else MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(20.dp),
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("说话修改文章", fontWeight = FontWeight.SemiBold)
+                    Text(
+                        text = articleRevisionStateLabel(enabled, state, elapsedLabel),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                if (state == ArticleRevisionUiState.UPLOADING) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(20.dp),
+                        strokeWidth = 2.dp,
+                    )
+                }
+            }
+
+            val helper = message.ifBlank {
+                if (enabled) {
+                    "用一段话说明要怎么改，提交后会更新这篇文章和原公众号草稿。"
+                } else {
+                    "文章生成后可用语音继续修改。"
+                }
+            }
+            Text(
+                text = helper,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
+            when (state) {
+                ArticleRevisionUiState.RECORDING -> {
+                    Button(
+                        onClick = onStop,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("StopArticleRevisionButton"),
+                    ) {
+                        Icon(Icons.Default.Stop, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("停止并提交")
+                    }
+                }
+                ArticleRevisionUiState.UPLOADING -> {
+                    Button(
+                        onClick = {},
+                        enabled = false,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text("提交中")
+                    }
+                }
+                ArticleRevisionUiState.QUEUED -> {
+                    Button(
+                        onClick = onRefresh,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("RefreshAfterArticleRevisionButton"),
+                    ) {
+                        Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("刷新进度")
+                    }
+                }
+                ArticleRevisionUiState.FAILED,
+                ArticleRevisionUiState.IDLE -> {
+                    Button(
+                        onClick = onStart,
+                        enabled = enabled,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("StartArticleRevisionButton"),
+                    ) {
+                        Icon(Icons.Default.Mic, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("说话修改文章")
+                    }
+                }
+            }
+        }
+    }
+}
+
+internal fun articleRevisionStateLabel(
+    enabled: Boolean,
+    state: ArticleRevisionUiState,
+    elapsedLabel: String,
+): String {
+    if (!enabled) return "等待文章生成"
+    return when (state) {
+        ArticleRevisionUiState.IDLE -> "可提交修改要求"
+        ArticleRevisionUiState.RECORDING -> "正在录制 $elapsedLabel"
+        ArticleRevisionUiState.UPLOADING -> "正在提交修改要求"
+        ArticleRevisionUiState.QUEUED -> "修改已进入云端流程"
+        ArticleRevisionUiState.FAILED -> "修改未提交成功"
     }
 }
 

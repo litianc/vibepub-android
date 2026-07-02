@@ -107,6 +107,23 @@ internal fun shouldSkipRemoteRecording(existing: RecordingEntity?): Boolean {
     return existing?.deletedAt != null
 }
 
+internal fun shouldFetchRemoteTranscript(jsonFile: File, recording: RecordingEntity): Boolean {
+    if (!jsonFile.exists()) return true
+
+    val status = recording.status.asRecordingStatus()
+    val stage = recording.processingStage.orEmpty()
+        .trim()
+        .uppercase(Locale.ROOT)
+        .replace("-", "_")
+        .replace(" ", "_")
+    val remoteMayHaveUpdatedTranscript = status == RecordingStatus.COMPLETED ||
+        stage in TRANSCRIPT_REFRESH_STAGES
+    if (!remoteMayHaveUpdatedTranscript) return false
+
+    val remoteUpdatedAtMs = parseRemoteRecordingCreatedAt(recording.remoteStatusUpdatedAt)
+    return remoteUpdatedAtMs != null && remoteUpdatedAtMs > jsonFile.lastModified() + 1_000L
+}
+
 internal fun mergeRemoteRecordingFromListItem(
     recObj: JSONObject,
     existing: RecordingEntity?,
@@ -258,8 +275,9 @@ class SyncWorker(
 
         for (recording in recordings) {
             val jsonFile = File(dir, transcriptFileNameForRecording(recording.filename))
-            if (!jsonFile.exists()) {
+            if (shouldFetchRemoteTranscript(jsonFile, recording)) {
                 try {
+                    val wasExistingTranscript = jsonFile.exists()
                     val encodedFilename = URLEncoder.encode(recording.filename, "UTF-8").replace("+", "%20")
                     val endpoint = URL("${apiBaseUrl.trimEnd('/')}/api/transcripts/$encodedFilename")
                     val connection = (endpoint.openConnection() as HttpURLConnection).apply {
@@ -284,6 +302,7 @@ class SyncWorker(
                             filename = recording.filename,
                             coverImageUrl = transcriptCoverImageUrl ?: recording.coverImageUrl,
                             filesToken = filesToken,
+                            force = wasExistingTranscript,
                         )
                         dao.upsertBest(
                             recording.copy(
@@ -396,10 +415,11 @@ class SyncWorker(
         filename: String,
         coverImageUrl: String?,
         filesToken: String,
+        force: Boolean = false,
     ) {
         val url = coverImageUrl?.trim()?.takeIf { it.isNotBlank() } ?: return
         val file = File(dir, coverImageFileNameForRecording(filename))
-        if (file.exists() && file.length() > 0L) return
+        if (!force && file.exists() && file.length() > 0L) return
 
         val tempFile = File(file.parentFile, "${file.name}.tmp")
         runCatching {
@@ -455,3 +475,11 @@ internal fun JSONObject.syncErrorMessageOrNull(): String? {
         .ifBlank { optString("error_message", "") }
         .blankToNullValue()
 }
+
+private val TRANSCRIPT_REFRESH_STAGES = setOf(
+    "ARTICLE_READY",
+    "DRAFT_FAILED",
+    "REVISION_FAILED",
+    "COMPLETED",
+    "DONE",
+)

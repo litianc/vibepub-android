@@ -246,6 +246,34 @@ class DetailScreenTest {
     }
 
     @Test
+    fun articleRevisionStateLabelsAreReadable() {
+        assertEquals(
+            "等待文章生成",
+            articleRevisionStateLabel(
+                enabled = false,
+                state = ArticleRevisionUiState.IDLE,
+                elapsedLabel = "0:00",
+            ),
+        )
+        assertEquals(
+            "正在录制 0:03",
+            articleRevisionStateLabel(
+                enabled = true,
+                state = ArticleRevisionUiState.RECORDING,
+                elapsedLabel = "0:03",
+            ),
+        )
+        assertEquals(
+            "修改已进入云端流程",
+            articleRevisionStateLabel(
+                enabled = true,
+                state = ArticleRevisionUiState.QUEUED,
+                elapsedLabel = "0:03",
+            ),
+        )
+    }
+
+    @Test
     fun reviewSummaryShowsProcessingMessageBeforeCompletion() {
         val summary = buildArticleReviewSummary(
             status = RecordingStatus.PROCESSING,

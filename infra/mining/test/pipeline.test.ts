@@ -1,14 +1,15 @@
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
-import { processAudioText } from '../src/llm.js';
+import { processAudioText, reviseArticleWithInstruction } from '../src/llm.js';
 import { generateWechatCoverBuffer } from '../src/coverRenderer.js';
-import { getAccessToken, publishDraft } from '../src/wechat.js';
-import { createPresignedDownloadUrl, deleteFile, listUnprocessedFiles, uploadCoverImage, uploadTranscript } from '../src/r2.js';
+import { getAccessToken, publishDraft, updateDraft } from '../src/wechat.js';
+import { createPresignedDownloadUrl, deleteFile, downloadFile, listUnprocessedFiles, uploadCoverImage, uploadTranscript } from '../src/r2.js';
 import { transcribeAudioUrl } from '../src/asr.js';
 import { buildArticleTranscriptPayload, filterTargetFiles, main } from '../src/index.js';
 
 // Mock dependencies
 vi.mock('../src/llm.js', () => ({
   processAudioText: vi.fn(),
+  reviseArticleWithInstruction: vi.fn(),
 }));
 
 vi.mock('../src/coverRenderer.js', () => ({
@@ -17,12 +18,14 @@ vi.mock('../src/coverRenderer.js', () => ({
 
 vi.mock('../src/wechat.js', () => ({
   publishDraft: vi.fn(),
+  updateDraft: vi.fn(),
   getAccessToken: vi.fn()
 }));
 
 vi.mock('../src/r2.js', () => ({
   listUnprocessedFiles: vi.fn(),
   createPresignedDownloadUrl: vi.fn(),
+  downloadFile: vi.fn(),
   deleteFile: vi.fn(),
   uploadCoverImage: vi.fn(),
   uploadTranscript: vi.fn()
@@ -42,6 +45,7 @@ describe('VibePub Cloud Pipeline', () => {
       PUBLIC_BASE_URL: 'https://vibepub.example.test',
       FILES_TOKEN: 'test-files-token',
       TARGET_FILENAME: '',
+      REVISION_REQUEST_KEY: '',
     };
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
       ok: true,
@@ -284,5 +288,90 @@ describe('VibePub Cloud Pipeline', () => {
         call.filename === filename
     )).toBe(false);
     expect(publishDraft).not.toHaveBeenCalled();
+  });
+
+  it('should process a voice article revision by updating the existing WeChat draft', async () => {
+    const revisionRequestKey = 'revision-requests/VibePub-2026-07-02-160000-0m18s-Test/rev-1.json';
+    const audioKey = 'revision-requests/VibePub-2026-07-02-160000-0m18s-Test/rev-1.m4a';
+    const transcriptKey = 'transcripts/VibePub-2026-07-02-160000-0m18s-Test.json';
+    const filename = 'VibePub-2026-07-02-160000-0m18s-Test.m4a';
+    const revisedArticle = {
+      title: '新版标题',
+      content: '<p>这是按语音要求改过的新版正文。</p>',
+      imagePrompt: 'A clean editorial cover',
+      coverTitle: ['新版', '标题'],
+      coverSubtitle: '修改已应用',
+    };
+
+    process.env.REVISION_REQUEST_KEY = revisionRequestKey;
+    vi.mocked(downloadFile).mockImplementation(async (key) => {
+      if (key === revisionRequestKey) {
+        return Buffer.from(JSON.stringify({
+          revisionId: 'rev-1',
+          filename,
+          transcriptKey,
+          audioKey,
+          createdAt: '2026-07-02T08:00:00.000Z',
+        }));
+      }
+      if (key === transcriptKey) {
+        return Buffer.from(JSON.stringify({
+          rawText: '原始口述',
+          articleTitle: '旧标题',
+          articleContent: '<p>旧正文</p>',
+          wechatDraftId: 'MEDIA_ID_OLD',
+          revisionHistory: [{ revisionId: 'old-rev' }],
+        }));
+      }
+      throw new Error(`unexpected key ${key}`);
+    });
+    vi.mocked(createPresignedDownloadUrl).mockResolvedValue('https://r2.example.test/revision.m4a');
+    vi.mocked(transcribeAudioUrl).mockResolvedValue('把标题换得更直接，并补充一个结论。');
+    vi.mocked(reviseArticleWithInstruction).mockResolvedValue(revisedArticle);
+    vi.mocked(generateWechatCoverBuffer).mockResolvedValue(Buffer.from('revised-cover'));
+    vi.mocked(uploadCoverImage).mockResolvedValue();
+    vi.mocked(getAccessToken).mockResolvedValue('wechat-token');
+    vi.mocked(updateDraft).mockResolvedValue();
+    vi.mocked(uploadTranscript).mockResolvedValue();
+
+    await expect(main()).resolves.toBeUndefined();
+
+    expect(listUnprocessedFiles).not.toHaveBeenCalled();
+    expect(transcribeAudioUrl).toHaveBeenCalledWith('https://r2.example.test/revision.m4a', 'm4a');
+    expect(reviseArticleWithInstruction).toHaveBeenCalledWith({
+      rawText: '原始口述',
+      currentTitle: '旧标题',
+      currentContent: '<p>旧正文</p>',
+      instructionText: '把标题换得更直接，并补充一个结论。',
+    });
+    expect(updateDraft).toHaveBeenCalledWith(
+      'wechat-token',
+      'MEDIA_ID_OLD',
+      revisedArticle.title,
+      revisedArticle.content,
+      Buffer.from('revised-cover'),
+    );
+    expect(uploadTranscript).toHaveBeenCalledWith(
+      transcriptKey,
+      expect.stringContaining('"instructionText": "把标题换得更直接，并补充一个结论。"'),
+    );
+
+    const fetchCalls = vi.mocked(fetch).mock.calls.map(([, init]) => JSON.parse(String(init?.body)));
+    expect(fetchCalls.map(call => call.processingStage)).toEqual([
+      'ASR',
+      'REWRITING',
+      'ARTICLE_READY',
+      'DRAFTING',
+      'COMPLETED',
+    ]);
+    expect(fetchCalls.at(-1)).toMatchObject({
+      filename,
+      status: 'COMPLETED',
+      articleTitle: revisedArticle.title,
+      articleContent: revisedArticle.content,
+      processingStage: 'COMPLETED',
+      wechatDraftId: 'MEDIA_ID_OLD',
+      errorMessage: null,
+    });
   });
 });
