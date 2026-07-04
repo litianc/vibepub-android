@@ -5,10 +5,7 @@ const GLM_API_KEY = process.env.GLM_API_KEY!;
 const GLM_BASE_URL = process.env.GLM_BASE_URL || "https://open.bigmodel.cn/api/paas/v4/";
 const GLM_MODEL = process.env.GLM_MODEL || "glm-5.2"; // using the appropriate glm model (e.g. glm-5.2)
 
-const openai = new OpenAI({
-  apiKey: GLM_API_KEY,
-  baseURL: GLM_BASE_URL,
-});
+let openai: OpenAI | null = null;
 
 export type ArticleResult = {
   title: string;
@@ -43,7 +40,7 @@ export async function reviseArticleWithInstruction(input: {
 }
 
 async function generateArticleFromPrompt(prompt: string): Promise<ArticleResult> {
-  const response = await openai.chat.completions.create({
+  const response = await getOpenAIClient().chat.completions.create({
     model: GLM_MODEL,
     messages: [
       { role: "user", content: prompt }
@@ -68,6 +65,19 @@ async function generateArticleFromPrompt(prompt: string): Promise<ArticleResult>
     console.warn("Failed to parse JSON, falling back to raw response");
     return articleResultFromParsed({}, responseText);
   }
+}
+
+function getOpenAIClient(): OpenAI {
+  if (!GLM_API_KEY) {
+    throw new Error("GLM_API_KEY is required to generate articles");
+  }
+  if (!openai) {
+    openai = new OpenAI({
+      apiKey: GLM_API_KEY,
+      baseURL: GLM_BASE_URL,
+    });
+  }
+  return openai;
 }
 
 function buildRevisionPrompt(input: {
