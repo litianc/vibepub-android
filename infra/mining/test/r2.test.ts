@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isSupportedInboxAudioKey } from "../src/r2.js";
+import { isSupportedInboxAudioKey, isSupportedPipelineInputKey, isSupportedTextSubmissionKey } from "../src/r2.js";
 
 describe("R2 inbox audio filter", () => {
   it("accepts Android-importable audio formats from the inbox", () => {
@@ -13,5 +13,13 @@ describe("R2 inbox audio filter", () => {
     expect(isSupportedInboxAudioKey("transcripts/voice.json")).toBe(false);
     expect(isSupportedInboxAudioKey("inbox/voice.flac")).toBe(false);
     expect(isSupportedInboxAudioKey("inbox/voice.txt")).toBe(false);
+  });
+
+  it("accepts text submissions as pipeline inputs", () => {
+    expect(isSupportedTextSubmissionKey("text-submissions/VibePub-2026-07-04-Text-abcd1234.txt")).toBe(true);
+    expect(isSupportedTextSubmissionKey("text-submissions/VibePub-2026-07-04-Text-abcd1234.json")).toBe(true);
+    expect(isSupportedTextSubmissionKey("inbox/VibePub-2026-07-04-Text-abcd1234.txt")).toBe(false);
+    expect(isSupportedPipelineInputKey("text-submissions/VibePub-2026-07-04-Text-abcd1234.txt")).toBe(true);
+    expect(isSupportedPipelineInputKey("inbox/voice.m4a")).toBe(true);
   });
 });

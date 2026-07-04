@@ -1,9 +1,8 @@
 package cn.litianc.vibepub.ui.screens
 
 import androidx.activity.ComponentActivity
-import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
-import androidx.compose.ui.test.longClick
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTouchInput
@@ -35,6 +34,7 @@ class HomeScreenInteractionTest {
                 onDeleteRecording = {},
                 onRecordClick = { recordClicks += 1 },
                 onImportAudioClick = {},
+                onTextInputClick = {},
                 onRecordingClick = {},
             )
         }
@@ -45,7 +45,37 @@ class HomeScreenInteractionTest {
     }
 
     @Test
-    fun recordButtonLongClickOpensAudioImportSheet() {
+    fun recordButtonLongPressLeftDragImportsAudio() {
+        var importClicks = 0
+        composeTestRule.setContent {
+            HomeScreen(
+                recordingsFlow = flowOf(emptyList()),
+                lastSyncAtMs = 0L,
+                onSettingsClick = {},
+                onRefresh = {},
+                onAutoRefresh = {},
+                onRetryUpload = {},
+                onDeleteRecording = {},
+                onRecordClick = {},
+                onImportAudioClick = { importClicks += 1 },
+                onTextInputClick = {},
+                onRecordingClick = {},
+            )
+        }
+
+        composeTestRule.onNodeWithTag("RecordButton").performTouchInput {
+            down(center)
+            advanceEventTime(700)
+            moveBy(Offset(-140f, 0f))
+            up()
+        }
+
+        assertEquals(1, importClicks)
+    }
+
+    @Test
+    fun recordButtonLongPressRightDragOpensTextInput() {
+        var textClicks = 0
         composeTestRule.setContent {
             HomeScreen(
                 recordingsFlow = flowOf(emptyList()),
@@ -57,13 +87,18 @@ class HomeScreenInteractionTest {
                 onDeleteRecording = {},
                 onRecordClick = {},
                 onImportAudioClick = {},
+                onTextInputClick = { textClicks += 1 },
                 onRecordingClick = {},
             )
         }
 
-        composeTestRule.onNodeWithTag("RecordButton").performTouchInput { longClick() }
+        composeTestRule.onNodeWithTag("RecordButton").performTouchInput {
+            down(center)
+            advanceEventTime(700)
+            moveBy(Offset(140f, 0f))
+            up()
+        }
 
-        composeTestRule.onNodeWithTag("AudioImportSheet").assertIsDisplayed()
-        composeTestRule.onNodeWithTag("ChooseAudioImportButton").assertIsDisplayed()
+        assertEquals(1, textClicks)
     }
 }

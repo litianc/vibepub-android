@@ -25,4 +25,6 @@ data class RecordingEntity(
     val coverImageUrl: String? = null,
     val processingStage: String? = null,
     val deletedAt: Long? = null,
+    val sourceType: String = RecordingSourceType.RECORDING.value,
+    val inputText: String? = null,
 )

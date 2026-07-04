@@ -33,11 +33,15 @@ export default {
       return uploadAudio(request, env, ctx);
     }
 
+    if (request.method === "POST" && url.pathname === "/api/text-submissions") {
+      return submitText(request, env, ctx);
+    }
+
     if (request.method === "GET" && url.pathname === "/api/uploads") {
       return listUploads(env, url);
     }
 
-  if (request.method === "GET" && url.pathname === "/api/recordings") {
+    if (request.method === "GET" && url.pathname === "/api/recordings") {
       return listRecordings(env);
     }
 
@@ -70,6 +74,126 @@ export default {
     return json({ error: "not_found" }, 404);
   },
 };
+
+async function submitText(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  let body: any;
+  try {
+    body = await request.json();
+  } catch {
+    return json({ error: "invalid_json", message: "文字提交内容不是有效 JSON" }, 400);
+  }
+
+  const text = normalizeOptionalString(body?.text);
+  if (!text || text.length < 10) {
+    return json({ error: "text_too_short", message: "文字太短，请再补充一些想法" }, 400);
+  }
+  if (text.length > 30_000) {
+    return json({ error: "text_too_long", message: "文字太长，请分成多次提交" }, 400);
+  }
+
+  const titleHint = normalizeOptionalString(body?.title_hint ?? body?.titleHint);
+  const submittedAt = new Date().toISOString();
+  const safeTimestamp = submittedAt.replace(/[:.]/g, "-").replace("T", "-").replace("Z", "");
+  const filename = sanitizeFileName(`VibePub-${safeTimestamp}-Text-${crypto.randomUUID().slice(0, 8)}.txt`);
+  const key = `text-submissions/${filename}`;
+  const payload = {
+    filename,
+    text,
+    titleHint,
+    source: normalizeOptionalString(body?.source) || "android_text",
+    submittedAt,
+  };
+
+  await env.FILES_BUCKET.put(key, JSON.stringify(payload, null, 2), {
+    httpMetadata: { contentType: "application/json; charset=utf-8" },
+    customMetadata: {
+      filename,
+      submittedAt,
+      sourceType: "TEXT",
+    },
+  });
+
+  await upsertTextRecording(env, {
+    filename,
+    key,
+    text,
+    titleHint,
+  });
+
+  ctx.waitUntil(triggerGitHubAction(env, filename).catch((e) => {
+    console.error("Failed to trigger GitHub Action for text submission:", e);
+  }));
+
+  return json({
+    ok: true,
+    key,
+    filename,
+    status: "PROCESSING",
+    processing_stage: "REWRITING",
+    submitted_at: submittedAt,
+  }, 202);
+}
+
+async function upsertTextRecording(
+  env: Env,
+  input: {
+    filename: string;
+    key: string;
+    text: string;
+    titleHint?: string | null;
+  },
+): Promise<void> {
+  const userId = "default_user";
+  try {
+    const updated = await env.DB.prepare(
+      `
+      UPDATE recordings
+      SET r2_key = ?, status = ?, processing_stage = ?, duration_ms = 0, raw_text = ?, article_title = COALESCE(?, article_title), source_type = ?, error_message = NULL, updated_at = CURRENT_TIMESTAMP
+      WHERE user_id = ? AND filename = ?
+      `,
+    )
+      .bind(input.key, "PROCESSING", "REWRITING", input.text, input.titleHint || null, "TEXT", userId, input.filename)
+      .run();
+
+    if ((updated.meta.changes ?? 0) === 0) {
+      await env.DB.prepare(
+        `
+        INSERT INTO recordings (user_id, filename, r2_key, status, processing_stage, duration_ms, raw_text, article_title, source_type)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `,
+      )
+        .bind(userId, input.filename, input.key, "PROCESSING", "REWRITING", 0, input.text, input.titleHint || null, "TEXT")
+        .run();
+    }
+  } catch (dbErr: any) {
+    const message = String(dbErr?.message || "");
+    if (!message.includes("no such column")) {
+      console.error("Failed to insert text submission into D1:", dbErr);
+      throw dbErr;
+    }
+
+    const updated = await env.DB.prepare(
+      `
+      UPDATE recordings
+      SET r2_key = ?, status = ?, processing_stage = ?, duration_ms = 0, raw_text = ?, article_title = COALESCE(?, article_title), error_message = NULL, updated_at = CURRENT_TIMESTAMP
+      WHERE user_id = ? AND filename = ?
+      `,
+    )
+      .bind(input.key, "PROCESSING", "REWRITING", input.text, input.titleHint || null, userId, input.filename)
+      .run();
+
+    if ((updated.meta.changes ?? 0) === 0) {
+      await env.DB.prepare(
+        `
+        INSERT INTO recordings (user_id, filename, r2_key, status, processing_stage, duration_ms, raw_text, article_title)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `,
+      )
+        .bind(userId, input.filename, input.key, "PROCESSING", "REWRITING", 0, input.text, input.titleHint || null)
+        .run();
+    }
+  }
+}
 
 async function uploadAudio(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   if (!request.body) {
@@ -380,19 +504,7 @@ async function listRecordings(env: Env): Promise<Response> {
       return json({ error: "database_error", details: dbErr.message }, 500);
     }
 
-    const legacyShapes: Array<{
-      shape: QueryRecordingShape;
-      defaults: Record<string, unknown>;
-    }> = [
-      { shape: "withoutCoverImageUrl", defaults: { cover_image_url: null } },
-      { shape: "withoutDuration", defaults: { duration_ms: null, cover_image_url: null } },
-      {
-        shape: "withoutProcessingStage",
-        defaults: { duration_ms: null, processing_stage: null, cover_image_url: null },
-      },
-    ];
-
-    for (const legacyShape of legacyShapes) {
+    for (const legacyShape of legacyRecordingQueryShapes(message)) {
       try {
         return json({
           recordings: withRecordingDisplayFields(
@@ -423,6 +535,7 @@ async function listRecordings(env: Env): Promise<Response> {
         wechat_url: null,
         wechat_draft_id: null,
         cover_image_url: null,
+        source_type: null,
         error_message: null,
       }),
     });
@@ -441,6 +554,9 @@ async function deleteRecording(env: Env, filename: string): Promise<Response> {
   const coverKey = `covers/${safeName.replace(/\.[^/.]+$/, ".png")}`;
 
   r2Keys.add(`inbox/${safeName}`);
+  if (inferSourceType(safeName, "") === "TEXT") {
+    r2Keys.add(`text-submissions/${safeName}`);
+  }
   r2Keys.add(transcriptKey);
   r2Keys.add(coverKey);
 
@@ -502,13 +618,16 @@ function withRecordingDisplayFields(
 ): unknown[] {
   return recordings.map((recording: any) => {
     const durationMs =
-      positiveIntegerOrNull(recording?.duration_ms) ??
-      positiveIntegerOrNull(recording?.durationMs) ??
+      nonNegativeIntegerOrNull(recording?.duration_ms) ??
+      nonNegativeIntegerOrNull(recording?.durationMs) ??
       parseDurationMsFromRecordingFilename(recording?.filename);
     return {
       ...recording,
       ...defaults,
       duration_ms: durationMs,
+      source_type: normalizeOptionalString(recording?.source_type) ??
+        normalizeOptionalString(recording?.sourceType) ??
+        inferSourceType(recording?.filename, recording?.r2_key),
       cover_image_url: normalizeOptionalString(recording?.cover_image_url) ??
         normalizeOptionalString(recording?.coverImageUrl),
       wechat_url: normalizeRemoteReference(recording?.wechat_url),
@@ -517,9 +636,20 @@ function withRecordingDisplayFields(
   });
 }
 
-function positiveIntegerOrNull(value: unknown): number | null {
+function inferSourceType(filename: unknown, r2Key: unknown): string {
+  const key = `${typeof r2Key === "string" ? r2Key : ""} ${typeof filename === "string" ? filename : ""}`.toLowerCase();
+  if (key.includes("text-submissions/") || key.includes("-text-") || key.endsWith(".txt")) {
+    return "TEXT";
+  }
+  if (key.includes("imported-audio")) {
+    return "AUDIO_FILE";
+  }
+  return "RECORDING";
+}
+
+function nonNegativeIntegerOrNull(value: unknown): number | null {
   const parsed = typeof value === "number" ? value : Number.parseInt(String(value), 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
 }
 
 function parseDurationMsFromRecordingFilename(filename: unknown): number | null {
@@ -535,9 +665,33 @@ function parseDurationMsFromRecordingFilename(filename: unknown): number | null 
 
 type QueryRecordingShape =
   | "full"
+  | "withoutSourceType"
   | "withoutCoverImageUrl"
   | "withoutDuration"
   | "withoutProcessingStage";
+
+function legacyRecordingQueryShapes(message: string): Array<{
+  shape: QueryRecordingShape;
+  defaults: Record<string, unknown>;
+}> {
+  const oldSchemaFallbacks = [
+    { shape: "withoutCoverImageUrl" as const, defaults: { cover_image_url: null } },
+    { shape: "withoutDuration" as const, defaults: { duration_ms: null, cover_image_url: null } },
+    {
+      shape: "withoutProcessingStage" as const,
+      defaults: { duration_ms: null, processing_stage: null, cover_image_url: null },
+    },
+  ];
+
+  if (message.includes("source_type")) {
+    return [
+      { shape: "withoutSourceType", defaults: { source_type: null } },
+      ...oldSchemaFallbacks,
+    ];
+  }
+
+  return oldSchemaFallbacks;
+}
 
 async function queryRecordings(
   env: Env,
@@ -546,6 +700,22 @@ async function queryRecordings(
 ): Promise<unknown[]> {
   const selectColumnsByShape: Record<QueryRecordingShape, string[]> = {
     full: [
+      "id",
+      "filename",
+      "status",
+      "duration_ms",
+      "created_at",
+      "updated_at",
+      "article_title",
+      "substr(raw_text, 1, 120) AS raw_text_preview",
+      "processing_stage",
+      "wechat_url",
+      "wechat_draft_id",
+      "cover_image_url",
+      "source_type",
+      "error_message",
+    ],
+    withoutSourceType: [
       "id",
       "filename",
       "status",

@@ -1,4 +1,4 @@
-import { listUnprocessedFiles, createPresignedDownloadUrl, deleteFile, downloadFile, uploadCoverImage, uploadTranscript } from "./r2.js";
+import { listUnprocessedFiles, createPresignedDownloadUrl, deleteFile, downloadFile, uploadCoverImage, uploadTranscript, isSupportedTextSubmissionKey } from "./r2.js";
 import { transcribeAudioUrl } from "./asr.js";
 import { processAudioText, reviseArticleWithInstruction } from "./llm.js";
 import { generateWechatCoverBuffer } from "./coverRenderer.js";
@@ -115,11 +115,11 @@ async function updateStatus(filename: string, status: string, metadata: StatusMe
 }
 
 function transcriptJsonKey(fileKey: string): string {
-  return fileKey.replace("inbox/", "transcripts/").replace(/\.[^/.]+$/, ".json");
+  return `transcripts/${path.basename(fileKey).replace(/\.[^/.]+$/, ".json")}`;
 }
 
 function coverImageKey(fileKey: string): string {
-  return fileKey.replace("inbox/", "covers/").replace(/\.[^/.]+$/, ".png");
+  return `covers/${path.basename(fileKey).replace(/\.[^/.]+$/, ".png")}`;
 }
 
 function publicFileUrl(key: string): string | undefined {
@@ -241,6 +241,30 @@ function optionalStringField(record: Record<string, unknown>, ...fields: string[
     }
   }
   return undefined;
+}
+
+function textSubmissionFromBuffer(key: string, buffer: Buffer): { rawText: string; titleHint?: string } {
+  const body = buffer.toString("utf8").trim();
+  if (!body) {
+    throw new Error(`Text submission ${key} is empty`);
+  }
+
+  if (body.startsWith("{")) {
+    const record = parseJsonBuffer(key, buffer);
+    const rawText = requiredStringField(record, "text", "rawText", "raw_text");
+    return {
+      rawText,
+      titleHint: optionalStringField(record, "titleHint", "title_hint"),
+    };
+  }
+
+  return { rawText: body };
+}
+
+function rawTextForArticleInput(textInput: { rawText: string; titleHint?: string }): string {
+  const titleHint = textInput.titleHint?.trim();
+  if (!titleHint) return textInput.rawText;
+  return `标题提示：${titleHint}\n\n${textInput.rawText}`;
 }
 
 function revisionFailureMessage(error: unknown): string {
@@ -422,21 +446,29 @@ export async function main() {
       console.log(`\n--- Processing file: ${fileKey} ---`);
       
       await updateStatus(filename, "PROCESSING", { processingStage });
-      
-      // 3. Build a short-lived R2 URL for Volcengine ASR.
-      console.log("Creating temporary audio URL from R2...");
-      const audioUrl = await createPresignedDownloadUrl(fileKey);
-      const ext = path.extname(fileKey).slice(1);
-      
-      // 4. ASR: Speech to text
-      processingStage = "ASR";
-      await updateStatus(filename, "PROCESSING", { processingStage });
-      console.log("Transcribing audio via Volcengine ASR...");
-      try {
-        rawText = await transcribeAudioUrl(audioUrl, ext || 'm4a');
-      } catch (e: any) {
-        console.error("ASR failed:", e.message);
-        throw e;
+
+      if (isSupportedTextSubmissionKey(fileKey)) {
+        console.log("Reading text submission from R2...");
+        const textInput = textSubmissionFromBuffer(fileKey, await downloadFile(fileKey));
+        rawText = rawTextForArticleInput(textInput);
+        processingStage = "REWRITING";
+        await updateStatus(filename, "PROCESSING", { processingStage, rawText });
+      } else {
+        // 3. Build a short-lived R2 URL for Volcengine ASR.
+        console.log("Creating temporary audio URL from R2...");
+        const audioUrl = await createPresignedDownloadUrl(fileKey);
+        const ext = path.extname(fileKey).slice(1);
+
+        // 4. ASR: Speech to text
+        processingStage = "ASR";
+        await updateStatus(filename, "PROCESSING", { processingStage });
+        console.log("Transcribing audio via Volcengine ASR...");
+        try {
+          rawText = await transcribeAudioUrl(audioUrl, ext || 'm4a');
+        } catch (e: any) {
+          console.error("ASR failed:", e.message);
+          throw e;
+        }
       }
       
       console.log(`Raw Transcript: ${rawText.substring(0, 50)}...`);

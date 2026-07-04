@@ -14,6 +14,7 @@ CREATE TABLE recordings (
     wechat_url TEXT,
     wechat_draft_id TEXT,
     cover_image_url TEXT,
+    source_type TEXT DEFAULT 'RECORDING',
     error_message TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,

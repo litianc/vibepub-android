@@ -1,0 +1,1 @@
+ALTER TABLE recordings ADD COLUMN source_type TEXT DEFAULT 'RECORDING';

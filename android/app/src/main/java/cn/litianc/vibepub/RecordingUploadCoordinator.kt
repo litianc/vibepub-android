@@ -9,6 +9,7 @@ import androidx.work.WorkManager
 import androidx.work.workDataOf
 import cn.litianc.vibepub.data.AppDatabase
 import cn.litianc.vibepub.data.RecordingEntity
+import cn.litianc.vibepub.data.RecordingSourceType
 import cn.litianc.vibepub.data.RecordingStatus
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -26,6 +27,7 @@ object RecordingUploadCoordinator {
         durationMs: Long,
         status: String = RecordingStatus.LOCAL_RECORDED.value,
         lastError: String? = null,
+        sourceType: RecordingSourceType = RecordingSourceType.RECORDING,
         minDurationMs: Long = MIN_RECORDING_DURATION_MS,
     ): Boolean {
         if (!shouldSaveRecording(file, durationMs, minDurationMs)) {
@@ -43,6 +45,7 @@ object RecordingUploadCoordinator {
                     status = status,
                     localAudioPath = file.absolutePath,
                     lastError = lastError,
+                    sourceType = sourceType.value,
                 ),
             )
         return true

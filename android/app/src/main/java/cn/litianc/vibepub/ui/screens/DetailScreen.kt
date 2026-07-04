@@ -95,12 +95,15 @@ import cn.litianc.vibepub.transcriptFileNameForRecording
 import cn.litianc.vibepub.data.AppDatabase
 import cn.litianc.vibepub.data.RecordingEntity
 import cn.litianc.vibepub.data.RecordingRecoveryActionType
+import cn.litianc.vibepub.data.RecordingSourceType
 import cn.litianc.vibepub.data.RecordingStatus
 import cn.litianc.vibepub.data.asRecordingStatus
 import cn.litianc.vibepub.data.displayTitle
 import cn.litianc.vibepub.data.durationLabel
 import cn.litianc.vibepub.data.hasDraftFailureMessage
+import cn.litianc.vibepub.data.isTextSource
 import cn.litianc.vibepub.data.primaryRecoveryAction
+import cn.litianc.vibepub.data.sourceTypeValue
 import cn.litianc.vibepub.data.statusDetail
 import cn.litianc.vibepub.data.statusLabel
 import cn.litianc.vibepub.data.sanitizedRemoteReference
@@ -294,10 +297,16 @@ fun DetailScreen(
         }
     }
 
+    val detailTitle = when (recording?.sourceTypeValue()) {
+        RecordingSourceType.TEXT -> "文字详情"
+        RecordingSourceType.AUDIO_FILE -> "音频详情"
+        else -> "录音详情"
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("录音详情", fontWeight = FontWeight.Bold) },
+                title = { Text(detailTitle, fontWeight = FontWeight.Bold) },
                 navigationIcon = {
                     IconButton(onClick = onBackClick) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
@@ -326,7 +335,7 @@ fun DetailScreen(
                     .padding(padding),
                 contentAlignment = Alignment.Center,
             ) {
-                Text("这条录音不在本机")
+                Text("这条记录不在本机")
             }
             return@Scaffold
         }
@@ -370,6 +379,7 @@ fun DetailScreen(
             articleContent = articleContent,
             articleContentIsGenerated = articleContentIsGenerated,
             rawText = rawText,
+            rawTextLabel = if (currentRecording.isTextSource()) "原始输入" else "原始识别",
             wechatDraftId = wechatDraftId,
             wechatUrl = wechatUrl,
             draftError = draftError,
@@ -411,8 +421,10 @@ fun DetailScreen(
                 .verticalScroll(scrollState)
                 .padding(horizontal = 16.dp, vertical = 8.dp),
         ) {
-            AudioPlayerCard(recording = currentRecording)
-            Spacer(modifier = Modifier.height(18.dp))
+            if (!currentRecording.isTextSource()) {
+                AudioPlayerCard(recording = currentRecording)
+                Spacer(modifier = Modifier.height(18.dp))
+            }
             StatusCard(
                 recording = currentRecording,
                 lastSyncAtMs = lastSyncAtMs,
@@ -436,8 +448,9 @@ fun DetailScreen(
 
             if (rawText.isNotBlank()) {
                 Spacer(modifier = Modifier.height(8.dp))
+                val rawTextLabel = if (currentRecording.isTextSource()) "原始输入文字" else "原始识别结果"
                 Text(
-                    text = "原始识别结果: ${rawText.take(80)}${if (rawText.length > 80) "..." else ""}",
+                    text = "$rawTextLabel: ${rawText.take(80)}${if (rawText.length > 80) "..." else ""}",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -815,11 +828,11 @@ private fun DetailDeleteRecordingDialog(
     AlertDialog(
         modifier = Modifier.testTag("DetailDeleteRecordingDialog"),
         onDismissRequest = onDismiss,
-        title = { Text("删除这条录音？") },
+        title = { Text("删除这条记录？") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(
-                    "将从本机移除录音、音频和结果文件，并尝试删除云端历史记录。",
+                    "将从本机移除内容、音频和结果文件，并尝试删除云端历史记录。",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -1374,6 +1387,7 @@ internal fun buildArticleReviewSummary(
     articleContent: String,
     articleContentIsGenerated: Boolean = status == RecordingStatus.COMPLETED,
     rawText: String,
+    rawTextLabel: String = "原始识别",
     wechatDraftId: String,
     wechatUrl: String,
     draftError: String = "",
@@ -1424,8 +1438,8 @@ internal fun buildArticleReviewSummary(
                 ready = hasArticle,
             ),
             ArticleReviewItem(
-                label = "原始识别",
-                value = if (hasRawText) "已保留，可用于核对口述原意" else "暂未同步到原始识别结果",
+                label = rawTextLabel,
+                value = if (hasRawText) "已保留，可用于核对原始表达" else "暂未同步到$rawTextLabel",
                 ready = hasRawText,
             ),
             ArticleReviewItem(

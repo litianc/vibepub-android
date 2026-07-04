@@ -195,7 +195,7 @@ class WorkflowHelpDialogTest {
 
         composeTestRule.onNodeWithTag("DeleteRecordingButton").performClick()
         composeTestRule.onNodeWithTag("DeleteRecordingDialog").assertIsDisplayed()
-        composeTestRule.onNodeWithText("删除这条录音？").assertIsDisplayed()
+        composeTestRule.onNodeWithText("删除这条记录？").assertIsDisplayed()
         composeTestRule.onNodeWithTag("CancelDeleteRecordingButton").performClick()
 
         composeTestRule.runOnIdle {
@@ -405,7 +405,7 @@ class WorkflowHelpDialogTest {
         composeTestRule.onNodeWithTag("DetailDeleteRecordingButton").assertIsDisplayed()
         composeTestRule.onNodeWithTag("DetailDeleteRecordingButton").performClick()
         composeTestRule.onNodeWithTag("DetailDeleteRecordingDialog").assertIsDisplayed()
-        composeTestRule.onNodeWithText("删除这条录音？").assertIsDisplayed()
+        composeTestRule.onNodeWithText("删除这条记录？").assertIsDisplayed()
         composeTestRule.onNodeWithTag("CancelDetailDeleteRecordingButton").performClick()
 
         composeTestRule.runOnIdle {

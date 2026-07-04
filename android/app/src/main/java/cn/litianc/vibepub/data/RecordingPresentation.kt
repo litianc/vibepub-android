@@ -45,23 +45,30 @@ data class RecordingRecoveryAction(
 fun RecordingEntity.displayTitle(locale: Locale = Locale.getDefault()): String {
     val title = articleTitle?.trim()
     if (!title.isNullOrBlank()) return title
-    return "${SimpleDateFormat("M月d日 HH:mm", locale).format(Date(timestamp))} · 录音片段"
+    val fallbackLabel = when (sourceTypeValue()) {
+        RecordingSourceType.RECORDING -> "录音片段"
+        RecordingSourceType.AUDIO_FILE -> "导入音频"
+        RecordingSourceType.TEXT -> "文字想法"
+    }
+    return "${SimpleDateFormat("M月d日 HH:mm", locale).format(Date(timestamp))} · $fallbackLabel"
 }
 
 fun RecordingEntity.durationLabel(): String {
+    if (isTextSource()) return "文字输入"
     val totalSeconds = (durationMs / 1000).coerceAtLeast(0)
     return "%d:%02d".format(totalSeconds / 60, totalSeconds % 60)
 }
 
 fun RecordingEntity.listDurationLabel(): String {
+    if (isTextSource()) return "文字输入"
     val totalSeconds = (durationMs / 1000).coerceAtLeast(0)
     return "${totalSeconds / 60}m${totalSeconds % 60}s"
 }
 
 fun RecordingEntity.statusLabel(): String {
     return when (status.asRecordingStatus()) {
-        RecordingStatus.LOCAL_RECORDED -> "待上传"
-        RecordingStatus.UPLOADING -> "上传中"
+        RecordingStatus.LOCAL_RECORDED -> if (isTextSource()) "待提交" else "待上传"
+        RecordingStatus.UPLOADING -> if (isTextSource()) "提交中" else "上传中"
         RecordingStatus.UPLOADED -> if (workflowIndexFromProcessingStage() == 2) "排队中" else "处理中"
         RecordingStatus.PROCESSING -> processingStatusLabel()
         RecordingStatus.COMPLETED -> when {
@@ -74,13 +81,14 @@ fun RecordingEntity.statusLabel(): String {
 }
 
 fun RecordingEntity.statusDetail(): String {
+    if (isTextSource()) return textStatusDetail()
     return when (status.asRecordingStatus()) {
         RecordingStatus.LOCAL_RECORDED -> "录音已保存，等待上传。"
         RecordingStatus.UPLOADING -> retryableUploadDetail()
         RecordingStatus.UPLOADED -> "录音已到云端，正在排队转录。"
         RecordingStatus.PROCESSING -> processingStatusDetail()
         RecordingStatus.COMPLETED -> completedStatusDetail()
-        RecordingStatus.FAILED -> lastError?.takeIf { it.isNotBlank() } ?: "这条录音处理失败，可以重试。"
+        RecordingStatus.FAILED -> lastError?.takeIf { it.isNotBlank() } ?: "这条记录处理失败，可以重试。"
     }
 }
 
@@ -90,6 +98,7 @@ fun RecordingEntity.shouldShowStatusDetailInline(): Boolean {
 }
 
 fun RecordingEntity.workflowNextActionLabel(): String {
+    if (isTextSource()) return textWorkflowNextActionLabel()
     return when (status.asRecordingStatus()) {
         RecordingStatus.LOCAL_RECORDED -> "下一步：点重试上传；如果反复失败，先到设置页检查 FILES_TOKEN。"
         RecordingStatus.UPLOADING -> "下一步：保持网络可用，等待上传完成；也可以下拉或点同步刷新状态。"
@@ -134,7 +143,9 @@ fun RecordingEntity.workflowHelpTitle(): String {
 }
 
 fun RecordingEntity.workflowHelpSummary(): String {
-    return "这条录音正在经历从口述想法到公众号草稿的流程。${workflowCurrentNodeLabel()}，${workflowProgressLabel()}。${workflowNextActionLabel()}"
+    val itemLabel = if (isTextSource()) "这段文字" else "这条录音"
+    val journeyLabel = if (isTextSource()) "从文字想法到公众号草稿" else "从口述想法到公众号草稿"
+    return "$itemLabel 正在经历$journeyLabel 的流程。${workflowCurrentNodeLabel()}，${workflowProgressLabel()}。${workflowNextActionLabel()}"
 }
 
 fun RecordingEntity.workflowProgressLabel(): String {
@@ -222,7 +233,7 @@ fun RecordingEntity.workflowAttention(nowMs: Long = System.currentTimeMillis()):
 }
 
 fun RecordingEntity.workflowCycleLabel(): String {
-    return WORKFLOW_BASE_STEPS.joinToString(" → ") { it.title }
+    return workflowBaseSteps().joinToString(" → ") { it.title }
 }
 
 fun sanitizedRemoteReference(value: String?): String? {
@@ -246,7 +257,7 @@ fun RecordingEntity.workflowSteps(): List<RecordingWorkflowStep> {
         hasDraftFailureMessage() &&
         !hasWechatDraftReference()
 
-    return WORKFLOW_BASE_STEPS.mapIndexed { index, step ->
+    return workflowBaseSteps().mapIndexed { index, step ->
         val state = when {
             completedWithDraftFailure && index < 5 -> WorkflowStepState.DONE
             completedWithDraftFailure && index == 5 -> WorkflowStepState.BLOCKED
@@ -307,6 +318,58 @@ private fun RecordingEntity.failureWorkflowIndex(): Int {
             error.contains("草稿") ||
             error.contains("wechat") -> 5
         else -> 4
+    }
+}
+
+private fun RecordingEntity.textStatusDetail(): String {
+    return when (status.asRecordingStatus()) {
+        RecordingStatus.LOCAL_RECORDED -> "文字已保存在本机，等待提交到云端。"
+        RecordingStatus.UPLOADING -> retryableUploadDetail().replace("录音", "文字")
+        RecordingStatus.UPLOADED -> "文字已到云端，等待后台开始整理。"
+        RecordingStatus.PROCESSING -> textProcessingStatusDetail()
+        RecordingStatus.COMPLETED -> completedStatusDetail()
+        RecordingStatus.FAILED -> lastError?.takeIf { it.isNotBlank() } ?: "这段文字处理失败，可以重试或重新提交。"
+    }
+}
+
+private fun RecordingEntity.textProcessingStatusDetail(): String {
+    return when (processingStageKind()) {
+        ProcessingStageKind.QUEUED -> "文字已到云端，等待后台任务开始处理。"
+        ProcessingStageKind.ASR -> "云端正在理解文字内容。"
+        ProcessingStageKind.ARTICLE -> "云端正在把文字整理成适合公众号阅读的文章。"
+        ProcessingStageKind.ARTICLE_READY -> "文章已生成，可以先阅读、复制或分享；公众号草稿仍在准备或同步中。"
+        ProcessingStageKind.WECHAT -> "文章已生成，正在准备微信公众号草稿。"
+        ProcessingStageKind.COMPLETED -> completedStatusDetail()
+        ProcessingStageKind.FAILED -> lastError?.takeIf { it.isNotBlank() } ?: "云端处理阶段失败，等待重试或人工检查。"
+        ProcessingStageKind.ASR_FAILED -> lastError?.takeIf { it.isNotBlank() } ?: "文字理解失败，可以重新提交。"
+        ProcessingStageKind.ARTICLE_FAILED -> lastError?.takeIf { it.isNotBlank() } ?: "文章生成失败，可以重试或反馈诊断信息。"
+        ProcessingStageKind.WECHAT_FAILED -> lastError?.takeIf { it.isNotBlank() } ?: "公众号草稿创建失败，可以先复制正文。"
+        ProcessingStageKind.REVISION_FAILED -> lastError?.takeIf { it.isNotBlank() } ?: "这次说话修改失败，原文章仍可使用。"
+        ProcessingStageKind.UNKNOWN -> "云端正在整理这段文字。"
+    }
+}
+
+private fun RecordingEntity.textWorkflowNextActionLabel(): String {
+    return when (status.asRecordingStatus()) {
+        RecordingStatus.LOCAL_RECORDED -> "下一步：提交文字；如果反复失败，先到设置页检查 FILES_TOKEN。"
+        RecordingStatus.UPLOADING -> "下一步：保持网络可用，等待文字提交完成；也可以下拉或点同步刷新状态。"
+        RecordingStatus.UPLOADED -> "下一步：等待云端任务接手；如果长时间不动，点同步确认后台进度。"
+        RecordingStatus.PROCESSING -> when (processingStageKind()) {
+            ProcessingStageKind.QUEUED -> "下一步：等待后台开始理解文字；如果超过几分钟没有变化，点同步刷新。"
+            ProcessingStageKind.ASR -> "下一步：等待云端理解文字内容。"
+            ProcessingStageKind.ARTICLE -> "下一步：等待文章标题和正文生成；完成后可以复制、分享或导出。"
+            ProcessingStageKind.ARTICLE_READY -> "下一步：可以先查看、复制或分享正文；点同步等待公众号草稿状态。"
+            ProcessingStageKind.WECHAT -> "下一步：等待公众号草稿创建；草稿可用后会显示打开入口。"
+            ProcessingStageKind.COMPLETED -> completedNextActionLabel()
+            ProcessingStageKind.FAILED,
+            ProcessingStageKind.ASR_FAILED,
+            ProcessingStageKind.ARTICLE_FAILED,
+            ProcessingStageKind.WECHAT_FAILED,
+            ProcessingStageKind.REVISION_FAILED -> failureNextActionLabel()
+            ProcessingStageKind.UNKNOWN -> "下一步：等待云端整理文字；如果长时间没有更新，点同步刷新。"
+        }
+        RecordingStatus.COMPLETED -> completedNextActionLabel()
+        RecordingStatus.FAILED -> failureNextActionLabel()
     }
 }
 
@@ -402,18 +465,19 @@ private fun RecordingEntity.processingStageKind(): ProcessingStageKind {
 }
 
 private fun RecordingEntity.workflowIndexFromProcessingStage(): Int? {
+    val textSource = isTextSource()
     return when (processingStageKind()) {
         ProcessingStageKind.QUEUED -> 2
-        ProcessingStageKind.ASR -> 3
-        ProcessingStageKind.ARTICLE -> 4
-        ProcessingStageKind.ARTICLE_READY -> 5
+        ProcessingStageKind.ASR -> if (textSource) 2 else 3
+        ProcessingStageKind.ARTICLE -> if (textSource) 3 else 4
+        ProcessingStageKind.ARTICLE_READY -> if (textSource) 4 else 5
         ProcessingStageKind.WECHAT -> 5
         ProcessingStageKind.COMPLETED -> completedWorkflowIndex()
         ProcessingStageKind.FAILED -> null
-        ProcessingStageKind.ASR_FAILED -> 3
-        ProcessingStageKind.ARTICLE_FAILED -> 4
+        ProcessingStageKind.ASR_FAILED -> if (textSource) 2 else 3
+        ProcessingStageKind.ARTICLE_FAILED -> if (textSource) 3 else 4
         ProcessingStageKind.WECHAT_FAILED -> 5
-        ProcessingStageKind.REVISION_FAILED -> 4
+        ProcessingStageKind.REVISION_FAILED -> if (textSource) 3 else 4
         ProcessingStageKind.UNKNOWN -> null
     }
 }
@@ -527,6 +591,55 @@ private val WORKFLOW_BASE_STEPS = listOf(
         state = WorkflowStepState.PENDING,
     ),
 )
+
+private val WORKFLOW_TEXT_STEPS = listOf(
+    RecordingWorkflowStep(
+        number = 1,
+        title = "保存文字",
+        detail = "把输入或粘贴的文字保存成一条内容任务。",
+        state = WorkflowStepState.PENDING,
+    ),
+    RecordingWorkflowStep(
+        number = 2,
+        title = "提交云端",
+        detail = "把文字提交到云端；网络或 Token 配置异常会停在这里。",
+        state = WorkflowStepState.PENDING,
+    ),
+    RecordingWorkflowStep(
+        number = 3,
+        title = "内容理解",
+        detail = "云端理解原始文字里真正想表达的主题和结构。",
+        state = WorkflowStepState.PENDING,
+    ),
+    RecordingWorkflowStep(
+        number = 4,
+        title = "文章改写",
+        detail = "把原始文字整理成标题和适合公众号阅读的正文。",
+        state = WorkflowStepState.PENDING,
+    ),
+    RecordingWorkflowStep(
+        number = 5,
+        title = "封面生成",
+        detail = "根据文章标题生成公众号封面图。",
+        state = WorkflowStepState.PENDING,
+    ),
+    RecordingWorkflowStep(
+        number = 6,
+        title = "公众号草稿",
+        detail = "把整理好的标题、正文和封面准备到微信公众号草稿箱。",
+        state = WorkflowStepState.PENDING,
+    ),
+    RecordingWorkflowStep(
+        number = 7,
+        title = "人工发布确认",
+        detail = "打开草稿做最后一眼检查，再由你决定是否发布。",
+        state = WorkflowStepState.PENDING,
+    ),
+)
+
+private fun RecordingEntity.workflowBaseSteps(): List<RecordingWorkflowStep> {
+    return if (isTextSource()) WORKFLOW_TEXT_STEPS else WORKFLOW_BASE_STEPS
+}
 
 private fun RecordingEntity.completedStatusDetail(): String {
     return when {

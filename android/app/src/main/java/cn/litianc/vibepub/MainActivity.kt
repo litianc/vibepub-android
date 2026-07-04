@@ -20,7 +20,10 @@ import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.WorkManager
 import cn.litianc.vibepub.data.AppDatabase
+import cn.litianc.vibepub.data.RecordingEntity
+import cn.litianc.vibepub.data.RecordingSourceType
 import cn.litianc.vibepub.data.RecordingStatus
+import cn.litianc.vibepub.data.asRecordingStatus
 import cn.litianc.vibepub.ui.navigation.AppNavigation
 import cn.litianc.vibepub.ui.theme.VibePubTheme
 import kotlinx.coroutines.Dispatchers
@@ -132,6 +135,7 @@ fun VibePubApp(
                         durationMs = imported.durationMs,
                         status = initialStatus,
                         lastError = initialError,
+                        sourceType = RecordingSourceType.AUDIO_FILE,
                     )
                     Triple(imported.file, hasUploadToken, saved)
                 }
@@ -231,6 +235,53 @@ fun VibePubApp(
         },
         onImportAudio = {
             audioImportLauncher.launch(arrayOf("audio/*", "video/mp4"))
+        },
+        onSubmitText = submitText@{ text, titleHint ->
+            if (preferences.filesToken.isBlank()) {
+                Toast.makeText(context, "请先在设置中配置 FILES_TOKEN", Toast.LENGTH_LONG).show()
+                return@submitText false
+            }
+
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    val submitted = TextSubmissionApi.submitText(
+                        apiBaseUrl = preferences.apiBaseUrl,
+                        filesToken = preferences.filesToken,
+                        text = text,
+                        titleHint = titleHint,
+                    )
+                    val nowMs = System.currentTimeMillis()
+                    AppDatabase.getDatabase(context)
+                        .recordingDao()
+                        .upsertBest(
+                            RecordingEntity(
+                                filename = submitted.filename,
+                                durationMs = 0L,
+                                timestamp = nowMs,
+                                status = submitted.status.asRecordingStatus().value,
+                                articleTitle = titleHint?.trim()?.takeIf { it.isNotBlank() },
+                                rawTextPreview = text.trim().take(80),
+                                remoteStatusUpdatedAt = null,
+                                processingStage = submitted.processingStage ?: "REWRITING",
+                                sourceType = RecordingSourceType.TEXT.value,
+                                inputText = text.trim(),
+                            ),
+                        )
+                    submitted
+                }
+            }
+
+            result.fold(
+                onSuccess = {
+                    runSync()
+                    Toast.makeText(context, "文字已提交，正在生成文章", Toast.LENGTH_SHORT).show()
+                    true
+                },
+                onFailure = { error ->
+                    Toast.makeText(context, error.message ?: "文字提交失败，请稍后重试", Toast.LENGTH_SHORT).show()
+                    false
+                },
+            )
         },
         onStopRecording = {
             if (!isRecording) return@AppNavigation true

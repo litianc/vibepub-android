@@ -11,7 +11,9 @@ import java.net.URL
 import java.net.URLEncoder
 import cn.litianc.vibepub.data.AppDatabase
 import cn.litianc.vibepub.data.RecordingEntity
+import cn.litianc.vibepub.data.RecordingSourceType
 import cn.litianc.vibepub.data.RecordingStatus
+import cn.litianc.vibepub.data.asRecordingSourceType
 import cn.litianc.vibepub.data.asRecordingStatus
 import org.json.JSONObject
 import java.text.SimpleDateFormat
@@ -156,6 +158,13 @@ internal fun mergeRemoteRecordingFromListItem(
     val wechatUrl = recObj.wechatUrlOrNull()
     val coverImageUrl = recObj.coverImageUrlOrNull()
     val processingStage = recObj.processingStageOrNull()
+    val sourceType = recObj.optString("source_type", "")
+        .ifBlank { recObj.optString("sourceType", "") }
+        .ifBlank { inferSourceTypeFromFilename(filename).value }
+        .asRecordingSourceType()
+    val inputText = recObj.optString("input_text", "")
+        .ifBlank { recObj.optString("inputText", "") }
+        .blankToNullValue()
 
     if (existing == null) {
         return RecordingEntity(
@@ -172,6 +181,8 @@ internal fun mergeRemoteRecordingFromListItem(
             wechatUrl = wechatUrl,
             coverImageUrl = coverImageUrl,
             processingStage = processingStage,
+            sourceType = sourceType.value,
+            inputText = inputText,
         )
     }
 
@@ -207,7 +218,18 @@ internal fun mergeRemoteRecordingFromListItem(
         wechatUrl = wechatUrl ?: existing.wechatUrl,
         coverImageUrl = coverImageUrl ?: existing.coverImageUrl,
         processingStage = processingStage ?: existing.processingStage,
+        sourceType = sourceType.value,
+        inputText = inputText ?: existing.inputText,
     )
+}
+
+internal fun inferSourceTypeFromFilename(filename: String): RecordingSourceType {
+    val normalized = filename.trim().lowercase(Locale.ROOT)
+    return when {
+        normalized.endsWith(".txt") || normalized.endsWith(".json") && normalized.contains("-text-") -> RecordingSourceType.TEXT
+        normalized.contains("imported-audio") -> RecordingSourceType.AUDIO_FILE
+        else -> RecordingSourceType.RECORDING
+    }
 }
 
 class SyncWorker(

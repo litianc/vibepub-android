@@ -16,6 +16,7 @@ import cn.litianc.vibepub.ui.screens.DetailScreen
 import cn.litianc.vibepub.ui.screens.HomeScreen
 import cn.litianc.vibepub.ui.screens.RecordingScreen
 import cn.litianc.vibepub.ui.screens.SettingsScreen
+import cn.litianc.vibepub.ui.screens.TextInputScreen
 import cn.litianc.vibepub.data.AppDatabase
 
 @Composable
@@ -27,6 +28,7 @@ fun AppNavigation(
     onDeleteRecording: (RecordingEntity) -> Unit,
     onStartRecording: () -> Boolean,
     onImportAudio: () -> Unit,
+    onSubmitText: suspend (text: String, titleHint: String?) -> Boolean,
     onStopRecording: suspend () -> Boolean,
     shouldOpenRecording: Boolean = false,
     onRecordingOpened: () -> Unit = {},
@@ -67,6 +69,7 @@ fun AppNavigation(
                     }
                 },
                 onImportAudioClick = onImportAudio,
+                onTextInputClick = { navController.navigate("text_input") },
                 onRecordingClick = { recording ->
                     navController.navigate("detail/${Uri.encode(recording.filename)}")
                 }
@@ -90,6 +93,13 @@ fun AppNavigation(
         composable("settings") {
             SettingsScreen(
                 onBackClick = { navController.popBackStack() }
+            )
+        }
+
+        composable("text_input") {
+            TextInputScreen(
+                onBackClick = { navController.popBackStack() },
+                onSubmitText = onSubmitText,
             )
         }
         

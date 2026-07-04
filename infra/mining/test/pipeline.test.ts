@@ -28,7 +28,9 @@ vi.mock('../src/r2.js', () => ({
   downloadFile: vi.fn(),
   deleteFile: vi.fn(),
   uploadCoverImage: vi.fn(),
-  uploadTranscript: vi.fn()
+  uploadTranscript: vi.fn(),
+  isSupportedTextSubmissionKey: (key: string) =>
+    key.startsWith('text-submissions/') && (key.endsWith('.txt') || key.endsWith('.json')),
 }));
 
 vi.mock('../src/asr.js', () => ({
@@ -198,6 +200,66 @@ describe('VibePub Cloud Pipeline', () => {
       coverImageUrl: 'https://vibepub.example.test/api/files/covers%2FVibePub-2026-06-30-044540-0m30s-Debug-Audio-Import.png',
       processingStage: 'COMPLETED',
       wechatDraftId: 'MEDIA_ID_123',
+    }));
+  });
+
+  it('should process text submissions without ASR', async () => {
+    const fileKey = 'text-submissions/VibePub-2026-07-04-112233-Text-abcd1234.txt';
+    const filename = 'VibePub-2026-07-04-112233-Text-abcd1234.txt';
+    const article = {
+      title: '把手动输入也纳入成文流程',
+      content: '<p>这是一篇由手动文字生成的公众号文章。</p>'.repeat(4),
+      imagePrompt: 'A clean editorial cover',
+      coverTitle: ['手动输入', '也能成文'],
+      coverSubtitle: '不方便录音时的入口',
+    };
+
+    vi.mocked(listUnprocessedFiles).mockResolvedValue([fileKey]);
+    vi.mocked(downloadFile).mockResolvedValue(Buffer.from(JSON.stringify({
+      text: '这是一段用户在手机上手动输入的原始想法。',
+      titleHint: '手动输入也要能发布',
+    })));
+    vi.mocked(processAudioText).mockResolvedValue(article);
+    vi.mocked(generateWechatCoverBuffer).mockResolvedValue(Buffer.from('fake-cover'));
+    vi.mocked(getAccessToken).mockResolvedValue('wechat-token');
+    vi.mocked(publishDraft).mockResolvedValue('MEDIA_ID_TEXT');
+    vi.mocked(uploadCoverImage).mockResolvedValue();
+    vi.mocked(uploadTranscript).mockResolvedValue();
+    vi.mocked(deleteFile).mockResolvedValue();
+
+    await expect(main()).resolves.toBeUndefined();
+
+    expect(createPresignedDownloadUrl).not.toHaveBeenCalled();
+    expect(transcribeAudioUrl).not.toHaveBeenCalled();
+    expect(processAudioText).toHaveBeenCalledWith(
+      '标题提示：手动输入也要能发布\n\n这是一段用户在手机上手动输入的原始想法。',
+    );
+
+    const fetchCalls = vi.mocked(fetch).mock.calls.map(([, init]) => JSON.parse(String(init?.body)));
+    expect(fetchCalls.map(call => call.processingStage)).toEqual([
+      'QUEUED',
+      'REWRITING',
+      'REWRITING',
+      'ARTICLE_READY',
+      'DRAFTING',
+      'COMPLETED',
+    ]);
+    expect(uploadTranscript).toHaveBeenCalledWith(
+      'transcripts/VibePub-2026-07-04-112233-Text-abcd1234.json',
+      expect.any(String),
+    );
+    expect(uploadCoverImage).toHaveBeenCalledWith(
+      'covers/VibePub-2026-07-04-112233-Text-abcd1234.png',
+      Buffer.from('fake-cover'),
+    );
+    expect(fetchCalls).toContainEqual(expect.objectContaining({
+      filename,
+      status: 'COMPLETED',
+      articleTitle: article.title,
+      articleContent: article.content,
+      coverImageUrl: 'https://vibepub.example.test/api/files/covers%2FVibePub-2026-07-04-112233-Text-abcd1234.png',
+      processingStage: 'COMPLETED',
+      wechatDraftId: 'MEDIA_ID_TEXT',
     }));
   });
 

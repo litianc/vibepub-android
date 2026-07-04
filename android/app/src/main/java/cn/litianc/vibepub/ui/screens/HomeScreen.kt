@@ -3,7 +3,9 @@ package cn.litianc.vibepub.ui.screens
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -24,6 +26,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Mic
@@ -41,7 +44,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -53,6 +55,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -60,7 +63,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChange
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -97,6 +108,7 @@ import cn.litianc.vibepub.ui.theme.IconLightRedBackground
 import cn.litianc.vibepub.ui.theme.PrimaryRed
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.withTimeoutOrNull
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -107,6 +119,7 @@ internal data class HomeSyncNotice(
 
 private const val HOME_REFRESH_FINISH_DELAY_MS = 450L
 private const val HOME_REFRESH_TIMEOUT_MS = 3_500L
+private const val RECORD_GESTURE_SELECTION_THRESHOLD_DP = 76
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
@@ -120,6 +133,7 @@ fun HomeScreen(
     onDeleteRecording: (RecordingEntity) -> Unit,
     onRecordClick: () -> Unit,
     onImportAudioClick: () -> Unit,
+    onTextInputClick: () -> Unit,
     onRecordingClick: (RecordingEntity) -> Unit,
 ) {
     val recordings by recordingsFlow.collectAsState(initial = emptyList())
@@ -128,7 +142,6 @@ fun HomeScreen(
     var isRefreshing by remember { mutableStateOf(false) }
     var refreshStartedSyncAtMs by remember { mutableStateOf<Long?>(null) }
     var lastAutoRefreshRequestAtMs by remember { mutableStateOf(0L) }
-    var showAudioImportSheet by remember { mutableStateOf(false) }
 
     fun requestRefresh() {
         refreshStartedSyncAtMs = lastSyncAtMs
@@ -163,16 +176,6 @@ fun HomeScreen(
             }
             delay(ACTIVE_RECORDING_AUTO_REFRESH_INTERVAL_MS)
         }
-    }
-
-    if (showAudioImportSheet) {
-        AudioImportOptionsSheet(
-            onDismiss = { showAudioImportSheet = false },
-            onChooseAudio = {
-                showAudioImportSheet = false
-                onImportAudioClick()
-            },
-        )
     }
 
     Scaffold(
@@ -212,10 +215,10 @@ fun HomeScreen(
         floatingActionButton = {
             RecordActionButton(
                 onRecordClick = onRecordClick,
-                onImportAudioClick = { showAudioImportSheet = true },
+                onImportAudioClick = onImportAudioClick,
+                onTextInputClick = onTextInputClick,
                 modifier = Modifier
-                    .size(72.dp)
-                    .testTag("RecordButton"),
+                    .testTag("RecordGestureArea"),
             )
         },
         floatingActionButtonPosition = androidx.compose.material3.FabPosition.Center,
@@ -237,7 +240,7 @@ fun HomeScreen(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Column {
-                        Text("我的录音", fontWeight = FontWeight.Bold)
+                        Text("我的内容", fontWeight = FontWeight.Bold)
                         Text(
                             "${recordings.size} 条 · ${lastSyncLabel(lastSyncAtMs)}",
                             style = MaterialTheme.typography.bodySmall,
@@ -290,94 +293,163 @@ fun HomeScreen(
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun RecordActionButton(
     onRecordClick: () -> Unit,
     onImportAudioClick: () -> Unit,
+    onTextInputClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val density = LocalDensity.current
+    val haptics = LocalHapticFeedback.current
+    val thresholdPx = with(density) { RECORD_GESTURE_SELECTION_THRESHOLD_DP.dp.toPx() }
+    var isSelectorVisible by remember { mutableStateOf(false) }
+    var dragOffsetX by remember { mutableFloatStateOf(0f) }
+    var lastSelectedAction by remember { mutableStateOf(RecordGestureAction.NONE) }
+    val selectedAction = recordGestureActionForOffset(dragOffsetX, thresholdPx)
+
     Box(
         modifier = modifier
-            .clip(CircleShape)
-            .background(PrimaryRed)
-            .combinedClickable(
-                onClick = onRecordClick,
-                onLongClick = onImportAudioClick,
-                onLongClickLabel = "选择音频上传",
-            ),
+            .size(width = 292.dp, height = 118.dp),
         contentAlignment = Alignment.Center,
     ) {
-        Icon(
-            Icons.Default.Mic,
-            contentDescription = "Record",
-            tint = Color.White,
-            modifier = Modifier.size(32.dp),
+        if (isSelectorVisible) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                RecordGestureOption(
+                    label = "上传录音",
+                    selected = selectedAction == RecordGestureAction.IMPORT_AUDIO,
+                    icon = { tint ->
+                        Icon(Icons.Default.Upload, contentDescription = null, tint = tint, modifier = Modifier.size(24.dp))
+                    },
+                    modifier = Modifier.testTag("RecordGestureImportAudioOption"),
+                )
+                RecordGestureOption(
+                    label = "输入文字",
+                    selected = selectedAction == RecordGestureAction.TEXT_INPUT,
+                    icon = { tint ->
+                        Icon(Icons.Default.Description, contentDescription = null, tint = tint, modifier = Modifier.size(24.dp))
+                    },
+                    modifier = Modifier.testTag("RecordGestureTextOption"),
+                )
+            }
+        }
+
+        Box(
+            modifier = Modifier
+                .size(72.dp)
+                .clip(CircleShape)
+                .background(PrimaryRed)
+                .semantics {
+                    contentDescription = "Record"
+                    onClick(label = "开始录音") {
+                        onRecordClick()
+                        true
+                    }
+                }
+                .pointerInput(onRecordClick, onImportAudioClick, onTextInputClick) {
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false)
+                        dragOffsetX = 0f
+                        lastSelectedAction = RecordGestureAction.NONE
+                        val upBeforeLongPress = withTimeoutOrNull(viewConfiguration.longPressTimeoutMillis) {
+                            waitForUpOrCancellation()
+                        }
+                        if (upBeforeLongPress != null) {
+                            onRecordClick()
+                            return@awaitEachGesture
+                        }
+
+                        isSelectorVisible = true
+                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                        var isReleased = false
+                        while (!isReleased) {
+                            val event = awaitPointerEvent()
+                            val change = event.changes.firstOrNull { it.id == down.id } ?: event.changes.firstOrNull()
+                            if (change == null || !change.pressed) {
+                                isReleased = true
+                            } else {
+                                dragOffsetX += change.positionChange().x
+                                val nextAction = recordGestureActionForOffset(dragOffsetX, thresholdPx)
+                                if (nextAction != RecordGestureAction.NONE && nextAction != lastSelectedAction) {
+                                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                    lastSelectedAction = nextAction
+                                }
+                                change.consume()
+                            }
+                        }
+
+                        val action = recordGestureActionForOffset(dragOffsetX, thresholdPx)
+                        isSelectorVisible = false
+                        dragOffsetX = 0f
+                        lastSelectedAction = RecordGestureAction.NONE
+                        when (action) {
+                            RecordGestureAction.IMPORT_AUDIO -> onImportAudioClick()
+                            RecordGestureAction.TEXT_INPUT -> onTextInputClick()
+                            RecordGestureAction.NONE -> Unit
+                        }
+                    }
+                }
+                .testTag("RecordButton"),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                Icons.Default.Mic,
+                contentDescription = null,
+                tint = Color.White,
+                modifier = Modifier.size(32.dp),
+            )
+        }
+    }
+}
+
+@Composable
+private fun RecordGestureOption(
+    label: String,
+    selected: Boolean,
+    icon: @Composable (Color) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val containerColor = if (selected) PrimaryRed else MaterialTheme.colorScheme.surface
+    val contentColor = if (selected) Color.White else PrimaryRed
+    Column(
+        modifier = modifier,
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .size(if (selected) 58.dp else 52.dp)
+                .clip(CircleShape)
+                .background(containerColor),
+            contentAlignment = Alignment.Center,
+        ) {
+            icon(contentColor)
+        }
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodySmall,
+            color = if (selected) PrimaryRed else MaterialTheme.colorScheme.onSurfaceVariant,
+            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+            maxLines = 1,
         )
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun AudioImportOptionsSheet(
-    onDismiss: () -> Unit,
-    onChooseAudio: () -> Unit,
-) {
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        modifier = Modifier.testTag("AudioImportSheet"),
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 20.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            Text(
-                text = "上传录音",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold,
-            )
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(10.dp))
-                    .clickable(onClick = onChooseAudio)
-                    .testTag("ChooseAudioImportButton")
-                    .padding(horizontal = 12.dp, vertical = 14.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(36.dp)
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(IconLightRedBackground),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Icon(
-                        Icons.Default.Upload,
-                        contentDescription = null,
-                        tint = PrimaryRed,
-                        modifier = Modifier.size(20.dp),
-                    )
-                }
-                Spacer(modifier = Modifier.width(12.dp))
-                Text(
-                    text = "选择音频文件",
-                    style = MaterialTheme.typography.bodyLarge,
-                    fontWeight = FontWeight.Medium,
-                )
-            }
-            TextButton(
-                onClick = onDismiss,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag("CancelAudioImportButton"),
-            ) {
-                Text("取消")
-            }
-            Spacer(modifier = Modifier.height(12.dp))
-        }
+internal enum class RecordGestureAction {
+    NONE,
+    IMPORT_AUDIO,
+    TEXT_INPUT,
+}
+
+internal fun recordGestureActionForOffset(offsetX: Float, thresholdPx: Float): RecordGestureAction {
+    return when {
+        offsetX <= -thresholdPx -> RecordGestureAction.IMPORT_AUDIO
+        offsetX >= thresholdPx -> RecordGestureAction.TEXT_INPUT
+        else -> RecordGestureAction.NONE
     }
 }
 
@@ -415,7 +487,7 @@ internal fun homeSyncNotice(
 ): HomeSyncNotice? {
     if (recordings.isEmpty()) return null
     if (recordings.any { it.status.asRecordingStatus() == RecordingStatus.LOCAL_RECORDED }) {
-        return HomeSyncNotice("有本机录音还没上传，先点录音卡片上的上传；反复失败时检查 FILES_TOKEN。")
+        return HomeSyncNotice("有本机内容还没上传，先点卡片上的上传；反复失败时检查 FILES_TOKEN。")
     }
     if (lastSyncAtMs <= 0L) {
         return HomeSyncNotice("还没有和云端同步过，点同步检查上传和处理进度。")
@@ -630,7 +702,7 @@ private fun EmptyHome() {
             Icon(Icons.Default.Mic, contentDescription = null, tint = PrimaryRed, modifier = Modifier.size(36.dp))
         }
         Spacer(modifier = Modifier.height(18.dp))
-        Text("还没有录音", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+        Text("还没有内容", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
         Spacer(modifier = Modifier.height(8.dp))
         Text(
             "说完一段想法，VibePub 会把它上传并整理成文章。",
@@ -899,11 +971,11 @@ private fun DeleteRecordingDialog(
     AlertDialog(
         modifier = Modifier.testTag("DeleteRecordingDialog"),
         onDismissRequest = onDismiss,
-        title = { Text("删除这条录音？") },
+        title = { Text("删除这条记录？") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(
-                    "将从本机移除录音、音频和结果文件，并尝试删除云端历史记录。",
+                    "将从本机移除内容、音频和结果文件，并尝试删除云端历史记录。",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

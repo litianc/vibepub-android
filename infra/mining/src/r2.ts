@@ -16,11 +16,22 @@ const s3 = new S3Client({
 });
 
 const SUPPORTED_INBOX_AUDIO_EXTENSIONS = [".m4a", ".mp3", ".mp4", ".wav"];
+const SUPPORTED_TEXT_SUBMISSION_EXTENSIONS = [".txt", ".json"];
 
 export function isSupportedInboxAudioKey(key: string): boolean {
   const normalized = key.toLowerCase();
   return key.startsWith("inbox/") &&
     SUPPORTED_INBOX_AUDIO_EXTENSIONS.some(extension => normalized.endsWith(extension));
+}
+
+export function isSupportedTextSubmissionKey(key: string): boolean {
+  const normalized = key.toLowerCase();
+  return key.startsWith("text-submissions/") &&
+    SUPPORTED_TEXT_SUBMISSION_EXTENSIONS.some(extension => normalized.endsWith(extension));
+}
+
+export function isSupportedPipelineInputKey(key: string): boolean {
+  return isSupportedInboxAudioKey(key) || isSupportedTextSubmissionKey(key);
 }
 
 export async function listUnprocessedFiles(): Promise<string[]> {
@@ -33,7 +44,7 @@ export async function listUnprocessedFiles(): Promise<string[]> {
     return [];
   }
   
-  return response.Contents.map(c => c.Key!).filter(isSupportedInboxAudioKey);
+  return response.Contents.map(c => c.Key!).filter(isSupportedPipelineInputKey);
 }
 
 export async function downloadFile(key: string): Promise<Buffer> {

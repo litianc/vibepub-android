@@ -16,6 +16,14 @@ class HomeScreenTest {
     }
 
     @Test
+    fun recordGestureActionUsesHorizontalThreshold() {
+        assertEquals(RecordGestureAction.NONE, recordGestureActionForOffset(offsetX = -75f, thresholdPx = 76f))
+        assertEquals(RecordGestureAction.IMPORT_AUDIO, recordGestureActionForOffset(offsetX = -76f, thresholdPx = 76f))
+        assertEquals(RecordGestureAction.TEXT_INPUT, recordGestureActionForOffset(offsetX = 76f, thresholdPx = 76f))
+        assertEquals(RecordGestureAction.NONE, recordGestureActionForOffset(offsetX = 12f, thresholdPx = 76f))
+    }
+
+    @Test
     fun lastSyncLabelShowsMissingSyncPlainly() {
         assertEquals("最近同步：尚未同步", lastSyncLabel(0L, nowMs = 10_000L))
     }
@@ -61,7 +69,7 @@ class HomeScreenTest {
             nowMs = 1_000L,
         )
 
-        assertEquals("有本机录音还没上传，先点录音卡片上的上传；反复失败时检查 FILES_TOKEN。", notice?.message)
+        assertEquals("有本机内容还没上传，先点卡片上的上传；反复失败时检查 FILES_TOKEN。", notice?.message)
     }
 
     @Test

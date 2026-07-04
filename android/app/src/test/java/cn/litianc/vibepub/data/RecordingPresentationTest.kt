@@ -31,6 +31,27 @@ class RecordingPresentationTest {
     }
 
     @Test
+    fun formatsTextSubmissionDisplayFields() {
+        val recording = RecordingEntity(
+            filename = "VibePub-2026-07-04-Text-abcd1234.txt",
+            durationMs = 0L,
+            timestamp = 1_771_000_000_000L,
+            status = RecordingStatus.PROCESSING.value,
+            rawTextPreview = "这是一段用户手动输入的想法",
+            processingStage = "REWRITING",
+            sourceType = RecordingSourceType.TEXT.value,
+        )
+
+        assertTrue(recording.displayTitle(Locale.CHINA).contains("文字想法"))
+        assertEquals("文字输入", recording.listDurationLabel())
+        assertEquals("正在成文", recording.statusLabel())
+        assertTrue(recording.statusDetail().contains("文字"))
+        assertEquals("第 4/7 步", recording.workflowProgressLabel())
+        assertTrue(recording.workflowCycleLabel().contains("保存文字 → 提交云端"))
+        assertTrue(recording.workflowHelpSummary().contains("这段文字"))
+    }
+
+    @Test
     fun prefersArticleTitleAndFailureMessage() {
         val recording = RecordingEntity(
             filename = "VibePub-test.m4a",

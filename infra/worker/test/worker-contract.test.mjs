@@ -482,6 +482,98 @@ test("dispatches mining workflow for the uploaded filename", async () => {
   });
 });
 
+test("creates text submission and dispatches mining workflow", async () => {
+  const originalFetch = globalThis.fetch;
+  const dispatches = [];
+  const putCalls = [];
+  const sqlCalls = [];
+  const valueCalls = [];
+  const waitUntilPromises = [];
+  globalThis.fetch = async (url, init = {}) => {
+    dispatches.push({
+      url: String(url),
+      init,
+      body: JSON.parse(String(init.body || "{}")),
+    });
+    return new Response(null, { status: 204 });
+  };
+
+  try {
+    const bucket = {
+      async put(key, body, options) {
+        putCalls.push({ key, body, options });
+      },
+    };
+    const db = {
+      prepare(sql) {
+        sqlCalls.push(sql);
+        const prepareIndex = sqlCalls.length;
+        return statement({
+          run: async (values) => {
+            valueCalls.push(values);
+            return { meta: { changes: prepareIndex === 1 ? 0 : 1 } };
+          },
+        });
+      },
+    };
+    const context = {
+      waitUntil(promise) {
+        waitUntilPromises.push(promise);
+      },
+    };
+
+    const response = await worker.fetch(
+      authorizedRequest("https://example.test/api/text-submissions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          text: "这是一段手动输入的文字，后续应该直接进入文章改写流程。",
+          title_hint: "文字输入测试",
+          source: "android_text",
+        }),
+      }),
+      createEnv({
+        FILES_BUCKET: bucket,
+        DB: db,
+        GITHUB_PAT: "github-token",
+      }),
+      context,
+    );
+
+    assert.equal(response.status, 202);
+    const body = await response.json();
+    assert.match(body.filename, /^VibePub-.+-Text-.+\.txt$/);
+    assert.equal(body.status, "PROCESSING");
+    assert.equal(body.processing_stage, "REWRITING");
+    assert.equal(putCalls.length, 1);
+    assert.equal(putCalls[0].key, `text-submissions/${body.filename}`);
+    assert.equal(putCalls[0].options.httpMetadata.contentType, "application/json; charset=utf-8");
+    assert.equal(JSON.parse(String(putCalls[0].body)).text, "这是一段手动输入的文字，后续应该直接进入文章改写流程。");
+    assert.match(sqlCalls[0], /source_type/);
+    assert.match(sqlCalls[1], /source_type/);
+    assert.deepEqual(valueCalls[1].slice(0, 9), [
+      "default_user",
+      body.filename,
+      `text-submissions/${body.filename}`,
+      "PROCESSING",
+      "REWRITING",
+      0,
+      "这是一段手动输入的文字，后续应该直接进入文章改写流程。",
+      "文字输入测试",
+      "TEXT",
+    ]);
+    assert.equal(waitUntilPromises.length, 1);
+    await Promise.all(waitUntilPromises);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(dispatches.length, 1);
+  assert.deepEqual(dispatches[0].body.inputs, {
+    target_filename: putCalls[0].key.replace("text-submissions/", ""),
+  });
+});
+
 test("creates voice article revision request and dispatches mining workflow with revision key", async () => {
   const originalFetch = globalThis.fetch;
   const dispatches = [];
