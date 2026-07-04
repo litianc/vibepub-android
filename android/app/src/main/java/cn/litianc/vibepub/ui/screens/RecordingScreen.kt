@@ -63,6 +63,9 @@ internal data class RecordingAudioFeedback(
 private const val HEARD_AUDIO_LEVEL_THRESHOLD = 0.12f
 private const val LOW_VOLUME_LEVEL_THRESHOLD = 0.08f
 private const val LOW_VOLUME_GRACE_SECONDS = 5
+private const val RECORDING_WAVE_BAR_COUNT = 17
+private const val RECORDING_WAVE_MIN_BAR_HEIGHT_DP = 8
+private const val RECORDING_WAVE_MAX_BAR_HEIGHT_DP = 58
 
 @Composable
 fun RecordingScreen(
@@ -234,23 +237,42 @@ private fun RecordingWave(
         label = "pulse",
     )
 
-    Row(
-        horizontalArrangement = Arrangement.spacedBy(5.dp),
-        verticalAlignment = Alignment.CenterVertically,
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(76.dp)
+            .testTag("RecordingWaveStableFrame"),
+        contentAlignment = Alignment.Center,
     ) {
-        repeat(17) { index ->
-            val base = 8 + ((index * 7 + secondsElapsed * 3) % 26)
-            val reactiveLift = 1f + amplitudeLevel.coerceIn(0f, 1f) * (0.45f + (index % 5) * 0.08f)
-            val animated = if (index % 2 == 0) pulse else 1f - (pulse * 0.35f)
-            Box(
-                modifier = Modifier
-                    .width(4.dp)
-                    .height((base * reactiveLift * (0.65f + animated * 0.45f)).roundToInt().dp)
-                    .clip(CircleShape)
-                    .background(PrimaryRed.copy(alpha = 0.24f + animated * 0.28f + amplitudeLevel * 0.26f)),
-            )
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(5.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            repeat(RECORDING_WAVE_BAR_COUNT) { index ->
+                val animated = if (index % 2 == 0) pulse else 1f - (pulse * 0.35f)
+                Box(
+                    modifier = Modifier
+                        .width(4.dp)
+                        .height(recordingWaveBarHeightDp(index, secondsElapsed, amplitudeLevel, animated).dp)
+                        .clip(CircleShape)
+                        .background(PrimaryRed.copy(alpha = 0.24f + animated * 0.28f + amplitudeLevel * 0.26f)),
+                )
+            }
         }
     }
+}
+
+internal fun recordingWaveBarHeightDp(
+    index: Int,
+    secondsElapsed: Int,
+    amplitudeLevel: Float,
+    animated: Float,
+): Int {
+    val base = RECORDING_WAVE_MIN_BAR_HEIGHT_DP + ((index * 7 + secondsElapsed * 3) % 26)
+    val reactiveLift = 1f + amplitudeLevel.coerceIn(0f, 1f) * (0.45f + (index % 5) * 0.08f)
+    return (base * reactiveLift * (0.65f + animated.coerceIn(0f, 1f) * 0.45f))
+        .roundToInt()
+        .coerceIn(RECORDING_WAVE_MIN_BAR_HEIGHT_DP, RECORDING_WAVE_MAX_BAR_HEIGHT_DP)
 }
 
 internal fun normalizeAmplitude(amplitude: Int): Float {

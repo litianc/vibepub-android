@@ -51,6 +51,19 @@ class RecordingScreenTest {
     }
 
     @Test
+    fun waveBarsStayWithinStableFrame() {
+        val heights = (0 until 17).flatMap { index ->
+            listOf(
+                recordingWaveBarHeightDp(index, secondsElapsed = 0, amplitudeLevel = 0f, animated = 0f),
+                recordingWaveBarHeightDp(index, secondsElapsed = 12, amplitudeLevel = 1f, animated = 1f),
+                recordingWaveBarHeightDp(index, secondsElapsed = 120, amplitudeLevel = 0.75f, animated = 0.5f),
+            )
+        }
+
+        assertTrue(heights.all { it in 8..58 })
+    }
+
+    @Test
     fun audioFeedbackEscalatesOnlyAfterSustainedSilence() {
         val warmingUp = recordingAudioFeedback(
             secondsElapsed = 3,
