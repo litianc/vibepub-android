@@ -10,6 +10,9 @@ WritingAgent is the standalone rewrite platform for VibePub. It owns writing sty
 - `GET /v1/layout-profiles`
 - `GET /v1/layout-profiles/:id`
 - `POST /v1/rewrite-jobs`
+- `POST /v1/revision-jobs`
+
+Rewrite and revision jobs can either reference a built-in `style_profile_id` or provide an inline private `style_profile_body` from Android local custom templates.
 
 All `/v1/*` endpoints require:
 

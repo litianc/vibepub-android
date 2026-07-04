@@ -2,12 +2,15 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   articleResultFromWritingAgentResponse,
   buildWritingAgentRequest,
+  buildWritingAgentRevisionRequest,
+  reviseArticle,
   rewriteArticle,
 } from "../src/writingAgent.js";
-import { processAudioText } from "../src/llm.js";
+import { processAudioText, reviseArticleWithInstruction } from "../src/llm.js";
 
 vi.mock("../src/llm.js", () => ({
   processAudioText: vi.fn(),
+  reviseArticleWithInstruction: vi.fn(),
 }));
 
 describe("WritingAgent mining adapter", () => {
@@ -59,6 +62,90 @@ describe("WritingAgent mining adapter", () => {
       profiles: {
         style_profile_id: "style_custom",
         layout_profile_id: "layout_custom",
+      },
+    });
+  });
+
+  it("lets recording profile selections override default rewrite profiles", () => {
+    process.env = {
+      ...originalEnv,
+      WRITING_AGENT_STYLE_PROFILE_ID: "style_env_default",
+      WRITING_AGENT_LAYOUT_PROFILE_ID: "layout_env_default",
+    };
+
+    expect(buildWritingAgentRequest({
+      rawText: "原始文字",
+      clientJobId: "job-selected-profile",
+      sourceType: "audio_transcript",
+      styleProfileId: "style_product_review",
+      styleProfileVersion: "2026-07-05",
+      styleProfileName: "我的产品复盘风格",
+      styleProfileDescription: "保留具体排查过程",
+      styleProfileBody: "请用真实克制的产品复盘风格写作。",
+      layoutProfileId: "wechat_clean_article",
+      layoutProfileVersion: "2026-07-05",
+    })).toMatchObject({
+      profiles: {
+        style_profile_id: "style_product_review",
+        style_profile_version: "2026-07-05",
+        style_profile_name: "我的产品复盘风格",
+        style_profile_description: "保留具体排查过程",
+        style_profile_body: "请用真实克制的产品复盘风格写作。",
+        layout_profile_id: "wechat_clean_article",
+        layout_profile_version: "2026-07-05",
+      },
+    });
+  });
+
+  it("falls back to the embedded revision path when WritingAgent is not configured", async () => {
+    process.env = { ...originalEnv, WRITING_AGENT_BASE_URL: "" };
+    vi.mocked(reviseArticleWithInstruction).mockResolvedValue({
+      title: "Fallback revision",
+      content: "<p>Fallback revision content</p>",
+      imagePrompt: "Fallback revision image",
+    });
+
+    await expect(reviseArticle({
+      rawText: "raw",
+      currentTitle: "旧标题",
+      currentContent: "<p>旧正文</p>",
+      instructionText: "补一个结论",
+      clientJobId: "revision-job-1",
+    })).resolves.toMatchObject({
+      title: "Fallback revision",
+      content: "<p>Fallback revision content</p>",
+    });
+
+    expect(reviseArticleWithInstruction).toHaveBeenCalledWith({
+      rawText: "raw",
+      currentTitle: "旧标题",
+      currentContent: "<p>旧正文</p>",
+      instructionText: "补一个结论",
+    });
+  });
+
+  it("builds a profile-based revision request", () => {
+    expect(buildWritingAgentRevisionRequest({
+      rawText: "原始口述",
+      currentTitle: "旧标题",
+      currentContent: "<p>旧正文</p>",
+      instructionText: "把标题改得直接一点",
+      clientJobId: "revision-job-2",
+    })).toMatchObject({
+      protocol_version: "vibepub.rewrite.v1",
+      client_job_id: "revision-job-2",
+      current_article: {
+        raw_text: "原始口述",
+        title: "旧标题",
+        content_html: "<p>旧正文</p>",
+      },
+      instruction: {
+        source_type: "voice_instruction",
+        text: "把标题改得直接一点",
+      },
+      profiles: {
+        style_profile_id: "style_litianc_default",
+        layout_profile_id: "wechat_clean_article",
       },
     });
   });
@@ -115,6 +202,48 @@ describe("WritingAgent mining adapter", () => {
 
     expect(fetch).toHaveBeenCalledWith(
       "https://writing-agent.example.test/v1/rewrite-jobs",
+      expect.objectContaining({
+        method: "POST",
+        headers: expect.objectContaining({
+          Authorization: "Bearer writing-token",
+        }),
+      }),
+    );
+  });
+
+  it("calls the configured WritingAgent revision endpoint", async () => {
+    process.env = {
+      ...originalEnv,
+      WRITING_AGENT_BASE_URL: "https://writing-agent.example.test",
+      WRITING_AGENT_TOKEN: "writing-token",
+    };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      status: "article_ready",
+      result: {
+        title: "新版平台文章",
+        content_html: "<p>新版平台正文</p>",
+        cover: {
+          image_prompt: "A revised clean image",
+        },
+      },
+    }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    })));
+
+    await expect(reviseArticle({
+      rawText: "raw text",
+      currentTitle: "旧标题",
+      currentContent: "<p>旧正文</p>",
+      instructionText: "补充一个结论",
+      clientJobId: "revision-job-3",
+    })).resolves.toMatchObject({
+      title: "新版平台文章",
+      content: "<p>新版平台正文</p>",
+    });
+
+    expect(fetch).toHaveBeenCalledWith(
+      "https://writing-agent.example.test/v1/revision-jobs",
       expect.objectContaining({
         method: "POST",
         headers: expect.objectContaining({

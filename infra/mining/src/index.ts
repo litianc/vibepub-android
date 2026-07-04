@@ -1,7 +1,6 @@
-import { listUnprocessedFiles, createPresignedDownloadUrl, deleteFile, downloadFile, uploadCoverImage, uploadTranscript, isSupportedTextSubmissionKey } from "./r2.js";
+import { listUnprocessedFiles, createPresignedDownloadUrl, deleteFile, downloadFile, getFileMetadata, uploadCoverImage, uploadTranscript, isSupportedTextSubmissionKey } from "./r2.js";
 import { transcribeAudioUrl } from "./asr.js";
-import { reviseArticleWithInstruction } from "./llm.js";
-import { rewriteArticle } from "./writingAgent.js";
+import { reviseArticle, rewriteArticle } from "./writingAgent.js";
 import { generateWechatCoverBuffer } from "./coverRenderer.js";
 import { getAccessToken, publishDraft, updateDraft } from "./wechat.js";
 import path from "path";
@@ -67,6 +66,16 @@ type StatusMetadata = {
   errorMessage?: string | null;
 };
 
+type ProfileSelection = {
+  styleProfileId?: string;
+  styleProfileVersion?: string;
+  styleProfileName?: string;
+  styleProfileDescription?: string;
+  styleProfileBody?: string;
+  layoutProfileId?: string;
+  layoutProfileVersion?: string;
+};
+
 type ArticleResult = Awaited<ReturnType<typeof rewriteArticle>>;
 
 type TranscriptMetadata = {
@@ -75,6 +84,7 @@ type TranscriptMetadata = {
   wechatDraftId?: string;
   wechatUrl?: string;
   errorMessage?: string;
+  profileSelection?: ProfileSelection;
 };
 
 type RevisionRequest = {
@@ -143,6 +153,13 @@ export function buildArticleTranscriptPayload(
     wechatDraftId: metadata.wechatDraftId,
     wechatUrl: metadata.wechatUrl,
     errorMessage: metadata.errorMessage,
+    styleProfileId: metadata.profileSelection?.styleProfileId,
+    styleProfileVersion: metadata.profileSelection?.styleProfileVersion,
+    styleProfileName: metadata.profileSelection?.styleProfileName,
+    styleProfileDescription: metadata.profileSelection?.styleProfileDescription,
+    styleProfileBody: metadata.profileSelection?.styleProfileBody,
+    layoutProfileId: metadata.profileSelection?.layoutProfileId,
+    layoutProfileVersion: metadata.profileSelection?.layoutProfileVersion,
   };
 }
 
@@ -176,6 +193,7 @@ async function completeWithArticleOnly(
   article: ArticleResult,
   error: unknown,
   transcriptAlreadySaved: boolean,
+  profileSelection: ProfileSelection = {},
 ): Promise<boolean> {
   const errorMessage = buildDraftFailureMessage(error);
   let transcriptSaved = transcriptAlreadySaved;
@@ -185,6 +203,7 @@ async function completeWithArticleOnly(
       processingStage: "DRAFT_FAILED",
       coverImageUrl: article.coverImageUrl,
       errorMessage,
+      profileSelection,
     });
     transcriptSaved = true;
   } catch (transcriptError) {
@@ -244,7 +263,10 @@ function optionalStringField(record: Record<string, unknown>, ...fields: string[
   return undefined;
 }
 
-function textSubmissionFromBuffer(key: string, buffer: Buffer): { rawText: string; titleHint?: string } {
+function textSubmissionFromBuffer(
+  key: string,
+  buffer: Buffer,
+): { rawText: string; titleHint?: string; profileSelection: ProfileSelection } {
   const body = buffer.toString("utf8").trim();
   if (!body) {
     throw new Error(`Text submission ${key} is empty`);
@@ -256,16 +278,58 @@ function textSubmissionFromBuffer(key: string, buffer: Buffer): { rawText: strin
     return {
       rawText,
       titleHint: optionalStringField(record, "titleHint", "title_hint"),
+      profileSelection: profileSelectionFromRecord(record),
     };
   }
 
-  return { rawText: body };
+  return { rawText: body, profileSelection: {} };
 }
 
 function rawTextForArticleInput(textInput: { rawText: string; titleHint?: string }): string {
   const titleHint = textInput.titleHint?.trim();
   if (!titleHint) return textInput.rawText;
   return `标题提示：${titleHint}\n\n${textInput.rawText}`;
+}
+
+function profileSelectionFromRecord(record: Record<string, unknown>): ProfileSelection {
+  return {
+    styleProfileId: optionalStringField(record, "styleProfileId", "style_profile_id"),
+    styleProfileVersion: optionalStringField(record, "styleProfileVersion", "style_profile_version"),
+    styleProfileName: optionalStringField(record, "styleProfileName", "style_profile_name"),
+    styleProfileDescription: optionalStringField(record, "styleProfileDescription", "style_profile_description"),
+    styleProfileBody: optionalStringField(record, "styleProfileBody", "style_profile_body"),
+    layoutProfileId: optionalStringField(record, "layoutProfileId", "layout_profile_id"),
+    layoutProfileVersion: optionalStringField(record, "layoutProfileVersion", "layout_profile_version"),
+  };
+}
+
+function profileSelectionFromMetadata(metadata: Record<string, string>): ProfileSelection {
+  return {
+    styleProfileId: metadata.styleprofileid || metadata.style_profile_id,
+    styleProfileVersion: metadata.styleprofileversion || metadata.style_profile_version,
+    styleProfileName: metadata.styleprofilename || metadata.style_profile_name,
+    styleProfileDescription: metadata.styleprofiledescription || metadata.style_profile_description,
+    layoutProfileId: metadata.layoutprofileid || metadata.layout_profile_id,
+    layoutProfileVersion: metadata.layoutprofileversion || metadata.layout_profile_version,
+  };
+}
+
+async function profileSelectionForAudioFile(fileKey: string): Promise<ProfileSelection> {
+  const metadataSelection = profileSelectionFromMetadata(await getFileMetadata(fileKey));
+  const sidecarKey = profileSelectionSidecarKey(path.basename(fileKey));
+  try {
+    const sidecar = parseJsonBuffer(sidecarKey, await downloadFile(sidecarKey));
+    return {
+      ...metadataSelection,
+      ...profileSelectionFromRecord(sidecar),
+    };
+  } catch {
+    return metadataSelection;
+  }
+}
+
+function profileSelectionSidecarKey(filename: string): string {
+  return `profile-selections/${filename.replace(/[^\w.\-]/g, "_")}.json`;
 }
 
 function revisionFailureMessage(error: unknown): string {
@@ -298,6 +362,7 @@ async function processRevisionRequest(revisionRequestKey: string): Promise<void>
     const currentContent = optionalStringField(transcript, "articleContent", "article_content", "content") || "";
     const currentDraftId = optionalStringField(transcript, "wechatDraftId", "mediaId", "wechat_draft_id");
     const currentWechatUrl = optionalStringField(transcript, "wechatUrl", "wechat_url");
+    const profileSelection = profileSelectionFromRecord(transcript);
 
     if (!currentContent) {
       throw new Error("原文章正文尚未生成");
@@ -314,11 +379,15 @@ async function processRevisionRequest(revisionRequestKey: string): Promise<void>
 
     await updateStatus(filename, "PROCESSING", { processingStage: "REWRITING" });
     console.log(`Voice revision instruction: ${instructionText.slice(0, 80)}...`);
-    const article = await reviseArticleWithInstruction({
+    const article = await reviseArticle({
       rawText,
       currentTitle,
       currentContent,
       instructionText,
+      clientJobId: revisionRequest.revisionId
+        ? `${filename}:${revisionRequest.revisionId}`
+        : `${filename}:${revisionRequestKey}`,
+      ...profileSelection,
     });
 
     await updateStatus(filename, "PROCESSING", {
@@ -364,6 +433,10 @@ async function processRevisionRequest(revisionRequestKey: string): Promise<void>
       wechatDraftId: currentDraftId,
       wechatUrl: currentWechatUrl,
       errorMessage: undefined,
+      styleProfileId: profileSelection.styleProfileId,
+      styleProfileVersion: profileSelection.styleProfileVersion,
+      layoutProfileId: profileSelection.layoutProfileId,
+      layoutProfileVersion: profileSelection.layoutProfileVersion,
       revisionHistory: [
         ...previousHistory,
         {
@@ -442,6 +515,7 @@ export async function main() {
     let rawText = "";
     let article: ArticleResult | undefined;
     let articleTranscriptSaved = false;
+    let profileSelection: ProfileSelection = {};
 
     try {
       console.log(`\n--- Processing file: ${fileKey} ---`);
@@ -452,9 +526,11 @@ export async function main() {
         console.log("Reading text submission from R2...");
         const textInput = textSubmissionFromBuffer(fileKey, await downloadFile(fileKey));
         rawText = rawTextForArticleInput(textInput);
+        profileSelection = textInput.profileSelection;
         processingStage = "REWRITING";
         await updateStatus(filename, "PROCESSING", { processingStage, rawText });
       } else {
+        profileSelection = await profileSelectionForAudioFile(fileKey);
         // 3. Build a short-lived R2 URL for Volcengine ASR.
         console.log("Creating temporary audio URL from R2...");
         const audioUrl = await createPresignedDownloadUrl(fileKey);
@@ -489,6 +565,7 @@ export async function main() {
         rawText,
         clientJobId: filename,
         sourceType: isSupportedTextSubmissionKey(fileKey) ? "text_submission" : "audio_transcript",
+        ...profileSelection,
       });
       console.log(`Generated Article Title: ${article.title}`);
 
@@ -501,6 +578,7 @@ export async function main() {
       });
       await saveArticleTranscript(fileKey, rawText, article, {
         processingStage: "ARTICLE_READY",
+        profileSelection,
       });
       articleTranscriptSaved = true;
 
@@ -534,6 +612,7 @@ export async function main() {
           processingStage: "COMPLETED",
           coverImageUrl,
           wechatDraftId: mediaId,
+          profileSelection,
         });
         articleTranscriptSaved = true;
       } catch (transcriptError) {
@@ -573,10 +652,11 @@ export async function main() {
           fileKey,
           filename,
           rawText,
-          article,
-          e,
-          articleTranscriptSaved,
-        );
+        article,
+        e,
+        articleTranscriptSaved,
+        profileSelection,
+      );
         if (recovered) {
           continue;
         }

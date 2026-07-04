@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import { processAudioText, reviseArticleWithInstruction } from '../src/llm.js';
 import { generateWechatCoverBuffer } from '../src/coverRenderer.js';
 import { getAccessToken, publishDraft, updateDraft } from '../src/wechat.js';
-import { createPresignedDownloadUrl, deleteFile, downloadFile, listUnprocessedFiles, uploadCoverImage, uploadTranscript } from '../src/r2.js';
+import { createPresignedDownloadUrl, deleteFile, downloadFile, getFileMetadata, listUnprocessedFiles, uploadCoverImage, uploadTranscript } from '../src/r2.js';
 import { transcribeAudioUrl } from '../src/asr.js';
 import { buildArticleTranscriptPayload, filterTargetFiles, main } from '../src/index.js';
 
@@ -26,6 +26,7 @@ vi.mock('../src/r2.js', () => ({
   listUnprocessedFiles: vi.fn(),
   createPresignedDownloadUrl: vi.fn(),
   downloadFile: vi.fn(),
+  getFileMetadata: vi.fn(),
   deleteFile: vi.fn(),
   uploadCoverImage: vi.fn(),
   uploadTranscript: vi.fn(),
@@ -53,6 +54,7 @@ describe('VibePub Cloud Pipeline', () => {
       ok: true,
       text: async () => '',
     }));
+    vi.mocked(getFileMetadata).mockResolvedValue({});
   });
 
   afterEach(() => {

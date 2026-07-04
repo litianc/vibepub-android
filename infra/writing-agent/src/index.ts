@@ -35,6 +35,9 @@ type RewriteJobRequest = {
   profiles?: {
     style_profile_id?: string;
     style_profile_version?: string;
+    style_profile_name?: string;
+    style_profile_description?: string;
+    style_profile_body?: string;
     layout_profile_id?: string;
     layout_profile_version?: string;
   };
@@ -45,9 +48,24 @@ type RewriteJobRequest = {
   };
 };
 
+type RevisionJobRequest = RewriteJobRequest & {
+  current_article?: {
+    raw_text?: string;
+    title?: string;
+    content?: string;
+    content_html?: string;
+  };
+  instruction?: {
+    source_type?: string;
+    text?: string;
+    language?: string;
+  };
+};
+
 const PROTOCOL_VERSION = "vibepub.rewrite.v1";
 const DEFAULT_GLM_BASE_URL = "https://open.bigmodel.cn/api/paas/v4/";
 const DEFAULT_GLM_MODEL = "glm-5.2";
+const MAX_INLINE_STYLE_PROFILE_BODY_CHARS = 8_000;
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -100,6 +118,18 @@ export default {
       }
     }
 
+    if (request.method === "POST" && url.pathname === "/v1/revision-jobs") {
+      try {
+        return await createRevisionJob(request, env);
+      } catch (error) {
+        if (error instanceof ResponseError) {
+          return json({ error: { code: error.code, message: error.message } }, error.status);
+        }
+        const message = error instanceof Error ? error.message : String(error);
+        return json({ error: { code: "internal_error", message } }, 500);
+      }
+    }
+
     return json({ error: { code: "not_found", message: "Route not found" } }, 404);
   },
 };
@@ -117,10 +147,7 @@ async function createRewriteJob(request: Request, env: Env): Promise<Response> {
     return json({ error: { code: "raw_text_required", message: "input.raw_text is required" } }, 400);
   }
 
-  const styleProfile = findStyleProfile(body.profiles?.style_profile_id);
-  if (!styleProfile) {
-    return profileNotFound("style_profile");
-  }
+  const styleProfile = resolveStyleProfile(body.profiles);
 
   const layoutProfile = findLayoutProfile(body.profiles?.layout_profile_id);
   if (!layoutProfile) {
@@ -143,6 +170,77 @@ async function createRewriteJob(request: Request, env: Env): Promise<Response> {
       layout_profile_version: layoutProfile.version,
     },
   }, 201);
+}
+
+async function createRevisionJob(request: Request, env: Env): Promise<Response> {
+  let body: RevisionJobRequest;
+  try {
+    body = await request.json();
+  } catch {
+    return json({ error: { code: "invalid_json", message: "Request body must be JSON" } }, 400);
+  }
+
+  const currentContent = body.current_article?.content_html?.trim() || body.current_article?.content?.trim();
+  if (!currentContent) {
+    return json({
+      error: { code: "current_article_required", message: "current_article.content_html is required" },
+    }, 400);
+  }
+
+  const instructionText = body.instruction?.text?.trim();
+  if (!instructionText) {
+    return json({
+      error: { code: "revision_instruction_required", message: "instruction.text is required" },
+    }, 400);
+  }
+
+  const styleProfile = resolveStyleProfile(body.profiles);
+
+  const layoutProfile = findLayoutProfile(body.profiles?.layout_profile_id);
+  if (!layoutProfile) {
+    return profileNotFound("layout_profile");
+  }
+
+  const jobId = await deterministicJobId(body, `${currentContent}\n\n${instructionText}`);
+  const prompt = buildRevisionPrompt(body, styleProfile, layoutProfile, currentContent, instructionText);
+  const article = await generateArticlePackage(env, prompt);
+
+  return json({
+    protocol_version: PROTOCOL_VERSION,
+    job_id: jobId,
+    status: "article_ready",
+    result: article,
+    profile_versions: {
+      style_profile_id: styleProfile.id,
+      style_profile_version: styleProfile.version,
+      layout_profile_id: layoutProfile.id,
+      layout_profile_version: layoutProfile.version,
+    },
+  }, 201);
+}
+
+function resolveStyleProfile(profiles: RewriteJobRequest["profiles"]): StyleProfile {
+  const inlineBody = normalizeInlineStyleProfileBody(profiles?.style_profile_body);
+  if (inlineBody) {
+    return {
+      id: profiles?.style_profile_id?.trim() || "custom_inline_style",
+      name: profiles?.style_profile_name?.trim() || "用户自定义写作风格",
+      version: profiles?.style_profile_version?.trim() || new Date().toISOString(),
+      description: profiles?.style_profile_description?.trim() || "由 VibePub App 提交的自定义风格画像",
+      body: inlineBody,
+    };
+  }
+
+  const styleProfile = findStyleProfile(profiles?.style_profile_id);
+  if (!styleProfile) {
+    throw new ResponseError(404, "invalid_profile", "style_profile does not exist or is not accessible");
+  }
+  return styleProfile;
+}
+
+function normalizeInlineStyleProfileBody(value: unknown): string {
+  if (typeof value !== "string") return "";
+  return value.trim().slice(0, MAX_INLINE_STYLE_PROFILE_BODY_CHARS);
 }
 
 function buildRewritePrompt(
@@ -175,6 +273,54 @@ ${titleHint || "无"}
 
 【原始文字】
 ${request.input?.raw_text?.trim()}`;
+}
+
+function buildRevisionPrompt(
+  request: RevisionJobRequest,
+  styleProfile: StyleProfile,
+  layoutProfile: LayoutProfile,
+  currentContent: string,
+  instructionText: string,
+): string {
+  const currentTitle = request.current_article?.title?.trim() || "无";
+  const rawText = request.current_article?.raw_text?.trim() || "无";
+  return `你是 WritingAgent，一个独立的公众号文章改写平台。
+用户已经有一篇公众号文章，现在又提交了一条修改指令。请根据写作风格画像和公众号排版要求，更新当前文章。
+
+【写作风格画像：${styleProfile.name} / ${styleProfile.version}】
+${styleProfile.body}
+
+【公众号排版要求：${layoutProfile.name} / ${layoutProfile.version}】
+${layoutProfile.body}
+
+【修改原则】
+1. 优先修改当前文章，不要因为一次修改指令就另起炉灶。
+2. 保留原文章核心观点、作者口吻和已经成立的结构。
+3. 对明确的删除、补充、换标题、调整结构、改变语气、增加例子等指令必须执行。
+4. 如果修改指令模糊，做最小合理修改，并保持文章完整可发布。
+5. 不要编造原始口述、当前文章和修改指令中都没有的信息。
+
+【输出要求】
+请只返回 JSON 对象，不要返回 Markdown 代码块或额外说明。
+JSON 必须包含：
+- title：新版文章标题。
+- content_html：新版正文 HTML 片段，遵守上面的公众号排版要求。
+- summary：可选摘要。
+- cover_title：新版公众号封面主标题短句数组，2-3 行。
+- cover_subtitle：可选封面副标题，12 字以内。
+- image_prompt：备用英文无字底图提示词；不要让图片模型生成中文标题。
+
+【原始口述转录】
+${rawText}
+
+【当前文章标题】
+${currentTitle}
+
+【当前文章正文】
+${currentContent}
+
+【用户修改指令】
+${instructionText}`;
 }
 
 async function generateArticlePackage(env: Env, prompt: string) {
@@ -214,8 +360,11 @@ async function generateArticlePackage(env: Env, prompt: string) {
   return articlePackageFromResponse(content);
 }
 
-async function deterministicJobId(body: RewriteJobRequest, rawText: string): Promise<string> {
-  const key = body.idempotency_key || body.client_job_id || rawText;
+async function deterministicJobId(
+  body: Pick<RewriteJobRequest, "idempotency_key" | "client_job_id">,
+  fallbackKey: string,
+): Promise<string> {
+  const key = body.idempotency_key || body.client_job_id || fallbackKey;
   const encoded = new TextEncoder().encode(key);
   const digest = await crypto.subtle.digest("SHA-256", encoded);
   const hex = Array.from(new Uint8Array(digest))

@@ -71,6 +71,7 @@ object RecordingUploadCoordinator {
             markUploadBlocked(context, file.name, "请先在设置中配置 FILES_TOKEN")
             return false
         }
+        val selectedProfile = preferences.selectedWritingStyleProfile()
 
         CoroutineScope(Dispatchers.IO).launch {
             val dao = AppDatabase.getDatabase(context).recordingDao()
@@ -97,6 +98,13 @@ object RecordingUploadCoordinator {
                     UploadWorker.KEY_FILE_PATH to file.absolutePath,
                     UploadWorker.KEY_API_BASE_URL to preferences.apiBaseUrl,
                     UploadWorker.KEY_FILES_TOKEN to token,
+                    UploadWorker.KEY_STYLE_PROFILE_ID to selectedProfile.id,
+                    UploadWorker.KEY_STYLE_PROFILE_VERSION to selectedProfile.version,
+                    UploadWorker.KEY_STYLE_PROFILE_NAME to selectedProfile.name,
+                    UploadWorker.KEY_STYLE_PROFILE_DESCRIPTION to selectedProfile.description,
+                    UploadWorker.KEY_STYLE_PROFILE_BODY to selectedProfile.body.orEmpty(),
+                    UploadWorker.KEY_LAYOUT_PROFILE_ID to preferences.selectedLayoutProfileId,
+                    UploadWorker.KEY_LAYOUT_PROFILE_VERSION to preferences.selectedLayoutProfileVersion,
                 ),
             )
 

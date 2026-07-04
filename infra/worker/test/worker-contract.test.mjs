@@ -174,6 +174,7 @@ test("deletes a recording and its remote files", async () => {
     "covers/VibePub-2026-06-30-214139-0m30s-Debug-Audio-Import.png",
     "inbox/VibePub-2026-06-30-214139-0m30s-Debug-Audio-Import.mp3",
     "inbox/custom-upload-key.m4a",
+    "profile-selections/VibePub-2026-06-30-214139-0m30s-Debug-Audio-Import.mp3.json",
     "transcripts/VibePub-2026-06-30-214139-0m30s-Debug-Audio-Import.json",
   ].sort());
 });
@@ -347,7 +348,16 @@ test("stores parsed duration on upload when duration column exists", async () =>
   const response = await worker.fetch(
     authorizedRequest("https://example.test/api/uploads", {
       method: "POST",
-      headers: { "X-File-Name": "VibePub-2026-06-30-160000-0m18s-Tue-Afternoon.m4a" },
+      headers: {
+        "X-File-Name": "VibePub-2026-06-30-160000-0m18s-Tue-Afternoon.m4a",
+        "X-Style-Profile-Id": "style_product_review",
+        "X-Style-Profile-Version": "2026-07-05",
+        "X-Style-Profile-Name-B64": Buffer.from("我的产品复盘风格").toString("base64"),
+        "X-Style-Profile-Description-B64": Buffer.from("保留具体排查过程").toString("base64"),
+        "X-Style-Profile-Body-B64": Buffer.from("请用真实克制的产品复盘风格写作。").toString("base64"),
+        "X-Layout-Profile-Id": "wechat_clean_article",
+        "X-Layout-Profile-Version": "2026-07-05",
+      },
       body: "audio",
     }),
     createEnv({ DB: db, FILES_BUCKET: bucket }),
@@ -355,7 +365,13 @@ test("stores parsed duration on upload when duration column exists", async () =>
   );
 
   assert.equal(response.status, 201);
-  assert.equal(putCalls.length, 1);
+  assert.equal(putCalls.length, 2);
+  assert.equal(putCalls[0].options.customMetadata.styleProfileId, "style_product_review");
+  assert.equal(putCalls[0].options.customMetadata.layoutProfileId, "wechat_clean_article");
+  assert.equal(putCalls[1].key, "profile-selections/VibePub-2026-06-30-160000-0m18s-Tue-Afternoon.m4a.json");
+  const sidecarBody = JSON.parse(String(putCalls[1].body));
+  assert.equal(sidecarBody.styleProfileName, "我的产品复盘风格");
+  assert.equal(sidecarBody.styleProfileBody, "请用真实克制的产品复盘风格写作。");
   assert.match(String(sqlCalls[0]), /duration_ms = COALESCE/);
   assert.match(String(sqlCalls[1]), /processing_stage, duration_ms/);
   assert.deepEqual(valueCalls[0].slice(0, 4), [
@@ -364,6 +380,12 @@ test("stores parsed duration on upload when duration column exists", async () =>
     "QUEUED",
     18_000,
   ]);
+  assert.deepEqual(valueCalls[0].slice(4, 8), [
+    "style_product_review",
+    "2026-07-05",
+    "wechat_clean_article",
+    "2026-07-05",
+  ]);
   assert.deepEqual(valueCalls[1].slice(0, 6), [
     "default_user",
     "VibePub-2026-06-30-160000-0m18s-Tue-Afternoon.m4a",
@@ -371,6 +393,12 @@ test("stores parsed duration on upload when duration column exists", async () =>
     "UPLOADED",
     "QUEUED",
     18_000,
+  ]);
+  assert.deepEqual(valueCalls[1].slice(6, 10), [
+    "style_product_review",
+    "2026-07-05",
+    "wechat_clean_article",
+    "2026-07-05",
   ]);
 });
 
@@ -530,6 +558,13 @@ test("creates text submission and dispatches mining workflow", async () => {
           text: "这是一段手动输入的文字，后续应该直接进入文章改写流程。",
           title_hint: "文字输入测试",
           source: "android_text",
+          style_profile_id: "style_product_review",
+          style_profile_version: "2026-07-05",
+          style_profile_name: "我的产品复盘风格",
+          style_profile_description: "保留具体排查过程",
+          style_profile_body: "请用真实克制的产品复盘风格写作。",
+          layout_profile_id: "wechat_clean_article",
+          layout_profile_version: "2026-07-05",
         }),
       }),
       createEnv({
@@ -548,7 +583,13 @@ test("creates text submission and dispatches mining workflow", async () => {
     assert.equal(putCalls.length, 1);
     assert.equal(putCalls[0].key, `text-submissions/${body.filename}`);
     assert.equal(putCalls[0].options.httpMetadata.contentType, "application/json; charset=utf-8");
-    assert.equal(JSON.parse(String(putCalls[0].body)).text, "这是一段手动输入的文字，后续应该直接进入文章改写流程。");
+    const textPayload = JSON.parse(String(putCalls[0].body));
+    assert.equal(textPayload.text, "这是一段手动输入的文字，后续应该直接进入文章改写流程。");
+    assert.equal(textPayload.styleProfileId, "style_product_review");
+    assert.equal(textPayload.styleProfileBody, "请用真实克制的产品复盘风格写作。");
+    assert.equal(textPayload.layoutProfileId, "wechat_clean_article");
+    assert.equal(putCalls[0].options.customMetadata.styleProfileId, "style_product_review");
+    assert.equal(putCalls[0].options.customMetadata.layoutProfileId, "wechat_clean_article");
     assert.match(sqlCalls[0], /source_type/);
     assert.match(sqlCalls[1], /source_type/);
     assert.deepEqual(valueCalls[1].slice(0, 9), [
@@ -561,6 +602,12 @@ test("creates text submission and dispatches mining workflow", async () => {
       "这是一段手动输入的文字，后续应该直接进入文章改写流程。",
       "文字输入测试",
       "TEXT",
+    ]);
+    assert.deepEqual(valueCalls[1].slice(9, 13), [
+      "style_product_review",
+      "2026-07-05",
+      "wechat_clean_article",
+      "2026-07-05",
     ]);
     assert.equal(waitUntilPromises.length, 1);
     await Promise.all(waitUntilPromises);

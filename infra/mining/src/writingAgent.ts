@@ -1,10 +1,17 @@
-import { processAudioText, type ArticleResult } from "./llm.js";
+import { processAudioText, reviseArticleWithInstruction, type ArticleResult } from "./llm.js";
 
 type RewriteArticleInput = {
   rawText: string;
   clientJobId: string;
   sourceType: "audio_transcript" | "text_submission";
   titleHint?: string;
+  styleProfileId?: string;
+  styleProfileVersion?: string;
+  styleProfileName?: string;
+  styleProfileDescription?: string;
+  styleProfileBody?: string;
+  layoutProfileId?: string;
+  layoutProfileVersion?: string;
 };
 
 type WritingAgentResponse = {
@@ -24,6 +31,21 @@ type WritingAgentResponse = {
     code?: string;
     message?: string;
   };
+};
+
+type ReviseArticleInput = {
+  rawText: string;
+  currentTitle: string;
+  currentContent: string;
+  instructionText: string;
+  clientJobId?: string;
+  styleProfileId?: string;
+  styleProfileVersion?: string;
+  styleProfileName?: string;
+  styleProfileDescription?: string;
+  styleProfileBody?: string;
+  layoutProfileId?: string;
+  layoutProfileVersion?: string;
 };
 
 export async function rewriteArticle(input: RewriteArticleInput): Promise<ArticleResult> {
@@ -54,6 +76,39 @@ export async function rewriteArticle(input: RewriteArticleInput): Promise<Articl
   return articleResultFromWritingAgentResponse(JSON.parse(responseBody) as WritingAgentResponse);
 }
 
+export async function reviseArticle(input: ReviseArticleInput): Promise<ArticleResult> {
+  const baseUrl = process.env.WRITING_AGENT_BASE_URL?.trim();
+  if (!baseUrl) {
+    return reviseArticleWithInstruction({
+      rawText: input.rawText,
+      currentTitle: input.currentTitle,
+      currentContent: input.currentContent,
+      instructionText: input.instructionText,
+    });
+  }
+
+  const token = process.env.WRITING_AGENT_TOKEN?.trim() || process.env.FILES_TOKEN?.trim();
+  if (!token) {
+    throw new Error("WRITING_AGENT_TOKEN or FILES_TOKEN is required when WRITING_AGENT_BASE_URL is set");
+  }
+
+  const response = await fetch(`${baseUrl.replace(/\/+$/, "")}/v1/revision-jobs`, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(buildWritingAgentRevisionRequest(input)),
+  });
+
+  const responseBody = await response.text();
+  if (!response.ok) {
+    throw new Error(`WritingAgent revision failed: HTTP ${response.status} ${responseBody.slice(0, 500)}`);
+  }
+
+  return articleResultFromWritingAgentResponse(JSON.parse(responseBody) as WritingAgentResponse);
+}
+
 export function buildWritingAgentRequest(input: RewriteArticleInput): Record<string, unknown> {
   return {
     protocol_version: "vibepub.rewrite.v1",
@@ -70,10 +125,66 @@ export function buildWritingAgentRequest(input: RewriteArticleInput): Record<str
       language: "zh-CN",
     },
     profiles: {
-      style_profile_id: process.env.WRITING_AGENT_STYLE_PROFILE_ID?.trim() || "style_litianc_default",
-      style_profile_version: process.env.WRITING_AGENT_STYLE_PROFILE_VERSION?.trim() || undefined,
-      layout_profile_id: process.env.WRITING_AGENT_LAYOUT_PROFILE_ID?.trim() || "wechat_clean_article",
-      layout_profile_version: process.env.WRITING_AGENT_LAYOUT_PROFILE_VERSION?.trim() || undefined,
+      style_profile_id: normalizeProfileValue(input.styleProfileId) ||
+        process.env.WRITING_AGENT_STYLE_PROFILE_ID?.trim() ||
+        "style_litianc_default",
+      style_profile_version: normalizeProfileValue(input.styleProfileVersion) ||
+        process.env.WRITING_AGENT_STYLE_PROFILE_VERSION?.trim() ||
+        undefined,
+      style_profile_name: normalizeProfileValue(input.styleProfileName) || undefined,
+      style_profile_description: normalizeProfileValue(input.styleProfileDescription) || undefined,
+      style_profile_body: normalizeProfileValue(input.styleProfileBody) || undefined,
+      layout_profile_id: normalizeProfileValue(input.layoutProfileId) ||
+        process.env.WRITING_AGENT_LAYOUT_PROFILE_ID?.trim() ||
+        "wechat_clean_article",
+      layout_profile_version: normalizeProfileValue(input.layoutProfileVersion) ||
+        process.env.WRITING_AGENT_LAYOUT_PROFILE_VERSION?.trim() ||
+        undefined,
+    },
+    output_contract: {
+      format: "wechat_article_package",
+      content_format: "html_fragment",
+      require_cover_fields: true,
+    },
+  };
+}
+
+export function buildWritingAgentRevisionRequest(input: ReviseArticleInput): Record<string, unknown> {
+  const clientJobId = input.clientJobId || `revision:${input.currentTitle}:${input.instructionText}`;
+  return {
+    protocol_version: "vibepub.rewrite.v1",
+    client_job_id: clientJobId,
+    idempotency_key: clientJobId,
+    user: {
+      user_id: process.env.WRITING_AGENT_USER_ID?.trim() || "default_user",
+      workspace_id: process.env.WRITING_AGENT_WORKSPACE_ID?.trim() || "vibepub-dogfood",
+    },
+    current_article: {
+      raw_text: input.rawText,
+      title: input.currentTitle,
+      content_html: input.currentContent,
+    },
+    instruction: {
+      source_type: "voice_instruction",
+      text: input.instructionText,
+      language: "zh-CN",
+    },
+    profiles: {
+      style_profile_id: normalizeProfileValue(input.styleProfileId) ||
+        process.env.WRITING_AGENT_STYLE_PROFILE_ID?.trim() ||
+        "style_litianc_default",
+      style_profile_version: normalizeProfileValue(input.styleProfileVersion) ||
+        process.env.WRITING_AGENT_STYLE_PROFILE_VERSION?.trim() ||
+        undefined,
+      style_profile_name: normalizeProfileValue(input.styleProfileName) || undefined,
+      style_profile_description: normalizeProfileValue(input.styleProfileDescription) || undefined,
+      style_profile_body: normalizeProfileValue(input.styleProfileBody) || undefined,
+      layout_profile_id: normalizeProfileValue(input.layoutProfileId) ||
+        process.env.WRITING_AGENT_LAYOUT_PROFILE_ID?.trim() ||
+        "wechat_clean_article",
+      layout_profile_version: normalizeProfileValue(input.layoutProfileVersion) ||
+        process.env.WRITING_AGENT_LAYOUT_PROFILE_VERSION?.trim() ||
+        undefined,
     },
     output_contract: {
       format: "wechat_article_package",
@@ -119,4 +230,9 @@ function normalizeStringArray(value: unknown): string[] | undefined {
     .filter(Boolean)
     .slice(0, 3);
   return normalized.length > 0 ? normalized : undefined;
+}
+
+function normalizeProfileValue(value: string | undefined): string | undefined {
+  const normalized = value?.trim();
+  return normalized || undefined;
 }

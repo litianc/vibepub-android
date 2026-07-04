@@ -18,19 +18,29 @@ object TextSubmissionApi {
         filesToken: String,
         text: String,
         titleHint: String?,
+        styleProfileId: String? = null,
+        styleProfileVersion: String? = null,
+        styleProfileName: String? = null,
+        styleProfileDescription: String? = null,
+        styleProfileBody: String? = null,
+        layoutProfileId: String? = null,
+        layoutProfileVersion: String? = null,
     ): TextSubmissionResult = withContext(Dispatchers.IO) {
         val normalizedText = text.trim()
         require(filesToken.isNotBlank()) { "请先在设置中配置 FILES_TOKEN" }
         require(normalizedText.length >= MIN_TEXT_SUBMISSION_CHARS) { "文字太短，请再补充一些想法" }
 
-        val body = JSONObject().apply {
-            put("text", normalizedText)
-            val normalizedTitleHint = titleHint?.trim().orEmpty()
-            if (normalizedTitleHint.isNotBlank()) {
-                put("title_hint", normalizedTitleHint)
-            }
-            put("source", "android_text")
-        }.toString()
+        val body = buildTextSubmissionBody(
+            text = normalizedText,
+            titleHint = titleHint,
+            styleProfileId = styleProfileId,
+            styleProfileVersion = styleProfileVersion,
+            styleProfileName = styleProfileName,
+            styleProfileDescription = styleProfileDescription,
+            styleProfileBody = styleProfileBody,
+            layoutProfileId = layoutProfileId,
+            layoutProfileVersion = layoutProfileVersion,
+        )
 
         val connection = (URL("${apiBaseUrl.trimEnd('/')}/api/text-submissions").openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
@@ -68,6 +78,41 @@ object TextSubmissionApi {
                 .ifBlank { json.optString("processingStage") }
                 .takeIf { it.isNotBlank() },
         )
+    }
+}
+
+internal fun buildTextSubmissionBody(
+    text: String,
+    titleHint: String?,
+    styleProfileId: String? = null,
+    styleProfileVersion: String? = null,
+    styleProfileName: String? = null,
+    styleProfileDescription: String? = null,
+    styleProfileBody: String? = null,
+    layoutProfileId: String? = null,
+    layoutProfileVersion: String? = null,
+): String {
+    return JSONObject().apply {
+        put("text", text.trim())
+        val normalizedTitleHint = titleHint?.trim().orEmpty()
+        if (normalizedTitleHint.isNotBlank()) {
+            put("title_hint", normalizedTitleHint)
+        }
+        put("source", "android_text")
+        putOptionalString("style_profile_id", styleProfileId)
+        putOptionalString("style_profile_version", styleProfileVersion)
+        putOptionalString("style_profile_name", styleProfileName)
+        putOptionalString("style_profile_description", styleProfileDescription)
+        putOptionalString("style_profile_body", styleProfileBody)
+        putOptionalString("layout_profile_id", layoutProfileId)
+        putOptionalString("layout_profile_version", layoutProfileVersion)
+    }.toString()
+}
+
+private fun JSONObject.putOptionalString(name: String, value: String?) {
+    val normalized = value?.trim().orEmpty()
+    if (normalized.isNotBlank()) {
+        put(name, normalized)
     }
 }
 

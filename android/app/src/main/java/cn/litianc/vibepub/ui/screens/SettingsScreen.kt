@@ -3,9 +3,14 @@ package cn.litianc.vibepub.ui.screens
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.app.Activity
+import android.content.Intent
 import android.os.Build
 import android.provider.Settings
+import android.speech.RecognizerIntent
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -33,8 +38,12 @@ import androidx.compose.material.icons.filled.CloudDone
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Error
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Link
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
@@ -48,7 +57,9 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -75,6 +86,8 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import cn.litianc.vibepub.AppPreferences
 import cn.litianc.vibepub.BuildConfig
+import cn.litianc.vibepub.WritingStyleProfileOption
+import cn.litianc.vibepub.WritingStyleProfiles
 import cn.litianc.vibepub.data.AppDatabase
 import cn.litianc.vibepub.data.RecordingEntity
 import cn.litianc.vibepub.data.currentWorkflowStep
@@ -153,6 +166,23 @@ fun SettingsScreen(
     }.collectAsState(initial = preferences.lastSyncAtMs)
     var lastTestedConfig by remember {
         mutableStateOf(SettingsConnectionConfig(apiBaseUrl, filesToken).normalized())
+    }
+    var customStyleProfiles by remember { mutableStateOf(preferences.customWritingStyleProfiles) }
+    var selectedStyleProfileId by remember { mutableStateOf(preferences.selectedStyleProfileId) }
+    var showWritingStyleDialog by remember { mutableStateOf(false) }
+    var showCustomStyleDialog by remember { mutableStateOf(false) }
+    var editingCustomStyleProfile by remember { mutableStateOf<WritingStyleProfileOption?>(null) }
+    var voiceStyleTurnText by remember { mutableStateOf("") }
+    val selectedStyleProfile = WritingStyleProfiles.optionFor(selectedStyleProfileId, customStyleProfiles)
+    val speechInputLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        val recognizedText = extractSpeechRecognitionText(result.resultCode, result.data)
+        if (recognizedText.isNotBlank()) {
+            voiceStyleTurnText = recognizedText
+        } else {
+            Toast.makeText(context, "没有识别到风格偏好", Toast.LENGTH_SHORT).show()
+        }
     }
 
     LaunchedEffect(apiBaseUrl, filesToken) {
@@ -275,6 +305,32 @@ fun SettingsScreen(
             }
 
             item {
+                SettingsGroup(title = "写作风格") {
+                    SettingsItem(
+                        iconContent = { SettingsIcon(Color(0xFFEAF7EF)) { Icon(Icons.Default.Palette, contentDescription = null, tint = Color(0xFF188A4B)) } },
+                        title = "当前风格模板",
+                        subtitle = selectedStyleProfile.description,
+                        value = selectedStyleProfile.name,
+                        valueColor = Color(0xFF188A4B),
+                        modifier = Modifier.testTag("WritingStyleProfileItem"),
+                        onClick = { showWritingStyleDialog = true },
+                    )
+                    Divider(color = MaterialTheme.colorScheme.background, thickness = 1.dp, modifier = Modifier.padding(start = 64.dp))
+                    SettingsItem(
+                        iconContent = { SettingsIcon(Color(0xFFFFF4E5)) { Icon(Icons.Default.Edit, contentDescription = null, tint = Color(0xFFB15F00)) } },
+                        title = "我的提示词模板",
+                        subtitle = "可新增模板，并用多轮语音偏好继续更新提示词画像",
+                        value = if (customStyleProfiles.isEmpty()) "新增" else "${customStyleProfiles.size} 个",
+                        onClick = {
+                            editingCustomStyleProfile = customStyleProfiles.firstOrNull()
+                            voiceStyleTurnText = ""
+                            showCustomStyleDialog = true
+                        },
+                    )
+                }
+            }
+
+            item {
                 SettingsGroup(title = "发布") {
                     SettingsItem(
                         iconContent = { SettingsIcon(Color(0xFFFDECEA)) { Icon(Icons.Default.CheckCircle, contentDescription = null, tint = Color(0xFF2E7D32)) } },
@@ -334,6 +390,216 @@ fun SettingsScreen(
             onCopy = { copyDiagnostics(context, diagnostics) },
         )
     }
+
+    if (showWritingStyleDialog) {
+        WritingStyleProfileDialog(
+            selectedProfileId = selectedStyleProfile.id,
+            profiles = WritingStyleProfiles.builtIn + customStyleProfiles,
+            onSelect = { profile ->
+                selectedStyleProfileId = profile.id
+                preferences.selectedStyleProfileId = profile.id
+                preferences.selectedStyleProfileVersion = profile.version
+                preferences.selectedLayoutProfileId = WritingStyleProfiles.DEFAULT_LAYOUT_PROFILE_ID
+                preferences.selectedLayoutProfileVersion = WritingStyleProfiles.DEFAULT_LAYOUT_PROFILE_VERSION
+                showWritingStyleDialog = false
+            },
+            onDismiss = { showWritingStyleDialog = false },
+        )
+    }
+
+    if (showCustomStyleDialog) {
+        CustomWritingStyleDialog(
+            profile = editingCustomStyleProfile,
+            voiceTurnText = voiceStyleTurnText,
+            onVoiceTurnConsumed = { voiceStyleTurnText = "" },
+            onStartVoiceTurn = {
+                runCatching {
+                    speechInputLauncher.launch(styleProfileSpeechIntent())
+                }.onFailure {
+                    Toast.makeText(context, "当前设备没有可用的语音识别服务", Toast.LENGTH_SHORT).show()
+                }
+            },
+            onDismiss = { showCustomStyleDialog = false },
+            onSave = { profile ->
+                preferences.upsertCustomWritingStyleProfile(profile)
+                customStyleProfiles = preferences.customWritingStyleProfiles
+                selectedStyleProfileId = profile.id
+                preferences.selectedStyleProfileId = profile.id
+                preferences.selectedStyleProfileVersion = profile.version
+                preferences.selectedLayoutProfileId = WritingStyleProfiles.DEFAULT_LAYOUT_PROFILE_ID
+                preferences.selectedLayoutProfileVersion = WritingStyleProfiles.DEFAULT_LAYOUT_PROFILE_VERSION
+                showCustomStyleDialog = false
+            },
+        )
+    }
+}
+
+@Composable
+internal fun WritingStyleProfileDialog(
+    selectedProfileId: String,
+    profiles: List<WritingStyleProfileOption>,
+    onSelect: (WritingStyleProfileOption) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        modifier = Modifier.testTag("WritingStyleProfileDialog"),
+        onDismissRequest = onDismiss,
+        title = { Text("选择写作风格") },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 420.dp)
+                    .verticalScroll(rememberScrollState()),
+            ) {
+                profiles.forEach { profile ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onSelect(profile) }
+                            .padding(vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        RadioButton(
+                            selected = profile.id == selectedProfileId,
+                            onClick = { onSelect(profile) },
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                profile.name,
+                                style = MaterialTheme.typography.bodyLarge,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                profile.description,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("关闭")
+            }
+        },
+    )
+}
+
+@Composable
+internal fun CustomWritingStyleDialog(
+    profile: WritingStyleProfileOption?,
+    voiceTurnText: String,
+    onVoiceTurnConsumed: () -> Unit,
+    onStartVoiceTurn: () -> Unit,
+    onDismiss: () -> Unit,
+    onSave: (WritingStyleProfileOption) -> Unit,
+) {
+    var name by remember(profile?.id) { mutableStateOf(profile?.name.orEmpty().ifBlank { "我的写作风格" }) }
+    var description by remember(profile?.id) { mutableStateOf(profile?.description.orEmpty()) }
+    var body by remember(profile?.id) { mutableStateOf(profile?.body.orEmpty()) }
+    var turnText by remember(profile?.id) { mutableStateOf("") }
+
+    LaunchedEffect(voiceTurnText) {
+        if (voiceTurnText.isNotBlank()) {
+            turnText = voiceTurnText
+            body = WritingStyleProfiles.mergeStylePromptTurn(body, voiceTurnText)
+            onVoiceTurnConsumed()
+        }
+    }
+
+    AlertDialog(
+        modifier = Modifier.testTag("CustomWritingStyleDialog"),
+        onDismissRequest = onDismiss,
+        title = { Text(if (profile == null) "新增提示词模板" else "编辑提示词模板") },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 520.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    label = { Text("模板名称") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = description,
+                    onValueChange = { description = it },
+                    label = { Text("一句话说明") },
+                    minLines = 2,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = turnText,
+                    onValueChange = { turnText = it },
+                    label = { Text("这一轮偏好") },
+                    minLines = 2,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    OutlinedButton(onClick = onStartVoiceTurn) {
+                        Icon(Icons.Default.Mic, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("说一轮")
+                    }
+                    Button(
+                        onClick = {
+                            body = WritingStyleProfiles.mergeStylePromptTurn(body, turnText)
+                            turnText = ""
+                        },
+                    ) {
+                        Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("更新提示词")
+                    }
+                }
+                OutlinedTextField(
+                    value = body,
+                    onValueChange = { body = WritingStyleProfiles.trimCustomProfileBody(it) },
+                    label = { Text("完整写作风格提示词") },
+                    minLines = 8,
+                    supportingText = {
+                        Text("${body.length}/${WritingStyleProfiles.MAX_CUSTOM_PROFILE_BODY_CHARS}")
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    val normalizedBody = WritingStyleProfiles.trimCustomProfileBody(body)
+                    onSave(
+                        WritingStyleProfileOption(
+                            id = profile?.id ?: "custom_style_${System.currentTimeMillis()}",
+                            version = WritingStyleProfiles.customProfileVersion(),
+                            name = name.trim().ifBlank { "我的写作风格" },
+                            description = description.trim(),
+                            body = normalizedBody,
+                            custom = true,
+                        ),
+                    )
+                },
+                enabled = body.trim().isNotBlank(),
+            ) {
+                Text("保存并使用")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("取消")
+            }
+        },
+    )
 }
 
 @Composable
@@ -823,4 +1089,21 @@ private fun compactDiagnosticValue(value: String?, fallback: String = "无", max
 private fun diagnosticTimeLabel(timestampMs: Long): String {
     if (timestampMs <= 0L) return "未知"
     return SimpleDateFormat("MM-dd HH:mm:ss", Locale.getDefault()).format(Date(timestampMs))
+}
+
+internal fun styleProfileSpeechIntent(): Intent {
+    return Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+        putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+        putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.CHINESE.toLanguageTag())
+        putExtra(RecognizerIntent.EXTRA_PROMPT, "说说你希望文章呈现出的写作风格")
+    }
+}
+
+internal fun extractSpeechRecognitionText(resultCode: Int, data: Intent?): String {
+    if (resultCode != Activity.RESULT_OK || data == null) return ""
+    return data
+        .getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+        ?.firstOrNull()
+        ?.trim()
+        .orEmpty()
 }

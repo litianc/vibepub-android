@@ -1,6 +1,7 @@
 package cn.litianc.vibepub
 
 import android.content.Context
+import android.util.Base64
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
 import cn.litianc.vibepub.data.AppDatabase
@@ -20,6 +21,13 @@ class UploadWorker(
         val path = inputData.getString(KEY_FILE_PATH) ?: return@withContext Result.failure()
         val apiBaseUrl = inputData.getString(KEY_API_BASE_URL) ?: return@withContext Result.failure()
         val filesToken = inputData.getString(KEY_FILES_TOKEN).orEmpty()
+        val styleProfileId = inputData.getString(KEY_STYLE_PROFILE_ID).orEmpty()
+        val styleProfileVersion = inputData.getString(KEY_STYLE_PROFILE_VERSION).orEmpty()
+        val styleProfileName = inputData.getString(KEY_STYLE_PROFILE_NAME).orEmpty()
+        val styleProfileDescription = inputData.getString(KEY_STYLE_PROFILE_DESCRIPTION).orEmpty()
+        val styleProfileBody = inputData.getString(KEY_STYLE_PROFILE_BODY).orEmpty()
+        val layoutProfileId = inputData.getString(KEY_LAYOUT_PROFILE_ID).orEmpty()
+        val layoutProfileVersion = inputData.getString(KEY_LAYOUT_PROFILE_VERSION).orEmpty()
         val file = File(path)
 
         if (!file.exists()) {
@@ -37,6 +45,13 @@ class UploadWorker(
                 setRequestProperty("Authorization", "Bearer $filesToken")
                 setRequestProperty("Content-Type", audioContentTypeForFilename(file.name))
                 setRequestProperty("X-File-Name", file.name)
+                setOptionalRequestProperty("X-Style-Profile-Id", styleProfileId)
+                setOptionalRequestProperty("X-Style-Profile-Version", styleProfileVersion)
+                setOptionalRequestProperty("X-Style-Profile-Name-B64", styleProfileName.base64OrBlank())
+                setOptionalRequestProperty("X-Style-Profile-Description-B64", styleProfileDescription.base64OrBlank())
+                setOptionalRequestProperty("X-Style-Profile-Body-B64", styleProfileBody.base64OrBlank())
+                setOptionalRequestProperty("X-Layout-Profile-Id", layoutProfileId)
+                setOptionalRequestProperty("X-Layout-Profile-Version", layoutProfileVersion)
                 setFixedLengthStreamingMode(file.length())
             }
 
@@ -93,6 +108,26 @@ class UploadWorker(
         const val KEY_FILE_PATH = "file_path"
         const val KEY_API_BASE_URL = "api_base_url"
         const val KEY_FILES_TOKEN = "files_token"
+        const val KEY_STYLE_PROFILE_ID = "style_profile_id"
+        const val KEY_STYLE_PROFILE_VERSION = "style_profile_version"
+        const val KEY_STYLE_PROFILE_NAME = "style_profile_name"
+        const val KEY_STYLE_PROFILE_DESCRIPTION = "style_profile_description"
+        const val KEY_STYLE_PROFILE_BODY = "style_profile_body"
+        const val KEY_LAYOUT_PROFILE_ID = "layout_profile_id"
+        const val KEY_LAYOUT_PROFILE_VERSION = "layout_profile_version"
         const val KEY_ERROR = "error"
     }
+}
+
+private fun HttpURLConnection.setOptionalRequestProperty(name: String, value: String) {
+    val normalized = value.trim()
+    if (normalized.isNotBlank()) {
+        setRequestProperty(name, normalized)
+    }
+}
+
+private fun String.base64OrBlank(): String {
+    val normalized = trim()
+    if (normalized.isBlank()) return ""
+    return Base64.encodeToString(normalized.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
 }

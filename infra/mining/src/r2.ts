@@ -1,4 +1,4 @@
-import { S3Client, ListObjectsV2Command, GetObjectCommand, DeleteObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
+import { S3Client, ListObjectsV2Command, GetObjectCommand, DeleteObjectCommand, PutObjectCommand, HeadObjectCommand } from "@aws-sdk/client-s3";
 import crypto from "crypto";
 
 const CLOUDFLARE_ACCOUNT_ID = process.env.CLOUDFLARE_ACCOUNT_ID!;
@@ -62,6 +62,15 @@ export async function downloadFile(key: string): Promise<Buffer> {
     stream.on('error', err => reject(err));
     stream.on('end', () => resolve(Buffer.concat(chunks)));
   });
+}
+
+export async function getFileMetadata(key: string): Promise<Record<string, string>> {
+  const command = new HeadObjectCommand({
+    Bucket: BUCKET_NAME,
+    Key: key,
+  });
+  const response = await s3.send(command);
+  return response.Metadata || {};
 }
 
 export async function createPresignedDownloadUrl(key: string, expiresInSeconds = 900): Promise<string> {

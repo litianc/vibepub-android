@@ -32,6 +32,71 @@ class AppPreferences(context: Context) {
         get() = prefs.getStringSet(KEY_TRANSCRIBED_FILES, emptySet()) ?: emptySet()
         set(value) = prefs.edit().putStringSet(KEY_TRANSCRIBED_FILES, value).apply()
 
+    var selectedStyleProfileId: String
+        get() = prefs.getString(
+            KEY_SELECTED_STYLE_PROFILE_ID,
+            WritingStyleProfiles.DEFAULT_STYLE_PROFILE_ID,
+        ) ?: WritingStyleProfiles.DEFAULT_STYLE_PROFILE_ID
+        set(value) = prefs.edit().putString(KEY_SELECTED_STYLE_PROFILE_ID, value.trim()).apply()
+
+    var selectedStyleProfileVersion: String
+        get() = prefs.getString(
+            KEY_SELECTED_STYLE_PROFILE_VERSION,
+            WritingStyleProfiles.DEFAULT_STYLE_PROFILE_VERSION,
+        ) ?: WritingStyleProfiles.DEFAULT_STYLE_PROFILE_VERSION
+        set(value) = prefs.edit().putString(KEY_SELECTED_STYLE_PROFILE_VERSION, value.trim()).apply()
+
+    var selectedLayoutProfileId: String
+        get() = prefs.getString(
+            KEY_SELECTED_LAYOUT_PROFILE_ID,
+            WritingStyleProfiles.DEFAULT_LAYOUT_PROFILE_ID,
+        ) ?: WritingStyleProfiles.DEFAULT_LAYOUT_PROFILE_ID
+        set(value) = prefs.edit().putString(KEY_SELECTED_LAYOUT_PROFILE_ID, value.trim()).apply()
+
+    var selectedLayoutProfileVersion: String
+        get() = prefs.getString(
+            KEY_SELECTED_LAYOUT_PROFILE_VERSION,
+            WritingStyleProfiles.DEFAULT_LAYOUT_PROFILE_VERSION,
+        ) ?: WritingStyleProfiles.DEFAULT_LAYOUT_PROFILE_VERSION
+        set(value) = prefs.edit().putString(KEY_SELECTED_LAYOUT_PROFILE_VERSION, value.trim()).apply()
+
+    var customWritingStyleProfiles: List<WritingStyleProfileOption>
+        get() = WritingStyleProfiles.decodeCustomProfiles(
+            prefs.getString(KEY_CUSTOM_WRITING_STYLE_PROFILES, "").orEmpty(),
+        )
+        set(value) = prefs.edit()
+            .putString(KEY_CUSTOM_WRITING_STYLE_PROFILES, WritingStyleProfiles.encodeCustomProfiles(value))
+            .apply()
+
+    fun allWritingStyleProfiles(): List<WritingStyleProfileOption> {
+        return WritingStyleProfiles.builtIn + customWritingStyleProfiles
+    }
+
+    fun selectedWritingStyleProfile(): WritingStyleProfileOption {
+        return WritingStyleProfiles.optionFor(selectedStyleProfileId, customWritingStyleProfiles)
+    }
+
+    fun selectedStyleProfileBody(): String {
+        return selectedWritingStyleProfile().body.orEmpty()
+    }
+
+    fun upsertCustomWritingStyleProfile(profile: WritingStyleProfileOption) {
+        val normalized = profile.copy(
+            name = profile.name.trim().ifBlank { "我的写作风格" },
+            description = profile.description.trim(),
+            body = WritingStyleProfiles.trimCustomProfileBody(profile.body.orEmpty()),
+            custom = true,
+        )
+        val current = customWritingStyleProfiles.toMutableList()
+        val index = current.indexOfFirst { it.id == normalized.id }
+        if (index >= 0) {
+            current[index] = normalized
+        } else {
+            current.add(normalized)
+        }
+        customWritingStyleProfiles = current
+    }
+
     fun markAsTranscribed(filename: String) {
         val current = transcribedFiles.toMutableSet()
         current.add(filename)
@@ -44,6 +109,11 @@ class AppPreferences(context: Context) {
         private const val KEY_FILES_TOKEN = "files_token"
         private const val KEY_TRANSCRIBED_FILES = "transcribed_files"
         private const val KEY_LAST_SYNC_AT_MS = "last_sync_at_ms"
+        private const val KEY_SELECTED_STYLE_PROFILE_ID = "selected_style_profile_id"
+        private const val KEY_SELECTED_STYLE_PROFILE_VERSION = "selected_style_profile_version"
+        private const val KEY_SELECTED_LAYOUT_PROFILE_ID = "selected_layout_profile_id"
+        private const val KEY_SELECTED_LAYOUT_PROFILE_VERSION = "selected_layout_profile_version"
+        private const val KEY_CUSTOM_WRITING_STYLE_PROFILES = "custom_writing_style_profiles"
         private val lastSyncAtMsUpdates = MutableSharedFlow<Long>(extraBufferCapacity = 1)
     }
 }

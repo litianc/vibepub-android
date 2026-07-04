@@ -244,11 +244,19 @@ fun VibePubApp(
 
             val result = withContext(Dispatchers.IO) {
                 runCatching {
+                    val selectedProfile = preferences.selectedWritingStyleProfile()
                     val submitted = TextSubmissionApi.submitText(
                         apiBaseUrl = preferences.apiBaseUrl,
                         filesToken = preferences.filesToken,
                         text = text,
                         titleHint = titleHint,
+                        styleProfileId = selectedProfile.id,
+                        styleProfileVersion = selectedProfile.version,
+                        styleProfileName = selectedProfile.name,
+                        styleProfileDescription = selectedProfile.description,
+                        styleProfileBody = selectedProfile.body,
+                        layoutProfileId = preferences.selectedLayoutProfileId,
+                        layoutProfileVersion = preferences.selectedLayoutProfileVersion,
                     )
                     val nowMs = System.currentTimeMillis()
                     AppDatabase.getDatabase(context)

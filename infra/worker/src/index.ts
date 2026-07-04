@@ -10,8 +10,20 @@ export interface Env {
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-  "Access-Control-Allow-Headers": "Authorization, Content-Type, X-File-Name, X-Files-Token",
+  "Access-Control-Allow-Headers": "Authorization, Content-Type, X-File-Name, X-Files-Token, X-Style-Profile-Id, X-Style-Profile-Version, X-Style-Profile-Name-B64, X-Style-Profile-Description-B64, X-Style-Profile-Body-B64, X-Layout-Profile-Id, X-Layout-Profile-Version",
 };
+
+type WritingProfileSelection = {
+  styleProfileId?: string;
+  styleProfileVersion?: string;
+  styleProfileName?: string;
+  styleProfileDescription?: string;
+  styleProfileBody?: string;
+  layoutProfileId?: string;
+  layoutProfileVersion?: string;
+};
+
+const MAX_INLINE_STYLE_PROFILE_BODY_CHARS = 3_000;
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -92,6 +104,7 @@ async function submitText(request: Request, env: Env, ctx: ExecutionContext): Pr
   }
 
   const titleHint = normalizeOptionalString(body?.title_hint ?? body?.titleHint);
+  const profileSelection = normalizeProfileSelectionFromBody(body);
   const submittedAt = new Date().toISOString();
   const safeTimestamp = submittedAt.replace(/[:.]/g, "-").replace("T", "-").replace("Z", "");
   const filename = sanitizeFileName(`VibePub-${safeTimestamp}-Text-${crypto.randomUUID().slice(0, 8)}.txt`);
@@ -102,6 +115,13 @@ async function submitText(request: Request, env: Env, ctx: ExecutionContext): Pr
     titleHint,
     source: normalizeOptionalString(body?.source) || "android_text",
     submittedAt,
+    styleProfileId: profileSelection.styleProfileId,
+    styleProfileVersion: profileSelection.styleProfileVersion,
+    styleProfileName: profileSelection.styleProfileName,
+    styleProfileDescription: profileSelection.styleProfileDescription,
+    styleProfileBody: profileSelection.styleProfileBody,
+    layoutProfileId: profileSelection.layoutProfileId,
+    layoutProfileVersion: profileSelection.layoutProfileVersion,
   };
 
   await env.FILES_BUCKET.put(key, JSON.stringify(payload, null, 2), {
@@ -110,6 +130,7 @@ async function submitText(request: Request, env: Env, ctx: ExecutionContext): Pr
       filename,
       submittedAt,
       sourceType: "TEXT",
+      ...profileSelectionMetadata(profileSelection),
     },
   });
 
@@ -118,6 +139,7 @@ async function submitText(request: Request, env: Env, ctx: ExecutionContext): Pr
     key,
     text,
     titleHint,
+    profileSelection,
   });
 
   ctx.waitUntil(triggerGitHubAction(env, filename).catch((e) => {
@@ -141,6 +163,7 @@ async function upsertTextRecording(
     key: string;
     text: string;
     titleHint?: string | null;
+    profileSelection?: WritingProfileSelection;
   },
 ): Promise<void> {
   const userId = "default_user";
@@ -148,21 +171,48 @@ async function upsertTextRecording(
     const updated = await env.DB.prepare(
       `
       UPDATE recordings
-      SET r2_key = ?, status = ?, processing_stage = ?, duration_ms = 0, raw_text = ?, article_title = COALESCE(?, article_title), source_type = ?, error_message = NULL, updated_at = CURRENT_TIMESTAMP
+      SET r2_key = ?, status = ?, processing_stage = ?, duration_ms = 0, raw_text = ?, article_title = COALESCE(?, article_title), source_type = ?, style_profile_id = COALESCE(?, style_profile_id), style_profile_version = COALESCE(?, style_profile_version), layout_profile_id = COALESCE(?, layout_profile_id), layout_profile_version = COALESCE(?, layout_profile_version), error_message = NULL, updated_at = CURRENT_TIMESTAMP
       WHERE user_id = ? AND filename = ?
       `,
     )
-      .bind(input.key, "PROCESSING", "REWRITING", input.text, input.titleHint || null, "TEXT", userId, input.filename)
+      .bind(
+        input.key,
+        "PROCESSING",
+        "REWRITING",
+        input.text,
+        input.titleHint || null,
+        "TEXT",
+        input.profileSelection?.styleProfileId || null,
+        input.profileSelection?.styleProfileVersion || null,
+        input.profileSelection?.layoutProfileId || null,
+        input.profileSelection?.layoutProfileVersion || null,
+        userId,
+        input.filename,
+      )
       .run();
 
     if ((updated.meta.changes ?? 0) === 0) {
       await env.DB.prepare(
         `
-        INSERT INTO recordings (user_id, filename, r2_key, status, processing_stage, duration_ms, raw_text, article_title, source_type)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO recordings (user_id, filename, r2_key, status, processing_stage, duration_ms, raw_text, article_title, source_type, style_profile_id, style_profile_version, layout_profile_id, layout_profile_version)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `,
       )
-        .bind(userId, input.filename, input.key, "PROCESSING", "REWRITING", 0, input.text, input.titleHint || null, "TEXT")
+        .bind(
+          userId,
+          input.filename,
+          input.key,
+          "PROCESSING",
+          "REWRITING",
+          0,
+          input.text,
+          input.titleHint || null,
+          "TEXT",
+          input.profileSelection?.styleProfileId || null,
+          input.profileSelection?.styleProfileVersion || null,
+          input.profileSelection?.layoutProfileId || null,
+          input.profileSelection?.layoutProfileVersion || null,
+        )
         .run();
     }
   } catch (dbErr: any) {
@@ -170,6 +220,38 @@ async function upsertTextRecording(
     if (!message.includes("no such column")) {
       console.error("Failed to insert text submission into D1:", dbErr);
       throw dbErr;
+    }
+
+    if (!message.includes("source_type")) {
+      try {
+        const updated = await env.DB.prepare(
+          `
+          UPDATE recordings
+          SET r2_key = ?, status = ?, processing_stage = ?, duration_ms = 0, raw_text = ?, article_title = COALESCE(?, article_title), source_type = ?, error_message = NULL, updated_at = CURRENT_TIMESTAMP
+          WHERE user_id = ? AND filename = ?
+          `,
+        )
+          .bind(input.key, "PROCESSING", "REWRITING", input.text, input.titleHint || null, "TEXT", userId, input.filename)
+          .run();
+
+        if ((updated.meta.changes ?? 0) === 0) {
+          await env.DB.prepare(
+            `
+            INSERT INTO recordings (user_id, filename, r2_key, status, processing_stage, duration_ms, raw_text, article_title, source_type)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `,
+          )
+            .bind(userId, input.filename, input.key, "PROCESSING", "REWRITING", 0, input.text, input.titleHint || null, "TEXT")
+            .run();
+        }
+        return;
+      } catch (profileFallbackErr: any) {
+        const profileFallbackMessage = String(profileFallbackErr?.message || "");
+        if (!profileFallbackMessage.includes("no such column")) {
+          console.error("Failed to insert text submission into D1:", profileFallbackErr);
+          throw profileFallbackErr;
+        }
+      }
     }
 
     const updated = await env.DB.prepare(
@@ -208,14 +290,28 @@ async function uploadAudio(request: Request, env: Env, ctx: ExecutionContext): P
     : `${uploadedAt.replace(/[:.]/g, "-")}-`;
   const key = `inbox/${keyPrefix}${safeOriginalName}`;
   const contentType = request.headers.get("content-type") || "audio/mp4";
+  const profileSelection = normalizeProfileSelectionFromHeaders(request.headers);
 
   await env.FILES_BUCKET.put(key, request.body, {
     httpMetadata: { contentType },
     customMetadata: {
       originalName,
       uploadedAt,
+      ...profileSelectionMetadata(profileSelection),
     },
   });
+
+  if (hasInlineProfileSelection(profileSelection)) {
+    await env.FILES_BUCKET.put(
+      profileSelectionSidecarKey(safeOriginalName),
+      JSON.stringify({
+        filename: safeOriginalName,
+        uploadedAt,
+        ...profileSelectionPayload(profileSelection),
+      }, null, 2),
+      { httpMetadata: { contentType: "application/json; charset=utf-8" } },
+    );
+  }
 
   // Default user ID for now since we have a single global auth token
   const userId = "default_user";
@@ -227,21 +323,43 @@ async function uploadAudio(request: Request, env: Env, ctx: ExecutionContext): P
     const updated = await env.DB.prepare(
       `
       UPDATE recordings
-      SET r2_key = ?, status = ?, processing_stage = ?, duration_ms = COALESCE(?, duration_ms), error_message = NULL, updated_at = CURRENT_TIMESTAMP
+      SET r2_key = ?, status = ?, processing_stage = ?, duration_ms = COALESCE(?, duration_ms), style_profile_id = COALESCE(?, style_profile_id), style_profile_version = COALESCE(?, style_profile_version), layout_profile_id = COALESCE(?, layout_profile_id), layout_profile_version = COALESCE(?, layout_profile_version), error_message = NULL, updated_at = CURRENT_TIMESTAMP
       WHERE user_id = ? AND filename = ?
       `
     )
-    .bind(key, "UPLOADED", "QUEUED", durationMs, userId, safeOriginalName)
+    .bind(
+      key,
+      "UPLOADED",
+      "QUEUED",
+      durationMs,
+      profileSelection.styleProfileId || null,
+      profileSelection.styleProfileVersion || null,
+      profileSelection.layoutProfileId || null,
+      profileSelection.layoutProfileVersion || null,
+      userId,
+      safeOriginalName,
+    )
     .run();
 
     if ((updated.meta.changes ?? 0) === 0) {
       await env.DB.prepare(
         `
-        INSERT INTO recordings (user_id, filename, r2_key, status, processing_stage, duration_ms)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO recordings (user_id, filename, r2_key, status, processing_stage, duration_ms, style_profile_id, style_profile_version, layout_profile_id, layout_profile_version)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `
       )
-      .bind(userId, safeOriginalName, key, "UPLOADED", "QUEUED", durationMs)
+      .bind(
+        userId,
+        safeOriginalName,
+        key,
+        "UPLOADED",
+        "QUEUED",
+        durationMs,
+        profileSelection.styleProfileId || null,
+        profileSelection.styleProfileVersion || null,
+        profileSelection.layoutProfileId || null,
+        profileSelection.layoutProfileVersion || null,
+      )
       .run();
     }
   } catch (dbErr) {
@@ -249,55 +367,89 @@ async function uploadAudio(request: Request, env: Env, ctx: ExecutionContext): P
     if (!message.includes("no such column")) {
       console.error("Failed to insert into D1:", dbErr);
     } else {
-      try {
-        const updated = await env.DB.prepare(
-          `
-          UPDATE recordings
-          SET r2_key = ?, status = ?, processing_stage = ?, error_message = NULL, updated_at = CURRENT_TIMESTAMP
-          WHERE user_id = ? AND filename = ?
-          `
-        )
-        .bind(key, "UPLOADED", "QUEUED", userId, safeOriginalName)
-        .run();
-
-        if ((updated.meta.changes ?? 0) === 0) {
-          await env.DB.prepare(
+      let profileFallbackHandled = false;
+      if (!message.includes("duration_ms") && !message.includes("processing_stage")) {
+        try {
+          const updated = await env.DB.prepare(
             `
-            INSERT INTO recordings (user_id, filename, r2_key, status, processing_stage)
-            VALUES (?, ?, ?, ?, ?)
+            UPDATE recordings
+            SET r2_key = ?, status = ?, processing_stage = ?, duration_ms = COALESCE(?, duration_ms), error_message = NULL, updated_at = CURRENT_TIMESTAMP
+            WHERE user_id = ? AND filename = ?
             `
           )
-          .bind(userId, safeOriginalName, key, "UPLOADED", "QUEUED")
+          .bind(key, "UPLOADED", "QUEUED", durationMs, userId, safeOriginalName)
           .run();
-        }
-      } catch (stageDbErr) {
-        const stageMessage = String((stageDbErr as Error)?.message || "");
-        if (!stageMessage.includes("no such column")) {
-          console.error("Failed to insert into D1:", stageDbErr);
-        } else {
-          try {
-            const updated = await env.DB.prepare(
+
+          if ((updated.meta.changes ?? 0) === 0) {
+            await env.DB.prepare(
               `
-              UPDATE recordings
-              SET r2_key = ?, status = ?, updated_at = CURRENT_TIMESTAMP
-              WHERE user_id = ? AND filename = ?
+              INSERT INTO recordings (user_id, filename, r2_key, status, processing_stage, duration_ms)
+              VALUES (?, ?, ?, ?, ?, ?)
               `
             )
-            .bind(key, "UPLOADED", userId, safeOriginalName)
+            .bind(userId, safeOriginalName, key, "UPLOADED", "QUEUED", durationMs)
             .run();
+          }
+          profileFallbackHandled = true;
+        } catch (profileFallbackErr) {
+          const profileFallbackMessage = String((profileFallbackErr as Error)?.message || "");
+          if (!profileFallbackMessage.includes("no such column")) {
+            console.error("Failed to insert into D1:", profileFallbackErr);
+          }
+        }
+      }
 
-            if ((updated.meta.changes ?? 0) === 0) {
-              await env.DB.prepare(
+      if (!profileFallbackHandled) {
+        try {
+          const updated = await env.DB.prepare(
+            `
+            UPDATE recordings
+            SET r2_key = ?, status = ?, processing_stage = ?, error_message = NULL, updated_at = CURRENT_TIMESTAMP
+            WHERE user_id = ? AND filename = ?
+            `
+          )
+          .bind(key, "UPLOADED", "QUEUED", userId, safeOriginalName)
+          .run();
+
+          if ((updated.meta.changes ?? 0) === 0) {
+            await env.DB.prepare(
+              `
+              INSERT INTO recordings (user_id, filename, r2_key, status, processing_stage)
+              VALUES (?, ?, ?, ?, ?)
+              `
+            )
+            .bind(userId, safeOriginalName, key, "UPLOADED", "QUEUED")
+            .run();
+          }
+        } catch (stageDbErr) {
+          const stageMessage = String((stageDbErr as Error)?.message || "");
+          if (!stageMessage.includes("no such column")) {
+            console.error("Failed to insert into D1:", stageDbErr);
+          } else {
+            try {
+              const updated = await env.DB.prepare(
                 `
-                INSERT INTO recordings (user_id, filename, r2_key, status)
-                VALUES (?, ?, ?, ?)
+                UPDATE recordings
+                SET r2_key = ?, status = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE user_id = ? AND filename = ?
                 `
               )
-              .bind(userId, safeOriginalName, key, "UPLOADED")
+              .bind(key, "UPLOADED", userId, safeOriginalName)
               .run();
+
+              if ((updated.meta.changes ?? 0) === 0) {
+                await env.DB.prepare(
+                  `
+                  INSERT INTO recordings (user_id, filename, r2_key, status)
+                  VALUES (?, ?, ?, ?)
+                  `
+                )
+                .bind(userId, safeOriginalName, key, "UPLOADED")
+                .run();
+              }
+            } catch (legacyDbErr) {
+              console.error("Failed to insert into D1:", legacyDbErr);
             }
-          } catch (legacyDbErr) {
-            console.error("Failed to insert into D1:", legacyDbErr);
           }
         }
       }
@@ -536,6 +688,10 @@ async function listRecordings(env: Env): Promise<Response> {
         wechat_draft_id: null,
         cover_image_url: null,
         source_type: null,
+        style_profile_id: null,
+        style_profile_version: null,
+        layout_profile_id: null,
+        layout_profile_version: null,
         error_message: null,
       }),
     });
@@ -554,6 +710,7 @@ async function deleteRecording(env: Env, filename: string): Promise<Response> {
   const coverKey = `covers/${safeName.replace(/\.[^/.]+$/, ".png")}`;
 
   r2Keys.add(`inbox/${safeName}`);
+  r2Keys.add(profileSelectionSidecarKey(safeName));
   if (inferSourceType(safeName, "") === "TEXT") {
     r2Keys.add(`text-submissions/${safeName}`);
   }
@@ -630,6 +787,14 @@ function withRecordingDisplayFields(
         inferSourceType(recording?.filename, recording?.r2_key),
       cover_image_url: normalizeOptionalString(recording?.cover_image_url) ??
         normalizeOptionalString(recording?.coverImageUrl),
+      style_profile_id: normalizeOptionalString(recording?.style_profile_id) ??
+        normalizeOptionalString(recording?.styleProfileId),
+      style_profile_version: normalizeOptionalString(recording?.style_profile_version) ??
+        normalizeOptionalString(recording?.styleProfileVersion),
+      layout_profile_id: normalizeOptionalString(recording?.layout_profile_id) ??
+        normalizeOptionalString(recording?.layoutProfileId),
+      layout_profile_version: normalizeOptionalString(recording?.layout_profile_version) ??
+        normalizeOptionalString(recording?.layoutProfileVersion),
       wechat_url: normalizeRemoteReference(recording?.wechat_url),
       wechat_draft_id: normalizeRemoteReference(recording?.wechat_draft_id),
     };
@@ -665,6 +830,7 @@ function parseDurationMsFromRecordingFilename(filename: unknown): number | null 
 
 type QueryRecordingShape =
   | "full"
+  | "withoutWritingProfiles"
   | "withoutSourceType"
   | "withoutCoverImageUrl"
   | "withoutDuration"
@@ -674,18 +840,39 @@ function legacyRecordingQueryShapes(message: string): Array<{
   shape: QueryRecordingShape;
   defaults: Record<string, unknown>;
 }> {
+  const writingProfileDefaults = {
+    style_profile_id: null,
+    style_profile_version: null,
+    layout_profile_id: null,
+    layout_profile_version: null,
+  };
   const oldSchemaFallbacks = [
-    { shape: "withoutCoverImageUrl" as const, defaults: { cover_image_url: null } },
-    { shape: "withoutDuration" as const, defaults: { duration_ms: null, cover_image_url: null } },
+    { shape: "withoutCoverImageUrl" as const, defaults: { cover_image_url: null, ...writingProfileDefaults } },
+    { shape: "withoutDuration" as const, defaults: { duration_ms: null, cover_image_url: null, ...writingProfileDefaults } },
     {
       shape: "withoutProcessingStage" as const,
-      defaults: { duration_ms: null, processing_stage: null, cover_image_url: null },
+      defaults: { duration_ms: null, processing_stage: null, cover_image_url: null, ...writingProfileDefaults },
     },
   ];
 
   if (message.includes("source_type")) {
     return [
-      { shape: "withoutSourceType", defaults: { source_type: null } },
+      { shape: "withoutSourceType", defaults: { source_type: null, ...writingProfileDefaults } },
+      ...oldSchemaFallbacks,
+    ];
+  }
+
+  if (
+    message.includes("style_profile_id") ||
+    message.includes("style_profile_version") ||
+    message.includes("layout_profile_id") ||
+    message.includes("layout_profile_version")
+  ) {
+    return [
+      {
+        shape: "withoutWritingProfiles",
+        defaults: writingProfileDefaults,
+      },
       ...oldSchemaFallbacks,
     ];
   }
@@ -700,6 +887,26 @@ async function queryRecordings(
 ): Promise<unknown[]> {
   const selectColumnsByShape: Record<QueryRecordingShape, string[]> = {
     full: [
+      "id",
+      "filename",
+      "status",
+      "duration_ms",
+      "created_at",
+      "updated_at",
+      "article_title",
+      "substr(raw_text, 1, 120) AS raw_text_preview",
+      "processing_stage",
+      "wechat_url",
+      "wechat_draft_id",
+      "cover_image_url",
+      "source_type",
+      "style_profile_id",
+      "style_profile_version",
+      "layout_profile_id",
+      "layout_profile_version",
+      "error_message",
+    ],
+    withoutWritingProfiles: [
       "id",
       "filename",
       "status",
@@ -1034,6 +1241,76 @@ function statusKeyOf(value: string): string {
 
 function normalizeOptionalString(value: unknown): string | null {
   return typeof value === "string" ? value.trim() || null : null;
+}
+
+function normalizeProfileSelectionFromBody(body: any): WritingProfileSelection {
+  return {
+    styleProfileId: normalizeOptionalString(body?.style_profile_id ?? body?.styleProfileId) || undefined,
+    styleProfileVersion: normalizeOptionalString(body?.style_profile_version ?? body?.styleProfileVersion) || undefined,
+    styleProfileName: normalizeOptionalString(body?.style_profile_name ?? body?.styleProfileName) || undefined,
+    styleProfileDescription: normalizeOptionalString(body?.style_profile_description ?? body?.styleProfileDescription) || undefined,
+    styleProfileBody: normalizeStyleProfileBody(body?.style_profile_body ?? body?.styleProfileBody) || undefined,
+    layoutProfileId: normalizeOptionalString(body?.layout_profile_id ?? body?.layoutProfileId) || undefined,
+    layoutProfileVersion: normalizeOptionalString(body?.layout_profile_version ?? body?.layoutProfileVersion) || undefined,
+  };
+}
+
+function normalizeProfileSelectionFromHeaders(headers: Headers): WritingProfileSelection {
+  return {
+    styleProfileId: normalizeOptionalString(headers.get("x-style-profile-id")) || undefined,
+    styleProfileVersion: normalizeOptionalString(headers.get("x-style-profile-version")) || undefined,
+    styleProfileName: normalizeOptionalString(decodeBase64Header(headers.get("x-style-profile-name-b64"))) || undefined,
+    styleProfileDescription: normalizeOptionalString(decodeBase64Header(headers.get("x-style-profile-description-b64"))) || undefined,
+    styleProfileBody: normalizeStyleProfileBody(decodeBase64Header(headers.get("x-style-profile-body-b64"))) || undefined,
+    layoutProfileId: normalizeOptionalString(headers.get("x-layout-profile-id")) || undefined,
+    layoutProfileVersion: normalizeOptionalString(headers.get("x-layout-profile-version")) || undefined,
+  };
+}
+
+function profileSelectionMetadata(selection: WritingProfileSelection): Record<string, string> {
+  const metadata: Record<string, string> = {};
+  if (selection.styleProfileId) metadata.styleProfileId = selection.styleProfileId;
+  if (selection.styleProfileVersion) metadata.styleProfileVersion = selection.styleProfileVersion;
+  if (selection.layoutProfileId) metadata.layoutProfileId = selection.layoutProfileId;
+  if (selection.layoutProfileVersion) metadata.layoutProfileVersion = selection.layoutProfileVersion;
+  return metadata;
+}
+
+function profileSelectionPayload(selection: WritingProfileSelection): Record<string, string> {
+  const payload: Record<string, string> = {};
+  if (selection.styleProfileId) payload.styleProfileId = selection.styleProfileId;
+  if (selection.styleProfileVersion) payload.styleProfileVersion = selection.styleProfileVersion;
+  if (selection.styleProfileName) payload.styleProfileName = selection.styleProfileName;
+  if (selection.styleProfileDescription) payload.styleProfileDescription = selection.styleProfileDescription;
+  if (selection.styleProfileBody) payload.styleProfileBody = selection.styleProfileBody;
+  if (selection.layoutProfileId) payload.layoutProfileId = selection.layoutProfileId;
+  if (selection.layoutProfileVersion) payload.layoutProfileVersion = selection.layoutProfileVersion;
+  return payload;
+}
+
+function hasInlineProfileSelection(selection: WritingProfileSelection): boolean {
+  return Boolean(selection.styleProfileBody || selection.styleProfileName || selection.styleProfileDescription);
+}
+
+function normalizeStyleProfileBody(value: unknown): string | null {
+  const normalized = normalizeOptionalString(value);
+  return normalized ? normalized.slice(0, MAX_INLINE_STYLE_PROFILE_BODY_CHARS) : null;
+}
+
+function decodeBase64Header(value: string | null): string | null {
+  const normalized = normalizeOptionalString(value);
+  if (!normalized) return null;
+  try {
+    const binary = atob(normalized);
+    const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+    return new TextDecoder().decode(bytes);
+  } catch {
+    return null;
+  }
+}
+
+function profileSelectionSidecarKey(filename: string): string {
+  return `profile-selections/${filename.replace(/[^\w.\-]/g, "_")}.json`;
 }
 
 function normalizeRemoteReference(value: unknown): string | null {
