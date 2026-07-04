@@ -1,6 +1,7 @@
 import { listUnprocessedFiles, createPresignedDownloadUrl, deleteFile, downloadFile, uploadCoverImage, uploadTranscript, isSupportedTextSubmissionKey } from "./r2.js";
 import { transcribeAudioUrl } from "./asr.js";
-import { processAudioText, reviseArticleWithInstruction } from "./llm.js";
+import { reviseArticleWithInstruction } from "./llm.js";
+import { rewriteArticle } from "./writingAgent.js";
 import { generateWechatCoverBuffer } from "./coverRenderer.js";
 import { getAccessToken, publishDraft, updateDraft } from "./wechat.js";
 import path from "path";
@@ -66,7 +67,7 @@ type StatusMetadata = {
   errorMessage?: string | null;
 };
 
-type ArticleResult = Awaited<ReturnType<typeof processAudioText>>;
+type ArticleResult = Awaited<ReturnType<typeof rewriteArticle>>;
 
 type TranscriptMetadata = {
   processingStage: string;
@@ -484,7 +485,11 @@ export async function main() {
       processingStage = "REWRITING";
       await updateStatus(filename, "PROCESSING", { processingStage, rawText });
       console.log("Running Style Distillation via GLM...");
-      article = await processAudioText(rawText);
+      article = await rewriteArticle({
+        rawText,
+        clientJobId: filename,
+        sourceType: isSupportedTextSubmissionKey(fileKey) ? "text_submission" : "audio_transcript",
+      });
       console.log(`Generated Article Title: ${article.title}`);
 
       processingStage = "ARTICLE_READY";

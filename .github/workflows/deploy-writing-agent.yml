@@ -1,0 +1,94 @@
+name: Deploy WritingAgent
+
+on:
+  pull_request:
+    paths:
+      - "infra/writing-agent/**"
+      - ".github/workflows/deploy-writing-agent.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "infra/writing-agent/**"
+      - ".github/workflows/deploy-writing-agent.yml"
+  workflow_dispatch:
+    inputs:
+      deploy:
+        description: Deploy WritingAgent after validation
+        required: true
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: infra/writing-agent
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: "infra/writing-agent/package-lock.json"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: Deploy dry run
+        run: npx wrangler deploy --dry-run
+
+  deploy:
+    if: github.event_name == 'workflow_dispatch' && inputs.deploy == 'true'
+    needs: validate
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: infra/writing-agent
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: "infra/writing-agent/package-lock.json"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Set GLM secret
+        run: printf '%s' "$GLM_API_KEY" | npx wrangler secret put GLM_API_KEY
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          GLM_API_KEY: ${{ secrets.GLM_API_KEY }}
+
+      - name: Set WritingAgent token
+        run: printf '%s' "$WRITING_AGENT_TOKEN" | npx wrangler secret put WRITING_AGENT_TOKEN
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          WRITING_AGENT_TOKEN: ${{ secrets.WRITING_AGENT_TOKEN }}
+
+      - name: Deploy
+        run: npx wrangler deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

@@ -1,0 +1,42 @@
+name: WritingAgent Tests
+
+on:
+  pull_request:
+    paths:
+      - "infra/writing-agent/**"
+      - ".github/workflows/writing-agent-tests.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "infra/writing-agent/**"
+      - ".github/workflows/writing-agent-tests.yml"
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: infra/writing-agent
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: "infra/writing-agent/package-lock.json"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
