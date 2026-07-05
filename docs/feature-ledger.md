@@ -13,6 +13,7 @@
 
 | 时间 | 功能更新 |
 | --- | --- |
+| 2026-07-06 07:27 CST | WritingAgent revision 在用户明确要求正文配图但模型漏返插图动作时自动补充 image action，提升线上配图修改的稳定性。 |
 | 2026-07-06 07:03 CST | 线上部署链路接入 WritingAgent、分支 mining workflow 和 GPT Image 变量，使风格蒸馏与正文配图能力可以进入 dogfood 环境。 |
 | 2026-07-06 00:17 CST | 正文配图 MVP 接入语音修改链路：WritingAgent revision 可返回插图动作，mining 生成正文图、上传 R2/微信并写回 transcript 与草稿正文。 |
 | 2026-07-06 00:00 CST | 风格蒸馏进入开发主链：WritingAgent 支持 D1 持久化素材导入和画像蒸馏，VibePub Worker 提供代理接口，Android 可接收分享素材、触发蒸馏并同步云端风格画像。 |

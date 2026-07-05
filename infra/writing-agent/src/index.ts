@@ -1,4 +1,4 @@
-import { articlePackageFromResponse } from "./article";
+import { articlePackageFromResponse, type ArticleImageAction, type ArticlePackage } from "./article";
 import {
   DEFAULT_LAYOUT_PROFILES,
   DEFAULT_STYLE_PROFILES,
@@ -247,7 +247,11 @@ async function createRevisionJob(request: Request, env: Env): Promise<Response> 
 
   const jobId = await deterministicJobId(body, `${currentContent}\n\n${instructionText}`);
   const prompt = buildRevisionPrompt(body, styleProfile, layoutProfile, currentContent, instructionText);
-  const article = await generateArticlePackage(env, prompt);
+  const article = ensureRequestedImageAction(
+    await generateArticlePackage(env, prompt),
+    instructionText,
+    Boolean(body.output_contract?.allow_image_actions),
+  );
 
   return json({
     protocol_version: PROTOCOL_VERSION,
@@ -261,6 +265,108 @@ async function createRevisionJob(request: Request, env: Env): Promise<Response> 
       layout_profile_version: layoutProfile.version,
     },
   }, 201);
+}
+
+function ensureRequestedImageAction(
+  article: ArticlePackage,
+  instructionText: string,
+  allowImageActions: boolean,
+): ArticlePackage {
+  if (!allowImageActions || article.image_actions?.length || !requestsArticleImage(instructionText)) {
+    return article;
+  }
+
+  return {
+    ...article,
+    image_actions: [
+      {
+        image_id: "requested_image_1",
+        kind: "insert_image",
+        prompt: fallbackArticleImagePrompt(instructionText),
+        alt: "根据修改要求生成的正文配图",
+        anchor: fallbackArticleImageAnchor(instructionText),
+      },
+    ],
+    warnings: [
+      ...article.warnings,
+      "模型没有返回 image_actions，已根据明确配图指令补充一条插图动作。",
+    ],
+  };
+}
+
+function requestsArticleImage(instructionText: string): boolean {
+  const normalized = instructionText.trim();
+  if (!normalized) return false;
+  return /(配图|插图|图片|照片|图像|加.{0,12}图|插.{0,12}图|放.{0,12}图)/.test(normalized);
+}
+
+function fallbackArticleImagePrompt(instructionText: string): string {
+  const topic = imageTopicFromInstruction(instructionText);
+  return [
+    topic,
+    "Use case: inline illustration for a WeChat public account article.",
+    "Style: natural, realistic editorial scene, warm daylight, calm professional mood.",
+    "Constraints: no text, no letters, no logos, no watermarks, no UI screenshots.",
+  ].join(" ");
+}
+
+function imageTopicFromInstruction(instructionText: string): string {
+  const topics: string[] = [];
+  if (/办公桌|书桌|桌面|桌上/.test(instructionText)) {
+    topics.push("a warm office desk with notes");
+  }
+  if (/录音|语音|麦克风|话筒|播客/.test(instructionText)) {
+    topics.push("a small audio recorder and microphone");
+  }
+  if (/咖啡|茶/.test(instructionText)) {
+    topics.push("a cup of coffee or tea");
+  }
+  if (/手机|电脑|笔记本/.test(instructionText)) {
+    topics.push("a laptop and phone used for writing");
+  }
+  if (topics.length > 0) {
+    return topics.join(", ");
+  }
+  return "an editorial scene related to the article revision request";
+}
+
+function fallbackArticleImageAnchor(instructionText: string): ArticleImageAction["anchor"] {
+  const paragraphIndex = paragraphIndexFromInstruction(instructionText);
+  const position = /前面|之前|前/.test(instructionText)
+    ? "before"
+    : /后面|之后|后/.test(instructionText)
+      ? "after"
+      : "end";
+  return {
+    position,
+    paragraph_index: paragraphIndex,
+  };
+}
+
+function paragraphIndexFromInstruction(instructionText: string): number | undefined {
+  const digitMatch = instructionText.match(/第\s*(\d+)\s*段/);
+  if (digitMatch) {
+    return Number.parseInt(digitMatch[1], 10);
+  }
+  const hanMatch = instructionText.match(/第\s*([一二三四五六七八九十])\s*段/);
+  if (!hanMatch) return undefined;
+  return chineseParagraphNumber(hanMatch[1]);
+}
+
+function chineseParagraphNumber(value: string): number | undefined {
+  const map: Record<string, number> = {
+    一: 1,
+    二: 2,
+    三: 3,
+    四: 4,
+    五: 5,
+    六: 6,
+    七: 7,
+    八: 8,
+    九: 9,
+    十: 10,
+  };
+  return map[value];
 }
 
 async function resolveStyleProfile(

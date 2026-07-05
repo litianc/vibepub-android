@@ -263,6 +263,79 @@ describe("WritingAgent Worker", () => {
     });
   });
 
+  it("adds a fallback image action when the instruction explicitly asks for a picture", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      choices: [
+        {
+          message: {
+            content: JSON.stringify({
+              title: "带配图的新版标题",
+              content_html: "<section><p>按修改要求更新后的正文。</p></section>",
+              cover_title: ["带图", "新版"],
+              image_prompt: "A clean revised editorial image, no text",
+            }),
+          },
+        },
+      ],
+    }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    })));
+
+    const response = await worker.fetch(
+      new Request("https://writing-agent.test/v1/revision-jobs", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer secret",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          protocol_version: "vibepub.rewrite.v1",
+          current_article: {
+            title: "旧标题",
+            content_html: "<section><p>旧正文。</p></section>",
+          },
+          instruction: {
+            source_type: "voice_instruction",
+            text: "在第一段后面加一张办公桌录音的图。",
+            language: "zh-CN",
+          },
+          profiles: {
+            style_profile_id: "style_litianc_default",
+            layout_profile_id: "wechat_clean_article",
+          },
+          output_contract: {
+            allow_image_actions: true,
+          },
+        }),
+      }),
+      {
+        WRITING_AGENT_TOKEN: "secret",
+        GLM_API_KEY: "glm-key",
+        GLM_BASE_URL: "https://glm.example.test/api/paas/v4",
+        GLM_MODEL: "glm-test",
+      },
+    );
+
+    expect(response.status).toBe(201);
+    await expect(response.json()).resolves.toMatchObject({
+      result: {
+        image_actions: [
+          {
+            image_id: "requested_image_1",
+            kind: "insert_image",
+            prompt: expect.stringContaining("office desk"),
+            alt: "根据修改要求生成的正文配图",
+            anchor: { position: "after", paragraph_index: 1 },
+          },
+        ],
+        warnings: [
+          expect.stringContaining("补充一条插图动作"),
+        ],
+      },
+    });
+  });
+
   it("imports style sources and lists them for the workspace", async () => {
     const db = createProfileDb();
     const response = await worker.fetch(

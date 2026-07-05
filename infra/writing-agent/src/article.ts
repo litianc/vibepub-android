@@ -26,7 +26,7 @@ type ParsedArticle = Partial<{
   image_actions: unknown;
 }>;
 
-type ArticleImageAction = {
+export type ArticleImageAction = {
   image_id: string;
   kind: "insert_image";
   prompt: string;
