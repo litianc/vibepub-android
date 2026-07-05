@@ -1,0 +1,978 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VibePub 三页产品演示</title>
+  <style>
+    :root {
+      --ink: #272727;
+      --muted: #8b8b86;
+      --line: #e3ded6;
+      --paper: #fbfaf5;
+      --soft: #f2f0ea;
+      --card: #ffffff;
+      --red: #ef4438;
+      --red-soft: #fde9e8;
+      --green: #188f36;
+      --green-soft: #e8f5eb;
+      --shadow: 0 22px 60px rgba(36, 33, 29, .13);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: #e8e5dd;
+      color: var(--ink);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+        "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      overflow: hidden;
+    }
+
+    .deck {
+      position: fixed;
+      inset: 0;
+      overflow: hidden;
+    }
+
+    .slide {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      width: min(1280px, calc(100vw - 56px), calc((100vh - 56px) * 16 / 9));
+      aspect-ratio: 16 / 9;
+      overflow: hidden;
+      background: var(--paper);
+      box-shadow: var(--shadow);
+      opacity: 0;
+      pointer-events: none;
+      transform: translate(-50%, -50%) scale(.985);
+      transition: opacity .22s ease, transform .22s ease;
+    }
+
+    .slide.is-active {
+      opacity: 1;
+      pointer-events: auto;
+      transform: translate(-50%, -50%) scale(1);
+    }
+
+    .slide-inner {
+      position: absolute;
+      inset: 0;
+      padding: 54px 68px;
+    }
+
+    .accent-line {
+      width: 76px;
+      height: 6px;
+      margin-bottom: 20px;
+      background: linear-gradient(90deg, var(--red), var(--green));
+      border-radius: 999px;
+    }
+
+    h1,
+    h2,
+    h3,
+    p {
+      margin: 0;
+    }
+
+    h1 {
+      max-width: 620px;
+      font-size: 52px;
+      line-height: 1.06;
+      letter-spacing: 0;
+      font-weight: 770;
+    }
+
+    h2 {
+      font-size: 38px;
+      line-height: 1.15;
+      letter-spacing: 0;
+      font-weight: 740;
+    }
+
+    h3 {
+      font-size: 23px;
+      line-height: 1.2;
+      letter-spacing: 0;
+      font-weight: 740;
+    }
+
+    .lead {
+      max-width: 620px;
+      margin-top: 20px;
+      color: var(--muted);
+      font-size: 25px;
+      line-height: 1.46;
+    }
+
+    .hero-grid {
+      display: grid;
+      grid-template-columns: .94fr 1.06fr;
+      gap: 42px;
+      height: 100%;
+      align-items: center;
+    }
+
+    .value-list {
+      display: grid;
+      gap: 17px;
+      margin-top: 34px;
+    }
+
+    .value-item {
+      display: grid;
+      grid-template-columns: 42px 1fr;
+      gap: 14px;
+      align-items: start;
+      font-size: 22px;
+      line-height: 1.35;
+    }
+
+    .value-icon {
+      display: grid;
+      width: 42px;
+      height: 42px;
+      place-items: center;
+      border: 2px solid var(--line);
+      border-radius: 50%;
+      color: var(--red);
+      font-size: 23px;
+      font-weight: 760;
+      background: #fff;
+    }
+
+    .showcase {
+      display: grid;
+      grid-template-columns: 248px 1fr;
+      gap: 26px;
+      align-items: center;
+    }
+
+    .phone-shot {
+      position: relative;
+      width: 236px;
+      height: 514px;
+      overflow: hidden;
+      border: 6px solid #2b2b2b;
+      border-radius: 32px;
+      background: #fff;
+      box-shadow: 0 14px 32px rgba(36, 33, 29, .14);
+    }
+
+    .phone-shot img {
+      display: block;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      object-position: center top;
+    }
+
+    .flow-stack {
+      display: grid;
+      gap: 12px;
+    }
+
+    .flow-chip {
+      display: grid;
+      grid-template-columns: 34px 1fr;
+      gap: 10px;
+      align-items: center;
+      padding: 14px 16px;
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      color: #343434;
+      font-size: 20px;
+      line-height: 1.25;
+      font-weight: 720;
+      box-shadow: 0 10px 26px rgba(36, 33, 29, .06);
+    }
+
+    .chip-icon {
+      display: grid;
+      width: 34px;
+      height: 34px;
+      place-items: center;
+      border-radius: 50%;
+      background: var(--red-soft);
+      color: var(--red);
+      font-size: 17px;
+      font-weight: 820;
+    }
+
+    .flow-chip.done .chip-icon {
+      background: var(--green-soft);
+      color: var(--green);
+    }
+
+    .showcase-note {
+      margin-top: 10px;
+      color: var(--muted);
+      font-size: 18px;
+      line-height: 1.5;
+    }
+
+    .process-title {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 28px;
+      align-items: end;
+      margin-bottom: 18px;
+    }
+
+    .process-title p {
+      max-width: 360px;
+      color: var(--muted);
+      font-size: 19px;
+      line-height: 1.42;
+      text-align: right;
+    }
+
+    .process-grid {
+      display: grid;
+      grid-template-columns: 300px 38px 300px 38px 300px;
+      gap: 25px;
+      align-items: center;
+    }
+
+    .shot-card {
+      width: 300px;
+      min-height: 506px;
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      background: var(--card);
+      box-shadow: 0 16px 36px rgba(36, 33, 29, .08);
+    }
+
+    .shot-card h3 {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+
+    .step-badge {
+      display: inline-grid;
+      width: 28px;
+      height: 28px;
+      place-items: center;
+      border-radius: 50%;
+      background: var(--red-soft);
+      color: var(--red);
+      font-size: 15px;
+      font-weight: 820;
+    }
+
+    .shot-card .caption {
+      min-height: 44px;
+      color: var(--muted);
+      font-size: 16px;
+      line-height: 1.36;
+    }
+
+    .connector {
+      color: var(--red);
+      font-size: 34px;
+      font-weight: 760;
+      text-align: center;
+    }
+
+    .screenshot-frame {
+      position: relative;
+      height: 342px;
+      margin-top: 14px;
+      overflow: hidden;
+      border: 1px solid #d8d3ca;
+      border-radius: 18px;
+      background: var(--soft);
+    }
+
+    .screenshot-frame img {
+      display: block;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+
+    .shot-detail img {
+      object-position: center 13.3%;
+    }
+
+    .shot-draft img {
+      object-position: center 25.8%;
+    }
+
+    .shot-article img {
+      object-position: center 34.8%;
+    }
+
+    .closing-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 34px;
+      margin-top: 34px;
+    }
+
+    .close-panel {
+      padding: 28px;
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      background: var(--card);
+      box-shadow: 0 14px 32px rgba(36, 33, 29, .07);
+    }
+
+    .close-panel h3 {
+      margin-bottom: 22px;
+      font-size: 26px;
+    }
+
+    .check-list {
+      display: grid;
+      gap: 16px;
+      color: #343434;
+      font-size: 22px;
+      line-height: 1.32;
+    }
+
+    .check-item {
+      display: grid;
+      grid-template-columns: 28px 1fr;
+      gap: 12px;
+      align-items: start;
+    }
+
+    .mark {
+      color: var(--green);
+      font-size: 22px;
+      font-weight: 800;
+      line-height: 1.15;
+    }
+
+    .next .mark {
+      color: var(--red);
+    }
+
+    .footer-claim {
+      position: absolute;
+      right: 68px;
+      bottom: 48px;
+      left: 68px;
+      padding-top: 24px;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 23px;
+      line-height: 1.38;
+    }
+
+    .autoplay-toggle,
+    .narration-toggle {
+      position: fixed;
+      top: 18px;
+      z-index: 10;
+      display: grid;
+      width: 46px;
+      height: 46px;
+      place-items: center;
+      border: 1px solid rgba(39, 39, 39, .18);
+      border-radius: 50%;
+      background: rgba(255, 255, 255, .86);
+      color: var(--ink);
+      box-shadow: 0 10px 26px rgba(36, 33, 29, .16);
+      cursor: pointer;
+      transition: background .18s ease, transform .18s ease, box-shadow .18s ease;
+      backdrop-filter: blur(10px);
+    }
+
+    .autoplay-toggle {
+      right: 74px;
+    }
+
+    .narration-toggle {
+      right: 18px;
+    }
+
+    .autoplay-toggle:hover,
+    .narration-toggle:hover {
+      background: #fff;
+      transform: translateY(-1px);
+      box-shadow: 0 14px 30px rgba(36, 33, 29, .2);
+    }
+
+    .autoplay-toggle:focus-visible,
+    .narration-toggle:focus-visible {
+      outline: 3px solid rgba(239, 68, 56, .28);
+      outline-offset: 3px;
+    }
+
+    .autoplay-toggle svg,
+    .narration-toggle svg {
+      width: 23px;
+      height: 23px;
+      fill: none;
+      stroke: currentColor;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      stroke-width: 2;
+    }
+
+    .autoplay-toggle .icon-pause,
+    .autoplay-toggle.is-playing .icon-play,
+    .narration-toggle .icon-volume-off,
+    .narration-toggle.is-muted .icon-volume-on {
+      display: none;
+    }
+
+    .autoplay-toggle.is-playing .icon-pause,
+    .narration-toggle.is-muted .icon-volume-off {
+      display: block;
+    }
+
+    .subtitle-panel {
+      position: fixed;
+      right: 50%;
+      bottom: 30px;
+      z-index: 11;
+      width: min(980px, calc(100vw - 56px));
+      padding: 0 22px;
+      border: 0;
+      background: transparent;
+      color: var(--ink);
+      box-shadow: none;
+      opacity: 0;
+      pointer-events: none;
+      transform: translateX(50%) translateY(10px);
+      transition: opacity .2s ease, transform .2s ease;
+    }
+
+    .subtitle-panel.is-visible {
+      opacity: 1;
+      transform: translateX(50%) translateY(0);
+    }
+
+    .subtitle-text {
+      color: inherit;
+      font-size: 23px;
+      font-weight: 720;
+      line-height: 1.45;
+      text-align: center;
+      text-shadow: 0 1px 0 rgba(255, 255, 255, .9),
+        0 0 18px rgba(255, 255, 255, .92),
+        0 8px 22px rgba(36, 33, 29, .18);
+    }
+
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    @media (max-width: 900px) {
+      .slide {
+        width: min(calc(100vw - 28px), calc((100vh - 28px) * 16 / 9));
+      }
+    }
+
+    @media print {
+      @page {
+        size: 16in 9in;
+        margin: 0;
+      }
+
+      body {
+        background: #fff;
+        overflow: visible;
+      }
+
+      .deck {
+        display: block;
+        position: static;
+        overflow: visible;
+        padding: 0;
+      }
+
+      .slide {
+        position: relative;
+        top: auto;
+        left: auto;
+        width: 16in;
+        height: 9in;
+        box-shadow: none;
+        opacity: 1;
+        pointer-events: auto;
+        transform: none;
+        transition: none;
+        page-break-after: always;
+      }
+
+      .autoplay-toggle,
+      .narration-toggle,
+      .subtitle-panel,
+      .narration-audio {
+        display: none;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="deck">
+    <section class="slide is-active" aria-label="VibePub 项目价值">
+      <div class="slide-inner hero-grid">
+        <div>
+          <div class="accent-line"></div>
+          <h1>VibePub：口述成文<br>直达公众号草稿</h1>
+          <p class="lead">把“先说出来”的灵感，整理成可以继续编辑和发布的文章草稿。</p>
+
+          <div class="value-list">
+            <div class="value-item">
+              <div class="value-icon">1</div>
+              <p>先录音，不必马上组织成完整文章。</p>
+            </div>
+            <div class="value-item">
+              <div class="value-icon">2</div>
+              <p>云端完成转录、整理、成文和草稿创建。</p>
+            </div>
+            <div class="value-item">
+              <div class="value-icon">3</div>
+              <p>作者回到公众号后台确认，保留最后编辑权。</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="showcase">
+          <div class="phone-shot">
+            <img src="../assets/vibepub-recording-list.jpg" alt="VibePub 我的录音列表截图">
+          </div>
+          <div>
+            <div class="flow-stack" aria-label="VibePub 核心流程">
+              <div class="flow-chip">
+                <div class="chip-icon">1</div>
+                <p>录下想法</p>
+              </div>
+              <div class="flow-chip">
+                <div class="chip-icon">2</div>
+                <p>识别原文</p>
+              </div>
+              <div class="flow-chip">
+                <div class="chip-icon">3</div>
+                <p>整理成文</p>
+              </div>
+              <div class="flow-chip done">
+                <div class="chip-icon">✓</div>
+                <p>草稿就绪</p>
+              </div>
+            </div>
+            <p class="showcase-note">每次录音都有清晰状态，直到文章草稿准备好给作者确认。</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="slide" aria-label="完整使用流程">
+      <div class="slide-inner">
+        <div class="process-title">
+          <div>
+            <div class="accent-line"></div>
+            <h2>一次完整使用，从录音到成文</h2>
+          </div>
+          <p>从识别结果，到发布前确认。</p>
+        </div>
+
+        <div class="process-grid">
+          <article class="shot-card">
+            <h3><span class="step-badge">1</span>转录结果页</h3>
+            <p class="caption">录音后看到识别文本、成文状态和草稿提示。</p>
+            <div class="screenshot-frame shot-detail">
+              <img src="../assets/vibepub-recording-detail.jpg" alt="VibePub 录音详情和转录结果截图">
+            </div>
+          </article>
+
+          <div class="connector">→</div>
+
+          <article class="shot-card">
+            <h3><span class="step-badge">2</span>公众号草稿确认</h3>
+            <p class="caption">文章进入草稿区，作者选择封面并预览。</p>
+            <div class="screenshot-frame shot-draft">
+              <img src="../assets/vibepub-wechat-draft.jpg" alt="公众号草稿确认页面截图">
+            </div>
+          </article>
+
+          <div class="connector">→</div>
+
+          <article class="shot-card">
+            <h3><span class="step-badge">3</span>最终成文效果</h3>
+            <p class="caption">标题、作者信息和正文排版已经成型。</p>
+            <div class="screenshot-frame shot-article">
+              <img src="../assets/vibepub-final-article.jpg" alt="最终文章阅读效果截图">
+            </div>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="slide" aria-label="参与试用和内容发表">
+      <div class="slide-inner">
+        <div class="accent-line"></div>
+        <h2>一起试用 App，把想法发表出来</h2>
+        <p class="lead">欢迎从一次短录音开始，体验从口述到公众号草稿的完整流程。</p>
+
+        <div class="closing-grid">
+          <section class="close-panel">
+            <h3>试用体验 App</h3>
+            <div class="check-list">
+              <div class="check-item">
+                <div class="mark">✓</div>
+                <p>录一段真实想法或会议灵感</p>
+              </div>
+              <div class="check-item">
+                <div class="mark">✓</div>
+                <p>观察转录、成文和草稿状态</p>
+              </div>
+              <div class="check-item">
+                <div class="mark">✓</div>
+                <p>反馈哪里顺手、哪里还卡顿</p>
+              </div>
+            </div>
+          </section>
+
+          <section class="close-panel next">
+            <h3>参与内容发表</h3>
+            <div class="check-list">
+              <div class="check-item">
+                <div class="mark">•</div>
+                <p>贡献适合发表的口述主题</p>
+              </div>
+              <div class="check-item">
+                <div class="mark">•</div>
+                <p>一起打磨标题、封面和正文</p>
+              </div>
+              <div class="check-item">
+                <div class="mark">•</div>
+                <p>把可发布样稿沉淀成模板</p>
+              </div>
+            </div>
+          </section>
+        </div>
+
+        <p class="footer-claim">目标很简单：让更多人的一段口述，变成一篇真正能发出去的文章。</p>
+      </div>
+    </section>
+  </main>
+
+  <button class="autoplay-toggle" type="button" aria-label="自动播放" title="自动播放">
+    <svg class="icon-play" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M8 5v14l11-7-11-7Z"></path>
+    </svg>
+    <svg class="icon-pause" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M8 5v14"></path>
+      <path d="M16 5v14"></path>
+    </svg>
+    <span class="sr-only">自动播放</span>
+  </button>
+
+  <button class="narration-toggle" type="button" aria-label="静音旁白" title="静音旁白">
+    <svg class="icon-volume-on" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M11 5 6 9H3v6h3l5 4V5Z"></path>
+      <path d="M15.5 8.5a5 5 0 0 1 0 7"></path>
+      <path d="M18.5 5.5a9 9 0 0 1 0 13"></path>
+    </svg>
+    <svg class="icon-volume-off" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M11 5 6 9H3v6h3l5 4V5Z"></path>
+      <path d="m16 9 5 5"></path>
+      <path d="m21 9-5 5"></path>
+    </svg>
+    <span class="sr-only">静音旁白</span>
+  </button>
+
+  <div class="subtitle-panel" aria-live="polite" aria-hidden="true">
+    <p class="subtitle-text"></p>
+  </div>
+
+  <audio class="narration-audio" preload="auto" src="../assets/narration/slide-1.wav"></audio>
+  <audio class="narration-audio" preload="auto" src="../assets/narration/slide-2.wav"></audio>
+  <audio class="narration-audio" preload="auto" src="../assets/narration/slide-3.wav"></audio>
+
+  <script>
+    const slides = Array.from(document.querySelectorAll(".slide"));
+    const narrations = Array.from(document.querySelectorAll(".narration-audio"));
+    const subtitles = [
+      "先从我为什么做 VibePub 说起。很多时候，真正卡住我的并不是有没有想法，而是要不要立刻进入“写文章”的状态。VibePub 想把这个门槛降下来：先把想法说出来，哪怕它还不完整。录音之后，识别、整理、成文和创建草稿交给系统处理。我最后再回来确认、修改，保留作为作者的判断和编辑权。",
+      "把这个想法放进一次真实使用里，就能看到整个流程是怎么接上的。录音完成后，我先看到识别结果和处理状态；文章生成以后，它会进入公众号草稿；再往后，就是一篇已经成型、可以继续编辑和发布的内容。我希望整个过程给人的感觉是清楚、可控：我知道现在走到哪一步，也知道什么时候等待、什么时候检查、什么时候做最后调整。",
+      "所以接下来，我想邀请大家一起试用。这个产品现在最需要真实的使用场景：可以是一段会议后的想法，一段临时冒出来的判断，也可以是一个你本来就想写的题目。我们一起看看，它能不能把这些口头想法变成一篇可以发布的文章；也一起发现哪里顺、哪里卡。我的目标很简单：让更多原本只是说出来的想法，真正变成可以发表的内容。"
+    ];
+    const autoplayToggle = document.querySelector(".autoplay-toggle");
+    const autoplayLabel = autoplayToggle.querySelector(".sr-only");
+    const narrationToggle = document.querySelector(".narration-toggle");
+    const narrationLabel = narrationToggle.querySelector(".sr-only");
+    const subtitlePanel = document.querySelector(".subtitle-panel");
+    const subtitleText = document.querySelector(".subtitle-text");
+    const mutedPreference = window.localStorage.getItem("vibepub-narration-muted");
+    let current = 0;
+    let wheelLocked = false;
+    let touchStartX = 0;
+    let touchStartY = 0;
+    let narrationMuted = mutedPreference === "1";
+    let autoplayEnabled = false;
+    let fallbackAdvanceTimer = null;
+    let fallbackSubtitleTimer = null;
+    let subtitleSegmentIndex = 0;
+    const subtitleSegments = subtitles.map(splitSubtitle);
+
+    function splitSubtitle(text) {
+      const normalized = text.replace(/\s+/g, " ").trim();
+      if (!normalized) return [];
+      const segments = normalized.match(/[^。！？!?；;]+[。！？!?；;]?/g) || [normalized];
+      return segments.map((segment) => segment.trim()).filter(Boolean);
+    }
+
+    function clearFallbackAdvance() {
+      window.clearTimeout(fallbackAdvanceTimer);
+      fallbackAdvanceTimer = null;
+    }
+
+    function clearFallbackSubtitleTimer() {
+      window.clearTimeout(fallbackSubtitleTimer);
+      fallbackSubtitleTimer = null;
+    }
+
+    function pauseNarrations(options = {}) {
+      const reset = options.reset !== false;
+      narrations.forEach((audio) => {
+        audio.pause();
+        if (reset) audio.currentTime = 0;
+      });
+    }
+
+    function syncAutoplayState() {
+      autoplayToggle.classList.toggle("is-playing", autoplayEnabled);
+      const label = autoplayEnabled ? "暂停自动播放" : "自动播放";
+      autoplayToggle.setAttribute("aria-label", label);
+      autoplayToggle.setAttribute("title", label);
+      autoplayLabel.textContent = label;
+    }
+
+    function syncNarrationState() {
+      narrations.forEach((audio) => {
+        audio.muted = narrationMuted;
+      });
+      narrationToggle.classList.toggle("is-muted", narrationMuted);
+      const label = narrationMuted ? "取消静音旁白" : "静音旁白";
+      narrationToggle.setAttribute("aria-label", label);
+      narrationToggle.setAttribute("title", label);
+      narrationLabel.textContent = label;
+    }
+
+    function updateSubtitle() {
+      const segments = subtitleSegments[current] || [];
+      const text = segments[Math.min(subtitleSegmentIndex, Math.max(segments.length - 1, 0))] || "";
+      subtitleText.textContent = text;
+      const visible = autoplayEnabled && Boolean(text);
+      subtitlePanel.classList.toggle("is-visible", visible);
+      subtitlePanel.setAttribute("aria-hidden", visible ? "false" : "true");
+    }
+
+    function estimateSubtitleDuration(text) {
+      return Math.max(4500, Math.min(16000, text.length * 180));
+    }
+
+    function subtitleIndexForTime(segments, currentTime, duration) {
+      if (!segments.length || !Number.isFinite(duration) || duration <= 0) return 0;
+      const weights = segments.map((segment) => Math.max(6, segment.length));
+      const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
+      const targetWeight = Math.min(.999, Math.max(0, currentTime / duration)) * totalWeight;
+      let cursor = 0;
+      for (let index = 0; index < weights.length; index += 1) {
+        cursor += weights[index];
+        if (targetWeight < cursor) return index;
+      }
+      return segments.length - 1;
+    }
+
+    function syncSubtitleToAudio(audio) {
+      if (!autoplayEnabled) return;
+      const segments = subtitleSegments[current] || [];
+      if (!segments.length) {
+        updateSubtitle();
+        return;
+      }
+      const duration = Number.isFinite(audio.duration) && audio.duration > 0
+        ? audio.duration
+        : estimateSubtitleDuration(subtitles[current] || "") / 1000;
+      const nextIndex = subtitleIndexForTime(segments, audio.currentTime, duration);
+      if (nextIndex !== subtitleSegmentIndex) {
+        subtitleSegmentIndex = nextIndex;
+        updateSubtitle();
+      }
+    }
+
+    function scheduleFallbackSubtitleAdvance() {
+      clearFallbackSubtitleTimer();
+      const segments = subtitleSegments[current] || [];
+      if (!autoplayEnabled || segments.length <= 1) return;
+      const duration = estimateSubtitleDuration(subtitles[current] || "");
+      const weights = segments.map((segment) => Math.max(6, segment.length));
+      const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
+      const currentWeight = weights[subtitleSegmentIndex] || 0;
+      fallbackSubtitleTimer = window.setTimeout(() => {
+        if (!autoplayEnabled) return;
+        subtitleSegmentIndex = Math.min(subtitleSegmentIndex + 1, segments.length - 1);
+        updateSubtitle();
+        scheduleFallbackSubtitleAdvance();
+      }, Math.max(1200, duration * currentWeight / totalWeight));
+    }
+
+    function playActiveNarration() {
+      clearFallbackAdvance();
+      clearFallbackSubtitleTimer();
+      pauseNarrations();
+      subtitleSegmentIndex = 0;
+      updateSubtitle();
+      if (narrationMuted && !autoplayEnabled) return;
+
+      const audio = narrations[current];
+      if (!audio) {
+        if (autoplayEnabled && current < slides.length - 1) {
+          fallbackAdvanceTimer = window.setTimeout(nextSlide, estimateSubtitleDuration(subtitles[current] || ""));
+          scheduleFallbackSubtitleAdvance();
+        }
+        return;
+      }
+      audio.currentTime = 0;
+      const playback = audio.play();
+      if (playback) {
+        playback.catch(() => {
+          // Browsers may block audible autoplay until the first user gesture.
+        });
+      }
+    }
+
+    function showSlide(index, options = {}) {
+      const next = Math.max(0, Math.min(slides.length - 1, index));
+      const changed = next !== current;
+      current = next;
+      slides.forEach((slide, slideIndex) => {
+        slide.classList.toggle("is-active", slideIndex === current);
+      });
+      const hash = `#${current + 1}`;
+      if (window.location.hash !== hash) {
+        window.history.replaceState(null, "", hash);
+      }
+      if (changed || options.forceNarration) {
+        playActiveNarration();
+      }
+      updateSubtitle();
+    }
+
+    function nextSlide() {
+      showSlide(current + 1);
+    }
+
+    function previousSlide() {
+      showSlide(current - 1);
+    }
+
+    narrationToggle.addEventListener("click", () => {
+      narrationMuted = !narrationMuted;
+      window.localStorage.setItem("vibepub-narration-muted", narrationMuted ? "1" : "0");
+      syncNarrationState();
+      if (autoplayEnabled) {
+        const audio = narrations[current];
+        if (audio) audio.muted = narrationMuted;
+        return;
+      }
+      narrationMuted ? pauseNarrations() : playActiveNarration();
+    });
+
+    autoplayToggle.addEventListener("click", () => {
+      autoplayEnabled = !autoplayEnabled;
+      syncAutoplayState();
+      updateSubtitle();
+      if (autoplayEnabled) {
+        playActiveNarration();
+      } else {
+        clearFallbackAdvance();
+        clearFallbackSubtitleTimer();
+        pauseNarrations({ reset: false });
+      }
+    });
+
+    narrations.forEach((audio) => {
+      audio.addEventListener("timeupdate", () => {
+        syncSubtitleToAudio(audio);
+      });
+
+      audio.addEventListener("ended", () => {
+        if (!autoplayEnabled) return;
+        if (current < slides.length - 1) {
+          nextSlide();
+          return;
+        }
+        autoplayEnabled = false;
+        syncAutoplayState();
+        updateSubtitle();
+      });
+    });
+
+    document.addEventListener("keydown", (event) => {
+      const focusedControl = event.target.closest("button, a");
+      const focusedField = event.target.closest("input, textarea, select, [contenteditable='true']");
+      if (focusedField || (focusedControl && ["Enter", " "].includes(event.key))) return;
+
+      if (["ArrowRight", "ArrowDown", "PageDown", " "].includes(event.key)) {
+        event.preventDefault();
+        nextSlide();
+      }
+
+      if (["ArrowLeft", "ArrowUp", "PageUp", "Backspace"].includes(event.key)) {
+        event.preventDefault();
+        previousSlide();
+      }
+    });
+
+    document.addEventListener("wheel", (event) => {
+      event.preventDefault();
+      if (wheelLocked || Math.abs(event.deltaY) < 20) return;
+      wheelLocked = true;
+      event.deltaY > 0 ? nextSlide() : previousSlide();
+      window.setTimeout(() => {
+        wheelLocked = false;
+      }, 420);
+    }, { passive: false });
+
+    document.addEventListener("touchstart", (event) => {
+      const touch = event.changedTouches[0];
+      touchStartX = touch.clientX;
+      touchStartY = touch.clientY;
+    }, { passive: true });
+
+    document.addEventListener("touchend", (event) => {
+      const touch = event.changedTouches[0];
+      const deltaX = touch.clientX - touchStartX;
+      const deltaY = touch.clientY - touchStartY;
+      if (Math.abs(deltaX) < 40 || Math.abs(deltaX) < Math.abs(deltaY)) return;
+      deltaX < 0 ? nextSlide() : previousSlide();
+    }, { passive: true });
+
+    window.addEventListener("hashchange", () => {
+      const hashIndex = Number(window.location.hash.replace("#", "")) - 1;
+      if (Number.isInteger(hashIndex)) showSlide(hashIndex);
+    });
+
+    const initialIndex = Number(window.location.hash.replace("#", "")) - 1;
+    syncAutoplayState();
+    syncNarrationState();
+    showSlide(Number.isInteger(initialIndex) ? initialIndex : 0, { forceNarration: true });
+  </script>
+</body>
+</html>
