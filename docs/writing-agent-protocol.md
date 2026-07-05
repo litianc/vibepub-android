@@ -256,7 +256,7 @@ Webhook 回调后续增加时，需要 `X-WritingAgent-Signature` 和 `X-Writing
 }
 ```
 
-`image_prompt` 会被 mining 用作 GPT Image 2 无字底图提示词；中文封面标题仍由 VibePub 叠加，图片接口不可用时会回落到确定性封面渲染。
+`image_prompt` 会被 mining 用作封面背景模板选择线索；中文封面标题仍由 VibePub 通过 SVG/Sharp 叠加。GPT Image 2 只用于维护性生成可复用无字背景底稿，不在每篇文章生成时调用。
 
 失败响应：
 

@@ -1,3 +1,6 @@
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import sharp from "sharp";
 
 export type CoverBrief = {
@@ -12,25 +15,23 @@ export const WECHAT_COVER_HEIGHT = 383;
 
 const MAX_TITLE_LINES = 3;
 const MAX_LINE_LENGTH = 12;
-const GPT_IMAGE_DEFAULT_MODEL = "gpt-image-2";
-const GPT_IMAGE_DEFAULT_SIZE = "1024x1024";
-const GPT_IMAGE_DEFAULT_TIMEOUT_MS = 75_000;
-const GPT_IMAGE_ENDPOINT_PATH = "/v1/images/generations";
+const COVER_BACKGROUND_DIR = fileURLToPath(new URL("../assets/cover-backgrounds/", import.meta.url));
+const COVER_BACKGROUND_MANIFEST_PATH = path.join(COVER_BACKGROUND_DIR, "templates.json");
 
-type GptImageConfig = {
-  apiKey: string;
-  baseUrl: string;
-  model: string;
-  size: string;
-  timeoutMs: number;
+export type CoverBackgroundTemplate = {
+  id: string;
+  file: string;
+  description?: string;
+  tags?: string[];
+  enabled?: boolean;
 };
 
-type GptImageResponse = {
-  data?: Array<{
-    b64_json?: string;
-    url?: string;
-  }>;
+type CoverBackgroundSelection = {
+  template: CoverBackgroundTemplate;
+  buffer: Buffer;
 };
+
+let coverBackgroundTemplateCache: Promise<CoverBackgroundTemplate[]> | undefined;
 
 export function normalizeCoverBrief(brief: CoverBrief): Required<CoverBrief> {
   const titleLines = normalizeTitleLines(brief.titleLines, brief.title);
@@ -44,12 +45,12 @@ export function normalizeCoverBrief(brief: CoverBrief): Required<CoverBrief> {
 
 export async function generateWechatCoverBuffer(brief: CoverBrief): Promise<Buffer> {
   const normalized = normalizeCoverBrief(brief);
-  const imageBackground = await tryGenerateGptImageBackground(normalized);
-  if (imageBackground) {
+  const background = await tryLoadCoverBackgroundTemplate(normalized);
+  if (background) {
     try {
-      return await renderWechatCoverWithImageBackground(normalized, imageBackground);
+      return await renderWechatCoverWithImageBackground(normalized, background.buffer);
     } catch (error) {
-      console.warn(`GPT Image cover rendering failed; falling back to deterministic cover: ${errorMessage(error)}`);
+      console.warn(`Cover background template ${background.template.id} failed; falling back to deterministic cover: ${errorMessage(error)}`);
     }
   }
   return renderDeterministicWechatCover(normalized);
@@ -148,104 +149,83 @@ ${buildSubtitleSvg(brief.subtitle)}
 </svg>`.trim();
 }
 
-async function tryGenerateGptImageBackground(brief: Required<CoverBrief>): Promise<Buffer | undefined> {
-  const config = getGptImageConfig();
-  if (!config) return undefined;
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), config.timeoutMs);
-
+async function tryLoadCoverBackgroundTemplate(brief: Required<CoverBrief>): Promise<CoverBackgroundSelection | undefined> {
   try {
-    const response = await fetch(joinUrl(config.baseUrl, GPT_IMAGE_ENDPOINT_PATH), {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${config.apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: config.model,
-        prompt: buildGptImagePrompt(brief),
-        size: config.size,
-        n: 1,
-      }),
-      signal: controller.signal,
-    });
-
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}: ${await safeReadResponseText(response)}`);
-    }
-
-    const payload = await response.json() as GptImageResponse;
-    const image = payload.data?.[0];
-    if (image?.b64_json) {
-      return Buffer.from(image.b64_json, "base64");
-    }
-    if (image?.url) {
-      return fetchImageBuffer(image.url, controller.signal);
-    }
-    throw new Error("response did not include b64_json or url");
+    const template = selectCoverBackgroundTemplate(brief, await loadCoverBackgroundTemplates());
+    if (!template) return undefined;
+    const buffer = await readFile(path.join(COVER_BACKGROUND_DIR, path.basename(template.file)));
+    return { template, buffer };
   } catch (error) {
-    console.warn(`GPT Image cover generation failed; falling back to deterministic cover: ${errorMessage(error)}`);
+    console.warn(`Cover background template unavailable; falling back to deterministic cover: ${errorMessage(error)}`);
     return undefined;
-  } finally {
-    clearTimeout(timeout);
   }
 }
 
-function getGptImageConfig(): GptImageConfig | undefined {
-  const apiKey = process.env.GPT_IMAGE_API_KEY?.trim();
-  const baseUrl = process.env.GPT_IMAGE_BASE_URL?.trim();
-  if (!apiKey || !baseUrl) return undefined;
-
-  return {
-    apiKey,
-    baseUrl,
-    model: process.env.GPT_IMAGE_MODEL?.trim() || GPT_IMAGE_DEFAULT_MODEL,
-    size: process.env.GPT_IMAGE_SIZE?.trim() || GPT_IMAGE_DEFAULT_SIZE,
-    timeoutMs: parsePositiveInt(process.env.GPT_IMAGE_TIMEOUT_MS, GPT_IMAGE_DEFAULT_TIMEOUT_MS),
-  };
+async function loadCoverBackgroundTemplates(): Promise<CoverBackgroundTemplate[]> {
+  coverBackgroundTemplateCache ??= readCoverBackgroundTemplates();
+  return coverBackgroundTemplateCache;
 }
 
-function buildGptImagePrompt(brief: Required<CoverBrief>): string {
-  const subjectPrompt = brief.imagePrompt || `A clean editorial WeChat article cover background inspired by: ${brief.title}`;
-  return [
-    subjectPrompt,
-    "Horizontal editorial cover background for a WeChat article.",
-    "No text, no letters, no logo, no watermark.",
-    "Keep the center calm and readable for an overlaid Chinese title.",
-    "Warm natural light, clear subject matter, polished but not dark, not cluttered, not a pure abstract gradient.",
-  ].join(" ");
-}
-
-async function fetchImageBuffer(url: string, signal: AbortSignal): Promise<Buffer> {
-  const response = await fetch(url, { signal });
-  if (!response.ok) {
-    throw new Error(`image URL HTTP ${response.status}: ${await safeReadResponseText(response)}`);
+async function readCoverBackgroundTemplates(): Promise<CoverBackgroundTemplate[]> {
+  const raw = JSON.parse(await readFile(COVER_BACKGROUND_MANIFEST_PATH, "utf8")) as unknown;
+  if (!Array.isArray(raw)) {
+    throw new Error("cover background manifest must be an array");
   }
-  return Buffer.from(await response.arrayBuffer());
+  return raw.filter(isCoverBackgroundTemplate);
 }
 
-async function safeReadResponseText(response: Response): Promise<string> {
-  try {
-    return (await response.text()).slice(0, 500);
-  } catch {
-    return "<unreadable response body>";
+function isCoverBackgroundTemplate(value: unknown): value is CoverBackgroundTemplate {
+  if (!value || typeof value !== "object") return false;
+  const template = value as Record<string, unknown>;
+  return typeof template.id === "string" && typeof template.file === "string";
+}
+
+export function selectCoverBackgroundTemplate(
+  brief: Required<CoverBrief>,
+  templates: CoverBackgroundTemplate[],
+): CoverBackgroundTemplate | undefined {
+  const enabledTemplates = templates.filter(template => template.enabled !== false);
+  if (!enabledTemplates.length) return undefined;
+
+  const corpus = `${brief.title} ${brief.titleLines.join(" ")} ${brief.subtitle} ${brief.imagePrompt}`.toLowerCase();
+  let bestTemplate = enabledTemplates[0];
+  let bestScore = Number.NEGATIVE_INFINITY;
+
+  for (const template of enabledTemplates) {
+    const tags = template.tags || [];
+    let score = tags.includes("default") ? 1 : 0;
+    for (const tag of tags) {
+      if (tagMatchesCorpus(tag, corpus)) {
+        score += 3;
+      }
+    }
+    if (score > bestScore || (score === bestScore && template.id < bestTemplate.id)) {
+      bestTemplate = template;
+      bestScore = score;
+    }
   }
-}
 
-function joinUrl(baseUrl: string, path: string): string {
-  return `${baseUrl.replace(/\/+$/, "")}${path}`;
-}
-
-function parsePositiveInt(value: string | undefined, fallback: number): number {
-  const parsed = Number.parseInt(value || "", 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+  return bestTemplate;
 }
 
 function errorMessage(error: unknown): string {
   if (error instanceof Error) return error.message;
   return String(error);
 }
+
+function tagMatchesCorpus(tag: string, corpus: string): boolean {
+  const aliases = COVER_BACKGROUND_TAG_ALIASES[tag] || [tag];
+  return aliases.some(alias => corpus.includes(alias.toLowerCase()));
+}
+
+const COVER_BACKGROUND_TAG_ALIASES: Record<string, string[]> = {
+  dashboard: ["dashboard", "仪表盘", "数据看板", "数据"],
+  office: ["office", "desk", "workspace", "办公室", "办公", "书桌"],
+  product: ["product", "产品", "原型", "体验"],
+  tech: ["tech", "technology", "ai", "vibe coding", "技术", "系统"],
+  voice: ["voice", "recording", "audio", "语音", "录音", "口述"],
+  warm: ["warm", "daylight", "自然光", "温暖"],
+};
 
 function buildTitleLineSvgs(lines: string[]): string {
   const normalized = lines.slice(0, MAX_TITLE_LINES);
