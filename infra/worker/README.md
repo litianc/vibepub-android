@@ -10,6 +10,11 @@ Cloudflare Worker API for Android audio uploads.
 - `GET /api/recordings` - list recording statuses and display metadata; requires token
 - `PUT /api/internal/status` - update mining pipeline status; requires token
 - `GET /api/files/:key` - fetch an R2 object; requires token
+- `GET /api/style-profiles` - list built-in and distilled WritingAgent style profiles; requires token
+- `POST /api/style-source-imports` - import shared article or text sources for style distillation; requires token
+- `GET /api/style-source-imports` - list imported style sources; requires token
+- `POST /api/style-distillation-jobs` - distill imported sources into a reusable style profile; requires token
+- `GET /api/style-distillation-jobs/:id` - inspect a style distillation job; requires token
 
 `/api/recordings` returns the Android display contract: `filename`, `status`,
 `created_at`, `updated_at`, `duration_ms`, optional `article_title`, `raw_text_preview`,
@@ -34,6 +39,8 @@ npx wrangler r2 bucket create vibepub-files
 npx wrangler secret put FILES_TOKEN
 # Runtime secret name used by the Worker.
 npx wrangler secret put GITHUB_PAT
+# Required when Android should sync/distill WritingAgent style profiles.
+npx wrangler secret put WRITING_AGENT_TOKEN
 npx wrangler deploy
 ```
 
@@ -47,6 +54,10 @@ Worker as `GITHUB_PAT`.
 `GITHUB_WORKFLOW_REF` controls which Git ref receives the workflow dispatch. The
 dogfood deployment points at `main` so immediate upload-triggered mining uses the
 same code path as scheduled mining.
+`WRITING_AGENT_BASE_URL` must point at the deployed WritingAgent host before
+Android can sync cloud style profiles or import shared style sources. The Worker
+uses `WRITING_AGENT_TOKEN` server-side so Android only needs the normal
+`FILES_TOKEN`.
 
 ## Production Update Checklist
 

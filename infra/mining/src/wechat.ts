@@ -41,6 +41,27 @@ async function uploadCoverImage(accessToken: string, imageBuffer: Buffer): Promi
   return response.data.media_id;
 }
 
+export async function uploadWechatArticleImage(accessToken: string, imageBuffer: Buffer): Promise<string> {
+  const url = `${WECHAT_PROXY}/cgi-bin/media/uploadimg?access_token=${accessToken}`;
+
+  const form = new FormData();
+  form.append("media", imageBuffer, { filename: "article-image.png", contentType: "image/png" });
+
+  const response = await axios.post(url, form, {
+    headers: form.getHeaders()
+  });
+
+  if (response.data.errcode && response.data.errcode !== 0) {
+    throw new Error(`WeChat article image upload error: ${response.data.errcode} - ${response.data.errmsg}`);
+  }
+
+  if (!response.data.url) {
+    throw new Error("WeChat article image upload did not return url");
+  }
+
+  return response.data.url;
+}
+
 function buildDraftArticle(title: string, content: string, thumbMediaId: string) {
   return {
     title,

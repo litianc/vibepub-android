@@ -50,9 +50,9 @@ Webhook 回调后续增加时，需要 `X-WritingAgent-Signature` 和 `X-Writing
 
 ## Profile 接口
 
-当前代码已实现 `GET /v1/style-profiles`、`GET /v1/layout-profiles`、`POST /v1/rewrite-jobs` 和 `POST /v1/revision-jobs`。Android 也已支持本地自定义模板：模板正文会以内联 `style_profile_body` 方式随录音/文字任务提交给 WritingAgent。
+当前代码已实现 `GET /v1/style-profiles`、`GET /v1/layout-profiles`、`POST /v1/rewrite-jobs`、`POST /v1/revision-jobs`、`POST /v1/style-source-imports`、`GET /v1/style-source-imports`、`POST /v1/style-distillation-jobs` 和 `GET /v1/style-distillation-jobs/:id`。Android 也已支持本地自定义模板：模板正文会以内联 `style_profile_body` 方式随录音/文字任务提交给 WritingAgent。
 
-下面的创建/更新自定义模板与风格画像对话草稿接口是下一阶段平台化协议目标，需要在 WritingAgent 增加持久化存储后再开放为真正的跨设备模板市场。
+创建/更新自定义模板与风格画像对话草稿仍是下一阶段平台化协议目标；风格素材导入和蒸馏已先以 D1 持久化接口落地，供 VibePub Worker 代理给 Android 使用。
 
 ### `GET /v1/style-profiles`
 
@@ -103,6 +103,78 @@ Webhook 回调后续增加时，需要 `X-WritingAgent-Signature` 和 `X-Writing
 ### `PUT /v1/style-profiles/:id`
 
 更新用户自定义写作风格画像并生成新版本。公共模板不可原地修改，只能复制为私有模板。
+
+## 风格素材导入与蒸馏
+
+Android 不直接调用 WritingAgent；VibePub Worker 通过 `GET /api/style-profiles`、`POST /api/style-source-imports` 和 `POST /api/style-distillation-jobs` 代理这些接口，并用服务端 `WRITING_AGENT_TOKEN` 调用 WritingAgent。
+
+### `POST /v1/style-source-imports`
+
+导入一条可用于风格蒸馏的参考素材。P0 支持 URL、公众号文章分享文本和纯文本；Word/PDF 文件解析仍作为后续能力。
+
+```json
+{
+  "source_type": "wechat_article",
+  "url": "https://mp.weixin.qq.com/s/example",
+  "title": "一篇满意的旧文章",
+  "text": "用户分享或复制进来的正文片段"
+}
+```
+
+响应：
+
+```json
+{
+  "source_import": {
+    "id": "ssi_xxx",
+    "workspace_id": "vibepub-dogfood",
+    "source_type": "wechat_article",
+    "source_url": "https://mp.weixin.qq.com/s/example",
+    "title": "一篇满意的旧文章",
+    "status": "ready",
+    "text_preview": "用户分享或复制进来的正文片段",
+    "created_at": "2026-07-06T00:00:00.000Z"
+  }
+}
+```
+
+### `GET /v1/style-source-imports`
+
+按 workspace 返回最近导入的风格素材。
+
+### `POST /v1/style-distillation-jobs`
+
+用一组素材蒸馏出新的私有风格画像或生成已有画像的新版本。当前 MVP 同步返回 `profile_ready`，并默认保留每个 profile 最近 10 个版本。
+
+```json
+{
+  "source_import_ids": ["ssi_1", "ssi_2"],
+  "profile": {
+    "id": "style_my_old_articles",
+    "name": "我的旧文风格",
+    "description": "从满意旧文章提取。"
+  }
+}
+```
+
+响应：
+
+```json
+{
+  "distillation_job": {
+    "id": "sdj_xxx",
+    "status": "profile_ready",
+    "source_import_ids": ["ssi_1", "ssi_2"]
+  },
+  "style_profile": {
+    "id": "style_my_old_articles",
+    "name": "我的旧文风格",
+    "version": "2026-07-06T00:00:00.000Z",
+    "active_version_id": "spv_xxx",
+    "body": "完整写作风格画像提示词"
+  }
+}
+```
 
 ## 风格画像对话草稿
 
@@ -305,14 +377,41 @@ VibePub 在用户通过语音或文字提出修改要求后调用此接口。Vib
   "output_contract": {
     "format": "wechat_article_package",
     "content_format": "html_fragment",
-    "require_cover_fields": true
+    "require_cover_fields": true,
+    "allow_image_actions": true
   }
 }
 ```
 
-成功响应与 `/v1/rewrite-jobs` 一致，返回新版 `article_ready` 文章包。VibePub 收到新版文章包后负责：
+成功响应与 `/v1/rewrite-jobs` 一致，返回新版 `article_ready` 文章包。若修改指令明确要求配图，`result` 可额外带 `image_actions`：
+
+```json
+{
+  "result": {
+    "title": "新版文章标题",
+    "content_html": "<section><p>第一段。</p><p>第二段。</p></section>",
+    "image_actions": [
+      {
+        "image_id": "opening-desk",
+        "kind": "insert_image",
+        "prompt": "A warm desk with a recorder, no text, no logo, no watermark",
+        "alt": "办公桌上的录音设备",
+        "anchor": {
+          "position": "after",
+          "paragraph_index": 1
+        }
+      }
+    ]
+  }
+}
+```
+
+MVP 支持 `kind=insert_image`，`position=start/end/before/after`，`paragraph_index` 从 1 开始。WritingAgent 不直接在 `content_html` 中插入占位图片；VibePub mining 负责生成图片、上传 R2、上传微信正文图并把最终 `<img>` 写入新版正文。
+
+VibePub 收到新版文章包后负责：
 
 - 更新 transcript 中的 `articleTitle/articleContent/coverImageUrl/revisionHistory`。
+- 处理 `image_actions`：生成正文图、写入 `article-images/<filename>/<image_id>.png`、记录 `articleImages[]`。
 - 如果存在 `wechatDraftId`，调用公众号接口更新原草稿。
 - 把端上状态从 `REWRITING/DRAFTING` 推进到 `COMPLETED` 或 `REVISION_FAILED`。
 
@@ -345,3 +444,15 @@ WRITING_AGENT_LAYOUT_PROFILE_VERSION
 ```
 
 如果 `WRITING_AGENT_BASE_URL` 未配置，VibePub 保留原来的内置 GLM 初稿改写和文章修改路径作为 fallback。
+
+正文配图 MVP 由 `infra/mining` 在用户明确要求插图的 revision 中触发，使用独立图片生成配置；未配置时，含 `image_actions` 的 revision 会进入 `REVISION_FAILED`，不会覆盖旧文章：
+
+```text
+ARTICLE_IMAGE_BASE_URL
+ARTICLE_IMAGE_API_KEY
+ARTICLE_IMAGE_MODEL
+ARTICLE_IMAGE_SIZE
+ARTICLE_IMAGE_TIMEOUT_MS
+```
+
+缺省可回退读取已有 `GPT_IMAGE_*` 图片配置。

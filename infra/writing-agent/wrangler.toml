@@ -5,3 +5,8 @@ compatibility_date = "2026-07-05"
 [vars]
 GLM_BASE_URL = "https://open.bigmodel.cn/api/paas/v4/"
 GLM_MODEL = "glm-5.2"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "writing-agent-db"
+database_id = "50047723-7c43-40f9-9a97-b61219cb6c19"

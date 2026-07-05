@@ -147,6 +147,9 @@ describe("WritingAgent mining adapter", () => {
         style_profile_id: "style_litianc_default",
         layout_profile_id: "wechat_clean_article",
       },
+      output_contract: {
+        allow_image_actions: true,
+      },
     });
   });
 
@@ -161,6 +164,15 @@ describe("WritingAgent mining adapter", () => {
           cover_subtitle: "可配置",
           image_prompt: "A clean editorial image, no text",
         },
+        image_actions: [
+          {
+            image_id: "opening desk",
+            kind: "insert_image",
+            prompt: "A warm desk, no text",
+            alt: "办公桌",
+            anchor: { position: "after", paragraph_index: 1 },
+          },
+        ],
       },
     })).toEqual({
       title: "外部平台标题",
@@ -168,6 +180,15 @@ describe("WritingAgent mining adapter", () => {
       imagePrompt: "A clean editorial image, no text",
       coverTitle: ["外部", "平台"],
       coverSubtitle: "可配置",
+      imageActions: [
+        {
+          imageId: "opening_desk",
+          kind: "insert_image",
+          prompt: "A warm desk, no text",
+          alt: "办公桌",
+          anchor: { position: "after", paragraphIndex: 1, text: undefined },
+        },
+      ],
     });
   });
 

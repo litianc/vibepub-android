@@ -136,6 +136,17 @@ export async function uploadCoverImage(key: string, imageBuffer: Buffer): Promis
   await s3.send(command);
 }
 
+export async function uploadArticleImage(key: string, imageBuffer: Buffer): Promise<void> {
+  const command = new PutObjectCommand({
+    Bucket: BUCKET_NAME,
+    Key: key,
+    Body: imageBuffer,
+    ContentType: "image/png",
+    CacheControl: "private, max-age=86400",
+  });
+  await s3.send(command);
+}
+
 function encodePathSegment(value: string): string {
   return encodeURIComponent(value).replace(/[!*'()]/g, char => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
 }

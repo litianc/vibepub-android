@@ -1,4 +1,5 @@
 import { processAudioText, reviseArticleWithInstruction, type ArticleResult } from "./llm.js";
+import { normalizeArticleImageActions } from "./articleImageActions.js";
 
 type RewriteArticleInput = {
   rawText: string;
@@ -25,6 +26,8 @@ type WritingAgentResponse = {
       cover_subtitle?: string;
       image_prompt?: string;
     };
+    image_actions?: unknown;
+    imageActions?: unknown;
     warnings?: string[];
   };
   error?: {
@@ -145,6 +148,12 @@ export function buildWritingAgentRequest(input: RewriteArticleInput): Record<str
       format: "wechat_article_package",
       content_format: "html_fragment",
       require_cover_fields: true,
+      allow_image_actions: true,
+      image_actions: {
+        max_actions: 3,
+        supported_actions: ["insert_image"],
+        supported_positions: ["start", "end", "before", "after"],
+      },
     },
   };
 }
@@ -190,6 +199,12 @@ export function buildWritingAgentRevisionRequest(input: ReviseArticleInput): Rec
       format: "wechat_article_package",
       content_format: "html_fragment",
       require_cover_fields: true,
+      allow_image_actions: true,
+      image_actions: {
+        max_actions: 3,
+        supported_actions: ["insert_image"],
+        supported_positions: ["start", "end", "before", "after"],
+      },
     },
   };
 }
@@ -208,6 +223,7 @@ export function articleResultFromWritingAgentResponse(response: WritingAgentResp
   if (!title || !content) {
     throw new Error("WritingAgent response is missing title or content_html");
   }
+  const imageActions = normalizeArticleImageActions(result?.image_actions ?? result?.imageActions);
 
   return {
     title,
@@ -216,6 +232,7 @@ export function articleResultFromWritingAgentResponse(response: WritingAgentResp
       "A clean editorial cover image, no text, no logo, no watermark",
     coverTitle: normalizeStringArray(result?.cover?.cover_title),
     coverSubtitle: normalizeString(result?.cover?.cover_subtitle) || undefined,
+    ...(imageActions.length > 0 ? { imageActions } : {}),
   };
 }
 

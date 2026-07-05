@@ -998,6 +998,112 @@ test("persists snake_case status error for draft failure metadata", async () => 
   assert.deepEqual(boundValues.slice(8, 10), [1, "公众号草稿创建失败：502"]);
 });
 
+test("proxies style profile listing to WritingAgent with server-side token", async () => {
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, init = {}) => {
+    calls.push({ url: String(url), init });
+    return new Response(JSON.stringify({
+      style_profiles: [
+        { id: "style_litianc_default", name: "默认风格" },
+        { id: "style_my_old_articles", name: "我的旧文风格" },
+      ],
+    }), {
+      status: 200,
+      headers: { "Content-Type": "application/json; charset=utf-8" },
+    });
+  };
+
+  try {
+    const response = await worker.fetch(
+      authorizedRequest("https://example.test/api/style-profiles?workspace_id=vibepub-dogfood"),
+      createEnv({
+        WRITING_AGENT_BASE_URL: "https://writing-agent.example.test",
+        WRITING_AGENT_TOKEN: "writing-token",
+      }),
+      createExecutionContext(),
+    );
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), {
+      style_profiles: [
+        { id: "style_litianc_default", name: "默认风格" },
+        { id: "style_my_old_articles", name: "我的旧文风格" },
+      ],
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(calls.length, 1);
+  assert.equal(
+    calls[0].url,
+    "https://writing-agent.example.test/v1/style-profiles?workspace_id=vibepub-dogfood",
+  );
+  assert.equal(calls[0].init.headers.get("Authorization"), "Bearer writing-token");
+});
+
+test("proxies style source imports without exposing WritingAgent token to Android", async () => {
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, init = {}) => {
+    calls.push({ url: String(url), init, body: String(init.body || "") });
+    return new Response(JSON.stringify({
+      source_import: {
+        id: "ssi_1",
+        source_type: "wechat_article",
+        title: "参考文章",
+        status: "ready",
+      },
+    }), {
+      status: 201,
+      headers: { "Content-Type": "application/json; charset=utf-8" },
+    });
+  };
+
+  try {
+    const response = await worker.fetch(
+      authorizedRequest("https://example.test/api/style-source-imports", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          source_type: "wechat_article",
+          url: "https://mp.weixin.qq.com/s/example",
+          title: "参考文章",
+          text: "有现场感的旧文章。",
+        }),
+      }),
+      createEnv({
+        WRITING_AGENT_BASE_URL: "https://writing-agent.example.test/",
+        WRITING_AGENT_TOKEN: "writing-token",
+      }),
+      createExecutionContext(),
+    );
+
+    assert.equal(response.status, 201);
+    assert.equal((await response.json()).source_import.id, "ssi_1");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, "https://writing-agent.example.test/v1/style-source-imports");
+  assert.equal(calls[0].init.headers.get("Authorization"), "Bearer writing-token");
+  assert.equal(calls[0].init.headers.get("Content-Type"), "application/json");
+  assert.equal(JSON.parse(calls[0].body).title, "参考文章");
+});
+
+test("returns a clear error when WritingAgent proxy is not configured", async () => {
+  const response = await worker.fetch(
+    authorizedRequest("https://example.test/api/style-profiles"),
+    createEnv({ WRITING_AGENT_BASE_URL: "", WRITING_AGENT_TOKEN: "" }),
+    createExecutionContext(),
+  );
+
+  assert.equal(response.status, 503);
+  assert.equal((await response.json()).error, "writing_agent_unconfigured");
+});
+
 async function loadWorker() {
   const sourcePath = resolve("src/index.ts");
   const source = await readFile(sourcePath, "utf8");

@@ -1,4 +1,5 @@
 import OpenAI from "openai";
+import { normalizeArticleImageActions, type ArticleImageAction, type ArticleImageAsset } from "./articleImageActions.js";
 import { buildWechatArticlePrompt } from "./styleProfile.js";
 
 const GLM_API_KEY = process.env.GLM_API_KEY!;
@@ -14,6 +15,8 @@ export type ArticleResult = {
   coverTitle?: string[];
   coverSubtitle?: string;
   coverImageUrl?: string;
+  imageActions?: ArticleImageAction[];
+  articleImages?: ArticleImageAsset[];
 };
 
 type ParsedArticle = Partial<{
@@ -22,6 +25,8 @@ type ParsedArticle = Partial<{
   imagePrompt: string;
   coverTitle: unknown;
   coverSubtitle: string;
+  imageActions: unknown;
+  image_actions: unknown;
 }>;
 
 export async function processAudioText(rawText: string): Promise<ArticleResult> {
@@ -100,8 +105,18 @@ function buildRevisionPrompt(input: {
   "content": "新版公众号正文，允许使用 <p>/<h3>/<ul>/<li> 等微信可接受 HTML",
   "imagePrompt": "适合新版文章封面的英文图片提示词",
   "coverTitle": ["封面标题第一行", "第二行", "可选第三行"],
-  "coverSubtitle": "封面副标题"
+  "coverSubtitle": "封面副标题",
+  "imageActions": []
 }
+6. 如果修改要求明确要求生成图片、加配图、在开头/结尾/某段附近插图，请不要在正文里写占位图，而是在 imageActions 中返回插图动作：
+{
+  "imageId": "image_1",
+  "kind": "insert_image",
+  "prompt": "English prompt for the image, no text, no logo, no watermark",
+  "alt": "中文图片说明",
+  "anchor": { "position": "after", "paragraphIndex": 1 }
+}
+没有配图要求时 imageActions 必须是空数组。
 
 原始口述转录：
 ${input.rawText}
@@ -118,6 +133,7 @@ ${input.instructionText}
 }
 
 function articleResultFromParsed(result: ParsedArticle, fallbackContent: string): ArticleResult {
+  const imageActions = normalizeArticleImageActions(result.imageActions ?? result.image_actions);
   return {
     title: cleanArticleString(result.title) || "VibePub 语音随笔",
     content: cleanArticleString(result.content) || fallbackContent,
@@ -126,6 +142,7 @@ function articleResultFromParsed(result: ParsedArticle, fallbackContent: string)
       ? result.coverTitle.map(value => cleanArticleString(value)).filter(Boolean).slice(0, 3)
       : undefined,
     coverSubtitle: cleanArticleString(result.coverSubtitle) || undefined,
+    ...(imageActions.length > 0 ? { imageActions } : {}),
   };
 }
 

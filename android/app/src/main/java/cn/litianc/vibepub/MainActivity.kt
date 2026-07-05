@@ -1,6 +1,7 @@
 package cn.litianc.vibepub
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
@@ -12,6 +13,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.*
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.lifecycleScope
 import androidx.work.Constraints
 import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
@@ -48,6 +50,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         preferences = AppPreferences(this)
         recorder = AudioRecorder(this)
+        handleIncomingStyleSourceShare(intent)
         
         // Schedule SyncWorker
         val workManager = WorkManager.getInstance(this)
@@ -67,6 +70,42 @@ class MainActivity : ComponentActivity() {
             VibePubTheme {
                 VibePubApp(preferences, recorder)
             }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleIncomingStyleSourceShare(intent)
+    }
+
+    private fun handleIncomingStyleSourceShare(intent: Intent?) {
+        val source = sharedStyleSourceFromIntent(intent) ?: return
+        if (preferences.filesToken.isBlank()) {
+            Toast.makeText(this, "请先在设置中配置 FILES_TOKEN，再导入风格素材", Toast.LENGTH_LONG).show()
+            return
+        }
+        lifecycleScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    WritingStyleApi.importStyleSource(
+                        apiBaseUrl = preferences.apiBaseUrl,
+                        filesToken = preferences.filesToken,
+                        sourceType = source.sourceType,
+                        title = source.title,
+                        url = source.url,
+                        text = source.text,
+                    )
+                }
+            }
+            result.fold(
+                onSuccess = {
+                    Toast.makeText(this@MainActivity, "已导入风格素材：${it.title ?: it.id}", Toast.LENGTH_SHORT).show()
+                },
+                onFailure = {
+                    Toast.makeText(this@MainActivity, it.message ?: "风格素材导入失败", Toast.LENGTH_SHORT).show()
+                },
+            )
         }
     }
 }

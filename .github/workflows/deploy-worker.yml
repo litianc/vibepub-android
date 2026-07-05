@@ -76,6 +76,13 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           WORKFLOW_DISPATCH_PAT: ${{ secrets.WORKFLOW_DISPATCH_PAT }}
 
+      - name: Set WritingAgent Secret
+        if: env.WRITING_AGENT_TOKEN != ''
+        run: printf '%s' "$WRITING_AGENT_TOKEN" | npx wrangler secret put WRITING_AGENT_TOKEN
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          WRITING_AGENT_TOKEN: ${{ secrets.WRITING_AGENT_TOKEN }}
+
       - name: Deploy
         run: npx wrangler deploy
         env:

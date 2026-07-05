@@ -2,6 +2,7 @@ export type ArticlePackage = {
   title: string;
   content_html: string;
   summary?: string;
+  image_actions?: ArticleImageAction[];
   cover: {
     cover_title?: string[];
     cover_subtitle?: string;
@@ -21,7 +22,21 @@ type ParsedArticle = Partial<{
   cover_title: unknown;
   coverSubtitle: string;
   cover_subtitle: string;
+  imageActions: unknown;
+  image_actions: unknown;
 }>;
+
+type ArticleImageAction = {
+  image_id: string;
+  kind: "insert_image";
+  prompt: string;
+  alt?: string;
+  anchor: {
+    position: "start" | "end" | "before" | "after";
+    paragraph_index?: number;
+    text?: string;
+  };
+};
 
 export function articlePackageFromResponse(responseText: string): ArticlePackage {
   try {
@@ -44,6 +59,7 @@ function articlePackageFromParsed(
     title: cleanArticleString(result.title) || "VibePub 语音随笔",
     content_html: cleanArticleString(result.content_html) || cleanArticleString(result.content) || fallbackContent,
     summary: cleanArticleString(result.summary) || undefined,
+    image_actions: normalizeImageActions(result.image_actions ?? result.imageActions),
     cover: {
       cover_title: normalizeStringArray(result.cover_title ?? result.coverTitle),
       cover_subtitle: cleanArticleString(result.cover_subtitle ?? result.coverSubtitle) || undefined,
@@ -54,8 +70,61 @@ function articlePackageFromParsed(
   };
 }
 
+function normalizeImageActions(value: unknown): ArticleImageAction[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const actions = value
+    .map((item, index) => normalizeImageAction(item, index))
+    .filter((item): item is ArticleImageAction => Boolean(item))
+    .slice(0, 3);
+  return actions.length > 0 ? actions : undefined;
+}
+
+function normalizeImageAction(value: unknown, index: number): ArticleImageAction | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  const prompt = cleanArticleString(record.prompt ?? record.image_prompt);
+  if (!prompt) return undefined;
+  return {
+    image_id: sanitizeImageId(cleanArticleString(record.image_id ?? record.imageId ?? record.id) || `image_${index + 1}`),
+    kind: "insert_image",
+    prompt,
+    alt: cleanArticleString(record.alt ?? record.alt_text ?? record.altText) || undefined,
+    anchor: normalizeImageAnchor(record.anchor),
+  };
+}
+
+function normalizeImageAnchor(value: unknown): ArticleImageAction["anchor"] {
+  const record = typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+  const rawPosition = cleanArticleString(record.position ?? record.mode ?? record.location).toLowerCase();
+  const paragraphIndex = positiveInteger(record.paragraph_index ?? record.paragraphIndex);
+  return {
+    position: rawPosition.includes("start") || rawPosition.includes("front")
+      ? "start"
+      : rawPosition.includes("before")
+        ? "before"
+        : rawPosition.includes("after")
+          ? "after"
+          : "end",
+    paragraph_index: paragraphIndex,
+    text: cleanArticleString(record.text ?? record.near_text ?? record.nearText) || undefined,
+  };
+}
+
 function cleanArticleString(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
+}
+
+function sanitizeImageId(value: string): string {
+  return value.trim().replace(/[^\w.-]/g, "_").slice(0, 80) || "image";
+}
+
+function positiveInteger(value: unknown): number | undefined {
+  const parsed = typeof value === "number"
+    ? value
+    : Number.parseInt(cleanArticleString(value), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : undefined;
 }
 
 function normalizeStringArray(value: unknown): string[] | undefined {

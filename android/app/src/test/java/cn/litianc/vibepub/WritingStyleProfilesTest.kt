@@ -47,6 +47,32 @@ class WritingStyleProfilesTest {
     }
 
     @Test
+    fun remoteProfilesRoundTripThroughJsonAndCanBeSelected() {
+        val profile = WritingStyleProfileOption(
+            id = "style_my_old_articles",
+            version = "2026-07-05T12:00:00Z",
+            name = "我的旧文风格",
+            description = "从旧文章蒸馏出来的风格。",
+            remote = true,
+        )
+
+        val decoded = WritingStyleProfiles.decodeRemoteProfiles(
+            WritingStyleProfiles.encodeRemoteProfiles(listOf(profile)),
+        )
+
+        assertEquals(1, decoded.size)
+        assertEquals("style_my_old_articles", decoded.first().id)
+        assertEquals(true, decoded.first().remote)
+        assertEquals(
+            "我的旧文风格",
+            WritingStyleProfiles.optionFor(
+                id = "style_my_old_articles",
+                remoteProfiles = decoded,
+            ).name,
+        )
+    }
+
+    @Test
     fun voiceTurnsAppendToCustomPromptBody() {
         val first = WritingStyleProfiles.mergeStylePromptTurn(
             existingBody = "",

@@ -68,12 +68,24 @@ class AppPreferences(context: Context) {
             .putString(KEY_CUSTOM_WRITING_STYLE_PROFILES, WritingStyleProfiles.encodeCustomProfiles(value))
             .apply()
 
+    var remoteWritingStyleProfiles: List<WritingStyleProfileOption>
+        get() = WritingStyleProfiles.decodeRemoteProfiles(
+            prefs.getString(KEY_REMOTE_WRITING_STYLE_PROFILES, "").orEmpty(),
+        )
+        set(value) = prefs.edit()
+            .putString(KEY_REMOTE_WRITING_STYLE_PROFILES, WritingStyleProfiles.encodeRemoteProfiles(value))
+            .apply()
+
     fun allWritingStyleProfiles(): List<WritingStyleProfileOption> {
-        return WritingStyleProfiles.builtIn + customWritingStyleProfiles
+        return WritingStyleProfiles.builtIn + customWritingStyleProfiles + remoteWritingStyleProfiles
     }
 
     fun selectedWritingStyleProfile(): WritingStyleProfileOption {
-        return WritingStyleProfiles.optionFor(selectedStyleProfileId, customWritingStyleProfiles)
+        return WritingStyleProfiles.optionFor(
+            selectedStyleProfileId,
+            customWritingStyleProfiles,
+            remoteWritingStyleProfiles,
+        )
     }
 
     fun selectedStyleProfileBody(): String {
@@ -114,6 +126,7 @@ class AppPreferences(context: Context) {
         private const val KEY_SELECTED_LAYOUT_PROFILE_ID = "selected_layout_profile_id"
         private const val KEY_SELECTED_LAYOUT_PROFILE_VERSION = "selected_layout_profile_version"
         private const val KEY_CUSTOM_WRITING_STYLE_PROFILES = "custom_writing_style_profiles"
+        private const val KEY_REMOTE_WRITING_STYLE_PROFILES = "remote_writing_style_profiles"
         private val lastSyncAtMsUpdates = MutableSharedFlow<Long>(extraBufferCapacity = 1)
     }
 }

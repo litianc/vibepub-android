@@ -10,6 +10,7 @@ data class WritingStyleProfileOption(
     val description: String,
     val body: String? = null,
     val custom: Boolean = false,
+    val remote: Boolean = false,
 )
 
 object WritingStyleProfiles {
@@ -47,13 +48,21 @@ object WritingStyleProfiles {
 
     val defaultStyleProfile: WritingStyleProfileOption = builtIn.first()
 
-    fun findById(id: String?, customProfiles: List<WritingStyleProfileOption> = emptyList()): WritingStyleProfileOption? {
+    fun findById(
+        id: String?,
+        customProfiles: List<WritingStyleProfileOption> = emptyList(),
+        remoteProfiles: List<WritingStyleProfileOption> = emptyList(),
+    ): WritingStyleProfileOption? {
         val normalized = id?.trim().orEmpty()
-        return (builtIn + customProfiles).firstOrNull { it.id == normalized }
+        return (builtIn + customProfiles + remoteProfiles).firstOrNull { it.id == normalized }
     }
 
-    fun optionFor(id: String?, customProfiles: List<WritingStyleProfileOption> = emptyList()): WritingStyleProfileOption {
-        return findById(id, customProfiles) ?: defaultStyleProfile
+    fun optionFor(
+        id: String?,
+        customProfiles: List<WritingStyleProfileOption> = emptyList(),
+        remoteProfiles: List<WritingStyleProfileOption> = emptyList(),
+    ): WritingStyleProfileOption {
+        return findById(id, customProfiles, remoteProfiles) ?: defaultStyleProfile
     }
 
     fun decodeCustomProfiles(json: String): List<WritingStyleProfileOption> {
@@ -94,6 +103,47 @@ object WritingStyleProfiles {
                         put("name", profile.name)
                         put("description", profile.description)
                         put("body", profile.body.orEmpty())
+                    },
+                )
+            }
+        return array.toString()
+    }
+
+    fun decodeRemoteProfiles(json: String): List<WritingStyleProfileOption> {
+        if (json.isBlank()) return emptyList()
+        return runCatching {
+            val array = JSONArray(json)
+            buildList {
+                for (index in 0 until array.length()) {
+                    val item = array.optJSONObject(index) ?: continue
+                    val id = item.optString("id").trim()
+                    val name = item.optString("name").trim()
+                    if (id.isBlank() || name.isBlank()) continue
+                    add(
+                        WritingStyleProfileOption(
+                            id = id,
+                            version = item.optString("version").trim().ifBlank { DEFAULT_STYLE_PROFILE_VERSION },
+                            name = name,
+                            description = item.optString("description").trim(),
+                            remote = true,
+                        ),
+                    )
+                }
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    fun encodeRemoteProfiles(profiles: List<WritingStyleProfileOption>): String {
+        val array = JSONArray()
+        profiles
+            .filter { it.remote }
+            .forEach { profile ->
+                array.put(
+                    JSONObject().apply {
+                        put("id", profile.id)
+                        put("version", profile.version)
+                        put("name", profile.name)
+                        put("description", profile.description)
                     },
                 )
             }

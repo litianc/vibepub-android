@@ -86,6 +86,8 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import cn.litianc.vibepub.AppPreferences
 import cn.litianc.vibepub.BuildConfig
+import cn.litianc.vibepub.StyleSourceImportSummary
+import cn.litianc.vibepub.WritingStyleApi
 import cn.litianc.vibepub.WritingStyleProfileOption
 import cn.litianc.vibepub.WritingStyleProfiles
 import cn.litianc.vibepub.data.AppDatabase
@@ -168,12 +170,25 @@ fun SettingsScreen(
         mutableStateOf(SettingsConnectionConfig(apiBaseUrl, filesToken).normalized())
     }
     var customStyleProfiles by remember { mutableStateOf(preferences.customWritingStyleProfiles) }
+    var remoteStyleProfiles by remember { mutableStateOf(preferences.remoteWritingStyleProfiles) }
+    var styleSourceImports by remember { mutableStateOf<List<StyleSourceImportSummary>>(emptyList()) }
+    var isLoadingStyleSources by remember { mutableStateOf(false) }
+    var isDistillingStyleProfile by remember { mutableStateOf(false) }
+    var styleDistillationError by remember { mutableStateOf<String?>(null) }
     var selectedStyleProfileId by remember { mutableStateOf(preferences.selectedStyleProfileId) }
     var showWritingStyleDialog by remember { mutableStateOf(false) }
     var showCustomStyleDialog by remember { mutableStateOf(false) }
+    var showStyleDistillationDialog by remember { mutableStateOf(false) }
     var editingCustomStyleProfile by remember { mutableStateOf<WritingStyleProfileOption?>(null) }
     var voiceStyleTurnText by remember { mutableStateOf("") }
-    val selectedStyleProfile = WritingStyleProfiles.optionFor(selectedStyleProfileId, customStyleProfiles)
+    val visibleRemoteStyleProfiles = remoteStyleProfiles.filter { remoteProfile ->
+        WritingStyleProfiles.findById(remoteProfile.id, customStyleProfiles) == null
+    }
+    val selectedStyleProfile = WritingStyleProfiles.optionFor(
+        selectedStyleProfileId,
+        customStyleProfiles,
+        remoteStyleProfiles,
+    )
     val speechInputLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
     ) { result ->
@@ -198,6 +213,24 @@ fun SettingsScreen(
             lastTestedConfig = currentConfig
         } finally {
             isTesting = false
+        }
+    }
+
+    LaunchedEffect(apiBaseUrl, filesToken) {
+        if (filesToken.isBlank()) {
+            styleSourceImports = emptyList()
+            return@LaunchedEffect
+        }
+        runCatching {
+            WritingStyleApi.listStyleProfiles(apiBaseUrl, filesToken)
+        }.onSuccess { profiles ->
+            remoteStyleProfiles = profiles
+            preferences.remoteWritingStyleProfiles = profiles
+        }
+        runCatching {
+            WritingStyleApi.listStyleSources(apiBaseUrl, filesToken)
+        }.onSuccess { sources ->
+            styleSourceImports = sources
         }
     }
 
@@ -327,6 +360,48 @@ fun SettingsScreen(
                             showCustomStyleDialog = true
                         },
                     )
+                    Divider(color = MaterialTheme.colorScheme.background, thickness = 1.dp, modifier = Modifier.padding(start = 64.dp))
+                    SettingsItem(
+                        iconContent = { SettingsIcon(Color(0xFFEAF2FF)) { Icon(Icons.Default.Sync, contentDescription = null, tint = Color(0xFF2762C7)) } },
+                        title = "云端风格蒸馏",
+                        subtitle = if (styleSourceImports.isEmpty()) "暂无已导入素材" else "最近 ${styleSourceImports.size} 条素材",
+                        value = when {
+                            isLoadingStyleSources -> "同步中"
+                            isDistillingStyleProfile -> "生成中"
+                            styleSourceImports.isEmpty() -> "同步"
+                            else -> "生成"
+                        },
+                        valueColor = Color(0xFF2762C7),
+                        modifier = Modifier.testTag("StyleDistillationItem"),
+                        onClick = {
+                            if (filesToken.isBlank()) {
+                                Toast.makeText(context, "请先在设置中配置 FILES_TOKEN", Toast.LENGTH_SHORT).show()
+                            } else if (styleSourceImports.isEmpty()) {
+                                isLoadingStyleSources = true
+                                scope.launch {
+                                    runCatching {
+                                        WritingStyleApi.listStyleSources(apiBaseUrl, filesToken)
+                                    }.onSuccess { sources ->
+                                        styleSourceImports = sources
+                                        if (sources.isEmpty()) {
+                                            Toast.makeText(context, "先把参考文章或文本分享给 VibePub", Toast.LENGTH_SHORT).show()
+                                        } else {
+                                            showStyleDistillationDialog = true
+                                        }
+                                    }.onFailure { error ->
+                                        Toast.makeText(context, error.message ?: "风格素材同步失败", Toast.LENGTH_SHORT).show()
+                                    }
+                                    isLoadingStyleSources = false
+                                }
+                            } else {
+                                styleDistillationError = null
+                                showStyleDistillationDialog = true
+                            }
+                        },
+                    )
+                    if (isLoadingStyleSources || isDistillingStyleProfile) {
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    }
                 }
             }
 
@@ -394,7 +469,7 @@ fun SettingsScreen(
     if (showWritingStyleDialog) {
         WritingStyleProfileDialog(
             selectedProfileId = selectedStyleProfile.id,
-            profiles = WritingStyleProfiles.builtIn + customStyleProfiles,
+            profiles = WritingStyleProfiles.builtIn + customStyleProfiles + visibleRemoteStyleProfiles,
             onSelect = { profile ->
                 selectedStyleProfileId = profile.id
                 preferences.selectedStyleProfileId = profile.id
@@ -429,6 +504,47 @@ fun SettingsScreen(
                 preferences.selectedLayoutProfileId = WritingStyleProfiles.DEFAULT_LAYOUT_PROFILE_ID
                 preferences.selectedLayoutProfileVersion = WritingStyleProfiles.DEFAULT_LAYOUT_PROFILE_VERSION
                 showCustomStyleDialog = false
+            },
+        )
+    }
+
+    if (showStyleDistillationDialog) {
+        StyleDistillationDialog(
+            sources = styleSourceImports,
+            isSubmitting = isDistillingStyleProfile,
+            errorMessage = styleDistillationError,
+            onDismiss = {
+                if (!isDistillingStyleProfile) showStyleDistillationDialog = false
+            },
+            onDistill = { name, description ->
+                isDistillingStyleProfile = true
+                styleDistillationError = null
+                scope.launch {
+                    runCatching {
+                        WritingStyleApi.distillStyleProfile(
+                            apiBaseUrl = apiBaseUrl,
+                            filesToken = filesToken,
+                            sourceImportIds = styleSourceImports.map { it.id },
+                            profileId = null,
+                            name = name,
+                            description = description,
+                        )
+                    }.onSuccess { result ->
+                        val updatedProfiles = remoteStyleProfiles.filterNot { it.id == result.profile.id } + result.profile
+                        remoteStyleProfiles = updatedProfiles
+                        preferences.remoteWritingStyleProfiles = updatedProfiles
+                        selectedStyleProfileId = result.profile.id
+                        preferences.selectedStyleProfileId = result.profile.id
+                        preferences.selectedStyleProfileVersion = result.profile.version
+                        preferences.selectedLayoutProfileId = WritingStyleProfiles.DEFAULT_LAYOUT_PROFILE_ID
+                        preferences.selectedLayoutProfileVersion = WritingStyleProfiles.DEFAULT_LAYOUT_PROFILE_VERSION
+                        showStyleDistillationDialog = false
+                        Toast.makeText(context, "已生成并选中云端风格画像", Toast.LENGTH_SHORT).show()
+                    }.onFailure { error ->
+                        styleDistillationError = error.message ?: "风格画像生成失败"
+                    }
+                    isDistillingStyleProfile = false
+                }
             },
         )
     }
@@ -485,6 +601,96 @@ internal fun WritingStyleProfileDialog(
         confirmButton = {
             TextButton(onClick = onDismiss) {
                 Text("关闭")
+            }
+        },
+    )
+}
+
+@Composable
+internal fun StyleDistillationDialog(
+    sources: List<StyleSourceImportSummary>,
+    isSubmitting: Boolean,
+    errorMessage: String?,
+    onDismiss: () -> Unit,
+    onDistill: (String, String) -> Unit,
+) {
+    var name by remember { mutableStateOf("我的旧文风格") }
+    var description by remember { mutableStateOf("从分享给 VibePub 的参考素材提取。") }
+    AlertDialog(
+        modifier = Modifier.testTag("StyleDistillationDialog"),
+        onDismissRequest = onDismiss,
+        title = { Text("生成云端风格画像") },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 460.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    label = { Text("画像名称") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = description,
+                    onValueChange = { description = it },
+                    label = { Text("一句话说明") },
+                    minLines = 2,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Text(
+                    "素材 ${sources.size} 条",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                sources.take(8).forEach { source ->
+                    Column(modifier = Modifier.fillMaxWidth()) {
+                        Text(
+                            source.title ?: source.textPreview.ifBlank { source.id },
+                            style = MaterialTheme.typography.bodySmall,
+                            fontWeight = FontWeight.Medium,
+                        )
+                        Text(
+                            source.sourceType,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+                if (sources.size > 8) {
+                    Text(
+                        "另有 ${sources.size - 8} 条素材",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                errorMessage?.let {
+                    Text(
+                        it,
+                        color = Color(0xFFC62828),
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = !isSubmitting && sources.isNotEmpty(),
+                onClick = { onDistill(name, description) },
+            ) {
+                Text(if (isSubmitting) "生成中" else "生成并使用")
+            }
+        },
+        dismissButton = {
+            TextButton(
+                enabled = !isSubmitting,
+                onClick = onDismiss,
+            ) {
+                Text("取消")
             }
         },
     )

@@ -2,7 +2,9 @@ import { listUnprocessedFiles, createPresignedDownloadUrl, deleteFile, downloadF
 import { transcribeAudioUrl } from "./asr.js";
 import { reviseArticle, rewriteArticle } from "./writingAgent.js";
 import { generateWechatCoverBuffer } from "./coverRenderer.js";
-import { getAccessToken, publishDraft, updateDraft } from "./wechat.js";
+import { articleImagesForTranscript, insertArticleImagesIntoHtml, type ArticleImageAsset } from "./articleImageActions.js";
+import { prepareArticleImages, type PreparedArticleImage } from "./articleImages.js";
+import { getAccessToken, publishDraft, updateDraft, uploadWechatArticleImage } from "./wechat.js";
 import path from "path";
 import { pathToFileURL } from "url";
 
@@ -85,6 +87,7 @@ type TranscriptMetadata = {
   wechatUrl?: string;
   errorMessage?: string;
   profileSelection?: ProfileSelection;
+  articleImages?: ArticleImageAsset[];
 };
 
 type RevisionRequest = {
@@ -143,12 +146,13 @@ export function buildArticleTranscriptPayload(
   rawText: string,
   article: ArticleResult,
   metadata: TranscriptMetadata,
-): Record<string, string | undefined> {
+): Record<string, unknown> {
   return {
     rawText,
     articleTitle: article.title,
     articleContent: article.content,
     coverImageUrl: metadata.coverImageUrl,
+    articleImages: metadata.articleImages ?? article.articleImages,
     processingStage: metadata.processingStage,
     wechatDraftId: metadata.wechatDraftId,
     wechatUrl: metadata.wechatUrl,
@@ -179,6 +183,45 @@ async function saveCoverImage(fileKey: string, coverBuffer: Buffer): Promise<str
   console.log(`Saving WeChat cover image to ${key}...`);
   await uploadCoverImage(key, coverBuffer);
   return publicFileUrl(key);
+}
+
+async function attachArticleImages(
+  fileKey: string,
+  article: ArticleResult,
+  wxToken?: string,
+): Promise<{ article: ArticleResult; articleImages: ArticleImageAsset[] }> {
+  const actions = article.imageActions || [];
+  if (actions.length === 0) {
+    return { article, articleImages: article.articleImages || [] };
+  }
+
+  console.log(`Generating ${actions.length} article image(s)...`);
+  const prepared = await prepareArticleImages(fileKey, actions);
+  const withWechatUrls = wxToken
+    ? await uploadPreparedImagesToWechat(wxToken, prepared)
+    : prepared;
+  const articleImages = articleImagesForTranscript(withWechatUrls);
+  return {
+    article: {
+      ...article,
+      content: insertArticleImagesIntoHtml(article.content, articleImages),
+      articleImages,
+    },
+    articleImages,
+  };
+}
+
+async function uploadPreparedImagesToWechat(
+  wxToken: string,
+  images: PreparedArticleImage[],
+): Promise<PreparedArticleImage[]> {
+  const withWechatUrls: PreparedArticleImage[] = [];
+  for (const image of images) {
+    console.log(`Uploading article image ${image.imageId} to WeChat...`);
+    const wechatUrl = await uploadWechatArticleImage(wxToken, image.buffer);
+    withWechatUrls.push({ ...image, wechatUrl });
+  }
+  return withWechatUrls;
 }
 
 function buildDraftFailureMessage(error: unknown): string {
@@ -379,7 +422,7 @@ async function processRevisionRequest(revisionRequestKey: string): Promise<void>
 
     await updateStatus(filename, "PROCESSING", { processingStage: "REWRITING" });
     console.log(`Voice revision instruction: ${instructionText.slice(0, 80)}...`);
-    const article = await reviseArticle({
+    let article = await reviseArticle({
       rawText,
       currentTitle,
       currentContent,
@@ -404,6 +447,10 @@ async function processRevisionRequest(revisionRequestKey: string): Promise<void>
       articleContent: article.content,
     });
 
+    const wxToken = currentDraftId ? await getAccessToken() : undefined;
+    const imageResult = await attachArticleImages(fileKey, article, wxToken);
+    article = imageResult.article;
+
     console.log(`Generating revised WeChat cover from title: ${article.title}`);
     const coverBuffer = await generateWechatCoverBuffer({
       title: article.title,
@@ -415,8 +462,7 @@ async function processRevisionRequest(revisionRequestKey: string): Promise<void>
 
     if (currentDraftId) {
       console.log(`Updating existing WeChat draft: ${currentDraftId}`);
-      const wxToken = await getAccessToken();
-      await updateDraft(wxToken, currentDraftId, article.title, article.content, coverBuffer);
+      await updateDraft(wxToken!, currentDraftId, article.title, article.content, coverBuffer);
     } else {
       console.warn(`No WeChat draft ID found for ${filename}. Saving revised article without updating WeChat draft.`);
     }
@@ -430,6 +476,7 @@ async function processRevisionRequest(revisionRequestKey: string): Promise<void>
       articleTitle: article.title,
       articleContent: article.content,
       coverImageUrl,
+      articleImages: article.articleImages,
       processingStage: "COMPLETED",
       wechatDraftId: currentDraftId,
       wechatUrl: currentWechatUrl,

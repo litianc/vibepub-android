@@ -183,6 +183,15 @@ describe("WritingAgent Worker", () => {
               cover_title: ["新版", "标题"],
               cover_subtitle: "修改已应用",
               image_prompt: "A clean revised editorial image, no text",
+              image_actions: [
+                {
+                  image_id: "opening-desk",
+                  kind: "insert_image",
+                  prompt: "A warm desk with a recorder, no text",
+                  alt: "办公桌上的录音设备",
+                  anchor: { position: "after", paragraph_index: 1 },
+                },
+              ],
             }),
           },
         },
@@ -217,6 +226,9 @@ describe("WritingAgent Worker", () => {
             style_profile_id: "style_litianc_default",
             layout_profile_id: "wechat_clean_article",
           },
+          output_contract: {
+            allow_image_actions: true,
+          },
         }),
       }),
       {
@@ -232,6 +244,7 @@ describe("WritingAgent Worker", () => {
     expect(glmBody.messages[0].content).toContain("当前文章正文");
     expect(glmBody.messages[0].content).toContain("<section><p>旧正文。</p></section>");
     expect(glmBody.messages[0].content).toContain("把标题换得更直接");
+    expect(glmBody.messages[0].content).toContain("image_actions");
 
     await expect(response.json()).resolves.toMatchObject({
       protocol_version: "vibepub.rewrite.v1",
@@ -239,7 +252,351 @@ describe("WritingAgent Worker", () => {
       result: {
         title: "新版标题",
         content_html: "<section><p>按修改要求更新后的正文。</p></section>",
+        image_actions: [
+          expect.objectContaining({
+            image_id: "opening-desk",
+            kind: "insert_image",
+            prompt: "A warm desk with a recorder, no text",
+          }),
+        ],
+      },
+    });
+  });
+
+  it("imports style sources and lists them for the workspace", async () => {
+    const db = createProfileDb();
+    const response = await worker.fetch(
+      new Request("https://writing-agent.test/v1/style-source-imports", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer secret",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          source_type: "wechat_article",
+          url: "https://mp.weixin.qq.com/s/example",
+          title: "一篇满意的旧文章",
+          text: "第一段写具体现场。第二段给出判断。第三段拆解原因。",
+        }),
+      }),
+      { WRITING_AGENT_TOKEN: "secret", DB: db },
+    );
+
+    expect(response.status).toBe(201);
+    const body = await response.json() as { source_import: { id: string; text_preview: string } };
+    expect(body.source_import.id).toMatch(/^ssi_/);
+    expect(body.source_import.text_preview).toContain("具体现场");
+
+    const listResponse = await worker.fetch(
+      new Request("https://writing-agent.test/v1/style-source-imports", {
+        headers: { Authorization: "Bearer secret" },
+      }),
+      { WRITING_AGENT_TOKEN: "secret", DB: db },
+    );
+    expect(listResponse.status).toBe(200);
+    await expect(listResponse.json()).resolves.toMatchObject({
+      source_imports: [
+        expect.objectContaining({
+          id: body.source_import.id,
+          source_type: "wechat_article",
+          title: "一篇满意的旧文章",
+          status: "ready",
+        }),
+      ],
+    });
+  });
+
+  it("distills imported sources into a persistent profile and uses it for rewrite jobs", async () => {
+    const db = createProfileDb();
+    const sourceIds: string[] = [];
+    for (const title of ["旧文章 A", "旧文章 B"]) {
+      const response = await worker.fetch(
+        new Request("https://writing-agent.test/v1/style-source-imports", {
+          method: "POST",
+          headers: {
+            Authorization: "Bearer secret",
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            source_type: "text",
+            title,
+            text: `${title}：开头直接进入现场，正文用短段落解释取舍，结尾回到下一步动作。`,
+          }),
+        }),
+        { WRITING_AGENT_TOKEN: "secret", DB: db },
+      );
+      const body = await response.json() as { source_import: { id: string } };
+      sourceIds.push(body.source_import.id);
+    }
+
+    vi.stubGlobal("fetch", vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                name: "我的旧文风格",
+                description: "现场感强、短段落、结尾给下一步。",
+                body: "1. 开头直接进入具体现场。\n2. 正文用短段落拆解取舍。\n3. 结尾回到下一步动作。",
+              }),
+            },
+          },
+        ],
+      }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                title: "按旧文风格成文",
+                content_html: "<section><p>按蒸馏风格整理后的正文。</p></section>",
+                cover_title: ["旧文", "风格"],
+                image_prompt: "A clean editorial image, no text",
+              }),
+            },
+          },
+        ],
+      }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      })));
+
+    const distillResponse = await worker.fetch(
+      new Request("https://writing-agent.test/v1/style-distillation-jobs", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer secret",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          source_import_ids: sourceIds,
+          profile: {
+            id: "style_my_old_articles",
+            name: "我的旧文风格",
+            description: "从满意旧文章提取。",
+          },
+        }),
+      }),
+      {
+        WRITING_AGENT_TOKEN: "secret",
+        GLM_API_KEY: "glm-key",
+        GLM_BASE_URL: "https://glm.example.test/api/paas/v4",
+        GLM_MODEL: "glm-test",
+        DB: db,
+      },
+    );
+
+    expect(distillResponse.status).toBe(201);
+    const distillBody = await distillResponse.json() as {
+      style_profile: { id: string; version: string; body: string };
+      distillation_job: { id: string; status: string };
+    };
+    expect(distillBody.distillation_job.status).toBe("profile_ready");
+    expect(distillBody.style_profile).toMatchObject({
+      id: "style_my_old_articles",
+      body: expect.stringContaining("开头直接进入具体现场"),
+    });
+
+    const profilesResponse = await worker.fetch(
+      new Request("https://writing-agent.test/v1/style-profiles", {
+        headers: { Authorization: "Bearer secret" },
+      }),
+      { WRITING_AGENT_TOKEN: "secret", DB: db },
+    );
+    const profilesBody = await profilesResponse.json() as { style_profiles: Array<{ id: string; version: string }> };
+    expect(profilesBody.style_profiles).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "style_my_old_articles",
+          version: distillBody.style_profile.version,
+        }),
+      ]),
+    );
+
+    const rewriteResponse = await worker.fetch(
+      new Request("https://writing-agent.test/v1/rewrite-jobs", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer secret",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          client_job_id: "recording-distilled-style",
+          input: {
+            source_type: "text_submission",
+            raw_text: "今天我想复盘一个功能上线后的取舍。",
+          },
+          profiles: {
+            style_profile_id: "style_my_old_articles",
+            layout_profile_id: "wechat_clean_article",
+          },
+        }),
+      }),
+      {
+        WRITING_AGENT_TOKEN: "secret",
+        GLM_API_KEY: "glm-key",
+        GLM_BASE_URL: "https://glm.example.test/api/paas/v4",
+        GLM_MODEL: "glm-test",
+        DB: db,
+      },
+    );
+
+    expect(rewriteResponse.status).toBe(201);
+    const rewritePrompt = JSON.parse(String(vi.mocked(fetch).mock.calls[1][1]?.body)).messages[0].content;
+    expect(rewritePrompt).toContain("我的旧文风格");
+    expect(rewritePrompt).toContain("开头直接进入具体现场");
+    await expect(rewriteResponse.json()).resolves.toMatchObject({
+      profile_versions: {
+        style_profile_id: "style_my_old_articles",
+        style_profile_version: distillBody.style_profile.version,
       },
     });
   });
 });
+
+type FakeStatement = {
+  bind: (...values: unknown[]) => FakeStatement;
+  all: <T>() => Promise<{ results: T[] }>;
+  first: <T>() => Promise<T | null>;
+  run: () => Promise<{ meta: { changes: number } }>;
+};
+
+function createProfileDb(): D1Database {
+  const sources = new Map<string, any>();
+  const profiles = new Map<string, any>();
+  const versions = new Map<string, any>();
+  const jobs = new Map<string, any>();
+
+  return {
+    prepare(sql: string): FakeStatement {
+      let bound: unknown[] = [];
+      const statement: FakeStatement = {
+        bind(...values: unknown[]) {
+          bound = values;
+          return statement;
+        },
+        async all<T>() {
+          if (sql.includes("FROM style_source_imports") && sql.includes("id IN")) {
+            const ids = bound.slice(1) as string[];
+            return { results: ids.map(id => sources.get(id)).filter(Boolean) as T[] };
+          }
+          if (sql.includes("FROM style_source_imports")) {
+            const workspaceId = String(bound[0]);
+            return {
+              results: Array.from(sources.values())
+                .filter(source => source.workspace_id === workspaceId)
+                .sort((a, b) => b.created_at.localeCompare(a.created_at))
+                .map(source => ({
+                  id: source.id,
+                  workspace_id: source.workspace_id,
+                  source_type: source.source_type,
+                  source_url: source.source_url,
+                  title: source.title,
+                  status: source.status,
+                  text_preview: source.text.slice(0, 240),
+                  created_at: source.created_at,
+                  updated_at: source.updated_at,
+                })) as T[],
+            };
+          }
+          if (sql.includes("FROM style_profiles p") && sql.includes("ORDER BY p.updated_at DESC")) {
+            const workspaceId = String(bound[0]);
+            return {
+              results: Array.from(profiles.values())
+                .filter(profile => profile.workspace_id === workspaceId && !profile.deleted_at)
+                .map(profile => {
+                  const version = versions.get(profile.active_version_id);
+                  return {
+                    id: profile.id,
+                    name: profile.name,
+                    description: profile.description,
+                    visibility: profile.visibility,
+                    owner_user_id: profile.owner_user_id,
+                    workspace_id: profile.workspace_id,
+                    active_version_id: profile.active_version_id,
+                    version: version.version_label,
+                    version_created_at: version.created_at,
+                  };
+                }) as T[],
+            };
+          }
+          if (sql.includes("SELECT id") && sql.includes("FROM style_profile_versions") && sql.includes("OFFSET")) {
+            const [workspaceId, profileId, offset] = bound as [string, string, number];
+            return {
+              results: Array.from(versions.values())
+                .filter(version => version.workspace_id === workspaceId && version.profile_id === profileId)
+                .sort((a, b) => b.created_at.localeCompare(a.created_at))
+                .slice(offset)
+                .map(version => ({ id: version.id })) as T[],
+            };
+          }
+          return { results: [] };
+        },
+        async first<T>() {
+          if (sql.includes("FROM style_profiles p") && sql.includes("p.id = ?")) {
+            const [workspaceId, profileId] = bound as [string, string];
+            const profile = profiles.get(profileId);
+            if (!profile || profile.workspace_id !== workspaceId || profile.deleted_at) return null;
+            const version = versions.get(profile.active_version_id);
+            return {
+              id: profile.id,
+              name: profile.name,
+              description: profile.description,
+              version: version.version_label,
+              body: version.body,
+            } as T;
+          }
+          if (sql.includes("FROM style_distillation_jobs")) {
+            const [workspaceId, jobId] = bound as [string, string];
+            const job = jobs.get(jobId);
+            return job && job.workspace_id === workspaceId ? job as T : null;
+          }
+          return null;
+        },
+        async run() {
+          if (sql.includes("INSERT INTO style_source_imports")) {
+            const [id, workspace_id, user_id, source_type, source_url, title, text, status, created_at, updated_at] = bound;
+            sources.set(String(id), { id, workspace_id, user_id, source_type, source_url, title, text, status, created_at, updated_at });
+            return { meta: { changes: 1 } };
+          }
+          if (sql.includes("INSERT INTO style_profiles")) {
+            const [id, workspace_id, owner_user_id, name, description, visibility, active_version_id, created_at, updated_at] = bound;
+            profiles.set(String(id), { id, workspace_id, owner_user_id, name, description, visibility, active_version_id, created_at, updated_at, deleted_at: null });
+            return { meta: { changes: 1 } };
+          }
+          if (sql.includes("INSERT INTO style_profile_versions")) {
+            const [id, profile_id, workspace_id, version_label, body, source_count, source_ids_json, created_at] = bound;
+            versions.set(String(id), { id, profile_id, workspace_id, version_label, body, source_count, source_ids_json, created_at });
+            return { meta: { changes: 1 } };
+          }
+          if (sql.includes("INSERT INTO style_distillation_jobs")) {
+            const [id, workspace_id, profile_id, version_id, status, source_ids_json, created_at, completed_at] = bound;
+            jobs.set(String(id), { id, workspace_id, profile_id, version_id, status, source_ids_json, error_message: null, created_at, completed_at });
+            return { meta: { changes: 1 } };
+          }
+          if (sql.includes("UPDATE style_source_imports")) {
+            const [usedProfileId, updatedAt, workspaceId, ...ids] = bound as string[];
+            for (const id of ids) {
+              const source = sources.get(id);
+              if (source && source.workspace_id === workspaceId) {
+                source.used_in_profile_id = usedProfileId;
+                source.updated_at = updatedAt;
+              }
+            }
+            return { meta: { changes: ids.length } };
+          }
+          if (sql.includes("DELETE FROM style_profile_versions")) {
+            const ids = bound.slice(2) as string[];
+            for (const id of ids) versions.delete(id);
+            return { meta: { changes: ids.length } };
+          }
+          return { meta: { changes: 0 } };
+        },
+      };
+      return statement;
+    },
+  } as unknown as D1Database;
+}

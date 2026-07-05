@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import { processAudioText, reviseArticleWithInstruction } from '../src/llm.js';
 import { generateWechatCoverBuffer } from '../src/coverRenderer.js';
-import { getAccessToken, publishDraft, updateDraft } from '../src/wechat.js';
+import { prepareArticleImages } from '../src/articleImages.js';
+import { getAccessToken, publishDraft, updateDraft, uploadWechatArticleImage } from '../src/wechat.js';
 import { createPresignedDownloadUrl, deleteFile, downloadFile, getFileMetadata, listUnprocessedFiles, uploadCoverImage, uploadTranscript } from '../src/r2.js';
 import { transcribeAudioUrl } from '../src/asr.js';
 import { buildArticleTranscriptPayload, filterTargetFiles, main } from '../src/index.js';
@@ -16,10 +17,15 @@ vi.mock('../src/coverRenderer.js', () => ({
   generateWechatCoverBuffer: vi.fn()
 }));
 
+vi.mock('../src/articleImages.js', () => ({
+  prepareArticleImages: vi.fn()
+}));
+
 vi.mock('../src/wechat.js', () => ({
   publishDraft: vi.fn(),
   updateDraft: vi.fn(),
-  getAccessToken: vi.fn()
+  getAccessToken: vi.fn(),
+  uploadWechatArticleImage: vi.fn()
 }));
 
 vi.mock('../src/r2.js', () => ({
@@ -55,6 +61,7 @@ describe('VibePub Cloud Pipeline', () => {
       text: async () => '',
     }));
     vi.mocked(getFileMetadata).mockResolvedValue({});
+    vi.mocked(prepareArticleImages).mockResolvedValue([]);
   });
 
   afterEach(() => {
@@ -438,5 +445,88 @@ describe('VibePub Cloud Pipeline', () => {
       wechatDraftId: 'MEDIA_ID_OLD',
       errorMessage: null,
     });
+  });
+
+  it('should generate and insert article images requested by a voice revision', async () => {
+    const revisionRequestKey = 'revision-requests/VibePub-2026-07-02-160000-0m18s-Test/rev-image.json';
+    const audioKey = 'revision-requests/VibePub-2026-07-02-160000-0m18s-Test/rev-image.m4a';
+    const transcriptKey = 'transcripts/VibePub-2026-07-02-160000-0m18s-Test.json';
+    const filename = 'VibePub-2026-07-02-160000-0m18s-Test.m4a';
+    const revisedArticle = {
+      title: '带配图的新版标题',
+      content: '<p>第一段正文。</p><p>第二段正文。</p>',
+      imagePrompt: 'A clean editorial cover',
+      coverTitle: ['带配图', '新版'],
+      imageActions: [
+        {
+          imageId: 'opening-desk',
+          kind: 'insert_image' as const,
+          prompt: 'A warm desk with a recorder, no text',
+          alt: '办公桌上的录音设备',
+          anchor: { position: 'after' as const, paragraphIndex: 1 },
+        },
+      ],
+    };
+
+    process.env.REVISION_REQUEST_KEY = revisionRequestKey;
+    vi.mocked(downloadFile).mockImplementation(async (key) => {
+      if (key === revisionRequestKey) {
+        return Buffer.from(JSON.stringify({
+          revisionId: 'rev-image',
+          filename,
+          transcriptKey,
+          audioKey,
+        }));
+      }
+      if (key === transcriptKey) {
+        return Buffer.from(JSON.stringify({
+          rawText: '原始口述',
+          articleTitle: '旧标题',
+          articleContent: '<p>旧正文</p>',
+          wechatDraftId: 'MEDIA_ID_OLD',
+          revisionHistory: [],
+        }));
+      }
+      throw new Error(`unexpected key ${key}`);
+    });
+    vi.mocked(createPresignedDownloadUrl).mockResolvedValue('https://r2.example.test/revision.m4a');
+    vi.mocked(transcribeAudioUrl).mockResolvedValue('在第一段后面加一张办公桌录音的图。');
+    vi.mocked(reviseArticleWithInstruction).mockResolvedValue(revisedArticle);
+    vi.mocked(prepareArticleImages).mockResolvedValue([
+      {
+        ...revisedArticle.imageActions[0],
+        r2Key: 'article-images/VibePub-2026-07-02-160000-0m18s-Test/opening-desk.png',
+        publicUrl: 'https://vibepub.example.test/api/files/article-images%2Fopening-desk.png',
+        buffer: Buffer.from('article-image'),
+      },
+    ]);
+    vi.mocked(uploadWechatArticleImage).mockResolvedValue('https://mmbiz.qpic.cn/article-image.png');
+    vi.mocked(generateWechatCoverBuffer).mockResolvedValue(Buffer.from('revised-cover'));
+    vi.mocked(uploadCoverImage).mockResolvedValue();
+    vi.mocked(getAccessToken).mockResolvedValue('wechat-token');
+    vi.mocked(updateDraft).mockResolvedValue();
+    vi.mocked(uploadTranscript).mockResolvedValue();
+
+    await expect(main()).resolves.toBeUndefined();
+
+    expect(prepareArticleImages).toHaveBeenCalledWith('inbox/VibePub-2026-07-02-160000-0m18s-Test.m4a', revisedArticle.imageActions);
+    expect(uploadWechatArticleImage).toHaveBeenCalledWith('wechat-token', Buffer.from('article-image'));
+    expect(updateDraft).toHaveBeenCalledWith(
+      'wechat-token',
+      'MEDIA_ID_OLD',
+      revisedArticle.title,
+      expect.stringContaining('https://mmbiz.qpic.cn/article-image.png'),
+      Buffer.from('revised-cover'),
+    );
+    expect(updateDraft).toHaveBeenCalledWith(
+      'wechat-token',
+      'MEDIA_ID_OLD',
+      revisedArticle.title,
+      expect.stringMatching(/第一段正文。<\/p><figure[\s\S]+第二段正文。/),
+      Buffer.from('revised-cover'),
+    );
+    const transcriptPayload = String(vi.mocked(uploadTranscript).mock.calls.at(-1)?.[1]);
+    expect(transcriptPayload).toContain('"articleImages"');
+    expect(transcriptPayload).toContain('"wechatUrl": "https://mmbiz.qpic.cn/article-image.png"');
   });
 });

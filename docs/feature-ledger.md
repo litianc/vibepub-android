@@ -13,6 +13,9 @@
 
 | 时间 | 功能更新 |
 | --- | --- |
+| 2026-07-06 07:03 CST | 线上部署链路接入 WritingAgent、分支 mining workflow 和 GPT Image 变量，使风格蒸馏与正文配图能力可以进入 dogfood 环境。 |
+| 2026-07-06 00:17 CST | 正文配图 MVP 接入语音修改链路：WritingAgent revision 可返回插图动作，mining 生成正文图、上传 R2/微信并写回 transcript 与草稿正文。 |
+| 2026-07-06 00:00 CST | 风格蒸馏进入开发主链：WritingAgent 支持 D1 持久化素材导入和画像蒸馏，VibePub Worker 提供代理接口，Android 可接收分享素材、触发蒸馏并同步云端风格画像。 |
 | 2026-07-05 21:45 CST | 公众号封面改为从本地背景底稿库选择背景并继续用 SVG/Sharp 叠字，GPT Image 2 转为维护性生成可复用底稿。 |
 | 2026-07-05 17:29 CST | 公众号封面底图优先使用 GPT Image 2 生成，图片接口不可用时自动回落到原有确定性封面渲染。 |
 | 2026-07-05 07:21 CST | Android 支持新增本地自定义写作风格模板，并可通过多轮系统语音识别偏好更新提示词后随录音/文字提交进入 WritingAgent。 |

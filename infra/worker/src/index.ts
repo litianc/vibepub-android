@@ -5,6 +5,8 @@ export interface Env {
   PUBLIC_BASE_URL: string;
   GITHUB_PAT?: string;
   GITHUB_WORKFLOW_REF?: string;
+  WRITING_AGENT_BASE_URL?: string;
+  WRITING_AGENT_TOKEN?: string;
 }
 
 const corsHeaders = {
@@ -49,6 +51,40 @@ export default {
       return submitText(request, env, ctx);
     }
 
+    if (request.method === "GET" && url.pathname === "/api/style-profiles") {
+      return proxyWritingAgent(request, env, "/v1/style-profiles");
+    }
+
+    if (
+      (request.method === "GET" || request.method === "POST") &&
+      url.pathname.startsWith("/api/style-profiles/")
+    ) {
+      return proxyWritingAgent(
+        request,
+        env,
+        `/v1/style-profiles/${url.pathname.slice("/api/style-profiles/".length)}`,
+      );
+    }
+
+    if (
+      (request.method === "GET" || request.method === "POST") &&
+      url.pathname === "/api/style-source-imports"
+    ) {
+      return proxyWritingAgent(request, env, "/v1/style-source-imports");
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/style-distillation-jobs") {
+      return proxyWritingAgent(request, env, "/v1/style-distillation-jobs");
+    }
+
+    if (request.method === "GET" && url.pathname.startsWith("/api/style-distillation-jobs/")) {
+      return proxyWritingAgent(
+        request,
+        env,
+        `/v1/style-distillation-jobs/${url.pathname.slice("/api/style-distillation-jobs/".length)}`,
+      );
+    }
+
     if (request.method === "GET" && url.pathname === "/api/uploads") {
       return listUploads(env, url);
     }
@@ -86,6 +122,44 @@ export default {
     return json({ error: "not_found" }, 404);
   },
 };
+
+async function proxyWritingAgent(request: Request, env: Env, targetPath: string): Promise<Response> {
+  const baseUrl = env.WRITING_AGENT_BASE_URL?.trim();
+  const token = env.WRITING_AGENT_TOKEN?.trim() || env.FILES_TOKEN?.trim();
+  if (!baseUrl || !token) {
+    return json({
+      error: "writing_agent_unconfigured",
+      message: "WritingAgent proxy is not configured",
+    }, 503);
+  }
+
+  const sourceUrl = new URL(request.url);
+  const targetUrl = `${baseUrl.replace(/\/+$/, "")}${targetPath}${sourceUrl.search}`;
+  const headers = new Headers();
+  headers.set("Authorization", `Bearer ${token}`);
+  const contentType = request.headers.get("content-type");
+  if (contentType) {
+    headers.set("Content-Type", contentType);
+  }
+
+  const upstream = await fetch(targetUrl, {
+    method: request.method,
+    headers,
+    body: request.method === "GET" || request.method === "HEAD" ? undefined : await request.text(),
+  });
+  const responseHeaders = new Headers(corsHeaders);
+  const upstreamContentType = upstream.headers.get("content-type");
+  if (upstreamContentType) {
+    responseHeaders.set("content-type", upstreamContentType);
+  } else {
+    responseHeaders.set("content-type", "application/json; charset=utf-8");
+  }
+
+  return new Response(await upstream.text(), {
+    status: upstream.status,
+    headers: responseHeaders,
+  });
+}
 
 async function submitText(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   let body: any;
