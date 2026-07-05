@@ -189,6 +189,7 @@ describe('VibePub Cloud Pipeline', () => {
       title: article.title,
       titleLines: article.coverTitle,
       subtitle: article.coverSubtitle,
+      imagePrompt: article.imagePrompt,
     });
     expect(uploadCoverImage).toHaveBeenCalledWith(
       'covers/VibePub-2026-06-30-044540-0m30s-Debug-Audio-Import.png',

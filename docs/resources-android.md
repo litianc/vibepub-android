@@ -120,12 +120,16 @@ Configured:
 - `GLM_BASE_URL`
 - `GLM_API_KEY`
 - `GLM_MODEL=glm-5.2`
+- `GPT_IMAGE_API_KEY`
+- `GPT_IMAGE_BASE_URL`
+- `GPT_IMAGE_MODEL=gpt-image-2`
 
 Implementation notes:
 
 - The provided coding base URL works with OpenAI-compatible `POST /chat/completions`.
 - GLM-5.2 defaults to Thinking mode. For deterministic short outputs in the mining job, pass `thinking: { "type": "disabled" }`; otherwise allocate enough `max_tokens` for reasoning plus final content.
 - If a future GLM endpoint is vendor-specific, add a thin adapter in the mining job rather than changing Android or Worker code.
+- The mining job uses the OpenAI-compatible images endpoint at `POST /v1/images/generations` when `GPT_IMAGE_API_KEY` and `GPT_IMAGE_BASE_URL` are configured. It requests `gpt-image-2` first and falls back to the deterministic Sharp/SVG cover if the call fails.
 
 ### WeChat Publishing
 

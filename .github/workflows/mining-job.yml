@@ -48,6 +48,11 @@ jobs:
           GLM_API_KEY: ${{ secrets.GLM_API_KEY }}
           GLM_BASE_URL: ${{ secrets.GLM_BASE_URL }}
           GLM_MODEL: ${{ secrets.GLM_MODEL }}
+          GPT_IMAGE_API_KEY: ${{ secrets.GPT_IMAGE_API_KEY }}
+          GPT_IMAGE_BASE_URL: ${{ vars.GPT_IMAGE_BASE_URL }}
+          GPT_IMAGE_MODEL: ${{ vars.GPT_IMAGE_MODEL }}
+          GPT_IMAGE_SIZE: ${{ vars.GPT_IMAGE_SIZE }}
+          GPT_IMAGE_TIMEOUT_MS: ${{ vars.GPT_IMAGE_TIMEOUT_MS }}
           WRITING_AGENT_BASE_URL: ${{ vars.WRITING_AGENT_BASE_URL }}
           WRITING_AGENT_TOKEN: ${{ secrets.WRITING_AGENT_TOKEN }}
           WRITING_AGENT_STYLE_PROFILE_ID: ${{ vars.WRITING_AGENT_STYLE_PROFILE_ID }}

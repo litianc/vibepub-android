@@ -66,11 +66,12 @@ async function runTests() {
       const token = await getAccessToken();
       console.log("✅ Token acquired.");
 
-      console.log("Generating deterministic WeChat cover...");
+      console.log("Generating WeChat cover...");
       const coverBuffer = await generateWechatCoverBuffer({
         title: generatedArticle.title,
         titleLines: generatedArticle.coverTitle,
         subtitle: generatedArticle.coverSubtitle,
+        imagePrompt: generatedArticle.imagePrompt,
       });
 
       console.log("Pushing draft to WeChat...");

@@ -409,6 +409,7 @@ async function processRevisionRequest(revisionRequestKey: string): Promise<void>
       title: article.title,
       titleLines: article.coverTitle,
       subtitle: article.coverSubtitle,
+      imagePrompt: article.imagePrompt,
     });
     const coverImageUrl = await saveCoverImage(fileKey, coverBuffer);
 
@@ -595,6 +596,7 @@ export async function main() {
         title: article.title,
         titleLines: article.coverTitle,
         subtitle: article.coverSubtitle,
+        imagePrompt: article.imagePrompt,
       });
       const coverImageUrl = await saveCoverImage(fileKey, coverBuffer);
       article = { ...article, coverImageUrl };
