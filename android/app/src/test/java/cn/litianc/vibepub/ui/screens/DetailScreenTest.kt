@@ -271,6 +271,15 @@ class DetailScreenTest {
                 elapsedLabel = "0:03",
             ),
         )
+        assertEquals(
+            "正在录制插图要求 0:03",
+            articleRevisionStateLabel(
+                enabled = true,
+                state = ArticleRevisionUiState.RECORDING,
+                elapsedLabel = "0:03",
+                intent = ArticleRevisionIntent.ILLUSTRATION,
+            ),
+        )
     }
 
     @Test

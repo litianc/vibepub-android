@@ -155,6 +155,11 @@ internal enum class ArticleRevisionUiState {
     FAILED,
 }
 
+internal enum class ArticleRevisionIntent {
+    EDIT,
+    ILLUSTRATION,
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DetailScreen(
@@ -178,17 +183,23 @@ fun DetailScreen(
     var lastAutoRefreshRequestAtMs by remember(filename) { mutableStateOf(0L) }
     var deleteInProgress by remember(filename) { mutableStateOf(false) }
     var revisionUiState by remember(filename) { mutableStateOf(ArticleRevisionUiState.IDLE) }
+    var revisionIntent by remember(filename) { mutableStateOf(ArticleRevisionIntent.EDIT) }
+    var pendingRevisionIntent by remember(filename) { mutableStateOf(ArticleRevisionIntent.EDIT) }
     var revisionMessage by remember(filename) { mutableStateOf("") }
     var revisionStartedAtMs by remember(filename) { mutableLongStateOf(0L) }
     var revisionElapsedMs by remember(filename) { mutableLongStateOf(0L) }
 
-    fun startRevisionRecording() {
+    fun startRevisionRecording(intent: ArticleRevisionIntent) {
         runCatching {
             revisionRecorder.start()
         }.onSuccess {
+            revisionIntent = intent
             revisionStartedAtMs = System.currentTimeMillis()
             revisionElapsedMs = 0L
-            revisionMessage = "正在听你的修改要求。说完后点停止。"
+            revisionMessage = when (intent) {
+                ArticleRevisionIntent.EDIT -> "正在听你的修改要求。说完后点停止。"
+                ArticleRevisionIntent.ILLUSTRATION -> "正在听插图要求。说完后点停止。"
+            }
             revisionUiState = ArticleRevisionUiState.RECORDING
         }.onFailure { error ->
             revisionMessage = error.message ?: "无法开始录制修改要求"
@@ -200,16 +211,17 @@ fun DetailScreen(
         ActivityResultContracts.RequestPermission(),
     ) { granted ->
         if (granted) {
-            startRevisionRecording()
+            startRevisionRecording(pendingRevisionIntent)
         } else {
             revisionMessage = "需要麦克风权限，才能用语音修改文章"
             revisionUiState = ArticleRevisionUiState.FAILED
         }
     }
 
-    fun requestStartRevisionRecording() {
+    fun requestStartRevisionRecording(intent: ArticleRevisionIntent) {
+        pendingRevisionIntent = intent
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
-            startRevisionRecording()
+            startRevisionRecording(intent)
         } else {
             revisionPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
         }
@@ -241,7 +253,10 @@ fun DetailScreen(
             }.onSuccess {
                 recorded.file.delete()
                 revisionUiState = ArticleRevisionUiState.QUEUED
-                revisionMessage = "修改要求已提交，云端正在生成新版文章。刷新后可查看进度。"
+                revisionMessage = when (revisionIntent) {
+                    ArticleRevisionIntent.EDIT -> "修改要求已提交，云端正在生成新版文章。刷新后可查看进度。"
+                    ArticleRevisionIntent.ILLUSTRATION -> "插图要求已提交，云端正在更新文章和草稿。刷新后可查看进度。"
+                }
                 onRefresh()
             }.onFailure { error ->
                 revisionUiState = ArticleRevisionUiState.FAILED
@@ -467,9 +482,11 @@ fun DetailScreen(
             ArticleRevisionCard(
                 enabled = articleContentIsGenerated,
                 state = revisionUiState,
+                intent = revisionIntent,
                 message = revisionMessage,
                 elapsedLabel = formatDurationLabel(revisionElapsedMs),
-                onStart = { requestStartRevisionRecording() },
+                onStartEdit = { requestStartRevisionRecording(ArticleRevisionIntent.EDIT) },
+                onStartIllustration = { requestStartRevisionRecording(ArticleRevisionIntent.ILLUSTRATION) },
                 onStop = { stopAndSubmitRevision(currentRecording) },
                 onRefresh = onRefresh,
             )
@@ -943,9 +960,11 @@ private fun ArticleReviewItemRow(item: ArticleReviewItem) {
 private fun ArticleRevisionCard(
     enabled: Boolean,
     state: ArticleRevisionUiState,
+    intent: ArticleRevisionIntent,
     message: String,
     elapsedLabel: String,
-    onStart: () -> Unit,
+    onStartEdit: () -> Unit,
+    onStartIllustration: () -> Unit,
     onStop: () -> Unit,
     onRefresh: () -> Unit,
 ) {
@@ -972,9 +991,9 @@ private fun ArticleRevisionCard(
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 Column(modifier = Modifier.weight(1f)) {
-                    Text("说话修改文章", fontWeight = FontWeight.SemiBold)
+                    Text("修改与插图", fontWeight = FontWeight.SemiBold)
                     Text(
-                        text = articleRevisionStateLabel(enabled, state, elapsedLabel),
+                        text = articleRevisionStateLabel(enabled, state, elapsedLabel, intent),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -989,7 +1008,7 @@ private fun ArticleRevisionCard(
 
             val helper = message.ifBlank {
                 if (enabled) {
-                    "用一段话说明要怎么改，提交后会更新这篇文章和原公众号草稿。"
+                    "提交后会更新这篇文章和原公众号草稿。"
                 } else {
                     "文章生成后可用语音继续修改。"
                 }
@@ -1036,16 +1055,32 @@ private fun ArticleRevisionCard(
                 }
                 ArticleRevisionUiState.FAILED,
                 ArticleRevisionUiState.IDLE -> {
-                    Button(
-                        onClick = onStart,
-                        enabled = enabled,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("StartArticleRevisionButton"),
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
-                        Icon(Icons.Default.Mic, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("说话修改文章")
+                        Button(
+                            onClick = onStartEdit,
+                            enabled = enabled,
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("StartArticleRevisionButton"),
+                        ) {
+                            Icon(Icons.Default.Mic, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("说话修改")
+                        }
+                        OutlinedButton(
+                            onClick = onStartIllustration,
+                            enabled = enabled,
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("StartArticleImageRevisionButton"),
+                        ) {
+                            Icon(Icons.Default.Description, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("生成插图")
+                        }
                     }
                 }
             }
@@ -1057,11 +1092,15 @@ internal fun articleRevisionStateLabel(
     enabled: Boolean,
     state: ArticleRevisionUiState,
     elapsedLabel: String,
+    intent: ArticleRevisionIntent = ArticleRevisionIntent.EDIT,
 ): String {
     if (!enabled) return "等待文章生成"
     return when (state) {
         ArticleRevisionUiState.IDLE -> "可提交修改要求"
-        ArticleRevisionUiState.RECORDING -> "正在录制 $elapsedLabel"
+        ArticleRevisionUiState.RECORDING -> when (intent) {
+            ArticleRevisionIntent.EDIT -> "正在录制 $elapsedLabel"
+            ArticleRevisionIntent.ILLUSTRATION -> "正在录制插图要求 $elapsedLabel"
+        }
         ArticleRevisionUiState.UPLOADING -> "正在提交修改要求"
         ArticleRevisionUiState.QUEUED -> "修改已进入云端流程"
         ArticleRevisionUiState.FAILED -> "修改未提交成功"

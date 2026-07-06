@@ -13,6 +13,7 @@
 
 | 时间 | 功能更新 |
 | --- | --- |
+| 2026-07-06 21:43 CST | Android 文章详情页将语音修改入口升级为“修改与插图”，新增显式“生成插图”按钮触发正文配图修改链路。 |
 | 2026-07-06 07:27 CST | WritingAgent revision 在用户明确要求正文配图但模型漏返插图动作时自动补充 image action，提升线上配图修改的稳定性。 |
 | 2026-07-06 07:03 CST | 线上部署链路接入 WritingAgent、分支 mining workflow 和 GPT Image 变量，使风格蒸馏与正文配图能力可以进入 dogfood 环境。 |
 | 2026-07-06 00:17 CST | 正文配图 MVP 接入语音修改链路：WritingAgent revision 可返回插图动作，mining 生成正文图、上传 R2/微信并写回 transcript 与草稿正文。 |
