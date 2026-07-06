@@ -6,6 +6,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.text.Html
@@ -14,11 +15,14 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -77,11 +81,14 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.media3.common.MediaItem
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.core.content.FileProvider
@@ -118,8 +125,12 @@ import cn.litianc.vibepub.data.workflowProgressLabel
 import cn.litianc.vibepub.ui.theme.PrimaryRed
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.File
+import java.net.HttpURLConnection
+import java.net.URL
 import java.security.MessageDigest
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -145,6 +156,12 @@ internal data class WeChatDraftAction(
     val enabled: Boolean,
     val url: String,
     val helperText: String,
+)
+
+internal data class ArticleImagePreview(
+    val imageId: String,
+    val alt: String,
+    val url: String,
 )
 
 internal enum class ArticleRevisionUiState {
@@ -379,6 +396,7 @@ fun DetailScreen(
             .ifBlank { sanitizedRemoteReference(currentRecording.wechatUrl).orEmpty() }
         val coverImageUrl = transcript.optTranscriptString("coverImageUrl", "cover_image_url")
             .ifBlank { currentRecording.coverImageUrl.orEmpty() }
+        val articleImages = transcript.articleImagePreviews()
         val transcriptError = transcript.optTranscriptString("errorMessage", "error_message")
         val draftError = when {
             currentRecording.hasDraftFailureMessage() -> currentRecording.lastError.orEmpty()
@@ -490,6 +508,13 @@ fun DetailScreen(
                 onStop = { stopAndSubmitRevision(currentRecording) },
                 onRefresh = onRefresh,
             )
+            if (articleImages.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(16.dp))
+                ArticleImagesCard(
+                    images = articleImages,
+                    filesToken = preferences.filesToken,
+                )
+            }
             Spacer(modifier = Modifier.height(16.dp))
             ActionRow(
                 articleTitle = articleTitle,
@@ -513,6 +538,88 @@ fun DetailScreen(
 }
 
 @Composable
+private fun ArticleImagesCard(
+    images: List<ArticleImagePreview>,
+    filesToken: String,
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("ArticleImagesCard"),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        shape = RoundedCornerShape(12.dp),
+    ) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text("正文插图", fontWeight = FontWeight.SemiBold)
+            images.forEach { image ->
+                RemoteArticleImagePreview(
+                    image = image,
+                    filesToken = filesToken,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun RemoteArticleImagePreview(
+    image: ArticleImagePreview,
+    filesToken: String,
+) {
+    var bitmap by remember(image.url, filesToken) { mutableStateOf<Bitmap?>(null) }
+    var failed by remember(image.url, filesToken) { mutableStateOf(false) }
+
+    LaunchedEffect(image.url, filesToken) {
+        failed = false
+        bitmap = withContext(Dispatchers.IO) {
+            downloadArticleImageBitmap(image.url, filesToken)
+        }
+        failed = bitmap == null
+    }
+
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        val currentBitmap = bitmap
+        if (currentBitmap != null) {
+            Image(
+                bitmap = currentBitmap.asImageBitmap(),
+                contentDescription = image.alt.ifBlank { "正文插图预览" },
+                contentScale = ContentScale.Crop,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(190.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .testTag("ArticleImagePreview"),
+            )
+        } else {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(150.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = if (failed) "插图暂时无法预览，点同步后重试" else "插图加载中",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        if (image.alt.isNotBlank()) {
+            Text(
+                text = image.alt,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+@Composable
 private fun CoverImageCard(
     filename: String,
     coverImageUrl: String,
@@ -528,6 +635,7 @@ private fun CoverImageCard(
             null
         }
     }
+    var expanded by remember(filename) { mutableStateOf(false) }
 
     Card(
         modifier = Modifier
@@ -550,8 +658,17 @@ private fun CoverImageCard(
                         .fillMaxWidth()
                         .height(170.dp)
                         .clip(RoundedCornerShape(10.dp))
+                        .pointerInput(bitmap) {
+                            detectTapGestures(onDoubleTap = { expanded = true })
+                        }
                         .testTag("WechatCoverImage"),
                 )
+                if (expanded) {
+                    FullscreenCoverImage(
+                        bitmap = bitmap,
+                        onDismiss = { expanded = false },
+                    )
+                }
             } else {
                 Box(
                     modifier = Modifier
@@ -569,6 +686,37 @@ private fun CoverImageCard(
                     )
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun FullscreenCoverImage(
+    bitmap: android.graphics.Bitmap,
+    onDismiss: () -> Unit,
+) {
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.94f))
+                .clickable(onClick = onDismiss)
+                .padding(18.dp)
+                .testTag("FullscreenWechatCover"),
+            contentAlignment = Alignment.Center,
+        ) {
+            Image(
+                bitmap = bitmap.asImageBitmap(),
+                contentDescription = "公众号封面全屏预览",
+                contentScale = ContentScale.Fit,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .fillMaxHeight(0.9f)
+                    .clip(RoundedCornerShape(10.dp)),
+            )
         }
     }
 }
@@ -1314,8 +1462,62 @@ internal fun JSONObject?.optTranscriptString(vararg keys: String): String {
     }.orEmpty()
 }
 
+internal fun JSONObject?.articleImagePreviews(): List<ArticleImagePreview> {
+    if (this == null) return emptyList()
+    val images = optJSONArray("articleImages") ?: optJSONArray("article_images") ?: return emptyList()
+    return (0 until images.length()).mapNotNull { index ->
+        val item = images.optJSONObject(index) ?: return@mapNotNull null
+        val publicUrl = item.optString("publicUrl", "")
+            .ifBlank { item.optString("public_url", "") }
+            .blankToMissingString()
+            .orEmpty()
+        val wechatUrl = item.optString("wechatUrl", "")
+            .ifBlank { item.optString("wechat_url", "") }
+            .blankToMissingString()
+            .orEmpty()
+        val url = publicUrl.ifBlank { wechatUrl }
+        if (url.isBlank()) return@mapNotNull null
+        ArticleImagePreview(
+            imageId = item.optString("imageId", "")
+                .ifBlank { item.optString("image_id", "") }
+                .ifBlank { "image_${index + 1}" },
+            alt = item.optString("alt", "")
+                .ifBlank { item.optString("alt_text", "") }
+                .trim(),
+            url = url,
+        )
+    }
+}
+
 private fun String.blankToMissingString(): String? {
     return sanitizedRemoteReference(this)
+}
+
+private fun downloadArticleImageBitmap(url: String, filesToken: String): Bitmap? {
+    return runCatching {
+        val parsed = URL(url)
+        val connection = (parsed.openConnection() as HttpURLConnection).apply {
+            requestMethod = "GET"
+            connectTimeout = 10_000
+            readTimeout = 20_000
+            if (shouldAuthorizeArticleImageRequest(parsed, filesToken)) {
+                setRequestProperty("Authorization", "Bearer $filesToken")
+            }
+        }
+        try {
+            if (connection.responseCode !in 200..299) return null
+            connection.inputStream.use { input -> BitmapFactory.decodeStream(input) }
+        } finally {
+            connection.disconnect()
+        }
+    }.getOrNull()
+}
+
+private fun shouldAuthorizeArticleImageRequest(url: URL, filesToken: String): Boolean {
+    return filesToken.isNotBlank() &&
+        url.protocol.equals("https", ignoreCase = true) &&
+        url.host.equals("vibepub.litianc.cn", ignoreCase = true) &&
+        url.path.startsWith("/api/files/")
 }
 
 internal fun buildArticleExportText(

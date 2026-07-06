@@ -62,6 +62,38 @@ class DetailScreenTest {
     }
 
     @Test
+    fun articleImagePreviewsUsePublicUrlBeforeWechatUrl() {
+        val transcript = JSONObject(
+            """
+            {
+              "articleImages": [
+                {
+                  "imageId": "opening-desk",
+                  "alt": "办公桌上的录音设备",
+                  "publicUrl": "https://vibepub.litianc.cn/api/files/article-images%2Fdesk.png",
+                  "wechatUrl": "http://mmbiz.qpic.cn/image.png"
+                },
+                {
+                  "image_id": "wechat-only",
+                  "alt_text": "微信素材图片",
+                  "wechat_url": "http://mmbiz.qpic.cn/wechat-only.png"
+                }
+              ]
+            }
+            """.trimIndent(),
+        )
+
+        val images = transcript.articleImagePreviews()
+
+        assertEquals(2, images.size)
+        assertEquals("opening-desk", images[0].imageId)
+        assertEquals("办公桌上的录音设备", images[0].alt)
+        assertEquals("https://vibepub.litianc.cn/api/files/article-images%2Fdesk.png", images[0].url)
+        assertEquals("wechat-only", images[1].imageId)
+        assertEquals("http://mmbiz.qpic.cn/wechat-only.png", images[1].url)
+    }
+
+    @Test
     fun reviewSummaryMarksCompletedDraftReady() {
         val summary = buildArticleReviewSummary(
             status = RecordingStatus.COMPLETED,
