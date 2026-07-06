@@ -14,8 +14,10 @@ import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -568,12 +570,14 @@ private fun ArticleBodyContent(
 }
 
 @Composable
+@OptIn(ExperimentalFoundationApi::class)
 private fun RemoteArticleImagePreview(
     image: ArticleImagePreview,
     filesToken: String,
 ) {
     var bitmap by remember(image.url, filesToken) { mutableStateOf<Bitmap?>(null) }
     var failed by remember(image.url, filesToken) { mutableStateOf(false) }
+    var expanded by remember(image.url) { mutableStateOf(false) }
 
     LaunchedEffect(image.url, filesToken) {
         failed = false
@@ -594,8 +598,23 @@ private fun RemoteArticleImagePreview(
                     .fillMaxWidth()
                     .height(190.dp)
                     .clip(RoundedCornerShape(10.dp))
+                    .combinedClickable(
+                        onClick = {},
+                        onDoubleClick = { expanded = true },
+                    )
                     .testTag("ArticleImagePreview"),
             )
+            if (expanded) {
+                FullscreenImagePreview(
+                    bitmap = currentBitmap,
+                    contentDescription = image.alt
+                        .takeIf { it.isNotBlank() }
+                        ?.let { "$it 全屏预览" }
+                        ?: "正文插图全屏预览",
+                    testTag = "FullscreenArticleImage",
+                    onDismiss = { expanded = false },
+                )
+            }
         } else {
             Box(
                 modifier = Modifier
@@ -667,8 +686,10 @@ private fun CoverImageCard(
                         .testTag("WechatCoverImage"),
                 )
                 if (expanded) {
-                    FullscreenCoverImage(
+                    FullscreenImagePreview(
                         bitmap = bitmap,
+                        contentDescription = "公众号封面全屏预览",
+                        testTag = "FullscreenWechatCover",
                         onDismiss = { expanded = false },
                     )
                 }
@@ -694,8 +715,10 @@ private fun CoverImageCard(
 }
 
 @Composable
-private fun FullscreenCoverImage(
+private fun FullscreenImagePreview(
     bitmap: android.graphics.Bitmap,
+    contentDescription: String,
+    testTag: String,
     onDismiss: () -> Unit,
 ) {
     Dialog(
@@ -708,12 +731,12 @@ private fun FullscreenCoverImage(
                 .background(Color.Black.copy(alpha = 0.94f))
                 .clickable(onClick = onDismiss)
                 .padding(18.dp)
-                .testTag("FullscreenWechatCover"),
+                .testTag(testTag),
             contentAlignment = Alignment.Center,
         ) {
             Image(
                 bitmap = bitmap.asImageBitmap(),
-                contentDescription = "公众号封面全屏预览",
+                contentDescription = contentDescription,
                 contentScale = ContentScale.Fit,
                 modifier = Modifier
                     .fillMaxWidth()
