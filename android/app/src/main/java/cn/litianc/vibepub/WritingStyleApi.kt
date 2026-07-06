@@ -119,9 +119,9 @@ internal fun parseStyleSourceImportsResponse(responseBody: String): List<StyleSo
                 StyleSourceImportSummary(
                     id = id,
                     sourceType = item.optString("source_type").trim().ifBlank { "text" },
-                    title = item.optString("title").trim().ifBlank { null },
+                    title = item.optCleanOptionalString("title"),
                     status = item.optString("status").trim().ifBlank { "ready" },
-                    textPreview = item.optString("text_preview").trim(),
+                    textPreview = item.optCleanOptionalString("text_preview").orEmpty(),
                     createdAt = item.optString("created_at").trim(),
                 ),
             )
@@ -188,7 +188,7 @@ internal fun parseStyleSourceImportResponse(responseBody: String): StyleSourceIm
     return StyleSourceImportResult(
         id = source.getString("id"),
         status = source.optString("status").ifBlank { "ready" },
-        title = source.optString("title").takeIf { it.isNotBlank() },
+        title = source.optCleanOptionalString("title"),
     )
 }
 
@@ -214,6 +214,14 @@ private fun JSONObject.putOptionalString(name: String, value: String?) {
     if (normalized.isNotBlank()) {
         put(name, normalized)
     }
+}
+
+private fun JSONObject.optCleanOptionalString(name: String): String? {
+    val normalized = optString(name).trim()
+    if (normalized.isBlank()) return null
+    val lower = normalized.lowercase()
+    if (lower == "null" || lower == "(null)" || lower == "undefined") return null
+    return normalized
 }
 
 private fun requestJson(

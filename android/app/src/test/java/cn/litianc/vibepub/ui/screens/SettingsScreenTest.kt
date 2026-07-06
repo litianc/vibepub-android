@@ -1,5 +1,6 @@
 package cn.litianc.vibepub.ui.screens
 
+import cn.litianc.vibepub.StyleSourceImportSummary
 import cn.litianc.vibepub.data.RecordingEntity
 import cn.litianc.vibepub.data.RecordingStatus
 import org.junit.Assert.assertEquals
@@ -10,6 +11,35 @@ import java.util.Locale
 import java.util.TimeZone
 
 class SettingsScreenTest {
+    @Test
+    fun styleSourceDisplayTitleFallsBackForNullWechatTitles() {
+        val source = StyleSourceImportSummary(
+            id = "ssi_1",
+            sourceType = "wechat_article",
+            title = "NULL",
+            status = "ready",
+            textPreview = "null",
+            createdAt = "2026-07-06T00:00:00.000Z",
+        )
+
+        assertEquals("微信文章素材", styleSourceDisplayTitle(source))
+        assertEquals("微信文章", styleSourceTypeLabel(source.sourceType))
+    }
+
+    @Test
+    fun styleSourceDisplayTitleFallsBackForUrlOnlyWechatPreviews() {
+        val source = StyleSourceImportSummary(
+            id = "ssi_1",
+            sourceType = "wechat_article",
+            title = null,
+            status = "ready",
+            textPreview = "来源 URL：https://mp.weixin.qq.com/s/example",
+            createdAt = "2026-07-06T00:00:00.000Z",
+        )
+
+        assertEquals("微信文章素材", styleSourceDisplayTitle(source))
+    }
+
     @Test
     fun settingsLastSyncLabelShowsUninitializedStatePlainly() {
         assertEquals("尚未同步", settingsLastSyncValue(0L))

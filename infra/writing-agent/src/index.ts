@@ -1037,7 +1037,11 @@ function normalizedStringArray(value: unknown): string[] {
 }
 
 function normalizeOptionalString(value: unknown): string {
-  return typeof value === "string" ? value.trim() : "";
+  if (typeof value !== "string") return "";
+  const normalized = value.trim();
+  const lower = normalized.toLowerCase();
+  if (lower === "null" || lower === "(null)" || lower === "undefined") return "";
+  return normalized;
 }
 
 function sanitizeProfileId(value: unknown): string {

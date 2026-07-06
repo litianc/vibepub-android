@@ -379,6 +379,35 @@ describe("WritingAgent Worker", () => {
     });
   });
 
+  it("treats literal null style source titles as missing metadata", async () => {
+    const db = createProfileDb();
+    const response = await worker.fetch(
+      new Request("https://writing-agent.test/v1/style-source-imports", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer secret",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          source_type: "wechat_article",
+          url: "https://mp.weixin.qq.com/s/example",
+          title: "NULL",
+          text: "第一段写具体现场。第二段给出判断。",
+        }),
+      }),
+      { WRITING_AGENT_TOKEN: "secret", DB: db },
+    );
+
+    expect(response.status).toBe(201);
+    await expect(response.json()).resolves.toMatchObject({
+      source_import: {
+        source_type: "wechat_article",
+        title: null,
+        text_preview: expect.stringContaining("具体现场"),
+      },
+    });
+  });
+
   it("distills imported sources into a persistent profile and uses it for rewrite jobs", async () => {
     const db = createProfileDb();
     const sourceIds: string[] = [];

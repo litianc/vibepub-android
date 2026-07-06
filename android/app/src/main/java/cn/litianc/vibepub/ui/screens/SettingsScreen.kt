@@ -650,12 +650,12 @@ internal fun StyleDistillationDialog(
                 sources.take(8).forEach { source ->
                     Column(modifier = Modifier.fillMaxWidth()) {
                         Text(
-                            source.title ?: source.textPreview.ifBlank { source.id },
+                            styleSourceDisplayTitle(source),
                             style = MaterialTheme.typography.bodySmall,
                             fontWeight = FontWeight.Medium,
                         )
                         Text(
-                            source.sourceType,
+                            styleSourceTypeLabel(source.sourceType),
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -694,6 +694,41 @@ internal fun StyleDistillationDialog(
             }
         },
     )
+}
+
+internal fun styleSourceDisplayTitle(source: StyleSourceImportSummary): String {
+    return source.title.cleanStyleSourceValue()
+        ?: source.textPreview.cleanStyleSourceValue()
+        ?: when (source.sourceType.trim().lowercase()) {
+            "wechat_article" -> "微信文章素材"
+            "url", "webpage", "html" -> "网页素材"
+            "text" -> "文本素材"
+            else -> "风格素材"
+        }
+}
+
+internal fun styleSourceTypeLabel(sourceType: String): String {
+    return when (sourceType.trim().lowercase()) {
+        "wechat_article" -> "微信文章"
+        "url", "webpage", "html" -> "网页"
+        "text" -> "文本"
+        else -> sourceType.trim().ifBlank { "素材" }
+    }
+}
+
+private fun String?.cleanStyleSourceValue(): String? {
+    val normalized = this
+        ?.lineSequence()
+        ?.map { it.trim() }
+        ?.firstOrNull { it.isNotBlank() }
+        .orEmpty()
+    if (normalized.isBlank()) return null
+    val lower = normalized.lowercase()
+    if (lower == "null" || lower == "(null)" || lower == "undefined") return null
+    if (lower.startsWith("http://") || lower.startsWith("https://")) return null
+    if (lower.startsWith("来源 url：") || lower.startsWith("来源 url:")) return null
+    if (lower.startsWith("标题：null") || lower.startsWith("标题:null")) return null
+    return normalized
 }
 
 @Composable

@@ -3,6 +3,7 @@ package cn.litianc.vibepub
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -92,6 +93,30 @@ class WritingStyleApiTest {
         assertEquals("wechat_article", sources[0].sourceType)
         assertEquals("参考文章", sources[0].title)
         assertEquals("开头直接进入现场", sources[0].textPreview)
+    }
+
+    @Test
+    fun parsesLiteralNullStyleSourceTitlesAsMissing() {
+        val sources = parseStyleSourceImportsResponse(
+            """
+            {
+              "source_imports": [
+                {
+                  "id":"ssi_1",
+                  "source_type":"wechat_article",
+                  "title":"NULL",
+                  "status":"ready",
+                  "text_preview":"null",
+                  "created_at":"2026-07-06T00:00:00.000Z"
+                }
+              ]
+            }
+            """.trimIndent(),
+        )
+
+        assertEquals(1, sources.size)
+        assertNull(sources[0].title)
+        assertEquals("", sources[0].textPreview)
     }
 
     @Test

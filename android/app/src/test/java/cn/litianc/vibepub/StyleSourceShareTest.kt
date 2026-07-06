@@ -28,6 +28,36 @@ class StyleSourceShareTest {
     }
 
     @Test
+    fun ignoresLiteralNullTitleAndInfersWechatTitleFromShareText() {
+        val source = sharedStyleSourceFromIntent(
+            Intent(Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                putExtra(Intent.EXTRA_TITLE, "NULL")
+                putExtra(Intent.EXTRA_TEXT, "一篇真实标题\nhttps://mp.weixin.qq.com/s/example")
+            },
+        )
+
+        assertEquals("wechat_article", source?.sourceType)
+        assertEquals("一篇真实标题", source?.title)
+        assertEquals("https://mp.weixin.qq.com/s/example", source?.url)
+    }
+
+    @Test
+    fun leavesTitleEmptyWhenWechatShareOnlyContainsUrl() {
+        val source = sharedStyleSourceFromIntent(
+            Intent(Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                putExtra(Intent.EXTRA_TITLE, "null")
+                putExtra(Intent.EXTRA_TEXT, "https://mp.weixin.qq.com/s/example")
+            },
+        )
+
+        assertEquals("wechat_article", source?.sourceType)
+        assertNull(source?.title)
+        assertEquals("https://mp.weixin.qq.com/s/example", source?.url)
+    }
+
+    @Test
     fun parsesPlainTextShareAsStyleSource() {
         val source = sharedStyleSourceFromIntent(
             Intent(Intent.ACTION_SEND).apply {
