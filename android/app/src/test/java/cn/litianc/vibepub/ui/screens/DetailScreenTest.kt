@@ -89,8 +89,62 @@ class DetailScreenTest {
         assertEquals("opening-desk", images[0].imageId)
         assertEquals("办公桌上的录音设备", images[0].alt)
         assertEquals("https://vibepub.litianc.cn/api/files/article-images%2Fdesk.png", images[0].url)
+        assertEquals(
+            listOf(
+                "https://vibepub.litianc.cn/api/files/article-images%2Fdesk.png",
+                "http://mmbiz.qpic.cn/image.png",
+            ),
+            images[0].sourceUrls,
+        )
         assertEquals("wechat-only", images[1].imageId)
         assertEquals("http://mmbiz.qpic.cn/wechat-only.png", images[1].url)
+    }
+
+    @Test
+    fun articleBodyBlocksRenderImageAtHtmlFigurePosition() {
+        val image = ArticleImagePreview(
+            imageId = "opening-desk",
+            alt = "办公桌上的录音设备",
+            url = "https://vibepub.litianc.cn/api/files/article-images%2Fdesk.png",
+            sourceUrls = listOf(
+                "https://vibepub.litianc.cn/api/files/article-images%2Fdesk.png",
+                "http://mmbiz.qpic.cn/image.png",
+            ),
+        )
+
+        val blocks = buildArticleBodyBlocks(
+            sourceContent = """
+                <p>第一段</p>
+                <figure><img src="http://mmbiz.qpic.cn/image.png" alt="办公桌上的录音设备"></figure>
+                <p>第二段</p>
+            """.trimIndent(),
+            renderedContent = "第一段\n\n第二段",
+            images = listOf(image),
+        )
+
+        assertEquals(3, blocks.size)
+        assertEquals("第一段", (blocks[0] as ArticleBodyBlock.Text).text)
+        assertEquals("opening-desk", (blocks[1] as ArticleBodyBlock.Image).image.imageId)
+        assertEquals("第二段", (blocks[2] as ArticleBodyBlock.Text).text)
+    }
+
+    @Test
+    fun articleBodyBlocksAppendImagesInsideBodyWhenHtmlHasNoImageAnchor() {
+        val image = ArticleImagePreview(
+            imageId = "fallback",
+            alt = "补充插图",
+            url = "https://vibepub.litianc.cn/api/files/article-images%2Ffallback.png",
+        )
+
+        val blocks = buildArticleBodyBlocks(
+            sourceContent = "<p>只有正文，没有图片标签。</p>",
+            renderedContent = "只有正文，没有图片标签。",
+            images = listOf(image),
+        )
+
+        assertEquals(2, blocks.size)
+        assertEquals("只有正文，没有图片标签。", (blocks[0] as ArticleBodyBlock.Text).text)
+        assertEquals("fallback", (blocks[1] as ArticleBodyBlock.Image).image.imageId)
     }
 
     @Test

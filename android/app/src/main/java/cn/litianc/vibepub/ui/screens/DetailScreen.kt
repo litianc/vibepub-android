@@ -162,7 +162,13 @@ internal data class ArticleImagePreview(
     val imageId: String,
     val alt: String,
     val url: String,
+    val sourceUrls: List<String> = listOf(url),
 )
+
+internal sealed class ArticleBodyBlock {
+    data class Text(val text: String) : ArticleBodyBlock()
+    data class Image(val image: ArticleImagePreview) : ArticleBodyBlock()
+}
 
 internal enum class ArticleRevisionUiState {
     IDLE,
@@ -397,6 +403,11 @@ fun DetailScreen(
         val coverImageUrl = transcript.optTranscriptString("coverImageUrl", "cover_image_url")
             .ifBlank { currentRecording.coverImageUrl.orEmpty() }
         val articleImages = transcript.articleImagePreviews()
+        val articleBodyBlocks = buildArticleBodyBlocks(
+            sourceContent = articleContentSource,
+            renderedContent = articleContent,
+            images = articleImages,
+        )
         val transcriptError = transcript.optTranscriptString("errorMessage", "error_message")
         val draftError = when {
             currentRecording.hasDraftFailureMessage() -> currentRecording.lastError.orEmpty()
@@ -508,13 +519,6 @@ fun DetailScreen(
                 onStop = { stopAndSubmitRevision(currentRecording) },
                 onRefresh = onRefresh,
             )
-            if (articleImages.isNotEmpty()) {
-                Spacer(modifier = Modifier.height(16.dp))
-                ArticleImagesCard(
-                    images = articleImages,
-                    filesToken = preferences.filesToken,
-                )
-            }
             Spacer(modifier = Modifier.height(16.dp))
             ActionRow(
                 articleTitle = articleTitle,
@@ -526,11 +530,9 @@ fun DetailScreen(
             )
             Spacer(modifier = Modifier.height(20.dp))
 
-            Text(
-                text = articleContent,
-                style = MaterialTheme.typography.bodyLarge,
-                color = MaterialTheme.colorScheme.onSurface,
-                lineHeight = 28.sp,
+            ArticleBodyContent(
+                blocks = articleBodyBlocks,
+                filesToken = preferences.filesToken,
             )
             Spacer(modifier = Modifier.height(40.dp))
         }
@@ -538,25 +540,26 @@ fun DetailScreen(
 }
 
 @Composable
-private fun ArticleImagesCard(
-    images: List<ArticleImagePreview>,
+private fun ArticleBodyContent(
+    blocks: List<ArticleBodyBlock>,
     filesToken: String,
 ) {
-    Card(
+    Column(
         modifier = Modifier
             .fillMaxWidth()
-            .testTag("ArticleImagesCard"),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        shape = RoundedCornerShape(12.dp),
+            .testTag("ArticleBodyContent"),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
-        Column(
-            modifier = Modifier.padding(14.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            Text("正文插图", fontWeight = FontWeight.SemiBold)
-            images.forEach { image ->
-                RemoteArticleImagePreview(
-                    image = image,
+        blocks.forEach { block ->
+            when (block) {
+                is ArticleBodyBlock.Text -> Text(
+                    text = block.text,
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    lineHeight = 28.sp,
+                )
+                is ArticleBodyBlock.Image -> RemoteArticleImagePreview(
+                    image = block.image,
                     filesToken = filesToken,
                 )
             }
@@ -1455,6 +1458,87 @@ internal fun renderArticleText(content: String): String {
     return text.ifBlank { content }
 }
 
+internal fun buildArticleBodyBlocks(
+    sourceContent: String,
+    renderedContent: String,
+    images: List<ArticleImagePreview>,
+): List<ArticleBodyBlock> {
+    if (images.isEmpty()) {
+        return listOf(ArticleBodyBlock.Text(renderedContent))
+    }
+    if (sourceContent.isBlank()) {
+        return listOf(ArticleBodyBlock.Text(renderedContent)) + images.map { ArticleBodyBlock.Image(it) }
+    }
+
+    val imageTags = Regex("(?is)<figure\\b[^>]*>.*?</figure>|<img\\b[^>]*>")
+    val matches = imageTags.findAll(sourceContent).toList()
+    if (matches.isEmpty()) {
+        return listOf(ArticleBodyBlock.Text(renderedContent)) + images.map { ArticleBodyBlock.Image(it) }
+    }
+
+    val blocks = mutableListOf<ArticleBodyBlock>()
+    val usedImageIndexes = mutableSetOf<Int>()
+    var cursor = 0
+
+    matches.forEach { match ->
+        appendArticleTextBlock(blocks, sourceContent.substring(cursor, match.range.first))
+        resolveArticleImageForTag(
+            tagHtml = match.value,
+            images = images,
+            usedImageIndexes = usedImageIndexes,
+        )?.let { image ->
+            blocks += ArticleBodyBlock.Image(image)
+        }
+        cursor = match.range.last + 1
+    }
+
+    appendArticleTextBlock(blocks, sourceContent.substring(cursor))
+    images.forEachIndexed { index, image ->
+        if (index !in usedImageIndexes) {
+            blocks += ArticleBodyBlock.Image(image)
+        }
+    }
+
+    return blocks.ifEmpty { listOf(ArticleBodyBlock.Text(renderedContent)) }
+}
+
+private fun appendArticleTextBlock(blocks: MutableList<ArticleBodyBlock>, html: String) {
+    val text = renderArticleText(html)
+    if (text.isNotBlank()) {
+        blocks += ArticleBodyBlock.Text(text)
+    }
+}
+
+private fun resolveArticleImageForTag(
+    tagHtml: String,
+    images: List<ArticleImagePreview>,
+    usedImageIndexes: MutableSet<Int>,
+): ArticleImagePreview? {
+    val tagSrc = extractHtmlImageSrc(tagHtml)
+    val srcMatchedIndex = tagSrc?.let { src ->
+        images.indices.firstOrNull { index ->
+            index !in usedImageIndexes &&
+                images[index].sourceUrls.any { candidate -> candidate.equals(src, ignoreCase = true) }
+        }
+    } ?: -1
+
+    val resolvedIndex = if (srcMatchedIndex >= 0) {
+        srcMatchedIndex
+    } else {
+        images.indices.firstOrNull { it !in usedImageIndexes } ?: return null
+    }
+
+    usedImageIndexes += resolvedIndex
+    return images[resolvedIndex]
+}
+
+private fun extractHtmlImageSrc(tagHtml: String): String? {
+    val srcPattern = Regex("(?is)\\bsrc\\s*=\\s*(?:\"([^\"]*)\"|'([^']*)'|([^\\s>]+))")
+    val value = srcPattern.find(tagHtml)?.groupValues?.drop(1)?.firstOrNull { it.isNotBlank() }
+        ?: return null
+    return Html.fromHtml(value, Html.FROM_HTML_MODE_LEGACY).toString().trim().blankToMissingString()
+}
+
 internal fun JSONObject?.optTranscriptString(vararg keys: String): String {
     if (this == null) return ""
     return keys.firstNotNullOfOrNull { key ->
@@ -1477,6 +1561,9 @@ internal fun JSONObject?.articleImagePreviews(): List<ArticleImagePreview> {
             .orEmpty()
         val url = publicUrl.ifBlank { wechatUrl }
         if (url.isBlank()) return@mapNotNull null
+        val sourceUrls = listOf(publicUrl, wechatUrl)
+            .filter { it.isNotBlank() }
+            .distinct()
         ArticleImagePreview(
             imageId = item.optString("imageId", "")
                 .ifBlank { item.optString("image_id", "") }
@@ -1485,6 +1572,7 @@ internal fun JSONObject?.articleImagePreviews(): List<ArticleImagePreview> {
                 .ifBlank { item.optString("alt_text", "") }
                 .trim(),
             url = url,
+            sourceUrls = sourceUrls,
         )
     }
 }
