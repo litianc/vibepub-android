@@ -174,11 +174,14 @@ fun SettingsScreen(
     var styleSourceImports by remember { mutableStateOf<List<StyleSourceImportSummary>>(emptyList()) }
     var isLoadingStyleSources by remember { mutableStateOf(false) }
     var isDistillingStyleProfile by remember { mutableStateOf(false) }
+    var isDistillingStyleLink by remember { mutableStateOf(false) }
     var styleDistillationError by remember { mutableStateOf<String?>(null) }
+    var styleLinkDistillationError by remember { mutableStateOf<String?>(null) }
     var selectedStyleProfileId by remember { mutableStateOf(preferences.selectedStyleProfileId) }
     var showWritingStyleDialog by remember { mutableStateOf(false) }
     var showCustomStyleDialog by remember { mutableStateOf(false) }
     var showStyleDistillationDialog by remember { mutableStateOf(false) }
+    var showStyleLinkDistillationDialog by remember { mutableStateOf(false) }
     var editingCustomStyleProfile by remember { mutableStateOf<WritingStyleProfileOption?>(null) }
     var voiceStyleTurnText by remember { mutableStateOf("") }
     val visibleRemoteStyleProfiles = remoteStyleProfiles.filter { remoteProfile ->
@@ -198,6 +201,11 @@ fun SettingsScreen(
         } else {
             Toast.makeText(context, "没有识别到风格偏好", Toast.LENGTH_SHORT).show()
         }
+    }
+    fun selectRemoteStyleProfile(profile: WritingStyleProfileOption) {
+        preferences.upsertAndSelectRemoteWritingStyleProfile(profile)
+        remoteStyleProfiles = preferences.remoteWritingStyleProfiles
+        selectedStyleProfileId = profile.id
     }
 
     LaunchedEffect(apiBaseUrl, filesToken) {
@@ -399,7 +407,24 @@ fun SettingsScreen(
                             }
                         },
                     )
-                    if (isLoadingStyleSources || isDistillingStyleProfile) {
+                    Divider(color = MaterialTheme.colorScheme.background, thickness = 1.dp, modifier = Modifier.padding(start = 64.dp))
+                    SettingsItem(
+                        iconContent = { SettingsIcon(Color(0xFFEAF7EF)) { Icon(Icons.Default.Link, contentDescription = null, tint = Color(0xFF188A4B)) } },
+                        title = "微信链接生成风格",
+                        subtitle = "粘贴公众号文章链接，生成可选模板",
+                        value = if (isDistillingStyleLink) "生成中" else "粘贴",
+                        valueColor = Color(0xFF188A4B),
+                        modifier = Modifier.testTag("StyleLinkDistillationItem"),
+                        onClick = {
+                            if (filesToken.isBlank()) {
+                                Toast.makeText(context, "请先在设置中配置 FILES_TOKEN", Toast.LENGTH_SHORT).show()
+                            } else {
+                                styleLinkDistillationError = null
+                                showStyleLinkDistillationDialog = true
+                            }
+                        },
+                    )
+                    if (isLoadingStyleSources || isDistillingStyleProfile || isDistillingStyleLink) {
                         LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
                     }
                 }
@@ -530,20 +555,60 @@ fun SettingsScreen(
                             description = description,
                         )
                     }.onSuccess { result ->
-                        val updatedProfiles = remoteStyleProfiles.filterNot { it.id == result.profile.id } + result.profile
-                        remoteStyleProfiles = updatedProfiles
-                        preferences.remoteWritingStyleProfiles = updatedProfiles
-                        selectedStyleProfileId = result.profile.id
-                        preferences.selectedStyleProfileId = result.profile.id
-                        preferences.selectedStyleProfileVersion = result.profile.version
-                        preferences.selectedLayoutProfileId = WritingStyleProfiles.DEFAULT_LAYOUT_PROFILE_ID
-                        preferences.selectedLayoutProfileVersion = WritingStyleProfiles.DEFAULT_LAYOUT_PROFILE_VERSION
+                        selectRemoteStyleProfile(result.profile)
                         showStyleDistillationDialog = false
                         Toast.makeText(context, "已生成并选中云端风格画像", Toast.LENGTH_SHORT).show()
                     }.onFailure { error ->
                         styleDistillationError = error.message ?: "风格画像生成失败"
                     }
                     isDistillingStyleProfile = false
+                }
+            },
+        )
+    }
+
+    if (showStyleLinkDistillationDialog) {
+        StyleLinkDistillationDialog(
+            isSubmitting = isDistillingStyleLink,
+            errorMessage = styleLinkDistillationError,
+            onDismiss = {
+                if (!isDistillingStyleLink) showStyleLinkDistillationDialog = false
+            },
+            onSubmit = { link, name, description ->
+                isDistillingStyleLink = true
+                styleLinkDistillationError = null
+                scope.launch {
+                    runCatching {
+                        val sourceType = if (link.contains("mp.weixin.qq.com")) "wechat_article" else "url"
+                        val imported = WritingStyleApi.importStyleSource(
+                            apiBaseUrl = apiBaseUrl,
+                            filesToken = filesToken,
+                            sourceType = sourceType,
+                            title = null,
+                            url = link,
+                            text = null,
+                        )
+                        WritingStyleApi.distillStyleProfile(
+                            apiBaseUrl = apiBaseUrl,
+                            filesToken = filesToken,
+                            sourceImportIds = listOf(imported.id),
+                            profileId = null,
+                            name = name.takeIf { it.isNotBlank() },
+                            description = description.takeIf { it.isNotBlank() },
+                        )
+                    }.onSuccess { result ->
+                        selectRemoteStyleProfile(result.profile)
+                        runCatching {
+                            WritingStyleApi.listStyleSources(apiBaseUrl, filesToken)
+                        }.onSuccess { sources ->
+                            styleSourceImports = sources
+                        }
+                        showStyleLinkDistillationDialog = false
+                        Toast.makeText(context, "已生成并选中风格模板：${result.profile.name}", Toast.LENGTH_LONG).show()
+                    }.onFailure { error ->
+                        styleLinkDistillationError = error.message ?: "微信链接风格生成失败"
+                    }
+                    isDistillingStyleLink = false
                 }
             },
         )
@@ -729,6 +794,80 @@ private fun String?.cleanStyleSourceValue(): String? {
     if (lower.startsWith("来源 url：") || lower.startsWith("来源 url:")) return null
     if (lower.startsWith("标题：null") || lower.startsWith("标题:null")) return null
     return normalized
+}
+
+@Composable
+internal fun StyleLinkDistillationDialog(
+    isSubmitting: Boolean,
+    errorMessage: String?,
+    onDismiss: () -> Unit,
+    onSubmit: (String, String, String) -> Unit,
+) {
+    var link by remember { mutableStateOf("") }
+    var name by remember { mutableStateOf("") }
+    var description by remember { mutableStateOf("") }
+    val normalizedLink = link.trim()
+    AlertDialog(
+        modifier = Modifier.testTag("StyleLinkDistillationDialog"),
+        onDismissRequest = onDismiss,
+        title = { Text("微信链接生成风格") },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 420.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                OutlinedTextField(
+                    value = link,
+                    onValueChange = { link = it },
+                    label = { Text("微信文章链接") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    label = { Text("模板名称") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = description,
+                    onValueChange = { description = it },
+                    label = { Text("一句话说明") },
+                    minLines = 2,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                errorMessage?.let {
+                    Text(
+                        it,
+                        color = Color(0xFFC62828),
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = !isSubmitting && isSupportedStyleLink(normalizedLink),
+                onClick = { onSubmit(normalizedLink, name.trim(), description.trim()) },
+            ) {
+                Text(if (isSubmitting) "生成中" else "生成")
+            }
+        },
+        dismissButton = {
+            TextButton(enabled = !isSubmitting, onClick = onDismiss) {
+                Text("取消")
+            }
+        },
+    )
+}
+
+internal fun isSupportedStyleLink(value: String): Boolean {
+    val normalized = value.trim()
+    return normalized.startsWith("https://") || normalized.startsWith("http://")
 }
 
 @Composable

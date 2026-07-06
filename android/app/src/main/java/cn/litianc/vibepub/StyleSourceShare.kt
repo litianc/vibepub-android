@@ -10,10 +10,18 @@ data class SharedStyleSource(
     val title: String?,
     val url: String?,
     val text: String?,
+    val autoDistill: Boolean = false,
 )
 
 internal fun sharedStyleSourceFromIntent(intent: Intent?): SharedStyleSource? {
-    if (intent?.action != Intent.ACTION_SEND) return null
+    return when (intent?.action) {
+        Intent.ACTION_SEND -> sharedStyleSourceFromSendIntent(intent)
+        Intent.ACTION_VIEW -> sharedStyleSourceFromViewIntent(intent)
+        else -> null
+    }
+}
+
+private fun sharedStyleSourceFromSendIntent(intent: Intent): SharedStyleSource? {
     val type = intent.type.orEmpty().lowercase()
     if (type.isNotBlank() && !isSupportedStyleSourceMimeType(type)) return null
 
@@ -26,13 +34,37 @@ internal fun sharedStyleSourceFromIntent(intent: Intent?): SharedStyleSource? {
     if (extraText.isBlank() && title.isNullOrBlank()) return null
 
     val url = extractFirstUrl(extraText)
+    val sourceType = sourceTypeForUrl(url)
     val text = extraText.takeIf { it.isNotBlank() }
     return SharedStyleSource(
-        sourceType = if (url?.contains("mp.weixin.qq.com") == true) "wechat_article" else if (url != null) "url" else "text",
+        sourceType = sourceType,
         title = title,
         url = url,
         text = text,
+        autoDistill = sourceType == "wechat_article",
     )
+}
+
+private fun sharedStyleSourceFromViewIntent(intent: Intent): SharedStyleSource? {
+    val url = intent.dataString?.trim()?.takeIf { it.startsWith("http://") || it.startsWith("https://") }
+        ?: return null
+    val sourceType = sourceTypeForUrl(url)
+    if (sourceType != "wechat_article") return null
+    val title = normalizeSharedTitle(
+        intent.getStringExtra(Intent.EXTRA_TITLE)
+            ?: intent.getStringExtra(Intent.EXTRA_SUBJECT),
+    )
+    return SharedStyleSource(
+        sourceType = sourceType,
+        title = title,
+        url = url,
+        text = null,
+        autoDistill = true,
+    )
+}
+
+private fun sourceTypeForUrl(url: String?): String {
+    return if (url?.contains("mp.weixin.qq.com") == true) "wechat_article" else if (url != null) "url" else "text"
 }
 
 private fun isSupportedStyleSourceMimeType(type: String): Boolean {

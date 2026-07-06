@@ -87,8 +87,8 @@ object WritingStyleApi {
         filesToken: String,
         sourceImportIds: List<String>,
         profileId: String?,
-        name: String,
-        description: String,
+        name: String?,
+        description: String?,
     ): StyleDistillationResult = withContext(Dispatchers.IO) {
         require(filesToken.isNotBlank()) { "请先在设置中配置 FILES_TOKEN" }
         val payload = buildStyleDistillationBody(
@@ -146,8 +146,8 @@ internal fun buildStyleSourceImportBody(
 internal fun buildStyleDistillationBody(
     sourceImportIds: List<String>,
     profileId: String?,
-    name: String,
-    description: String,
+    name: String?,
+    description: String?,
 ): String {
     return JSONObject().apply {
         put("source_import_ids", JSONArray(sourceImportIds.map { it.trim() }.filter { it.isNotBlank() }))
@@ -155,7 +155,7 @@ internal fun buildStyleDistillationBody(
             "profile",
             JSONObject().apply {
                 putOptionalString("id", profileId)
-                put("name", name.trim().ifBlank { "我的写作风格" })
+                putOptionalString("name", name)
                 putOptionalString("description", description)
             },
         )

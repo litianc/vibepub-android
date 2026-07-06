@@ -338,6 +338,7 @@ describe("WritingAgent Worker", () => {
 
   it("imports style sources and lists them for the workspace", async () => {
     const db = createProfileDb();
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("", { status: 404 })));
     const response = await worker.fetch(
       new Request("https://writing-agent.test/v1/style-source-imports", {
         method: "POST",
@@ -379,8 +380,52 @@ describe("WritingAgent Worker", () => {
     });
   });
 
+  it("fetches WeChat article text and title when importing a bare URL", async () => {
+    const db = createProfileDb();
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(`
+      <html>
+        <head>
+          <meta content="王建硕：一个产品人的现场笔记" property="og:title">
+          <meta name="author" content="王建硕">
+        </head>
+        <body>
+          <h1 id="activity-name">备用标题</h1>
+          <div id="js_content">
+            <p>第一段直接进入现场。</p>
+            <p>第二段解释为什么这样取舍。</p>
+          </div>
+        </body>
+      </html>
+    `, {
+      status: 200,
+      headers: { "Content-Type": "text/html; charset=utf-8" },
+    })));
+
+    const response = await worker.fetch(
+      new Request("https://writing-agent.test/v1/style-source-imports", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer secret",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          source_type: "wechat_article",
+          url: "https://mp.weixin.qq.com/s/example",
+        }),
+      }),
+      { WRITING_AGENT_TOKEN: "secret", DB: db },
+    );
+
+    expect(response.status).toBe(201);
+    const body = await response.json() as { source_import: { title: string; text_preview: string } };
+    expect(body.source_import.title).toBe("王建硕：一个产品人的现场笔记");
+    expect(body.source_import.text_preview).toContain("作者：王建硕");
+    expect(body.source_import.text_preview).toContain("第一段直接进入现场");
+  });
+
   it("treats literal null style source titles as missing metadata", async () => {
     const db = createProfileDb();
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("", { status: 404 })));
     const response = await worker.fetch(
       new Request("https://writing-agent.test/v1/style-source-imports", {
         method: "POST",

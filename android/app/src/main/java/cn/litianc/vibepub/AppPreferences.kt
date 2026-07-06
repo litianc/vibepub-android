@@ -92,6 +92,35 @@ class AppPreferences(context: Context) {
         return selectedWritingStyleProfile().body.orEmpty()
     }
 
+    fun upsertRemoteWritingStyleProfile(profile: WritingStyleProfileOption) {
+        val normalized = profile.copy(
+            name = profile.name.trim().ifBlank { "云端写作风格" },
+            description = profile.description.trim(),
+            remote = true,
+            custom = false,
+        )
+        val current = remoteWritingStyleProfiles.toMutableList()
+        val index = current.indexOfFirst { it.id == normalized.id }
+        if (index >= 0) {
+            current[index] = normalized
+        } else {
+            current.add(normalized)
+        }
+        remoteWritingStyleProfiles = current
+    }
+
+    fun selectWritingStyleProfile(profile: WritingStyleProfileOption) {
+        selectedStyleProfileId = profile.id
+        selectedStyleProfileVersion = profile.version
+        selectedLayoutProfileId = WritingStyleProfiles.DEFAULT_LAYOUT_PROFILE_ID
+        selectedLayoutProfileVersion = WritingStyleProfiles.DEFAULT_LAYOUT_PROFILE_VERSION
+    }
+
+    fun upsertAndSelectRemoteWritingStyleProfile(profile: WritingStyleProfileOption) {
+        upsertRemoteWritingStyleProfile(profile)
+        selectWritingStyleProfile(profile)
+    }
+
     fun upsertCustomWritingStyleProfile(profile: WritingStyleProfileOption) {
         val normalized = profile.copy(
             name = profile.name.trim().ifBlank { "我的写作风格" },

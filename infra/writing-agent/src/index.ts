@@ -92,6 +92,8 @@ const DEFAULT_GLM_MODEL = "glm-5.2";
 const MAX_INLINE_STYLE_PROFILE_BODY_CHARS = 8_000;
 const MAX_STYLE_SOURCE_TEXT_CHARS = 30_000;
 const MAX_STYLE_DISTILLATION_SOURCE_CHARS = 80_000;
+const MIN_FETCHED_SOURCE_TEXT_CHARS = 1_200;
+const SOURCE_FETCH_TIMEOUT_MS = 8_000;
 const MAX_PROFILE_VERSIONS = 10;
 const DEFAULT_WORKSPACE_ID = "vibepub-dogfood";
 const DEFAULT_USER_ID = "default_user";
@@ -447,8 +449,11 @@ async function createStyleSourceImport(request: Request, env: Env): Promise<unkn
   const body = await parseRequestJson<StyleSourceImportRequest>(request);
   const sourceType = normalizeSourceType(body.source_type);
   const sourceUrl = normalizeOptionalString(body.source_url ?? body.url);
-  const title = normalizeOptionalString(body.title);
-  const sourceText = normalizeSourceText(body.text ?? body.raw_text, sourceUrl, title);
+  const submittedTitle = normalizeOptionalString(body.title);
+  const submittedText = normalizeOptionalString(body.text ?? body.raw_text);
+  const fetched = await fetchSourceContentIfUseful(sourceType, sourceUrl, submittedText);
+  const title = submittedTitle || fetched?.title || "";
+  const sourceText = normalizeSourceText(fetched?.text || submittedText, sourceUrl, title);
   const now = new Date().toISOString();
   const id = `ssi_${crypto.randomUUID()}`;
   const workspaceId = DEFAULT_WORKSPACE_ID;
@@ -506,7 +511,8 @@ async function createStyleDistillationJob(request: Request, env: Env): Promise<u
 
   const workspaceId = DEFAULT_WORKSPACE_ID;
   const profileId = sanitizeProfileId(body.profile?.id ?? body.profile_id) || `style_${crypto.randomUUID()}`;
-  const requestedName = normalizeOptionalString(body.profile?.name ?? body.name) || "蒸馏写作风格";
+  const requestedName = normalizeOptionalString(body.profile?.name ?? body.name) ||
+    "请根据素材标题、作者和主题生成风格名";
   const requestedDescription = normalizeOptionalString(body.profile?.description ?? body.description) ||
     "由导入素材自动提取的写作风格画像。";
   const sources = await loadStyleSources(env, workspaceId, sourceIds);
@@ -916,7 +922,7 @@ ${input.requestedDescription}
 【输出要求】
 只返回 JSON 对象，不要 Markdown，不要额外说明。
 JSON 字段：
-- name：适合展示给用户的风格名。
+- name：适合展示给用户的风格名，优先从素材标题、作者、主题和文章气质中提炼 6-14 个中文字；不要使用“蒸馏写作风格”“我的写作风格”这类泛名。
 - description：一句话说明这个风格适合什么文章。
 - body：完整写作风格画像提示词，使用编号规则，必须包含语气、结构、开头、标题、段落、证据、禁忌和结尾要求。
 
@@ -1001,6 +1007,155 @@ function workspaceIdFromRequest(request: Pick<RewriteJobRequest, "user">): strin
 
 function workspaceIdFromUrl(url: URL): string {
   return normalizeOptionalString(url.searchParams.get("workspace_id")) || DEFAULT_WORKSPACE_ID;
+}
+
+type FetchedSourceContent = {
+  title: string;
+  text: string;
+};
+
+async function fetchSourceContentIfUseful(
+  sourceType: string,
+  sourceUrl: string,
+  submittedText: string,
+): Promise<FetchedSourceContent | undefined> {
+  if (!sourceUrl || !shouldFetchSourceUrl(sourceType, sourceUrl, submittedText)) return undefined;
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), SOURCE_FETCH_TIMEOUT_MS);
+    try {
+      const response = await fetch(sourceUrl, {
+        signal: controller.signal,
+        headers: {
+          "User-Agent": "Mozilla/5.0 (compatible; VibePubStyleDistiller/1.0)",
+          "Accept": "text/html,application/xhtml+xml,text/plain;q=0.8,*/*;q=0.5",
+        },
+      });
+      if (!response.ok) return undefined;
+      const contentType = response.headers.get("content-type") || "";
+      const rawText = await response.text();
+      const parsed = contentType.includes("html") || /<html|<body|id=["']js_content["']/i.test(rawText)
+        ? parseHtmlSourceContent(rawText)
+        : { title: "", text: rawText };
+      const title = normalizeOptionalString(parsed.title);
+      const text = normalizeOptionalString(parsed.text).slice(0, MAX_STYLE_SOURCE_TEXT_CHARS);
+      if (!text) return undefined;
+      return { title, text: sourceTextWithMetadata(text, sourceUrl, title) };
+    } finally {
+      clearTimeout(timeout);
+    }
+  } catch {
+    return undefined;
+  }
+}
+
+function shouldFetchSourceUrl(sourceType: string, sourceUrl: string, submittedText: string): boolean {
+  if (!sourceUrl) return false;
+  if (sourceType === "wechat_article") return true;
+  return ["url", "webpage", "html"].includes(sourceType) && submittedText.length < MIN_FETCHED_SOURCE_TEXT_CHARS;
+}
+
+function parseHtmlSourceContent(html: string): FetchedSourceContent {
+  const title = extractHtmlTitle(html);
+  const author = extractHtmlAuthor(html);
+  const contentHtml = extractElementById(html, "js_content") ||
+    extractElementByTag(html, "article") ||
+    extractElementByTag(html, "body") ||
+    html;
+  const text = stripHtmlToText(contentHtml);
+  const metadata = [
+    title ? `标题：${title}` : "",
+    author ? `作者：${author}` : "",
+  ].filter(Boolean).join("\n");
+  return {
+    title,
+    text: [metadata, text].filter(Boolean).join("\n\n"),
+  };
+}
+
+function extractHtmlTitle(html: string): string {
+  return extractMetaContent(html, "og:title") ||
+    extractMetaContent(html, "twitter:title") ||
+    stripHtmlToText(extractElementById(html, "activity-name")) ||
+    stripHtmlToText(extractElementByTag(html, "title"));
+}
+
+function extractHtmlAuthor(html: string): string {
+  return extractMetaContent(html, "author") ||
+    extractJsString(html, "nickname") ||
+    extractJsString(html, "profile_nickname") ||
+    stripHtmlToText(extractElementById(html, "js_name"));
+}
+
+function extractMetaContent(html: string, key: string): string {
+  const metas = html.match(/<meta\b[^>]*>/gi) || [];
+  for (const meta of metas) {
+    const metaKey = extractHtmlAttribute(meta, "property") || extractHtmlAttribute(meta, "name");
+    if (metaKey.toLowerCase() === key.toLowerCase()) {
+      return decodeHtmlEntities(extractHtmlAttribute(meta, "content")).trim();
+    }
+  }
+  return "";
+}
+
+function extractJsString(html: string, key: string): string {
+  const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const pattern = new RegExp(`${escaped}\\s*=\\s*["']([^"']+)["']`, "i");
+  return decodeHtmlEntities(pattern.exec(html)?.[1] || "").trim();
+}
+
+function extractHtmlAttribute(tag: string, name: string): string {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const pattern = new RegExp(`\\b${escaped}\\s*=\\s*["']([^"']*)["']`, "i");
+  return pattern.exec(tag)?.[1] || "";
+}
+
+function extractElementById(html: string, id: string): string {
+  const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const pattern = new RegExp(`<([a-z0-9]+)\\b[^>]*id=["']${escaped}["'][^>]*>([\\s\\S]*?)<\\/\\1>`, "i");
+  return pattern.exec(html)?.[2] || "";
+}
+
+function extractElementByTag(html: string, tag: string): string {
+  const escaped = tag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const pattern = new RegExp(`<${escaped}\\b[^>]*>([\\s\\S]*?)<\\/${escaped}>`, "i");
+  return pattern.exec(html)?.[1] || "";
+}
+
+function stripHtmlToText(html: string): string {
+  return decodeHtmlEntities(html
+    .replace(/<script\b[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style\b[\s\S]*?<\/style>/gi, " ")
+    .replace(/<svg\b[\s\S]*?<\/svg>/gi, " ")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/(p|div|section|article|h[1-6]|li|blockquote)>/gi, "\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\r/g, "\n")
+    .replace(/[ \t\f\v]+/g, " ")
+    .replace(/\n\s+/g, "\n")
+    .replace(/\n{3,}/g, "\n\n"))
+    .trim();
+}
+
+function sourceTextWithMetadata(text: string, sourceUrl: string, title: string): string {
+  const lines = [
+    title && !text.includes(`标题：${title}`) ? `标题：${title}` : "",
+    sourceUrl ? `来源 URL：${sourceUrl}` : "",
+    text,
+  ];
+  return lines.filter(Boolean).join("\n");
+}
+
+function decodeHtmlEntities(value: string): string {
+  return value
+    .replace(/&#(\d+);/g, (_, code) => String.fromCodePoint(Number(code)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, code) => String.fromCodePoint(Number.parseInt(code, 16)))
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, "\"")
+    .replace(/&#39;|&apos;/g, "'");
 }
 
 function normalizeSourceType(value: unknown): string {

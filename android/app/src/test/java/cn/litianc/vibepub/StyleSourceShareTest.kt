@@ -1,6 +1,7 @@
 package cn.litianc.vibepub
 
 import android.content.Intent
+import android.net.Uri
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -25,6 +26,7 @@ class StyleSourceShareTest {
         assertEquals("Voice Drop 更新", source?.title)
         assertEquals("https://mp.weixin.qq.com/s/example", source?.url)
         assertEquals("Voice Drop 迎来更新 https://mp.weixin.qq.com/s/example", source?.text)
+        assertEquals(true, source?.autoDistill)
     }
 
     @Test
@@ -55,6 +57,25 @@ class StyleSourceShareTest {
         assertEquals("wechat_article", source?.sourceType)
         assertNull(source?.title)
         assertEquals("https://mp.weixin.qq.com/s/example", source?.url)
+        assertEquals(true, source?.autoDistill)
+    }
+
+    @Test
+    fun parsesWechatArticleViewIntentAsAutoDistillSource() {
+        val source = sharedStyleSourceFromIntent(
+            Intent(Intent.ACTION_VIEW, Uri.parse("https://mp.weixin.qq.com/s/example")),
+        )
+
+        assertEquals("wechat_article", source?.sourceType)
+        assertNull(source?.title)
+        assertEquals("https://mp.weixin.qq.com/s/example", source?.url)
+        assertNull(source?.text)
+        assertEquals(true, source?.autoDistill)
+    }
+
+    @Test
+    fun ignoresNonWechatViewIntent() {
+        assertNull(sharedStyleSourceFromIntent(Intent(Intent.ACTION_VIEW, Uri.parse("https://example.com/post"))))
     }
 
     @Test
@@ -69,10 +90,11 @@ class StyleSourceShareTest {
         assertEquals("text", source?.sourceType)
         assertNull(source?.url)
         assertEquals("这是一段我喜欢的旧文风格。", source?.text)
+        assertEquals(false, source?.autoDistill)
     }
 
     @Test
     fun ignoresUnsupportedIntent() {
-        assertNull(sharedStyleSourceFromIntent(Intent(Intent.ACTION_VIEW)))
+        assertNull(sharedStyleSourceFromIntent(Intent(Intent.ACTION_MAIN)))
     }
 }

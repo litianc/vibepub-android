@@ -49,6 +49,22 @@ class WritingStyleApiTest {
     }
 
     @Test
+    fun distillationBodyCanOmitProfileNameForCloudNaming() {
+        val json = JSONObject(
+            buildStyleDistillationBody(
+                sourceImportIds = listOf("ssi_1"),
+                profileId = null,
+                name = null,
+                description = null,
+            ),
+        )
+
+        assertEquals("ssi_1", json.getJSONArray("source_import_ids").getString(0))
+        assertFalse(json.getJSONObject("profile").has("name"))
+        assertFalse(json.getJSONObject("profile").has("description"))
+    }
+
+    @Test
     fun parsesRemoteStyleProfiles() {
         val profiles = parseStyleProfilesResponse(
             """

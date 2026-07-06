@@ -85,10 +85,15 @@ class MainActivity : ComponentActivity() {
             Toast.makeText(this, "请先在设置中配置 FILES_TOKEN，再导入风格素材", Toast.LENGTH_LONG).show()
             return
         }
+        Toast.makeText(
+            this,
+            if (source.autoDistill) "正在生成云端风格模板" else "正在导入风格素材",
+            Toast.LENGTH_SHORT,
+        ).show()
         lifecycleScope.launch {
             val result = withContext(Dispatchers.IO) {
                 runCatching {
-                    WritingStyleApi.importStyleSource(
+                    val imported = WritingStyleApi.importStyleSource(
                         apiBaseUrl = preferences.apiBaseUrl,
                         filesToken = preferences.filesToken,
                         sourceType = source.sourceType,
@@ -96,11 +101,31 @@ class MainActivity : ComponentActivity() {
                         url = source.url,
                         text = source.text,
                     )
+                    if (!source.autoDistill) {
+                        IncomingStyleSourceResult(imported = imported)
+                    } else {
+                        val distilled = WritingStyleApi.distillStyleProfile(
+                            apiBaseUrl = preferences.apiBaseUrl,
+                            filesToken = preferences.filesToken,
+                            sourceImportIds = listOf(imported.id),
+                            profileId = null,
+                            name = styleProfileNameHintForSource(source, imported.title),
+                            description = styleProfileDescriptionHintForSource(source),
+                        )
+                        preferences.upsertAndSelectRemoteWritingStyleProfile(distilled.profile)
+                        IncomingStyleSourceResult(imported = imported, profile = distilled.profile)
+                    }
                 }
             }
             result.fold(
-                onSuccess = {
-                    Toast.makeText(this@MainActivity, "已导入风格素材：${it.title ?: it.id}", Toast.LENGTH_SHORT).show()
+                onSuccess = { outcome ->
+                    val profile = outcome.profile
+                    val message = if (profile != null) {
+                        "已生成并选中风格模板：${profile.name}"
+                    } else {
+                        "已导入风格素材：${outcome.imported.title ?: outcome.imported.id}"
+                    }
+                    Toast.makeText(this@MainActivity, message, Toast.LENGTH_LONG).show()
                 },
                 onFailure = {
                     Toast.makeText(this@MainActivity, it.message ?: "风格素材导入失败", Toast.LENGTH_SHORT).show()
@@ -108,6 +133,39 @@ class MainActivity : ComponentActivity() {
             )
         }
     }
+}
+
+private data class IncomingStyleSourceResult(
+    val imported: StyleSourceImportResult,
+    val profile: WritingStyleProfileOption? = null,
+)
+
+internal fun styleProfileNameHintForSource(source: SharedStyleSource, importedTitle: String?): String {
+    val title = importedTitle.cleanStyleNamePart()
+        ?: source.title.cleanStyleNamePart()
+        ?: return if (source.sourceType == "wechat_article") "微信文章风格" else "素材写作风格"
+    return "${title.take(18)}风格"
+}
+
+internal fun styleProfileDescriptionHintForSource(source: SharedStyleSource): String {
+    return when (source.sourceType) {
+        "wechat_article" -> "从单篇微信文章自动蒸馏出的写作风格。"
+        "url", "webpage", "html" -> "从单篇网页素材自动蒸馏出的写作风格。"
+        else -> "从导入素材自动蒸馏出的写作风格。"
+    }
+}
+
+private fun String?.cleanStyleNamePart(): String? {
+    val normalized = this
+        ?.replace(Regex("""https?://\S+"""), "")
+        ?.replace(Regex("""[|｜].*$"""), "")
+        ?.replace(Regex("""\s+"""), "")
+        ?.trim('「', '」', '《', '》', '"', '\'', '“', '”', ':', '：', '-', '—')
+        .orEmpty()
+    if (normalized.length < 2) return null
+    val lower = normalized.lowercase()
+    if (lower == "null" || lower == "undefined") return null
+    return normalized
 }
 
 @Composable

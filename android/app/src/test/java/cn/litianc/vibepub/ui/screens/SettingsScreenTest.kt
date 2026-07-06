@@ -41,6 +41,13 @@ class SettingsScreenTest {
     }
 
     @Test
+    fun styleLinkValidationAcceptsHttpLinksOnly() {
+        assertTrue(isSupportedStyleLink("https://mp.weixin.qq.com/s/example"))
+        assertTrue(isSupportedStyleLink(" http://mp.weixin.qq.com/s/example "))
+        assertFalse(isSupportedStyleLink("mp.weixin.qq.com/s/example"))
+    }
+
+    @Test
     fun settingsLastSyncLabelShowsUninitializedStatePlainly() {
         assertEquals("尚未同步", settingsLastSyncValue(0L))
         assertEquals("还没有从云端同步过录音状态", settingsLastSyncDetail(0L))
