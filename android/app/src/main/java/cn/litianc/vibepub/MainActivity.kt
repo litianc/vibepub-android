@@ -27,7 +27,9 @@ import cn.litianc.vibepub.data.RecordingSourceType
 import cn.litianc.vibepub.data.RecordingStatus
 import cn.litianc.vibepub.data.asRecordingStatus
 import cn.litianc.vibepub.ui.navigation.AppNavigation
+import cn.litianc.vibepub.ui.screens.AuthPrefillMode
 import cn.litianc.vibepub.ui.screens.AuthScreen
+import cn.litianc.vibepub.ui.screens.AuthTokenPrefill
 import cn.litianc.vibepub.ui.theme.VibePubTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -43,14 +45,31 @@ internal enum class SyncRequestKind {
     USER_OR_ACTIVE_PROGRESS,
 }
 
+internal fun authTokenPrefillFromIntent(intent: Intent?): AuthTokenPrefill? =
+    authTokenPrefillFromUri(intent?.data)
+
+internal fun authTokenPrefillFromUri(uri: Uri?): AuthTokenPrefill? {
+    if (uri?.scheme != "vibepub" || uri.host != "auth") return null
+    val token = uri.getQueryParameter("token")?.trim().orEmpty()
+    if (token.isBlank()) return null
+    val mode = when (uri.pathSegments.firstOrNull()) {
+        "accept-invite" -> AuthPrefillMode.ACCEPT_INVITE
+        "reset-password" -> AuthPrefillMode.RESET_PASSWORD
+        else -> return null
+    }
+    return AuthTokenPrefill(mode = mode, token = token)
+}
+
 class MainActivity : ComponentActivity() {
     private lateinit var preferences: AppPreferences
     private lateinit var recorder: AudioRecorder
+    private var pendingAuthTokenPrefill by mutableStateOf<AuthTokenPrefill?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         preferences = AppPreferences(this)
         recorder = AudioRecorder(this)
+        pendingAuthTokenPrefill = authTokenPrefillFromIntent(intent)
         handleIncomingStyleSourceShare(intent)
         
         schedulePeriodicSync()
@@ -60,7 +79,12 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             VibePubTheme {
-                VibePubApp(preferences, recorder)
+                VibePubApp(
+                    preferences = preferences,
+                    recorder = recorder,
+                    tokenPrefill = pendingAuthTokenPrefill,
+                    onTokenPrefillConsumed = { pendingAuthTokenPrefill = null },
+                )
             }
         }
     }
@@ -68,6 +92,7 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        authTokenPrefillFromIntent(intent)?.let { pendingAuthTokenPrefill = it }
         handleIncomingStyleSourceShare(intent)
     }
 
@@ -179,7 +204,9 @@ private fun String?.cleanStyleNamePart(): String? {
 @Composable
 fun VibePubApp(
     preferences: AppPreferences,
-    recorder: AudioRecorder
+    recorder: AudioRecorder,
+    tokenPrefill: AuthTokenPrefill? = null,
+    onTokenPrefillConsumed: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -237,6 +264,8 @@ fun VibePubApp(
             onAuthenticated = {
                 runSync()
             },
+            tokenPrefill = tokenPrefill,
+            onTokenPrefillConsumed = onTokenPrefillConsumed,
         )
         return
     }

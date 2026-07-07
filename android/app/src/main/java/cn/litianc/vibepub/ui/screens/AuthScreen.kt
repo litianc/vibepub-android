@@ -22,6 +22,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -44,10 +45,22 @@ private enum class AuthMode {
     RESET_PASSWORD,
 }
 
+enum class AuthPrefillMode {
+    ACCEPT_INVITE,
+    RESET_PASSWORD,
+}
+
+data class AuthTokenPrefill(
+    val mode: AuthPrefillMode,
+    val token: String,
+)
+
 @Composable
 fun AuthScreen(
     preferences: AppPreferences,
     onAuthenticated: () -> Unit,
+    tokenPrefill: AuthTokenPrefill? = null,
+    onTokenPrefillConsumed: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -59,6 +72,22 @@ fun AuthScreen(
     var resetToken by remember { mutableStateOf("") }
     var isSubmitting by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(tokenPrefill) {
+        val prefill = tokenPrefill ?: return@LaunchedEffect
+        when (prefill.mode) {
+            AuthPrefillMode.ACCEPT_INVITE -> {
+                mode = AuthMode.ACCEPT_INVITE
+                inviteToken = prefill.token
+            }
+            AuthPrefillMode.RESET_PASSWORD -> {
+                mode = AuthMode.RESET_PASSWORD
+                resetToken = prefill.token
+            }
+        }
+        errorMessage = null
+        onTokenPrefillConsumed()
+    }
 
     fun submit(block: suspend () -> Unit) {
         isSubmitting = true
