@@ -57,7 +57,8 @@ const corsHeaders = {
 };
 
 const MAX_INLINE_STYLE_PROFILE_BODY_CHARS = 3_000;
-const PASSWORD_ITERATIONS = 210_000;
+// Cloudflare Workers Web Crypto currently rejects PBKDF2 iteration counts above 100,000.
+const PASSWORD_ITERATIONS = 100_000;
 const ACCESS_TOKEN_TTL_MS = 60 * 60 * 1_000;
 const REFRESH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1_000;
 const INVITATION_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
