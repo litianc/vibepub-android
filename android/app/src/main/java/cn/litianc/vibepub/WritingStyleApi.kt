@@ -6,6 +6,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
+import java.net.URLEncoder
 
 data class StyleSourceImportResult(
     val id: String,
@@ -41,6 +42,23 @@ object WritingStyleApi {
             method = "GET",
         )
         parseStyleProfilesResponse(response)
+    }
+
+    suspend fun getStyleProfile(
+        apiBaseUrl: String,
+        filesToken: String,
+        profileId: String,
+        includeBody: Boolean = true,
+    ): WritingStyleProfileOption = withContext(Dispatchers.IO) {
+        require(filesToken.isNotBlank()) { "请先在设置中配置 FILES_TOKEN" }
+        val encodedId = URLEncoder.encode(profileId.trim(), "UTF-8")
+        val response = requestJson(
+            apiBaseUrl = apiBaseUrl,
+            filesToken = filesToken,
+            path = "/api/style-profiles/$encodedId?include_body=$includeBody",
+            method = "GET",
+        )
+        parseStyleProfileResponse(response)
     }
 
     suspend fun listStyleSources(
@@ -167,20 +185,15 @@ internal fun parseStyleProfilesResponse(responseBody: String): List<WritingStyle
     return buildList {
         for (index in 0 until array.length()) {
             val item = array.optJSONObject(index) ?: continue
-            val id = item.optString("id").trim()
-            val name = item.optString("name").trim()
-            if (id.isBlank() || name.isBlank()) continue
-            add(
-                WritingStyleProfileOption(
-                    id = id,
-                    version = item.optString("version").trim().ifBlank { WritingStyleProfiles.DEFAULT_STYLE_PROFILE_VERSION },
-                    name = name,
-                    description = item.optString("description").trim(),
-                    remote = true,
-                ),
-            )
+            parseStyleProfileObject(item, fallbackName = null)?.let { add(it) }
         }
     }
+}
+
+internal fun parseStyleProfileResponse(responseBody: String): WritingStyleProfileOption {
+    val profile = JSONObject(responseBody).getJSONObject("style_profile")
+    return parseStyleProfileObject(profile, fallbackName = "我的写作风格")
+        ?: throw IllegalArgumentException("风格模板响应缺少有效 id")
 }
 
 internal fun parseStyleSourceImportResponse(responseBody: String): StyleSourceImportResult {
@@ -196,16 +209,29 @@ internal fun parseStyleDistillationResponse(responseBody: String): StyleDistilla
     val root = JSONObject(responseBody)
     val job = root.getJSONObject("distillation_job")
     val profile = root.getJSONObject("style_profile")
+    val body = profile.optString("body").trim()
     return StyleDistillationResult(
         jobId = job.getString("id"),
-        profile = WritingStyleProfileOption(
-            id = profile.getString("id"),
-            version = profile.optString("version").ifBlank { WritingStyleProfiles.DEFAULT_STYLE_PROFILE_VERSION },
-            name = profile.optString("name").ifBlank { "我的写作风格" },
-            description = profile.optString("description"),
-            remote = true,
-        ),
-        body = profile.optString("body"),
+        profile = parseStyleProfileObject(profile, fallbackName = "我的写作风格")
+            ?: throw IllegalArgumentException("风格画像生成结果缺少有效 id"),
+        body = body,
+    )
+}
+
+private fun parseStyleProfileObject(
+    item: JSONObject,
+    fallbackName: String?,
+): WritingStyleProfileOption? {
+    val id = item.optString("id").trim()
+    val name = item.optString("name").trim().ifBlank { fallbackName.orEmpty() }
+    if (id.isBlank() || name.isBlank()) return null
+    return WritingStyleProfileOption(
+        id = id,
+        version = item.optString("version").trim().ifBlank { WritingStyleProfiles.DEFAULT_STYLE_PROFILE_VERSION },
+        name = name,
+        description = item.optString("description").trim(),
+        body = item.optString("body").trim().takeIf { it.isNotBlank() },
+        remote = true,
     )
 }
 

@@ -11,8 +11,10 @@ import android.speech.RecognizerIntent
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -29,6 +31,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -179,6 +182,9 @@ fun SettingsScreen(
     var styleLinkDistillationError by remember { mutableStateOf<String?>(null) }
     var selectedStyleProfileId by remember { mutableStateOf(preferences.selectedStyleProfileId) }
     var showWritingStyleDialog by remember { mutableStateOf(false) }
+    var showWritingStylePromptDialog by remember { mutableStateOf(false) }
+    var isLoadingWritingStylePrompt by remember { mutableStateOf(false) }
+    var writingStylePromptError by remember { mutableStateOf<String?>(null) }
     var showCustomStyleDialog by remember { mutableStateOf(false) }
     var showStyleDistillationDialog by remember { mutableStateOf(false) }
     var showStyleLinkDistillationDialog by remember { mutableStateOf(false) }
@@ -206,6 +212,31 @@ fun SettingsScreen(
         preferences.upsertAndSelectRemoteWritingStyleProfile(profile)
         remoteStyleProfiles = preferences.remoteWritingStyleProfiles
         selectedStyleProfileId = profile.id
+    }
+    fun showPromptForCurrentStyle() {
+        writingStylePromptError = null
+        showWritingStylePromptDialog = true
+        val profile = selectedStyleProfile
+        if (!shouldFetchStylePrompt(profile, filesToken) || isLoadingWritingStylePrompt) {
+            return
+        }
+        isLoadingWritingStylePrompt = true
+        scope.launch {
+            runCatching {
+                WritingStyleApi.getStyleProfile(
+                    apiBaseUrl = apiBaseUrl,
+                    filesToken = filesToken,
+                    profileId = profile.id,
+                    includeBody = true,
+                )
+            }.onSuccess { loadedProfile ->
+                preferences.upsertRemoteWritingStyleProfile(loadedProfile)
+                remoteStyleProfiles = preferences.remoteWritingStyleProfiles
+            }.onFailure { error ->
+                writingStylePromptError = error.message ?: "提示词加载失败"
+            }
+            isLoadingWritingStylePrompt = false
+        }
     }
 
     LaunchedEffect(apiBaseUrl, filesToken) {
@@ -351,6 +382,7 @@ fun SettingsScreen(
                         profile = selectedStyleProfile,
                         modifier = Modifier.testTag("WritingStyleProfileItem"),
                         onClick = { showWritingStyleDialog = true },
+                        onLongClick = { showPromptForCurrentStyle() },
                     )
                     Divider(color = MaterialTheme.colorScheme.background, thickness = 1.dp, modifier = Modifier.padding(start = 64.dp))
                     Text(
@@ -493,6 +525,16 @@ fun SettingsScreen(
         )
     }
 
+    if (showWritingStylePromptDialog) {
+        WritingStylePromptDialog(
+            profile = selectedStyleProfile,
+            isLoading = isLoadingWritingStylePrompt,
+            errorMessage = writingStylePromptError,
+            onDismiss = { showWritingStylePromptDialog = false },
+            onCopy = { copyWritingStylePrompt(context, selectedStyleProfile) },
+        )
+    }
+
     if (showWritingStyleDialog) {
         WritingStyleProfileDialog(
             selectedProfileId = selectedStyleProfile.id,
@@ -615,6 +657,80 @@ fun SettingsScreen(
             },
         )
     }
+}
+
+@Composable
+internal fun WritingStylePromptDialog(
+    profile: WritingStyleProfileOption,
+    isLoading: Boolean,
+    errorMessage: String?,
+    onDismiss: () -> Unit,
+    onCopy: () -> Unit,
+) {
+    val promptText = if (isLoading && profile.body.isNullOrBlank()) {
+        "正在加载完整提示词…"
+    } else {
+        stylePromptDisplayText(profile)
+    }
+    AlertDialog(
+        modifier = Modifier.testTag("WritingStylePromptDialog"),
+        onDismissRequest = onDismiss,
+        title = { Text("写作风格提示词") },
+        text = {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Text(
+                    profile.name,
+                    style = MaterialTheme.typography.bodyLarge,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                if (profile.description.isNotBlank()) {
+                    Text(
+                        profile.description,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                if (isLoading) {
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                }
+                errorMessage?.let {
+                    Text(
+                        it,
+                        color = Color(0xFFC62828),
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                SelectionContainer {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 420.dp)
+                            .verticalScroll(rememberScrollState())
+                            .testTag("WritingStylePromptText"),
+                    ) {
+                        Text(
+                            promptText,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurface,
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("关闭")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onCopy) {
+                Text("复制")
+            }
+        },
+    )
 }
 
 @Composable
@@ -1144,15 +1260,20 @@ fun SettingsItem(
 }
 
 @Composable
+@OptIn(ExperimentalFoundationApi::class)
 private fun CurrentStyleTemplateItem(
     profile: WritingStyleProfileOption,
     modifier: Modifier = Modifier,
     onClick: () -> Unit,
+    onLongClick: () -> Unit,
 ) {
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick)
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = onLongClick,
+            )
             .semantics(mergeDescendants = true) {}
             .padding(16.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -1228,6 +1349,20 @@ internal fun sourceDistillationValue(
 }
 
 internal fun styleSwitchValue(): String = "切换 ▾"
+
+internal fun stylePromptDisplayText(profile: WritingStyleProfileOption): String {
+    val body = profile.body.orEmpty().trim()
+    if (body.isNotBlank()) return body
+    val description = profile.description.trim()
+    if (description.isNotBlank()) {
+        return "这个模板暂时没有完整提示词正文。\n\n$description"
+    }
+    return "这个模板暂时没有可查看的提示词。"
+}
+
+internal fun shouldFetchStylePrompt(profile: WritingStyleProfileOption, filesToken: String): Boolean {
+    return profile.remote && profile.body.isNullOrBlank() && filesToken.isNotBlank()
+}
 
 internal fun shouldAutoTestSettingsConnection(
     lastTestedConfig: SettingsConnectionConfig,
@@ -1434,6 +1569,12 @@ private fun copyDiagnostics(context: Context, diagnostics: String) {
     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
     clipboard.setPrimaryClip(ClipData.newPlainText("VibePub 诊断信息", diagnostics))
     Toast.makeText(context, "诊断信息已复制", Toast.LENGTH_SHORT).show()
+}
+
+private fun copyWritingStylePrompt(context: Context, profile: WritingStyleProfileOption) {
+    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+    clipboard.setPrimaryClip(ClipData.newPlainText("VibePub 写作风格提示词", stylePromptDisplayText(profile)))
+    Toast.makeText(context, "提示词已复制", Toast.LENGTH_SHORT).show()
 }
 
 private suspend fun buildDiagnostics(context: android.content.Context, preferences: AppPreferences): String =

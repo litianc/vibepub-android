@@ -53,6 +53,7 @@ class WritingStyleProfilesTest {
             version = "2026-07-05T12:00:00Z",
             name = "我的旧文风格",
             description = "从旧文章蒸馏出来的风格。",
+            body = "1. 开头进入现场。",
             remote = true,
         )
 
@@ -62,6 +63,7 @@ class WritingStyleProfilesTest {
 
         assertEquals(1, decoded.size)
         assertEquals("style_my_old_articles", decoded.first().id)
+        assertEquals("1. 开头进入现场。", decoded.first().body)
         assertEquals(true, decoded.first().remote)
         assertEquals(
             "我的旧文风格",
@@ -70,6 +72,24 @@ class WritingStyleProfilesTest {
                 remoteProfiles = decoded,
             ).name,
         )
+    }
+
+    @Test
+    fun builtInPromptBodiesAreForDisplayOnly() {
+        assertEquals(
+            "",
+            WritingStyleProfiles.submissionBodyFor(WritingStyleProfiles.defaultStyleProfile),
+        )
+
+        val remoteProfile = WritingStyleProfileOption(
+            id = "style_remote",
+            version = "v1",
+            name = "云端风格",
+            description = "",
+            body = "1. 使用云端蒸馏提示词。",
+            remote = true,
+        )
+        assertEquals("1. 使用云端蒸馏提示词。", WritingStyleProfiles.submissionBodyFor(remoteProfile))
     }
 
     @Test

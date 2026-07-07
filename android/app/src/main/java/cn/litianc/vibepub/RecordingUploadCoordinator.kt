@@ -102,7 +102,7 @@ object RecordingUploadCoordinator {
                     UploadWorker.KEY_STYLE_PROFILE_VERSION to selectedProfile.version,
                     UploadWorker.KEY_STYLE_PROFILE_NAME to selectedProfile.name,
                     UploadWorker.KEY_STYLE_PROFILE_DESCRIPTION to selectedProfile.description,
-                    UploadWorker.KEY_STYLE_PROFILE_BODY to selectedProfile.body.orEmpty(),
+                    UploadWorker.KEY_STYLE_PROFILE_BODY to WritingStyleProfiles.submissionBodyFor(selectedProfile),
                     UploadWorker.KEY_LAYOUT_PROFILE_ID to preferences.selectedLayoutProfileId,
                     UploadWorker.KEY_LAYOUT_PROFILE_VERSION to preferences.selectedLayoutProfileVersion,
                 ),

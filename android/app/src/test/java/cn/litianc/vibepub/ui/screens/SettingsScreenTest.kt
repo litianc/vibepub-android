@@ -63,6 +63,67 @@ class SettingsScreenTest {
     }
 
     @Test
+    fun stylePromptDisplayPrefersFullPromptBody() {
+        val profile = cn.litianc.vibepub.WritingStyleProfileOption(
+            id = "style_1",
+            version = "v1",
+            name = "我的风格",
+            description = "一句话说明",
+            body = "1. 开头直接进入现场。",
+        )
+
+        assertEquals("1. 开头直接进入现场。", stylePromptDisplayText(profile))
+    }
+
+    @Test
+    fun stylePromptDisplayFallsBackToDescription() {
+        val profile = cn.litianc.vibepub.WritingStyleProfileOption(
+            id = "style_1",
+            version = "v1",
+            name = "我的风格",
+            description = "一句话说明",
+            body = null,
+        )
+
+        assertTrue(stylePromptDisplayText(profile).contains("一句话说明"))
+    }
+
+    @Test
+    fun remotePromptFetchRunsOnlyWhenBodyMissingAndTokenConfigured() {
+        assertTrue(
+            shouldFetchStylePrompt(
+                profile = cn.litianc.vibepub.WritingStyleProfileOption(
+                    id = "style_remote",
+                    version = "v1",
+                    name = "远端风格",
+                    description = "",
+                    remote = true,
+                ),
+                filesToken = "TOKEN",
+            ),
+        )
+        assertFalse(
+            shouldFetchStylePrompt(
+                profile = cn.litianc.vibepub.WritingStyleProfileOption(
+                    id = "style_remote",
+                    version = "v1",
+                    name = "远端风格",
+                    description = "",
+                    body = "1. 已有提示词。",
+                    remote = true,
+                ),
+                filesToken = "TOKEN",
+            ),
+        )
+        assertFalse(
+            shouldFetchStylePrompt(
+                profile = cn.litianc.vibepub.WritingStyleProfiles.defaultStyleProfile,
+                filesToken = "TOKEN",
+            ),
+        )
+    }
+
+    @Test
     fun settingsLastSyncLabelShowsUninitializedStatePlainly() {
         assertEquals("尚未同步", settingsLastSyncValue(0L))
         assertEquals("还没有从云端同步过录音状态", settingsLastSyncDetail(0L))

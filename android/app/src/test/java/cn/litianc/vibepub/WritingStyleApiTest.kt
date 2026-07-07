@@ -71,7 +71,7 @@ class WritingStyleApiTest {
             {
               "style_profiles": [
                 {"id":"style_litianc_default","name":"默认","version":"2026-07-05"},
-                {"id":"style_my_old_articles","name":"我的旧文风格","version":"v1","description":"短段落"}
+                {"id":"style_my_old_articles","name":"我的旧文风格","version":"v1","description":"短段落","body":"1. 开头进入现场。"}
               ]
             }
             """.trimIndent(),
@@ -81,8 +81,30 @@ class WritingStyleApiTest {
         assertEquals("style_my_old_articles", profiles[1].id)
         assertEquals("v1", profiles[1].version)
         assertEquals("短段落", profiles[1].description)
+        assertEquals("1. 开头进入现场。", profiles[1].body)
         assertTrue(profiles[1].remote)
         assertFalse(profiles[1].custom)
+    }
+
+    @Test
+    fun parsesSingleStyleProfileWithBody() {
+        val profile = parseStyleProfileResponse(
+            """
+            {
+              "style_profile": {
+                "id":"style_my_old_articles",
+                "name":"我的旧文风格",
+                "version":"v1",
+                "description":"短段落",
+                "body":"1. 开头进入现场。"
+              }
+            }
+            """.trimIndent(),
+        )
+
+        assertEquals("style_my_old_articles", profile.id)
+        assertEquals("1. 开头进入现场。", profile.body)
+        assertTrue(profile.remote)
     }
 
     @Test
@@ -154,6 +176,7 @@ class WritingStyleApiTest {
 
         assertEquals("sdj_1", result.jobId)
         assertEquals("style_my_old_articles", result.profile.id)
+        assertEquals("1. 开头进入现场。", result.profile.body)
         assertEquals("1. 开头进入现场。", result.body)
     }
 

@@ -351,7 +351,7 @@ fun VibePubApp(
                         styleProfileVersion = selectedProfile.version,
                         styleProfileName = selectedProfile.name,
                         styleProfileDescription = selectedProfile.description,
-                        styleProfileBody = selectedProfile.body,
+                        styleProfileBody = WritingStyleProfiles.submissionBodyFor(selectedProfile),
                         layoutProfileId = preferences.selectedLayoutProfileId,
                         layoutProfileVersion = preferences.selectedLayoutProfileVersion,
                     )
