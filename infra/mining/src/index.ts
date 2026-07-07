@@ -136,6 +136,7 @@ async function updateStatus(filename: string, status: string, metadata: StatusMe
 async function getWechatConfigForUser(userId: string): Promise<WechatConfig> {
   const token = process.env.MINING_SERVICE_TOKEN || process.env.FILES_TOKEN;
   const baseUrl = process.env.PUBLIC_BASE_URL?.trim();
+  const canUseLegacyWechatConfig = userId === "default_user";
   if (token && baseUrl) {
     const res = await fetch(`${baseUrl.replace(/\/+$/, "")}/api/internal/publishing-account`, {
       method: "POST",
@@ -148,6 +149,9 @@ async function getWechatConfigForUser(userId: string): Promise<WechatConfig> {
     if (res.ok) {
       const body = await res.json() as any;
       const account = body.publishing_account;
+      if (!account?.app_id || !account?.app_secret || !account?.proxy_url) {
+        throw new Error("Publishing account response missing credentials");
+      }
       return {
         appId: account.app_id,
         appSecret: account.app_secret,
@@ -159,7 +163,7 @@ async function getWechatConfigForUser(userId: string): Promise<WechatConfig> {
     }
   }
 
-  if (process.env.WECHAT_APP_ID && process.env.WECHAT_APP_SECRET && process.env.WECHAT_PROXY) {
+  if (canUseLegacyWechatConfig && process.env.WECHAT_APP_ID && process.env.WECHAT_APP_SECRET && process.env.WECHAT_PROXY) {
     return {
       appId: process.env.WECHAT_APP_ID,
       appSecret: process.env.WECHAT_APP_SECRET,

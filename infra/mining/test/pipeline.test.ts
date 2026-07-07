@@ -38,6 +38,7 @@ vi.mock('../src/r2.js', () => ({
   uploadTranscript: vi.fn(),
   isSupportedTextSubmissionKey: (key: string) =>
     key.startsWith('text-submissions/') && (key.endsWith('.txt') || key.endsWith('.json')),
+  userIdFromPipelineKey: (key: string) => key.match(/^users\/([^/]+)\//)?.[1],
 }));
 
 vi.mock('../src/asr.js', () => ({
@@ -46,6 +47,42 @@ vi.mock('../src/asr.js', () => ({
 
 describe('VibePub Cloud Pipeline', () => {
   const originalEnv = { ...process.env };
+  const testWechatConfig = {
+    appId: 'wx-test-app',
+    appSecret: 'wx-test-secret',
+    proxyUrl: 'https://wechat-proxy.example.test',
+  };
+
+  function mockFetchWithPublishingAccount(account = testWechatConfig) {
+    vi.stubGlobal('fetch', vi.fn(async (input) => {
+      if (String(input).includes('/api/internal/publishing-account')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            publishing_account: {
+              app_id: account.appId,
+              app_secret: account.appSecret,
+              proxy_url: account.proxyUrl,
+            },
+          }),
+          text: async () => '',
+        } as any;
+      }
+
+      return {
+        ok: true,
+        status: 200,
+        text: async () => '',
+      } as any;
+    }));
+  }
+
+  function statusUpdateBodies() {
+    return vi.mocked(fetch).mock.calls
+      .filter(([input]) => !String(input).includes('/api/internal/publishing-account'))
+      .map(([, init]) => JSON.parse(String(init?.body)));
+  }
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -55,11 +92,11 @@ describe('VibePub Cloud Pipeline', () => {
       FILES_TOKEN: 'test-files-token',
       TARGET_FILENAME: '',
       REVISION_REQUEST_KEY: '',
+      WECHAT_APP_ID: '',
+      WECHAT_APP_SECRET: '',
+      WECHAT_PROXY: '',
     };
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
-      ok: true,
-      text: async () => '',
-    }));
+    mockFetchWithPublishingAccount();
     vi.mocked(getFileMetadata).mockResolvedValue({});
     vi.mocked(prepareArticleImages).mockResolvedValue([]);
   });
@@ -176,7 +213,7 @@ describe('VibePub Cloud Pipeline', () => {
 
     await expect(main()).resolves.toBeUndefined();
 
-    const fetchCalls = vi.mocked(fetch).mock.calls.map(([, init]) => JSON.parse(String(init?.body)));
+    const fetchCalls = statusUpdateBodies();
     expect(fetchCalls.map(call => call.processingStage)).toEqual([
       'QUEUED',
       'ASR',
@@ -245,7 +282,7 @@ describe('VibePub Cloud Pipeline', () => {
       '标题提示：手动输入也要能发布\n\n这是一段用户在手机上手动输入的原始想法。',
     );
 
-    const fetchCalls = vi.mocked(fetch).mock.calls.map(([, init]) => JSON.parse(String(init?.body)));
+    const fetchCalls = statusUpdateBodies();
     expect(fetchCalls.map(call => call.processingStage)).toEqual([
       'QUEUED',
       'REWRITING',
@@ -303,7 +340,7 @@ describe('VibePub Cloud Pipeline', () => {
     );
     expect(deleteFile).toHaveBeenCalledWith(fileKey);
 
-    const fetchCalls = vi.mocked(fetch).mock.calls.map(([, init]) => JSON.parse(String(init?.body)));
+    const fetchCalls = statusUpdateBodies();
     expect(fetchCalls).toContainEqual(expect.objectContaining({
       filename,
       status: 'COMPLETED',
@@ -316,6 +353,68 @@ describe('VibePub Cloud Pipeline', () => {
       call.status === 'FAILED' &&
         call.filename === filename
     )).toBe(false);
+  });
+
+  it('should keep article visible without falling back to legacy WeChat credentials for unbound authenticated users', async () => {
+    const fileKey = 'users/usr_unbound/inbox/VibePub-2026-07-07-230000-0m30s-Unbound-WeChat.mp3';
+    const filename = 'VibePub-2026-07-07-230000-0m30s-Unbound-WeChat.mp3';
+    const article = {
+      title: '未绑定公众号也要能读文章',
+      content: '<p>这篇文章已经生成，但当前用户还没有绑定公众号。</p>'.repeat(4),
+      imagePrompt: 'A clean editorial cover',
+      coverTitle: ['未绑定', '公众号', '也能读'],
+      coverSubtitle: '账号隔离优先',
+    };
+
+    process.env.WECHAT_APP_ID = 'legacy-app-id';
+    process.env.WECHAT_APP_SECRET = 'legacy-secret';
+    process.env.WECHAT_PROXY = 'https://legacy-wechat-proxy.example.test';
+    vi.stubGlobal('fetch', vi.fn(async (input) => {
+      if (String(input).includes('/api/internal/publishing-account')) {
+        return {
+          ok: false,
+          status: 404,
+          text: async () => '{"error":"publishing_account_not_configured"}',
+        } as any;
+      }
+
+      return {
+        ok: true,
+        status: 200,
+        text: async () => '',
+      } as any;
+    }));
+
+    vi.mocked(listUnprocessedFiles).mockResolvedValue([fileKey]);
+    vi.mocked(createPresignedDownloadUrl).mockResolvedValue('https://r2.example.test/audio.mp3');
+    vi.mocked(transcribeAudioUrl).mockResolvedValue('今天我想测试用户没有绑定公众号时的成文结果。');
+    vi.mocked(processAudioText).mockResolvedValue(article);
+    vi.mocked(generateWechatCoverBuffer).mockResolvedValue(Buffer.from('fake-cover'));
+    vi.mocked(uploadCoverImage).mockResolvedValue();
+    vi.mocked(uploadTranscript).mockResolvedValue();
+    vi.mocked(deleteFile).mockResolvedValue();
+
+    await expect(main()).resolves.toBeUndefined();
+
+    expect(getAccessToken).not.toHaveBeenCalled();
+    expect(publishDraft).not.toHaveBeenCalled();
+    expect(deleteFile).toHaveBeenCalledWith(fileKey);
+    expect(uploadTranscript).toHaveBeenCalledWith(
+      'users/usr_unbound/transcripts/VibePub-2026-07-07-230000-0m30s-Unbound-WeChat.json',
+      expect.stringContaining('"processingStage":"DRAFT_FAILED"'),
+    );
+
+    const fetchCalls = statusUpdateBodies();
+    expect(fetchCalls).toContainEqual(expect.objectContaining({
+      filename,
+      userId: 'usr_unbound',
+      status: 'COMPLETED',
+      articleTitle: article.title,
+      articleContent: article.content,
+      processingStage: 'DRAFT_FAILED',
+      errorMessage: expect.stringContaining('公众号未绑定'),
+    }));
+    expect(fetchCalls.some(call => call.wechatDraftId)).toBe(false);
   });
 
   it('should keep generated article visible when cover generation fails after article-ready progress', async () => {
@@ -339,7 +438,7 @@ describe('VibePub Cloud Pipeline', () => {
 
     await expect(main()).resolves.toBeUndefined();
 
-    const fetchCalls = vi.mocked(fetch).mock.calls.map(([, init]) => JSON.parse(String(init?.body)));
+    const fetchCalls = statusUpdateBodies();
     expect(fetchCalls).toContainEqual(expect.objectContaining({
       filename,
       status: 'PROCESSING',
@@ -422,13 +521,14 @@ describe('VibePub Cloud Pipeline', () => {
       revisedArticle.title,
       revisedArticle.content,
       Buffer.from('revised-cover'),
+      testWechatConfig,
     );
     expect(uploadTranscript).toHaveBeenCalledWith(
       transcriptKey,
       expect.stringContaining('"instructionText": "把标题换得更直接，并补充一个结论。"'),
     );
 
-    const fetchCalls = vi.mocked(fetch).mock.calls.map(([, init]) => JSON.parse(String(init?.body)));
+    const fetchCalls = statusUpdateBodies();
     expect(fetchCalls.map(call => call.processingStage)).toEqual([
       'ASR',
       'REWRITING',
@@ -510,13 +610,14 @@ describe('VibePub Cloud Pipeline', () => {
     await expect(main()).resolves.toBeUndefined();
 
     expect(prepareArticleImages).toHaveBeenCalledWith('inbox/VibePub-2026-07-02-160000-0m18s-Test.m4a', revisedArticle.imageActions);
-    expect(uploadWechatArticleImage).toHaveBeenCalledWith('wechat-token', Buffer.from('article-image'));
+    expect(uploadWechatArticleImage).toHaveBeenCalledWith('wechat-token', Buffer.from('article-image'), testWechatConfig);
     expect(updateDraft).toHaveBeenCalledWith(
       'wechat-token',
       'MEDIA_ID_OLD',
       revisedArticle.title,
       expect.stringContaining('https://mmbiz.qpic.cn/article-image.png'),
       Buffer.from('revised-cover'),
+      testWechatConfig,
     );
     expect(updateDraft).toHaveBeenCalledWith(
       'wechat-token',
@@ -524,6 +625,7 @@ describe('VibePub Cloud Pipeline', () => {
       revisedArticle.title,
       expect.stringMatching(/第一段正文。<\/p><figure[\s\S]+第二段正文。/),
       Buffer.from('revised-cover'),
+      testWechatConfig,
     );
     const transcriptPayload = String(vi.mocked(uploadTranscript).mock.calls.at(-1)?.[1]);
     expect(transcriptPayload).toContain('"articleImages"');
