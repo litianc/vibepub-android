@@ -257,8 +257,9 @@ fun VibePubApp(
     val authStateVersion by remember(preferences) {
         preferences.authStateFlow()
     }.collectAsState(initial = preferences.authStateVersion)
+    val isAuthenticated = authStateVersion.let { preferences.isAuthenticated }
 
-    if (!preferences.isAuthenticated) {
+    if (!isAuthenticated) {
         AuthScreen(
             preferences = preferences,
             onAuthenticated = {

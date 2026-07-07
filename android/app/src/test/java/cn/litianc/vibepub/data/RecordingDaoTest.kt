@@ -57,6 +57,35 @@ class RecordingDaoTest {
     }
 
     @Test
+    fun recordingsAreScopedByCurrentUserId() = runBlocking {
+        val dao = database.recordingDao()
+        dao.insert(
+            RecordingEntity(
+                userId = "usr_first",
+                filename = "shared-name.m4a",
+                durationMs = 32_000L,
+                timestamp = 1L,
+                status = RecordingStatus.COMPLETED.value,
+            ),
+        )
+        dao.insert(
+            RecordingEntity(
+                userId = "usr_second",
+                filename = "shared-name.m4a",
+                durationMs = 18_000L,
+                timestamp = 2L,
+                status = RecordingStatus.UPLOADED.value,
+            ),
+        )
+
+        assertEquals(1, dao.getAllRecordings("usr_first").size)
+        assertEquals(RecordingStatus.COMPLETED.value, dao.getAllRecordings("usr_first").first().status)
+        assertEquals(1, dao.getAllRecordings("usr_second").size)
+        assertEquals(RecordingStatus.UPLOADED.value, dao.getAllRecordings("usr_second").first().status)
+        assertEquals(emptyList<RecordingEntity>(), dao.getAllRecordings("default_user"))
+    }
+
+    @Test
     fun updatesExistingRowWhenCallerCarriesExistingId() = runBlocking {
         val dao = database.recordingDao()
         val rowId = dao.upsertBest(

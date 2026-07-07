@@ -137,7 +137,9 @@ fun AuthScreen(
                 label = { Text("API Base URL") },
                 leadingIcon = { androidx.compose.material3.Icon(Icons.Default.Link, contentDescription = null) },
                 singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("AuthApiBaseUrlField"),
             )
             Spacer(modifier = Modifier.height(12.dp))
 
@@ -148,7 +150,9 @@ fun AuthScreen(
                     label = { Text("邮箱") },
                     leadingIcon = { androidx.compose.material3.Icon(Icons.Default.Email, contentDescription = null) },
                     singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("AuthEmailField"),
                 )
                 Spacer(modifier = Modifier.height(12.dp))
             }
@@ -184,7 +188,9 @@ fun AuthScreen(
                     leadingIcon = { androidx.compose.material3.Icon(Icons.Default.Lock, contentDescription = null) },
                     singleLine = true,
                     visualTransformation = PasswordVisualTransformation(),
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("AuthPasswordField"),
                 )
                 Spacer(modifier = Modifier.height(16.dp))
             }
@@ -200,7 +206,9 @@ fun AuthScreen(
 
             Button(
                 enabled = !isSubmitting,
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("AuthSubmitButton"),
                 onClick = {
                     when (mode) {
                         AuthMode.LOGIN -> submit {
