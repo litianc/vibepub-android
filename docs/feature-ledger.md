@@ -13,6 +13,7 @@
 
 | 时间 | 功能更新 |
 | --- | --- |
+| 2026-07-07 22:10 CST | Android 真机 smoke 支持复用当前登录账号执行上传到成文链路，debug 导入录音也按当前用户写入本地 Room。 |
 | 2026-07-07 20:30 CST | Worker 认证密码哈希参数调整到 Cloudflare Web Crypto 支持范围，线上邀请接受和登录流程可正常执行。 |
 | 2026-07-07 17:09 CST | Android 可直接承接 `vibepub://auth` 邀请和重置密码链接，自动打开对应账号流程并预填 token。 |
 | 2026-07-07 16:21 CST | VibePub 升级为邀请制账号体系，Android、Worker、WritingAgent 和 mining 链路按用户隔离录音、风格、草稿与公众号发布配置。 |

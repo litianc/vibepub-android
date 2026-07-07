@@ -18,6 +18,8 @@ fi
 AUDIO_FILE="${AUDIO_FILE:-}"
 API_BASE_URL="${API_BASE_URL:-}"
 FILES_TOKEN="${FILES_TOKEN:-}"
+APP_AUTH_USER_ID=""
+APP_AUTH_USER_EMAIL=""
 RESET_APP_DATA="${RESET_APP_DATA:-false}"
 REQUIRE_PREFS_INJECTION="${REQUIRE_PREFS_INJECTION:-true}"
 AUTOMATION_MODE="${AUTOMATION_MODE:-debug-broadcast}"
@@ -67,6 +69,8 @@ Environment:
                   recording, and captures evidence.
   API_BASE_URL    Optional API base URL to inject into app preferences.
   FILES_TOKEN     Optional upload/files token to inject into app preferences.
+                  When empty, the script reads the installed debug app's current
+                  access_token from shared_prefs without printing it.
   RESET_APP_DATA  Set to true to clear app data before the run. Default: false.
   REQUIRE_PREFS_INJECTION
                   Fail if API_BASE_URL/FILES_TOKEN injection fails. Default: true.
@@ -989,9 +993,12 @@ trigger_and_wait_for_mining_job() {
   echo "Triggering GitHub Actions workflow: $MINING_WORKFLOW_ID ($MINING_WORKFLOW_REF)"
   printf '%s\n' "manual" > "$OUT_DIR/mining-trigger-mode.txt"
   if truthy "$MINING_TARGETED" && [[ -n "$target_filename" ]]; then
-    if ! gh workflow run "$MINING_WORKFLOW_ID" --ref "$MINING_WORKFLOW_REF" \
-      -f "target_filename=$target_filename" \
-      > "$OUT_DIR/mining-workflow-dispatch.txt" 2>&1; then
+    local workflow_args=(workflow run "$MINING_WORKFLOW_ID" --ref "$MINING_WORKFLOW_REF" -f "target_filename=$target_filename")
+    if [[ -n "$APP_AUTH_USER_ID" ]]; then
+      workflow_args+=(-f "user_id=$APP_AUTH_USER_ID")
+      printf '%s\n' "$APP_AUTH_USER_ID" > "$OUT_DIR/mining-target-user-id.txt"
+    fi
+    if ! gh "${workflow_args[@]}" > "$OUT_DIR/mining-workflow-dispatch.txt" 2>&1; then
       cat "$OUT_DIR/mining-workflow-dispatch.txt" >&2
       cat >&2 <<EOF
 Targeted mining dispatch failed. Retrying without target_filename so smoke
@@ -1093,7 +1100,7 @@ maybe_run_mining_job_for_latest_recording() {
   require_cmd curl
 
   if [[ -z "$FILES_TOKEN" ]]; then
-    echo "TRIGGER_MINING_JOB=true requires FILES_TOKEN." >&2
+    echo "TRIGGER_MINING_JOB=true requires either FILES_TOKEN or an existing app auth session." >&2
     return 1
   fi
 
@@ -1186,7 +1193,7 @@ capture_local_recording_row() {
   adb_cmd shell "run-as '$PACKAGE_NAME' sh -c 'test -f databases/vibepub_database-shm && cat databases/vibepub_database-shm || true'" \
     > "$db_file-shm" 2>/dev/null || true
 
-  python3 - "$db_file" "$filename" > "$OUT_DIR/local-recording-row.json" <<'PY'
+  python3 - "$db_file" "$filename" "$APP_AUTH_USER_ID" > "$OUT_DIR/local-recording-row.json" <<'PY'
 import json
 import sqlite3
 import sys
@@ -1194,6 +1201,7 @@ from pathlib import Path
 
 path = Path(sys.argv[1])
 filename = sys.argv[2]
+user_id = sys.argv[3]
 connection = sqlite3.connect(path)
 try:
     row = connection.execute(
@@ -1210,8 +1218,9 @@ try:
             COALESCE(MAX(lastError), '')
         FROM recordings
         WHERE filename = ?
+          AND (? = '' OR userId = ?)
         """,
-        (filename,),
+        (filename, user_id, user_id),
     ).fetchone()
 finally:
     connection.close()
@@ -1224,6 +1233,7 @@ def clean(value):
 
 print(json.dumps({
     "filename": filename,
+    "userId": user_id,
     "count": int(row[0] or 0),
     "durationMs": int(row[1] or 0),
     "status": clean(row[2]),
@@ -1505,7 +1515,7 @@ xml_escape() {
 }
 
 write_app_preferences() {
-  if [[ -z "$API_BASE_URL" && -z "$FILES_TOKEN" ]]; then
+  if [[ -z "$FILES_TOKEN" ]]; then
     return 0
   fi
 
@@ -1540,6 +1550,64 @@ EOF
   fi
 
   adb_shell rm -f /data/local/tmp/vibepub-prefs.xml >/dev/null 2>&1 || true
+}
+
+load_app_auth_session() {
+  if [[ -n "$FILES_TOKEN" ]]; then
+    return 0
+  fi
+
+  local prefs_file="$OUT_DIR/app-prefs.xml"
+  if ! adb_cmd shell "run-as '$PACKAGE_NAME' cat shared_prefs/vibepub.xml" \
+    > "$prefs_file" 2>"$OUT_DIR/app-prefs.err"; then
+    return 1
+  fi
+
+  local auth_values
+  auth_values="$(python3 - "$prefs_file" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+from pathlib import Path
+
+path = Path(sys.argv[1])
+root = ET.parse(path).getroot()
+values = {}
+for node in root:
+    name = node.attrib.get("name")
+    if not name:
+        continue
+    if node.tag == "boolean":
+        values[name] = node.attrib.get("value", "")
+    else:
+        values[name] = node.text or ""
+
+print(values.get("access_token") or values.get("files_token") or "")
+print(values.get("user_id") or "")
+print(values.get("user_email") or "")
+print(values.get("api_base_url") or "")
+PY
+)"
+
+  FILES_TOKEN="$(printf '%s\n' "$auth_values" | sed -n '1p')"
+  APP_AUTH_USER_ID="$(printf '%s\n' "$auth_values" | sed -n '2p')"
+  APP_AUTH_USER_EMAIL="$(printf '%s\n' "$auth_values" | sed -n '3p')"
+  local app_api_base
+  app_api_base="$(printf '%s\n' "$auth_values" | sed -n '4p')"
+  if [[ -z "$API_BASE_URL" && -n "$app_api_base" ]]; then
+    API_BASE_URL="$app_api_base"
+  fi
+
+  if [[ -z "$FILES_TOKEN" || -z "$APP_AUTH_USER_ID" ]]; then
+    return 1
+  fi
+
+  cat > "$OUT_DIR/app-auth-session.txt" <<EOF
+Loaded existing app auth session.
+User ID: $APP_AUTH_USER_ID
+Email: $APP_AUTH_USER_EMAIL
+Access token: set
+EOF
+  return 0
 }
 
 require_cmd adb
@@ -1670,6 +1738,13 @@ wait_for_app_focus || true
 grant_recording_permissions "after-launch"
 capture_recording_permission_evidence
 capture_recording_permission_evidence "after-launch"
+if [[ -z "$FILES_TOKEN" ]]; then
+  if load_app_auth_session; then
+    echo "Loaded existing app auth session for backend polling."
+  else
+    echo "No app auth session was available for backend polling."
+  fi
+fi
 
 echo "Capturing launch screenshot..."
 adb_shell screencap -p /sdcard/vibepub-launch.png

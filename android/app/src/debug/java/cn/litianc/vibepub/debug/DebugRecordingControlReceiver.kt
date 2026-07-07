@@ -75,11 +75,22 @@ private object DebugRecordingHarness {
         val (file, durationMs) = activeRecorder.stop()
         recorder = null
 
-        RecordingUploadCoordinator.saveRecording(context, file, durationMs, minDurationMs = 0L)
+        val preferences = AppPreferences(context)
+        RecordingUploadCoordinator.saveRecording(
+            context = context,
+            file = file,
+            durationMs = durationMs,
+            userId = preferences.effectiveUserId,
+            minDurationMs = 0L,
+        )
 
         writeStatus(
             context = context,
-            status = if (enqueueUpload(context, file)) "STOPPED" else "STOPPED_WITHOUT_UPLOAD_TOKEN",
+            status = if (RecordingUploadCoordinator.enqueueUpload(context, preferences, file)) {
+                "STOPPED"
+            } else {
+                "STOPPED_WITHOUT_UPLOAD_TOKEN"
+            },
             filename = file.name,
             durationMs = durationMs,
         )
@@ -110,19 +121,25 @@ private object DebugRecordingHarness {
         val destination = nextImportedRecordingFile(context, source, durationMs)
         source.copyTo(destination, overwrite = false)
 
-        RecordingUploadCoordinator.saveRecording(context, destination, durationMs, minDurationMs = 0L)
+        val preferences = AppPreferences(context)
+        RecordingUploadCoordinator.saveRecording(
+            context = context,
+            file = destination,
+            durationMs = durationMs,
+            userId = preferences.effectiveUserId,
+            minDurationMs = 0L,
+        )
 
         writeStatus(
             context = context,
-            status = if (enqueueUpload(context, destination)) "IMPORTED" else "IMPORTED_WITHOUT_UPLOAD_TOKEN",
+            status = if (RecordingUploadCoordinator.enqueueUpload(context, preferences, destination)) {
+                "IMPORTED"
+            } else {
+                "IMPORTED_WITHOUT_UPLOAD_TOKEN"
+            },
             filename = destination.name,
             durationMs = durationMs,
         )
-    }
-
-    private fun enqueueUpload(context: Context, file: File): Boolean {
-        val preferences = AppPreferences(context)
-        return RecordingUploadCoordinator.enqueueUpload(context, preferences, file)
     }
 
     private fun resolveAudioFile(context: Context, path: String): File {

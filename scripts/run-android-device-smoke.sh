@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEFAULT_AUDIO_FILE="/Users/xyli/Documents/Code/revoice-project/.data/test_clips/speaker_boundary_18_48s.mp3"
 DEVICE_ENV_FILE="${DEVICE_ENV_FILE:-$ROOT_DIR/secrets/device-test.env}"
 APK_PATH="${1:-}"
+USE_APP_AUTH_SESSION="${USE_APP_AUTH_SESSION:-false}"
 
 usage() {
   cat <<EOF
@@ -16,6 +17,9 @@ Environment:
   AUDIO_FILE       Test audio file. Defaults to the standard speaker sample.
   API_BASE_URL     Backend URL. Defaults to https://vibepub.litianc.cn.
   FILES_TOKEN      Backend token. Falls back to secrets/files-token.txt.
+  USE_APP_AUTH_SESSION
+                   When true, use the already logged-in debug app session
+                   instead of requiring FILES_TOKEN. Default: false.
   SKIP_INSTALL     Use APK already installed on phone. Default: false.
   CHECK_APK_INSTALL_IN_PREFLIGHT
                    Let readiness preflight install/check the APK before the
@@ -52,7 +56,7 @@ if [[ -z "$APK_PATH" ]]; then
   APK_PATH="$("$ROOT_DIR/scripts/download-latest-android-apk.sh" | tail -n 1)"
 fi
 
-if [[ -z "${FILES_TOKEN:-}" ]]; then
+if [[ -z "${FILES_TOKEN:-}" && "$USE_APP_AUTH_SESSION" != "true" ]]; then
   echo "FILES_TOKEN is required. Put it in secrets/device-test.env or export it." >&2
   exit 1
 fi
@@ -68,9 +72,9 @@ REQUIRE_UNLOCKED="${REQUIRE_UNLOCKED:-true}" \
 
 AUDIO_FILE="${AUDIO_FILE:-$DEFAULT_AUDIO_FILE}" \
 API_BASE_URL="${API_BASE_URL:-https://vibepub.litianc.cn}" \
-FILES_TOKEN="$FILES_TOKEN" \
+FILES_TOKEN="${FILES_TOKEN:-}" \
 AUTOMATION_MODE="${AUTOMATION_MODE:-debug-broadcast}" \
-RESET_APP_DATA="${RESET_APP_DATA:-true}" \
+RESET_APP_DATA="${RESET_APP_DATA:-$(if [[ "$USE_APP_AUTH_SESSION" == "true" ]]; then printf false; else printf true; fi)}" \
 SKIP_INSTALL="${SKIP_INSTALL:-false}" \
 RECORD_SECONDS="${RECORD_SECONDS:-15}" \
 POST_STOP_WAIT_SECONDS="${POST_STOP_WAIT_SECONDS:-2}" \
