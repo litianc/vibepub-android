@@ -347,21 +347,41 @@ fun SettingsScreen(
 
             item {
                 SettingsGroup(title = "写作风格") {
-                    SettingsItem(
-                        iconContent = { SettingsIcon(Color(0xFFEAF7EF)) { Icon(Icons.Default.Palette, contentDescription = null, tint = Color(0xFF188A4B)) } },
-                        title = "当前风格模板",
-                        subtitle = selectedStyleProfile.description,
-                        value = selectedStyleProfile.name,
-                        valueColor = Color(0xFF188A4B),
+                    CurrentStyleTemplateItem(
+                        profile = selectedStyleProfile,
                         modifier = Modifier.testTag("WritingStyleProfileItem"),
                         onClick = { showWritingStyleDialog = true },
                     )
                     Divider(color = MaterialTheme.colorScheme.background, thickness = 1.dp, modifier = Modifier.padding(start = 64.dp))
+                    Text(
+                        "创建模板",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.padding(start = 16.dp, top = 14.dp, bottom = 2.dp),
+                    )
+                    SettingsItem(
+                        iconContent = { SettingsIcon(Color(0xFFEAF7EF)) { Icon(Icons.Default.Link, contentDescription = null, tint = Color(0xFF188A4B)) } },
+                        title = "微信文章链接",
+                        subtitle = "单篇公众号文章",
+                        value = styleLinkDistillationValue(isDistillingStyleLink),
+                        valueColor = Color(0xFF188A4B),
+                        modifier = Modifier.testTag("StyleLinkDistillationItem"),
+                        onClick = {
+                            if (filesToken.isBlank()) {
+                                Toast.makeText(context, "请先在设置中配置 FILES_TOKEN", Toast.LENGTH_SHORT).show()
+                            } else {
+                                styleLinkDistillationError = null
+                                showStyleLinkDistillationDialog = true
+                            }
+                        },
+                    )
+                    Divider(color = MaterialTheme.colorScheme.background, thickness = 1.dp, modifier = Modifier.padding(start = 64.dp))
                     SettingsItem(
                         iconContent = { SettingsIcon(Color(0xFFFFF4E5)) { Icon(Icons.Default.Edit, contentDescription = null, tint = Color(0xFFB15F00)) } },
-                        title = "我的提示词模板",
-                        subtitle = "可新增模板，并用多轮语音偏好继续更新提示词画像",
-                        value = if (customStyleProfiles.isEmpty()) "新增" else "${customStyleProfiles.size} 个",
+                        title = "手写提示词",
+                        subtitle = "自定义规则",
+                        value = manualStyleTemplateValue(customStyleProfiles.size),
                         onClick = {
                             editingCustomStyleProfile = customStyleProfiles.firstOrNull()
                             voiceStyleTurnText = ""
@@ -371,14 +391,13 @@ fun SettingsScreen(
                     Divider(color = MaterialTheme.colorScheme.background, thickness = 1.dp, modifier = Modifier.padding(start = 64.dp))
                     SettingsItem(
                         iconContent = { SettingsIcon(Color(0xFFEAF2FF)) { Icon(Icons.Default.Sync, contentDescription = null, tint = Color(0xFF2762C7)) } },
-                        title = "云端风格蒸馏",
-                        subtitle = if (styleSourceImports.isEmpty()) "暂无已导入素材" else "最近 ${styleSourceImports.size} 条素材",
-                        value = when {
-                            isLoadingStyleSources -> "同步中"
-                            isDistillingStyleProfile -> "生成中"
-                            styleSourceImports.isEmpty() -> "同步"
-                            else -> "生成"
-                        },
+                        title = "多素材蒸馏",
+                        subtitle = sourceDistillationSubtitle(styleSourceImports.size),
+                        value = sourceDistillationValue(
+                            sourceCount = styleSourceImports.size,
+                            isLoading = isLoadingStyleSources,
+                            isSubmitting = isDistillingStyleProfile,
+                        ),
                         valueColor = Color(0xFF2762C7),
                         modifier = Modifier.testTag("StyleDistillationItem"),
                         onClick = {
@@ -404,23 +423,6 @@ fun SettingsScreen(
                             } else {
                                 styleDistillationError = null
                                 showStyleDistillationDialog = true
-                            }
-                        },
-                    )
-                    Divider(color = MaterialTheme.colorScheme.background, thickness = 1.dp, modifier = Modifier.padding(start = 64.dp))
-                    SettingsItem(
-                        iconContent = { SettingsIcon(Color(0xFFEAF7EF)) { Icon(Icons.Default.Link, contentDescription = null, tint = Color(0xFF188A4B)) } },
-                        title = "微信链接生成风格",
-                        subtitle = "粘贴公众号文章链接，生成可选模板",
-                        value = if (isDistillingStyleLink) "生成中" else "粘贴",
-                        valueColor = Color(0xFF188A4B),
-                        modifier = Modifier.testTag("StyleLinkDistillationItem"),
-                        onClick = {
-                            if (filesToken.isBlank()) {
-                                Toast.makeText(context, "请先在设置中配置 FILES_TOKEN", Toast.LENGTH_SHORT).show()
-                            } else {
-                                styleLinkDistillationError = null
-                                showStyleLinkDistillationDialog = true
                             }
                         },
                     )
@@ -1142,6 +1144,52 @@ fun SettingsItem(
 }
 
 @Composable
+private fun CurrentStyleTemplateItem(
+    profile: WritingStyleProfileOption,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .semantics(mergeDescendants = true) {}
+            .padding(16.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        SettingsIcon(Color(0xFFEAF7EF)) {
+            Icon(Icons.Default.Palette, contentDescription = null, tint = Color(0xFF188A4B))
+        }
+        Spacer(modifier = Modifier.width(16.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                "当前风格",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Spacer(modifier = Modifier.height(3.dp))
+            Text(
+                profile.name,
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onSurface,
+                fontWeight = FontWeight.SemiBold,
+            )
+            if (profile.description.isNotBlank()) {
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    profile.description,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        Spacer(modifier = Modifier.width(12.dp))
+        Text(styleSwitchValue(), style = MaterialTheme.typography.bodyMedium, color = Color(0xFF188A4B))
+    }
+}
+
+@Composable
 private fun SettingsIcon(color: Color, content: @Composable () -> Unit) {
     Box(
         modifier = Modifier
@@ -1153,6 +1201,33 @@ private fun SettingsIcon(color: Color, content: @Composable () -> Unit) {
         content()
     }
 }
+
+internal fun manualStyleTemplateValue(count: Int): String {
+    return if (count <= 0) "新增" else "${count} 个"
+}
+
+internal fun styleLinkDistillationValue(isSubmitting: Boolean): String {
+    return if (isSubmitting) "生成中" else "生成"
+}
+
+internal fun sourceDistillationSubtitle(sourceCount: Int): String {
+    return if (sourceCount <= 0) "暂无导入素材" else "最近 ${sourceCount} 条素材"
+}
+
+internal fun sourceDistillationValue(
+    sourceCount: Int,
+    isLoading: Boolean,
+    isSubmitting: Boolean,
+): String {
+    return when {
+        isLoading -> "同步中"
+        isSubmitting -> "生成中"
+        sourceCount <= 0 -> "同步"
+        else -> "生成"
+    }
+}
+
+internal fun styleSwitchValue(): String = "切换 ▾"
 
 internal fun shouldAutoTestSettingsConnection(
     lastTestedConfig: SettingsConnectionConfig,

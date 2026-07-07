@@ -48,6 +48,21 @@ class SettingsScreenTest {
     }
 
     @Test
+    fun styleWorkflowLabelsMatchSettingsWorkbench() {
+        assertEquals("切换 ▾", styleSwitchValue())
+        assertEquals("生成", styleLinkDistillationValue(isSubmitting = false))
+        assertEquals("生成中", styleLinkDistillationValue(isSubmitting = true))
+        assertEquals("新增", manualStyleTemplateValue(0))
+        assertEquals("2 个", manualStyleTemplateValue(2))
+        assertEquals("暂无导入素材", sourceDistillationSubtitle(0))
+        assertEquals("最近 3 条素材", sourceDistillationSubtitle(3))
+        assertEquals("同步", sourceDistillationValue(sourceCount = 0, isLoading = false, isSubmitting = false))
+        assertEquals("同步中", sourceDistillationValue(sourceCount = 0, isLoading = true, isSubmitting = false))
+        assertEquals("生成中", sourceDistillationValue(sourceCount = 3, isLoading = false, isSubmitting = true))
+        assertEquals("生成", sourceDistillationValue(sourceCount = 3, isLoading = false, isSubmitting = false))
+    }
+
+    @Test
     fun settingsLastSyncLabelShowsUninitializedStatePlainly() {
         assertEquals("尚未同步", settingsLastSyncValue(0L))
         assertEquals("还没有从云端同步过录音状态", settingsLastSyncDetail(0L))
