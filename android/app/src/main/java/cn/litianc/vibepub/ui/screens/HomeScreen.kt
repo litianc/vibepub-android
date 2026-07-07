@@ -487,7 +487,7 @@ internal fun homeSyncNotice(
 ): HomeSyncNotice? {
     if (recordings.isEmpty()) return null
     if (recordings.any { it.status.asRecordingStatus() == RecordingStatus.LOCAL_RECORDED }) {
-        return HomeSyncNotice("有本机内容还没上传，先点卡片上的上传；反复失败时检查 FILES_TOKEN。")
+        return HomeSyncNotice("有本机内容还没上传，先点卡片上的上传；反复失败时检查登录状态。")
     }
     if (lastSyncAtMs <= 0L) {
         return HomeSyncNotice("还没有和云端同步过，点同步检查上传和处理进度。")
@@ -1066,7 +1066,7 @@ fun WorkflowHelpDialog(
                 }
                 if (recording.status.asRecordingStatus() == RecordingStatus.FAILED) {
                     Text(
-                        "失败后可以先重试；如果仍失败，到设置页检查后端连接和 FILES_TOKEN。",
+                        "失败后可以先重试；如果仍失败，到设置页检查后端连接和登录状态。",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.error,
                     )

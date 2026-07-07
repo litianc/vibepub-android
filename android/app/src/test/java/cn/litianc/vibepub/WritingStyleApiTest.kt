@@ -182,7 +182,7 @@ class WritingStyleApiTest {
 
     @Test
     fun failureMessageHandlesAuthAndUnconfiguredProxy() {
-        assertEquals("FILES_TOKEN 无效或没有权限", writingStyleApiFailureMessage(401, ""))
+        assertEquals("登录已失效或没有权限，请重新登录", writingStyleApiFailureMessage(401, ""))
         assertEquals("WritingAgent 尚未配置，请先部署风格服务", writingStyleApiFailureMessage(503, ""))
         assertEquals("风格服务暂时不可用，请稍后重试", writingStyleApiFailureMessage(502, "bad gateway"))
     }

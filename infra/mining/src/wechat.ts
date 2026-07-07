@@ -1,15 +1,18 @@
 import axios from "axios";
 import FormData from "form-data";
 
-const WECHAT_APP_ID = process.env.WECHAT_APP_ID!;
-const WECHAT_APP_SECRET = process.env.WECHAT_APP_SECRET!;
-const WECHAT_PROXY = process.env.WECHAT_PROXY!; // e.g. "http://23.105.194.173:8080"
+export type WechatConfig = {
+  appId: string;
+  appSecret: string;
+  proxyUrl: string;
+};
 
 /**
  * Gets a WeChat access token via the configured proxy
  */
-export async function getAccessToken(): Promise<string> {
-  const url = `${WECHAT_PROXY}/cgi-bin/token?grant_type=client_credential&appid=${WECHAT_APP_ID}&secret=${WECHAT_APP_SECRET}`;
+export async function getAccessToken(config?: WechatConfig): Promise<string> {
+  const wechat = resolveWechatConfig(config);
+  const url = `${wechat.proxyUrl}/cgi-bin/token?grant_type=client_credential&appid=${wechat.appId}&secret=${wechat.appSecret}`;
   
   const response = await axios.get(url);
   const data = response.data;
@@ -24,8 +27,9 @@ export async function getAccessToken(): Promise<string> {
 /**
  * Uploads a PNG/JPG buffer to WeChat to get a permanent media_id for the cover
  */
-async function uploadCoverImage(accessToken: string, imageBuffer: Buffer): Promise<string> {
-  const url = `${WECHAT_PROXY}/cgi-bin/material/add_material?access_token=${accessToken}&type=image`;
+async function uploadCoverImage(accessToken: string, imageBuffer: Buffer, config?: WechatConfig): Promise<string> {
+  const wechat = resolveWechatConfig(config);
+  const url = `${wechat.proxyUrl}/cgi-bin/material/add_material?access_token=${accessToken}&type=image`;
   
   const form = new FormData();
   form.append("media", imageBuffer, { filename: "cover.png", contentType: "image/png" });
@@ -41,8 +45,9 @@ async function uploadCoverImage(accessToken: string, imageBuffer: Buffer): Promi
   return response.data.media_id;
 }
 
-export async function uploadWechatArticleImage(accessToken: string, imageBuffer: Buffer): Promise<string> {
-  const url = `${WECHAT_PROXY}/cgi-bin/media/uploadimg?access_token=${accessToken}`;
+export async function uploadWechatArticleImage(accessToken: string, imageBuffer: Buffer, config?: WechatConfig): Promise<string> {
+  const wechat = resolveWechatConfig(config);
+  const url = `${wechat.proxyUrl}/cgi-bin/media/uploadimg?access_token=${accessToken}`;
 
   const form = new FormData();
   form.append("media", imageBuffer, { filename: "article-image.png", contentType: "image/png" });
@@ -77,11 +82,18 @@ function buildDraftArticle(title: string, content: string, thumbMediaId: string)
 /**
  * Pushes a draft article to WeChat Official Account
  */
-export async function publishDraft(accessToken: string, title: string, content: string, coverBuffer: Buffer): Promise<string> {
+export async function publishDraft(
+  accessToken: string,
+  title: string,
+  content: string,
+  coverBuffer: Buffer,
+  config?: WechatConfig,
+): Promise<string> {
   console.log("Uploading AI generated cover to WeChat...");
-  const thumbMediaId = await uploadCoverImage(accessToken, coverBuffer);
+  const thumbMediaId = await uploadCoverImage(accessToken, coverBuffer, config);
+  const wechat = resolveWechatConfig(config);
   
-  const url = `${WECHAT_PROXY}/cgi-bin/draft/add?access_token=${accessToken}`;
+  const url = `${wechat.proxyUrl}/cgi-bin/draft/add?access_token=${accessToken}`;
   
   // Format as WeChat FreePublish API expects
   const payload = {
@@ -110,10 +122,12 @@ export async function updateDraft(
   title: string,
   content: string,
   coverBuffer: Buffer,
+  config?: WechatConfig,
 ): Promise<void> {
   console.log("Uploading revised cover to WeChat...");
-  const thumbMediaId = await uploadCoverImage(accessToken, coverBuffer);
-  const url = `${WECHAT_PROXY}/cgi-bin/draft/update?access_token=${accessToken}`;
+  const thumbMediaId = await uploadCoverImage(accessToken, coverBuffer, config);
+  const wechat = resolveWechatConfig(config);
+  const url = `${wechat.proxyUrl}/cgi-bin/draft/update?access_token=${accessToken}`;
   const payload = {
     media_id: mediaId,
     index: 0,
@@ -126,4 +140,19 @@ export async function updateDraft(
   if (data.errcode && data.errcode !== 0) {
     throw new Error(`WeChat draft update error: ${data.errcode} - ${data.errmsg}`);
   }
+}
+
+function resolveWechatConfig(config?: WechatConfig): WechatConfig {
+  const resolved = {
+    appId: config?.appId || process.env.WECHAT_APP_ID || "",
+    appSecret: config?.appSecret || process.env.WECHAT_APP_SECRET || "",
+    proxyUrl: config?.proxyUrl || process.env.WECHAT_PROXY || "",
+  };
+  if (!resolved.appId || !resolved.appSecret || !resolved.proxyUrl) {
+    throw new Error("WeChat publishing account is not configured");
+  }
+  return {
+    ...resolved,
+    proxyUrl: resolved.proxyUrl.replace(/\/+$/, ""),
+  };
 }

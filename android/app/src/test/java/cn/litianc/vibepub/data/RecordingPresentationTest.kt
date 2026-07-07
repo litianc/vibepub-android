@@ -63,7 +63,7 @@ class RecordingPresentationTest {
         )
 
         assertEquals("整理好的标题", recording.displayTitle())
-        assertEquals("FILES_TOKEN 无效", recording.statusDetail())
+        assertEquals("登录已失效", recording.statusDetail())
         assertEquals(RecordingRecoveryActionType.RETRY_UPLOAD, recording.primaryRecoveryAction()?.type)
         assertEquals("重试上传", recording.primaryRecoveryAction()?.label)
     }
@@ -100,7 +100,7 @@ class RecordingPresentationTest {
         )
         val uploadFailed = local.copy(
             status = RecordingStatus.FAILED.value,
-            lastError = "FILES_TOKEN 无效",
+            lastError = "登录已失效",
         )
         val asrFailed = local.copy(
             status = RecordingStatus.FAILED.value,
@@ -381,12 +381,12 @@ class RecordingPresentationTest {
             durationMs = 1_000L,
             timestamp = 1L,
             status = RecordingStatus.FAILED.value,
-            lastError = "FILES_TOKEN 无效，上传被拒绝",
+            lastError = "登录已失效，上传被拒绝",
         )
 
         val steps = recording.workflowSteps()
 
-        assertTrue(recording.workflowNextActionLabel().contains("更新 FILES_TOKEN"))
+        assertTrue(recording.workflowNextActionLabel().contains("重新登录"))
         assertEquals(WorkflowStepState.DONE, steps[0].state)
         assertEquals(WorkflowStepState.BLOCKED, steps[1].state)
         assertEquals(WorkflowStepState.PENDING, steps[2].state)
@@ -421,7 +421,7 @@ class RecordingPresentationTest {
         )
         val failed = local.copy(
             status = RecordingStatus.FAILED.value,
-            lastError = "FILES_TOKEN 无效",
+            lastError = "登录已失效",
         )
         val articleReady = local.copy(
             status = RecordingStatus.PROCESSING.value,

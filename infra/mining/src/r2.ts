@@ -20,18 +20,27 @@ const SUPPORTED_TEXT_SUBMISSION_EXTENSIONS = [".txt", ".json"];
 
 export function isSupportedInboxAudioKey(key: string): boolean {
   const normalized = key.toLowerCase();
-  return key.startsWith("inbox/") &&
+  return pipelinePathMatches(key, "inbox") &&
     SUPPORTED_INBOX_AUDIO_EXTENSIONS.some(extension => normalized.endsWith(extension));
 }
 
 export function isSupportedTextSubmissionKey(key: string): boolean {
   const normalized = key.toLowerCase();
-  return key.startsWith("text-submissions/") &&
+  return pipelinePathMatches(key, "text-submissions") &&
     SUPPORTED_TEXT_SUBMISSION_EXTENSIONS.some(extension => normalized.endsWith(extension));
 }
 
 export function isSupportedPipelineInputKey(key: string): boolean {
   return isSupportedInboxAudioKey(key) || isSupportedTextSubmissionKey(key);
+}
+
+export function userIdFromPipelineKey(key: string): string | undefined {
+  const match = key.match(/^users\/([^/]+)\//);
+  return match?.[1];
+}
+
+export function pipelinePathMatches(key: string, kind: "inbox" | "text-submissions"): boolean {
+  return key.startsWith(`${kind}/`) || /^users\/[^/]+\//.test(key) && key.includes(`/${kind}/`);
 }
 
 export async function listUnprocessedFiles(): Promise<string[]> {

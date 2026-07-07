@@ -88,7 +88,7 @@ fun RecordingEntity.statusDetail(): String {
         RecordingStatus.UPLOADED -> "录音已到云端，正在排队转录。"
         RecordingStatus.PROCESSING -> processingStatusDetail()
         RecordingStatus.COMPLETED -> completedStatusDetail()
-        RecordingStatus.FAILED -> lastError?.takeIf { it.isNotBlank() } ?: "这条记录处理失败，可以重试。"
+        RecordingStatus.FAILED -> lastError?.toDisplayError()?.takeIf { it.isNotBlank() } ?: "这条记录处理失败，可以重试。"
     }
 }
 
@@ -100,7 +100,7 @@ fun RecordingEntity.shouldShowStatusDetailInline(): Boolean {
 fun RecordingEntity.workflowNextActionLabel(): String {
     if (isTextSource()) return textWorkflowNextActionLabel()
     return when (status.asRecordingStatus()) {
-        RecordingStatus.LOCAL_RECORDED -> "下一步：点重试上传；如果反复失败，先到设置页检查 FILES_TOKEN。"
+        RecordingStatus.LOCAL_RECORDED -> "下一步：点重试上传；如果反复失败，先到设置页检查登录状态。"
         RecordingStatus.UPLOADING -> "下一步：保持网络可用，等待上传完成；也可以下拉或点同步刷新状态。"
         RecordingStatus.UPLOADED -> "下一步：等待云端任务接手；如果长时间不动，点同步确认后台进度。"
         RecordingStatus.PROCESSING -> processingNextActionLabel()
@@ -305,6 +305,7 @@ private fun RecordingEntity.failureWorkflowIndex(): Int {
     val error = lastError.orEmpty().lowercase(Locale.ROOT)
     return when {
         error.contains("token") ||
+            error.contains("登录") ||
             error.contains("401") ||
             error.contains("403") ||
             error.contains("上传") ||
@@ -328,7 +329,7 @@ private fun RecordingEntity.textStatusDetail(): String {
         RecordingStatus.UPLOADED -> "文字已到云端，等待后台开始整理。"
         RecordingStatus.PROCESSING -> textProcessingStatusDetail()
         RecordingStatus.COMPLETED -> completedStatusDetail()
-        RecordingStatus.FAILED -> lastError?.takeIf { it.isNotBlank() } ?: "这段文字处理失败，可以重试或重新提交。"
+        RecordingStatus.FAILED -> lastError?.toDisplayError()?.takeIf { it.isNotBlank() } ?: "这段文字处理失败，可以重试或重新提交。"
     }
 }
 
@@ -340,18 +341,18 @@ private fun RecordingEntity.textProcessingStatusDetail(): String {
         ProcessingStageKind.ARTICLE_READY -> "文章已生成，可以先阅读、复制或分享；公众号草稿仍在准备或同步中。"
         ProcessingStageKind.WECHAT -> "文章已生成，正在准备微信公众号草稿。"
         ProcessingStageKind.COMPLETED -> completedStatusDetail()
-        ProcessingStageKind.FAILED -> lastError?.takeIf { it.isNotBlank() } ?: "云端处理阶段失败，等待重试或人工检查。"
-        ProcessingStageKind.ASR_FAILED -> lastError?.takeIf { it.isNotBlank() } ?: "文字理解失败，可以重新提交。"
-        ProcessingStageKind.ARTICLE_FAILED -> lastError?.takeIf { it.isNotBlank() } ?: "文章生成失败，可以重试或反馈诊断信息。"
-        ProcessingStageKind.WECHAT_FAILED -> lastError?.takeIf { it.isNotBlank() } ?: "公众号草稿创建失败，可以先复制正文。"
-        ProcessingStageKind.REVISION_FAILED -> lastError?.takeIf { it.isNotBlank() } ?: "这次说话修改失败，原文章仍可使用。"
+        ProcessingStageKind.FAILED -> lastError?.toDisplayError()?.takeIf { it.isNotBlank() } ?: "云端处理阶段失败，等待重试或人工检查。"
+        ProcessingStageKind.ASR_FAILED -> lastError?.toDisplayError()?.takeIf { it.isNotBlank() } ?: "文字理解失败，可以重新提交。"
+        ProcessingStageKind.ARTICLE_FAILED -> lastError?.toDisplayError()?.takeIf { it.isNotBlank() } ?: "文章生成失败，可以重试或反馈诊断信息。"
+        ProcessingStageKind.WECHAT_FAILED -> lastError?.toDisplayError()?.takeIf { it.isNotBlank() } ?: "公众号草稿创建失败，可以先复制正文。"
+        ProcessingStageKind.REVISION_FAILED -> lastError?.toDisplayError()?.takeIf { it.isNotBlank() } ?: "这次说话修改失败，原文章仍可使用。"
         ProcessingStageKind.UNKNOWN -> "云端正在整理这段文字。"
     }
 }
 
 private fun RecordingEntity.textWorkflowNextActionLabel(): String {
     return when (status.asRecordingStatus()) {
-        RecordingStatus.LOCAL_RECORDED -> "下一步：提交文字；如果反复失败，先到设置页检查 FILES_TOKEN。"
+        RecordingStatus.LOCAL_RECORDED -> "下一步：提交文字；如果反复失败，先到设置页检查登录状态。"
         RecordingStatus.UPLOADING -> "下一步：保持网络可用，等待文字提交完成；也可以下拉或点同步刷新状态。"
         RecordingStatus.UPLOADED -> "下一步：等待云端任务接手；如果长时间不动，点同步确认后台进度。"
         RecordingStatus.PROCESSING -> when (processingStageKind()) {
@@ -381,11 +382,11 @@ private fun RecordingEntity.processingStatusDetail(): String {
         ProcessingStageKind.ARTICLE_READY -> "文章已生成，可以先阅读、复制或分享；公众号草稿仍在准备或同步中。"
         ProcessingStageKind.WECHAT -> "文章已生成，正在准备微信公众号草稿。"
         ProcessingStageKind.COMPLETED -> completedStatusDetail()
-        ProcessingStageKind.FAILED -> lastError?.takeIf { it.isNotBlank() } ?: "云端处理阶段失败，等待重试或人工检查。"
-        ProcessingStageKind.ASR_FAILED -> lastError?.takeIf { it.isNotBlank() } ?: "语音识别失败，可以重试或检查音频。"
-        ProcessingStageKind.ARTICLE_FAILED -> lastError?.takeIf { it.isNotBlank() } ?: "文章生成失败，可以重试或反馈诊断信息。"
-        ProcessingStageKind.WECHAT_FAILED -> lastError?.takeIf { it.isNotBlank() } ?: "公众号草稿创建失败，可以先复制正文。"
-        ProcessingStageKind.REVISION_FAILED -> lastError?.takeIf { it.isNotBlank() } ?: "这次说话修改失败，原文章仍可使用。"
+        ProcessingStageKind.FAILED -> lastError?.toDisplayError()?.takeIf { it.isNotBlank() } ?: "云端处理阶段失败，等待重试或人工检查。"
+        ProcessingStageKind.ASR_FAILED -> lastError?.toDisplayError()?.takeIf { it.isNotBlank() } ?: "语音识别失败，可以重试或检查音频。"
+        ProcessingStageKind.ARTICLE_FAILED -> lastError?.toDisplayError()?.takeIf { it.isNotBlank() } ?: "文章生成失败，可以重试或反馈诊断信息。"
+        ProcessingStageKind.WECHAT_FAILED -> lastError?.toDisplayError()?.takeIf { it.isNotBlank() } ?: "公众号草稿创建失败，可以先复制正文。"
+        ProcessingStageKind.REVISION_FAILED -> lastError?.toDisplayError()?.takeIf { it.isNotBlank() } ?: "这次说话修改失败，原文章仍可使用。"
         ProcessingStageKind.UNKNOWN -> when (processingWorkflowIndex()) {
             4 -> "已拿到识别结果，云端正在整理公众号文章。"
             5 -> "文章已生成，正在准备微信公众号草稿。"
@@ -651,7 +652,7 @@ private fun RecordingEntity.completedStatusDetail(): String {
 }
 
 private fun RecordingEntity.retryableUploadDetail(): String {
-    val error = lastError?.trim().orEmpty()
+    val error = lastError?.toDisplayError().orEmpty()
     return if (error.isBlank()) {
         "正在上传录音，网络恢复后会自动继续。"
     } else if (error.contains("自动重试")) {
@@ -659,6 +660,16 @@ private fun RecordingEntity.retryableUploadDetail(): String {
     } else {
         "最近上传问题：$error；会自动重试。"
     }
+}
+
+private fun String.toDisplayError(): String {
+    return trim()
+        .replace("FILES_TOKEN 无效", "登录已失效")
+        .replace("FILES_TOKEN", "登录会话")
+        .replace("Token 无效", "登录已失效")
+        .replace("token 无效", "登录已失效")
+        .replace("Token", "登录会话")
+        .replace("token", "登录会话")
 }
 
 private fun RecordingEntity.completedNextActionLabel(): String {
@@ -674,8 +685,9 @@ private fun RecordingEntity.failureNextActionLabel(): String {
     val error = lastError.orEmpty().lowercase(Locale.ROOT)
     return when {
         error.contains("token") ||
+            error.contains("登录") ||
             error.contains("401") ||
-            error.contains("403") -> "下一步：到设置页更新 FILES_TOKEN，并用“测试后端连接”确认授权。"
+            error.contains("403") -> "下一步：到设置页重新登录，并用“测试后端连接”确认授权。"
         failureWorkflowIndex() == 1 -> "下一步：点重试上传；如果仍失败，到设置页检查后端连接。"
         failureWorkflowIndex() == 5 -> "下一步：文章可能已生成，先复制正文；再检查公众号草稿配置。"
         else -> "下一步：点同步或重试；如果仍失败，复制诊断信息反馈。"

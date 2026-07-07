@@ -7,7 +7,7 @@ import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
-@Database(entities = [RecordingEntity::class], version = 8, exportSchema = false)
+@Database(entities = [RecordingEntity::class], version = 9, exportSchema = false)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun recordingDao(): RecordingDao
 
@@ -30,6 +30,7 @@ abstract class AppDatabase : RoomDatabase() {
                         MIGRATION_5_6,
                         MIGRATION_6_7,
                         MIGRATION_7_8,
+                        MIGRATION_8_9,
                     )
                     .build()
                 INSTANCE = instance
@@ -115,6 +116,14 @@ abstract class AppDatabase : RoomDatabase() {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE recordings ADD COLUMN sourceType TEXT NOT NULL DEFAULT 'RECORDING'")
                 db.execSQL("ALTER TABLE recordings ADD COLUMN inputText TEXT")
+            }
+        }
+
+        private val MIGRATION_8_9 = object : Migration(8, 9) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE recordings ADD COLUMN userId TEXT NOT NULL DEFAULT 'default_user'")
+                db.execSQL("DROP INDEX IF EXISTS index_recordings_filename")
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_recordings_userId_filename ON recordings(userId, filename)")
             }
         }
     }

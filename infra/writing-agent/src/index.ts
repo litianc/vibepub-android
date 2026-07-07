@@ -86,6 +86,11 @@ type StyleDistillationJobRequest = {
   description?: string;
 };
 
+type AuthIdentity = {
+  userId: string;
+  workspaceId: string;
+};
+
 const PROTOCOL_VERSION = "vibepub.rewrite.v1";
 const DEFAULT_GLM_BASE_URL = "https://open.bigmodel.cn/api/paas/v4/";
 const DEFAULT_GLM_MODEL = "glm-5.2";
@@ -101,7 +106,7 @@ const DEFAULT_USER_ID = "default_user";
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Authorization, Content-Type, X-Writing-Agent-Token",
+  "Access-Control-Allow-Headers": "Authorization, Content-Type, X-Writing-Agent-Token, X-VibePub-User-Id, X-VibePub-Workspace-Id",
 };
 
 export default {
@@ -115,32 +120,33 @@ export default {
       return json({ ok: true, service: "writing-agent" });
     }
 
-    if (url.pathname.startsWith("/v1/") && !(await isAuthorized(request, env))) {
+    const identity = await authenticate(request, env);
+    if (url.pathname.startsWith("/v1/") && !identity) {
       return json({ error: { code: "unauthorized", message: "Missing or invalid WritingAgent token" } }, 401);
     }
 
     if (request.method === "GET" && url.pathname === "/v1/style-profiles") {
-      return routeJson(() => listStyleProfiles(env, url));
+      return routeJson(() => listStyleProfiles(env, identity!));
     }
 
     if (request.method === "GET" && url.pathname.startsWith("/v1/style-profiles/")) {
-      return routeJson(() => getStyleProfile(env, url));
+      return routeJson(() => getStyleProfile(env, url, identity!));
     }
 
     if (request.method === "POST" && url.pathname === "/v1/style-source-imports") {
-      return routeJson(() => createStyleSourceImport(request, env), 201);
+      return routeJson(() => createStyleSourceImport(request, env, identity!), 201);
     }
 
     if (request.method === "GET" && url.pathname === "/v1/style-source-imports") {
-      return routeJson(() => listStyleSourceImports(env, url));
+      return routeJson(() => listStyleSourceImports(env, identity!));
     }
 
     if (request.method === "POST" && url.pathname === "/v1/style-distillation-jobs") {
-      return routeJson(() => createStyleDistillationJob(request, env), 201);
+      return routeJson(() => createStyleDistillationJob(request, env, identity!), 201);
     }
 
     if (request.method === "GET" && url.pathname.startsWith("/v1/style-distillation-jobs/")) {
-      return routeJson(() => getStyleDistillationJob(env, url));
+      return routeJson(() => getStyleDistillationJob(env, url, identity!));
     }
 
     if (request.method === "GET" && url.pathname === "/v1/layout-profiles") {
@@ -154,7 +160,7 @@ export default {
 
     if (request.method === "POST" && url.pathname === "/v1/rewrite-jobs") {
       try {
-        return await createRewriteJob(request, env);
+        return await createRewriteJob(request, env, identity!);
       } catch (error) {
         if (error instanceof ResponseError) {
           return json({ error: { code: error.code, message: error.message } }, error.status);
@@ -166,7 +172,7 @@ export default {
 
     if (request.method === "POST" && url.pathname === "/v1/revision-jobs") {
       try {
-        return await createRevisionJob(request, env);
+        return await createRevisionJob(request, env, identity!);
       } catch (error) {
         if (error instanceof ResponseError) {
           return json({ error: { code: error.code, message: error.message } }, error.status);
@@ -180,7 +186,7 @@ export default {
   },
 };
 
-async function createRewriteJob(request: Request, env: Env): Promise<Response> {
+async function createRewriteJob(request: Request, env: Env, identity: AuthIdentity): Promise<Response> {
   let body: RewriteJobRequest;
   try {
     body = await request.json();
@@ -193,7 +199,7 @@ async function createRewriteJob(request: Request, env: Env): Promise<Response> {
     return json({ error: { code: "raw_text_required", message: "input.raw_text is required" } }, 400);
   }
 
-  const styleProfile = await resolveStyleProfile(env, body.profiles, workspaceIdFromRequest(body));
+  const styleProfile = await resolveStyleProfile(env, body.profiles, workspaceIdFromRequest(body, identity));
 
   const layoutProfile = findLayoutProfile(body.profiles?.layout_profile_id);
   if (!layoutProfile) {
@@ -218,7 +224,7 @@ async function createRewriteJob(request: Request, env: Env): Promise<Response> {
   }, 201);
 }
 
-async function createRevisionJob(request: Request, env: Env): Promise<Response> {
+async function createRevisionJob(request: Request, env: Env, identity: AuthIdentity): Promise<Response> {
   let body: RevisionJobRequest;
   try {
     body = await request.json();
@@ -240,7 +246,7 @@ async function createRevisionJob(request: Request, env: Env): Promise<Response> 
     }, 400);
   }
 
-  const styleProfile = await resolveStyleProfile(env, body.profiles, workspaceIdFromRequest(body));
+  const styleProfile = await resolveStyleProfile(env, body.profiles, workspaceIdFromRequest(body, identity));
 
   const layoutProfile = findLayoutProfile(body.profiles?.layout_profile_id);
   if (!layoutProfile) {
@@ -399,8 +405,8 @@ async function resolveStyleProfile(
   return styleProfile;
 }
 
-async function listStyleProfiles(env: Env, url: URL): Promise<unknown> {
-  const workspaceId = workspaceIdFromUrl(url);
+async function listStyleProfiles(env: Env, identity: AuthIdentity): Promise<unknown> {
+  const workspaceId = identity.workspaceId;
   const profiles = [...DEFAULT_STYLE_PROFILES.map(profile => ({
     ...publicStyleProfile(profile),
     visibility: "public",
@@ -427,9 +433,9 @@ async function listStyleProfiles(env: Env, url: URL): Promise<unknown> {
   return { style_profiles: profiles };
 }
 
-async function getStyleProfile(env: Env, url: URL): Promise<unknown> {
+async function getStyleProfile(env: Env, url: URL, identity: AuthIdentity): Promise<unknown> {
   const profileId = decodeURIComponent(url.pathname.slice("/v1/style-profiles/".length));
-  const workspaceId = workspaceIdFromUrl(url);
+  const workspaceId = identity.workspaceId;
   const includeBody = url.searchParams.get("include_body") === "true";
   const persistent = await findPersistedStyleProfile(env, profileId, workspaceId);
   if (persistent) {
@@ -444,7 +450,7 @@ async function getStyleProfile(env: Env, url: URL): Promise<unknown> {
   return { style_profile: includeBody ? profile : publicStyleProfile(profile) };
 }
 
-async function createStyleSourceImport(request: Request, env: Env): Promise<unknown> {
+async function createStyleSourceImport(request: Request, env: Env, identity: AuthIdentity): Promise<unknown> {
   requireDb(env);
   const body = await parseRequestJson<StyleSourceImportRequest>(request);
   const sourceType = normalizeSourceType(body.source_type);
@@ -456,8 +462,8 @@ async function createStyleSourceImport(request: Request, env: Env): Promise<unkn
   const sourceText = normalizeSourceText(fetched?.text || submittedText, sourceUrl, title);
   const now = new Date().toISOString();
   const id = `ssi_${crypto.randomUUID()}`;
-  const workspaceId = DEFAULT_WORKSPACE_ID;
-  const userId = DEFAULT_USER_ID;
+  const workspaceId = identity.workspaceId;
+  const userId = identity.userId;
 
   await env.DB.prepare(
     `
@@ -483,25 +489,26 @@ async function createStyleSourceImport(request: Request, env: Env): Promise<unkn
   };
 }
 
-async function listStyleSourceImports(env: Env, url: URL): Promise<unknown> {
+async function listStyleSourceImports(env: Env, identity: AuthIdentity): Promise<unknown> {
   requireDb(env);
-  const workspaceId = workspaceIdFromUrl(url);
+  const workspaceId = identity.workspaceId;
+  const userId = identity.userId;
   const rows = await env.DB.prepare(
     `
     SELECT id, workspace_id, source_type, source_url, title, status, substr(text, 1, 240) AS text_preview, created_at, updated_at
     FROM style_source_imports
-    WHERE workspace_id = ?
+    WHERE workspace_id = ? AND user_id = ?
     ORDER BY created_at DESC
     LIMIT 100
     `,
   )
-    .bind(workspaceId)
+    .bind(workspaceId, userId)
     .all<StyleSourceImportListRow>();
 
   return { source_imports: rows.results || [] };
 }
 
-async function createStyleDistillationJob(request: Request, env: Env): Promise<unknown> {
+async function createStyleDistillationJob(request: Request, env: Env, identity: AuthIdentity): Promise<unknown> {
   requireDb(env);
   const body = await parseRequestJson<StyleDistillationJobRequest>(request);
   const sourceIds = normalizedStringArray(body.source_import_ids ?? body.source_ids);
@@ -509,13 +516,14 @@ async function createStyleDistillationJob(request: Request, env: Env): Promise<u
     throw new ResponseError(400, "source_imports_required", "At least one style source import is required");
   }
 
-  const workspaceId = DEFAULT_WORKSPACE_ID;
+  const workspaceId = identity.workspaceId;
+  const userId = identity.userId;
   const profileId = sanitizeProfileId(body.profile?.id ?? body.profile_id) || `style_${crypto.randomUUID()}`;
   const requestedName = normalizeOptionalString(body.profile?.name ?? body.name) ||
     "请根据素材标题、作者和主题生成风格名";
   const requestedDescription = normalizeOptionalString(body.profile?.description ?? body.description) ||
     "由导入素材自动提取的写作风格画像。";
-  const sources = await loadStyleSources(env, workspaceId, sourceIds);
+  const sources = await loadStyleSources(env, workspaceId, userId, sourceIds);
   const distilled = await generateStyleProfileFromSources(env, {
     requestedName,
     requestedDescription,
@@ -538,7 +546,7 @@ async function createStyleDistillationJob(request: Request, env: Env): Promise<u
       deleted_at = NULL
     `,
   )
-    .bind(profileId, workspaceId, DEFAULT_USER_ID, distilled.name, distilled.description, "private", versionId, now, now)
+    .bind(profileId, workspaceId, userId, distilled.name, distilled.description, "private", versionId, now, now)
     .run();
 
   await env.DB.prepare(
@@ -594,10 +602,10 @@ async function createStyleDistillationJob(request: Request, env: Env): Promise<u
   };
 }
 
-async function getStyleDistillationJob(env: Env, url: URL): Promise<unknown> {
+async function getStyleDistillationJob(env: Env, url: URL, identity: AuthIdentity): Promise<unknown> {
   requireDb(env);
   const jobId = decodeURIComponent(url.pathname.slice("/v1/style-distillation-jobs/".length));
-  const workspaceId = workspaceIdFromUrl(url);
+  const workspaceId = identity.workspaceId;
   const row = await env.DB.prepare(
     `
     SELECT id, workspace_id, profile_id, version_id, status, source_ids_json, error_message, created_at, completed_at
@@ -856,6 +864,7 @@ function publicPersistedStyleProfile(row: StyleProfileListRow) {
 async function loadStyleSources(
   env: Env,
   workspaceId: string,
+  userId: string,
   sourceIds: string[],
 ): Promise<StyleSourceImportRow[]> {
   const placeholders = sourceIds.map(() => "?").join(", ");
@@ -863,10 +872,10 @@ async function loadStyleSources(
     `
     SELECT id, source_type, source_url, title, text
     FROM style_source_imports
-    WHERE workspace_id = ? AND id IN (${placeholders})
+    WHERE workspace_id = ? AND user_id = ? AND id IN (${placeholders})
     `,
   )
-    .bind(workspaceId, ...sourceIds)
+    .bind(workspaceId, userId, ...sourceIds)
     .all<StyleSourceImportRow>();
   const sources = rows.results || [];
   if (sources.length !== sourceIds.length) {
@@ -1001,12 +1010,8 @@ function requireDb(env: Env): asserts env is Env & { DB: D1Database } {
   }
 }
 
-function workspaceIdFromRequest(request: Pick<RewriteJobRequest, "user">): string {
-  return normalizeOptionalString(request.user?.workspace_id) || DEFAULT_WORKSPACE_ID;
-}
-
-function workspaceIdFromUrl(url: URL): string {
-  return normalizeOptionalString(url.searchParams.get("workspace_id")) || DEFAULT_WORKSPACE_ID;
+function workspaceIdFromRequest(_request: Pick<RewriteJobRequest, "user">, identity: AuthIdentity): string {
+  return identity.workspaceId || DEFAULT_WORKSPACE_ID;
 }
 
 type FetchedSourceContent = {
@@ -1247,13 +1252,18 @@ async function deterministicJobId(
   return `rw_${hex.slice(0, 24)}`;
 }
 
-async function isAuthorized(request: Request, env: Env): Promise<boolean> {
+async function authenticate(request: Request, env: Env): Promise<AuthIdentity | null> {
   const expected = env.WRITING_AGENT_TOKEN?.trim() || env.FILES_TOKEN?.trim();
-  if (!expected) return false;
+  if (!expected) return null;
   const authorization = request.headers.get("authorization") || "";
   const tokenHeader = request.headers.get("x-writing-agent-token") || "";
   const bearerToken = authorization.startsWith("Bearer ") ? authorization.slice("Bearer ".length).trim() : "";
-  return await secureTokenEquals(expected, bearerToken) || await secureTokenEquals(expected, tokenHeader.trim());
+  const authorized = await secureTokenEquals(expected, bearerToken) || await secureTokenEquals(expected, tokenHeader.trim());
+  if (!authorized) return null;
+  return {
+    userId: normalizeOptionalString(request.headers.get("x-vibepub-user-id")) || DEFAULT_USER_ID,
+    workspaceId: normalizeOptionalString(request.headers.get("x-vibepub-workspace-id")) || DEFAULT_WORKSPACE_ID,
+  };
 }
 
 async function secureTokenEquals(expected: string, candidate: string): Promise<boolean> {

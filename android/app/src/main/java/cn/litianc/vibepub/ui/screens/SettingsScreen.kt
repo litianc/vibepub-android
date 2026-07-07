@@ -42,11 +42,17 @@ import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.AccountCircle
+import androidx.compose.material.icons.filled.AdminPanelSettings
+import androidx.compose.material.icons.filled.Email
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Logout
+import androidx.compose.material.icons.filled.MarkEmailRead
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Palette
+import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
@@ -88,7 +94,11 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import cn.litianc.vibepub.AppPreferences
+import cn.litianc.vibepub.AdminInviteResult
+import cn.litianc.vibepub.AdminUsersResult
+import cn.litianc.vibepub.AuthApi
 import cn.litianc.vibepub.BuildConfig
+import cn.litianc.vibepub.PublishingAccount
 import cn.litianc.vibepub.StyleSourceImportSummary
 import cn.litianc.vibepub.WritingStyleApi
 import cn.litianc.vibepub.WritingStyleProfileOption
@@ -141,6 +151,9 @@ internal data class SettingsConnectionConfig(
     val apiBaseUrl: String,
     val filesToken: String,
 ) {
+    val accessToken: String
+        get() = filesToken
+
     fun normalized(): SettingsConnectionConfig {
         return SettingsConnectionConfig(
             apiBaseUrl = apiBaseUrl.trim(),
@@ -160,17 +173,28 @@ fun SettingsScreen(
     val preferences = remember { AppPreferences(context) }
     val scope = rememberCoroutineScope()
     var apiBaseUrl by remember { mutableStateOf(preferences.apiBaseUrl) }
-    var filesToken by remember { mutableStateOf(preferences.filesToken) }
-    var showToken by remember { mutableStateOf(false) }
+    var accessToken by remember { mutableStateOf(preferences.accessToken) }
+    var accountEmail by remember { mutableStateOf(preferences.userEmail) }
+    var accountRole by remember { mutableStateOf(preferences.userRole) }
+    var accountEmailVerified by remember { mutableStateOf(preferences.emailVerified) }
     var isTesting by remember { mutableStateOf(false) }
     var connectionResult by remember { mutableStateOf<ConnectionTestResult?>(null) }
     var showDiagnostics by remember { mutableStateOf(false) }
     var diagnostics by remember { mutableStateOf("") }
+    var publishingAccount by remember { mutableStateOf<PublishingAccount?>(null) }
+    var isLoadingPublishingAccount by remember { mutableStateOf(false) }
+    var publishingError by remember { mutableStateOf<String?>(null) }
+    var showPublishingDialog by remember { mutableStateOf(false) }
+    var adminUsersResult by remember { mutableStateOf<AdminUsersResult?>(null) }
+    var isLoadingAdminUsers by remember { mutableStateOf(false) }
+    var adminError by remember { mutableStateOf<String?>(null) }
+    var showAdminInviteDialog by remember { mutableStateOf(false) }
+    var adminInviteResult by remember { mutableStateOf<AdminInviteResult?>(null) }
     val lastSyncAtMs by remember(preferences) {
         preferences.lastSyncAtMsFlow()
     }.collectAsState(initial = preferences.lastSyncAtMs)
     var lastTestedConfig by remember {
-        mutableStateOf(SettingsConnectionConfig(apiBaseUrl, filesToken).normalized())
+        mutableStateOf(SettingsConnectionConfig(apiBaseUrl, accessToken).normalized())
     }
     var customStyleProfiles by remember { mutableStateOf(preferences.customWritingStyleProfiles) }
     var remoteStyleProfiles by remember { mutableStateOf(preferences.remoteWritingStyleProfiles) }
@@ -217,7 +241,7 @@ fun SettingsScreen(
         writingStylePromptError = null
         showWritingStylePromptDialog = true
         val profile = selectedStyleProfile
-        if (!shouldFetchStylePrompt(profile, filesToken) || isLoadingWritingStylePrompt) {
+        if (!shouldFetchStylePrompt(profile, accessToken) || isLoadingWritingStylePrompt) {
             return
         }
         isLoadingWritingStylePrompt = true
@@ -225,7 +249,7 @@ fun SettingsScreen(
             runCatching {
                 WritingStyleApi.getStyleProfile(
                     apiBaseUrl = apiBaseUrl,
-                    filesToken = filesToken,
+                    filesToken = accessToken,
                     profileId = profile.id,
                     includeBody = true,
                 )
@@ -239,8 +263,8 @@ fun SettingsScreen(
         }
     }
 
-    LaunchedEffect(apiBaseUrl, filesToken) {
-        val currentConfig = SettingsConnectionConfig(apiBaseUrl, filesToken).normalized()
+    LaunchedEffect(apiBaseUrl, accessToken) {
+        val currentConfig = SettingsConnectionConfig(apiBaseUrl, accessToken).normalized()
         if (!shouldAutoTestSettingsConnection(lastTestedConfig, currentConfig)) {
             return@LaunchedEffect
         }
@@ -248,29 +272,65 @@ fun SettingsScreen(
         isTesting = true
         connectionResult = null
         try {
-            connectionResult = testBackendConnection(currentConfig.apiBaseUrl, currentConfig.filesToken)
+            connectionResult = testBackendConnection(currentConfig.apiBaseUrl, currentConfig.accessToken)
             lastTestedConfig = currentConfig
         } finally {
             isTesting = false
         }
     }
 
-    LaunchedEffect(apiBaseUrl, filesToken) {
-        if (filesToken.isBlank()) {
+    LaunchedEffect(apiBaseUrl, accessToken) {
+        if (accessToken.isBlank()) {
             styleSourceImports = emptyList()
             return@LaunchedEffect
         }
         runCatching {
-            WritingStyleApi.listStyleProfiles(apiBaseUrl, filesToken)
+            WritingStyleApi.listStyleProfiles(apiBaseUrl, accessToken)
         }.onSuccess { profiles ->
             remoteStyleProfiles = profiles
             preferences.remoteWritingStyleProfiles = profiles
         }
         runCatching {
-            WritingStyleApi.listStyleSources(apiBaseUrl, filesToken)
+            WritingStyleApi.listStyleSources(apiBaseUrl, accessToken)
         }.onSuccess { sources ->
             styleSourceImports = sources
         }
+    }
+
+    LaunchedEffect(apiBaseUrl, accessToken) {
+        if (accessToken.isBlank()) return@LaunchedEffect
+        runCatching {
+            AuthApi.me(apiBaseUrl, accessToken)
+        }.onSuccess { user ->
+            preferences.updateCurrentUser(user)
+            accountEmail = user.email
+            accountRole = user.role
+            accountEmailVerified = user.emailVerified
+        }
+        isLoadingPublishingAccount = true
+        publishingError = null
+        runCatching {
+            AuthApi.getPublishingAccount(apiBaseUrl, accessToken)
+        }.onSuccess { account ->
+            publishingAccount = account
+        }.onFailure { error ->
+            publishingError = error.message ?: "公众号配置读取失败"
+        }
+        isLoadingPublishingAccount = false
+    }
+
+    LaunchedEffect(apiBaseUrl, accessToken, accountRole) {
+        if (accessToken.isBlank() || accountRole != "admin") return@LaunchedEffect
+        isLoadingAdminUsers = true
+        adminError = null
+        runCatching {
+            AuthApi.listAdminUsers(apiBaseUrl, accessToken)
+        }.onSuccess { result ->
+            adminUsersResult = result
+        }.onFailure { error ->
+            adminError = error.message ?: "用户列表读取失败"
+        }
+        isLoadingAdminUsers = false
     }
 
     Scaffold(
@@ -298,7 +358,51 @@ fun SettingsScreen(
         ) {
             item {
                 Spacer(modifier = Modifier.height(4.dp))
-                SettingsGroup(title = "后端连接") {
+                SettingsGroup(title = "账号与安全") {
+                    SettingsItem(
+                        iconContent = { SettingsIcon(Color(0xFFEAF2FF)) { Icon(Icons.Default.AccountCircle, contentDescription = null, tint = Color(0xFF2762C7)) } },
+                        title = accountEmail.ifBlank { "未登录账号" },
+                        subtitle = "角色：${accountRoleLabel(accountRole)}",
+                        value = if (accountEmailVerified) "已验证" else "未验证",
+                        valueColor = if (accountEmailVerified) Color(0xFF2E7D32) else Color(0xFFC62828),
+                        modifier = Modifier.testTag("AccountSummaryItem"),
+                        onClick = {},
+                    )
+                    Divider(color = MaterialTheme.colorScheme.background, thickness = 1.dp, modifier = Modifier.padding(start = 64.dp))
+                    SettingsItem(
+                        iconContent = { SettingsIcon(Color(0xFFEAF7EF)) { Icon(Icons.Default.MarkEmailRead, contentDescription = null, tint = Color(0xFF188A4B)) } },
+                        title = "邮箱认证",
+                        subtitle = if (accountEmailVerified) "可以上传录音、生成风格和发布草稿" else "完成认证前不能上传或发布",
+                        value = if (accountEmailVerified) "可用" else "受限",
+                        valueColor = if (accountEmailVerified) Color(0xFF2E7D32) else Color(0xFFC62828),
+                        onClick = {},
+                    )
+                    Divider(color = MaterialTheme.colorScheme.background, thickness = 1.dp, modifier = Modifier.padding(start = 64.dp))
+                    SettingsItem(
+                        iconContent = { SettingsIcon(Color(0xFFFDECEA)) { Icon(Icons.Default.Logout, contentDescription = null, tint = Color(0xFFC62828)) } },
+                        title = "退出登录",
+                        subtitle = "本机保留各账号本地记录，切换后只显示当前账号内容",
+                        value = null,
+                        onClick = {
+                            val oldAccessToken = accessToken
+                            val oldRefreshToken = preferences.refreshToken
+                            preferences.clearAuthSession()
+                            accessToken = ""
+                            accountEmail = ""
+                            accountRole = "user"
+                            accountEmailVerified = false
+                            scope.launch {
+                                runCatching {
+                                    AuthApi.logout(apiBaseUrl, oldAccessToken, oldRefreshToken)
+                                }
+                            }
+                        },
+                    )
+                }
+            }
+
+            item {
+                SettingsGroup(title = "连接诊断") {
                     OutlinedTextField(
                         value = apiBaseUrl,
                         onValueChange = {
@@ -315,45 +419,14 @@ fun SettingsScreen(
                         leadingIcon = { Icon(Icons.Default.Link, contentDescription = null) },
                     )
                     Divider(color = MaterialTheme.colorScheme.background, thickness = 1.dp)
-                    OutlinedTextField(
-                        value = filesToken,
-                        onValueChange = {
-                            filesToken = it
-                            preferences.filesToken = it
-                            connectionResult = null
-                        },
-                        label = { Text("FILES_TOKEN") },
-                        singleLine = true,
-                        visualTransformation = if (showToken) VisualTransformation.None else PasswordVisualTransformation(),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(16.dp)
-                            .testTag("FilesTokenField"),
-                        leadingIcon = { Icon(Icons.Default.Key, contentDescription = null) },
-                        trailingIcon = {
-                            Row {
-                                IconButton(onClick = { showToken = !showToken }) {
-                                    Icon(if (showToken) Icons.Default.VisibilityOff else Icons.Default.Visibility, contentDescription = "Toggle token")
-                                }
-                                IconButton(onClick = {
-                                    filesToken = ""
-                                    preferences.filesToken = ""
-                                    connectionResult = null
-                                }) {
-                                    Icon(Icons.Default.Delete, contentDescription = "Clear token")
-                                }
-                            }
-                        },
-                    )
-                    Divider(color = MaterialTheme.colorScheme.background, thickness = 1.dp)
                     Column(modifier = Modifier.padding(16.dp)) {
                         Button(
                             onClick = {
                                 isTesting = true
                                 connectionResult = null
-                                val currentConfig = SettingsConnectionConfig(apiBaseUrl, filesToken).normalized()
+                                val currentConfig = SettingsConnectionConfig(apiBaseUrl, accessToken).normalized()
                                 scope.launch {
-                                    connectionResult = testBackendConnection(currentConfig.apiBaseUrl, currentConfig.filesToken)
+                                    connectionResult = testBackendConnection(currentConfig.apiBaseUrl, currentConfig.accessToken)
                                     lastTestedConfig = currentConfig
                                     isTesting = false
                                 }
@@ -400,8 +473,8 @@ fun SettingsScreen(
                         valueColor = Color(0xFF188A4B),
                         modifier = Modifier.testTag("StyleLinkDistillationItem"),
                         onClick = {
-                            if (filesToken.isBlank()) {
-                                Toast.makeText(context, "请先在设置中配置 FILES_TOKEN", Toast.LENGTH_SHORT).show()
+                            if (!preferences.canUseCloudFeatures) {
+                                Toast.makeText(context, "请先登录并完成邮箱验证", Toast.LENGTH_SHORT).show()
                             } else {
                                 styleLinkDistillationError = null
                                 showStyleLinkDistillationDialog = true
@@ -433,13 +506,13 @@ fun SettingsScreen(
                         valueColor = Color(0xFF2762C7),
                         modifier = Modifier.testTag("StyleDistillationItem"),
                         onClick = {
-                            if (filesToken.isBlank()) {
-                                Toast.makeText(context, "请先在设置中配置 FILES_TOKEN", Toast.LENGTH_SHORT).show()
+                            if (!preferences.canUseCloudFeatures) {
+                                Toast.makeText(context, "请先登录并完成邮箱验证", Toast.LENGTH_SHORT).show()
                             } else if (styleSourceImports.isEmpty()) {
                                 isLoadingStyleSources = true
                                 scope.launch {
                                     runCatching {
-                                        WritingStyleApi.listStyleSources(apiBaseUrl, filesToken)
+                                        WritingStyleApi.listStyleSources(apiBaseUrl, accessToken)
                                     }.onSuccess { sources ->
                                         styleSourceImports = sources
                                         if (sources.isEmpty()) {
@@ -465,15 +538,52 @@ fun SettingsScreen(
             }
 
             item {
-                SettingsGroup(title = "发布") {
+                SettingsGroup(title = "公众号发布") {
                     SettingsItem(
-                        iconContent = { SettingsIcon(Color(0xFFFDECEA)) { Icon(Icons.Default.CheckCircle, contentDescription = null, tint = Color(0xFF2E7D32)) } },
+                        iconContent = { SettingsIcon(Color(0xFFEAF7EF)) { Icon(Icons.Default.CheckCircle, contentDescription = null, tint = Color(0xFF2E7D32)) } },
                         title = "微信公众号草稿",
-                        subtitle = "由云端 mining job 创建草稿，Android 只展示状态",
-                        value = "云端托管",
-                        valueColor = Color(0xFF2E7D32),
-                        onClick = {},
+                        subtitle = publishingAccountSubtitle(publishingAccount, publishingError, isLoadingPublishingAccount),
+                        value = publishingAccountValue(publishingAccount, isLoadingPublishingAccount),
+                        valueColor = if (publishingAccount?.connected == true) Color(0xFF2E7D32) else Color(0xFFB15F00),
+                        modifier = Modifier.testTag("PublishingAccountItem"),
+                        onClick = {
+                            if (!preferences.canUseCloudFeatures) {
+                                Toast.makeText(context, "请先登录并完成邮箱验证", Toast.LENGTH_SHORT).show()
+                            } else {
+                                showPublishingDialog = true
+                            }
+                        },
                     )
+                }
+            }
+
+            if (accountRole == "admin") {
+                item {
+                    SettingsGroup(title = "用户管理") {
+                        SettingsItem(
+                            iconContent = { SettingsIcon(Color(0xFFEAF2FF)) { Icon(Icons.Default.AdminPanelSettings, contentDescription = null, tint = Color(0xFF2762C7)) } },
+                            title = "邀请用户",
+                            subtitle = adminUsersSubtitle(adminUsersResult, adminError, isLoadingAdminUsers),
+                            value = adminUsersValue(adminUsersResult, isLoadingAdminUsers),
+                            modifier = Modifier.testTag("AdminUsersItem"),
+                            onClick = { showAdminInviteDialog = true },
+                        )
+                        adminInviteResult?.let { invite ->
+                            Divider(color = MaterialTheme.colorScheme.background, thickness = 1.dp, modifier = Modifier.padding(start = 64.dp))
+                            SettingsItem(
+                                iconContent = { SettingsIcon(Color(0xFFEAF7EF)) { Icon(Icons.Default.Send, contentDescription = null, tint = Color(0xFF188A4B)) } },
+                                title = invite.email,
+                                subtitle = invite.inviteUrl ?: invite.token ?: "邀请已发送",
+                                value = accountRoleLabel(invite.role),
+                                onClick = {
+                                    val inviteText = invite.inviteUrl ?: invite.token.orEmpty()
+                                    if (inviteText.isNotBlank()) {
+                                        copyPlainText(context, "VibePub 邀请", inviteText)
+                                    }
+                                },
+                            )
+                        }
+                    }
                 }
             }
 
@@ -577,6 +687,73 @@ fun SettingsScreen(
         )
     }
 
+    if (showPublishingDialog) {
+        PublishingAccountDialog(
+            account = publishingAccount,
+            isSubmitting = isLoadingPublishingAccount,
+            errorMessage = publishingError,
+            onDismiss = {
+                if (!isLoadingPublishingAccount) showPublishingDialog = false
+            },
+            onSave = { appId, appSecret, proxyUrl ->
+                isLoadingPublishingAccount = true
+                publishingError = null
+                scope.launch {
+                    runCatching {
+                        AuthApi.updatePublishingAccount(
+                            apiBaseUrl = apiBaseUrl,
+                            accessToken = accessToken,
+                            appId = appId,
+                            appSecret = appSecret,
+                            proxyUrl = proxyUrl,
+                        )
+                    }.onSuccess { account ->
+                        publishingAccount = account
+                        showPublishingDialog = false
+                        Toast.makeText(context, "公众号配置已保存", Toast.LENGTH_SHORT).show()
+                    }.onFailure { error ->
+                        publishingError = error.message ?: "公众号配置保存失败"
+                    }
+                    isLoadingPublishingAccount = false
+                }
+            },
+        )
+    }
+
+    if (showAdminInviteDialog) {
+        AdminInviteDialog(
+            isSubmitting = isLoadingAdminUsers,
+            errorMessage = adminError,
+            onDismiss = {
+                if (!isLoadingAdminUsers) showAdminInviteDialog = false
+            },
+            onInvite = { email, role ->
+                isLoadingAdminUsers = true
+                adminError = null
+                scope.launch {
+                    runCatching {
+                        AuthApi.inviteUser(
+                            apiBaseUrl = apiBaseUrl,
+                            accessToken = accessToken,
+                            email = email,
+                            role = role,
+                        )
+                    }.onSuccess { invite ->
+                        adminInviteResult = invite
+                        adminUsersResult = runCatching {
+                            AuthApi.listAdminUsers(apiBaseUrl, accessToken)
+                        }.getOrNull() ?: adminUsersResult
+                        showAdminInviteDialog = false
+                        Toast.makeText(context, "邀请已创建", Toast.LENGTH_SHORT).show()
+                    }.onFailure { error ->
+                        adminError = error.message ?: "邀请用户失败"
+                    }
+                    isLoadingAdminUsers = false
+                }
+            },
+        )
+    }
+
     if (showStyleDistillationDialog) {
         StyleDistillationDialog(
             sources = styleSourceImports,
@@ -590,9 +767,9 @@ fun SettingsScreen(
                 styleDistillationError = null
                 scope.launch {
                     runCatching {
-                        WritingStyleApi.distillStyleProfile(
-                            apiBaseUrl = apiBaseUrl,
-                            filesToken = filesToken,
+	                        WritingStyleApi.distillStyleProfile(
+	                            apiBaseUrl = apiBaseUrl,
+	                            filesToken = accessToken,
                             sourceImportIds = styleSourceImports.map { it.id },
                             profileId = null,
                             name = name,
@@ -624,17 +801,17 @@ fun SettingsScreen(
                 scope.launch {
                     runCatching {
                         val sourceType = if (link.contains("mp.weixin.qq.com")) "wechat_article" else "url"
-                        val imported = WritingStyleApi.importStyleSource(
-                            apiBaseUrl = apiBaseUrl,
-                            filesToken = filesToken,
+	                        val imported = WritingStyleApi.importStyleSource(
+	                            apiBaseUrl = apiBaseUrl,
+	                            filesToken = accessToken,
                             sourceType = sourceType,
                             title = null,
                             url = link,
                             text = null,
                         )
-                        WritingStyleApi.distillStyleProfile(
-                            apiBaseUrl = apiBaseUrl,
-                            filesToken = filesToken,
+	                        WritingStyleApi.distillStyleProfile(
+	                            apiBaseUrl = apiBaseUrl,
+	                            filesToken = accessToken,
                             sourceImportIds = listOf(imported.id),
                             profileId = null,
                             name = name.takeIf { it.isNotBlank() },
@@ -642,8 +819,8 @@ fun SettingsScreen(
                         )
                     }.onSuccess { result ->
                         selectRemoteStyleProfile(result.profile)
-                        runCatching {
-                            WritingStyleApi.listStyleSources(apiBaseUrl, filesToken)
+	                        runCatching {
+	                            WritingStyleApi.listStyleSources(apiBaseUrl, accessToken)
                         }.onSuccess { sources ->
                             styleSourceImports = sources
                         }
@@ -1101,6 +1278,140 @@ internal fun CustomWritingStyleDialog(
 }
 
 @Composable
+internal fun PublishingAccountDialog(
+    account: PublishingAccount?,
+    isSubmitting: Boolean,
+    errorMessage: String?,
+    onDismiss: () -> Unit,
+    onSave: (String, String, String) -> Unit,
+) {
+    var appId by remember(account?.appId) { mutableStateOf(account?.appId.orEmpty()) }
+    var appSecret by remember { mutableStateOf("") }
+    var proxyUrl by remember(account?.proxyUrl) { mutableStateOf(account?.proxyUrl.orEmpty()) }
+    val requiresSecret = account?.connected != true
+    AlertDialog(
+        modifier = Modifier.testTag("PublishingAccountDialog"),
+        onDismissRequest = onDismiss,
+        title = { Text("公众号发布配置") },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 420.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                OutlinedTextField(
+                    value = appId,
+                    onValueChange = { appId = it },
+                    label = { Text("App ID") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = appSecret,
+                    onValueChange = { appSecret = it },
+                    label = { Text(if (requiresSecret) "App Secret" else "App Secret（留空则沿用云端密钥）") },
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = proxyUrl,
+                    onValueChange = { proxyUrl = it },
+                    label = { Text("Proxy URL") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                errorMessage?.let {
+                    Text(
+                        it,
+                        color = Color(0xFFC62828),
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = !isSubmitting && appId.trim().isNotBlank() && (!requiresSecret || appSecret.trim().isNotBlank()),
+                onClick = { onSave(appId.trim(), appSecret.trim(), proxyUrl.trim()) },
+            ) {
+                Text(if (isSubmitting) "保存中" else "保存")
+            }
+        },
+        dismissButton = {
+            TextButton(enabled = !isSubmitting, onClick = onDismiss) {
+                Text("取消")
+            }
+        },
+    )
+}
+
+@Composable
+internal fun AdminInviteDialog(
+    isSubmitting: Boolean,
+    errorMessage: String?,
+    onDismiss: () -> Unit,
+    onInvite: (String, String) -> Unit,
+) {
+    var email by remember { mutableStateOf("") }
+    var role by remember { mutableStateOf("user") }
+    AlertDialog(
+        modifier = Modifier.testTag("AdminInviteDialog"),
+        onDismissRequest = onDismiss,
+        title = { Text("邀请用户") },
+        text = {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                OutlinedTextField(
+                    value = email,
+                    onValueChange = { email = it },
+                    label = { Text("邮箱") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    RadioButton(
+                        selected = role == "user",
+                        onClick = { role = "user" },
+                    )
+                    Text("普通用户")
+                    Spacer(modifier = Modifier.width(16.dp))
+                    RadioButton(
+                        selected = role == "admin",
+                        onClick = { role = "admin" },
+                    )
+                    Text("管理员")
+                }
+                errorMessage?.let {
+                    Text(
+                        it,
+                        color = Color(0xFFC62828),
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = !isSubmitting && email.trim().contains("@"),
+                onClick = { onInvite(email.trim(), role) },
+            ) {
+                Text(if (isSubmitting) "邀请中" else "发送邀请")
+            }
+        },
+        dismissButton = {
+            TextButton(enabled = !isSubmitting, onClick = onDismiss) {
+                Text("取消")
+            }
+        },
+    )
+}
+
+@Composable
 internal fun DiagnosticsDialog(
     diagnostics: String,
     onDismiss: () -> Unit,
@@ -1360,6 +1671,48 @@ internal fun stylePromptDisplayText(profile: WritingStyleProfileOption): String 
     return "这个模板暂时没有可查看的提示词。"
 }
 
+internal fun accountRoleLabel(role: String): String {
+    return if (role.trim() == "admin") "管理员" else "普通用户"
+}
+
+internal fun publishingAccountValue(account: PublishingAccount?, isLoading: Boolean): String {
+    return when {
+        isLoading -> "读取中"
+        account?.connected == true -> "已绑定"
+        else -> "未绑定"
+    }
+}
+
+internal fun publishingAccountSubtitle(
+    account: PublishingAccount?,
+    errorMessage: String?,
+    isLoading: Boolean,
+): String {
+    return when {
+        isLoading -> "正在读取当前账号的公众号配置"
+        errorMessage != null -> errorMessage
+        account?.connected == true -> "App ID：${account.appId.orEmpty().ifBlank { "已配置" }}"
+        else -> "当前账号尚未绑定公众号，文章生成后会保留在录音详情中"
+    }
+}
+
+internal fun adminUsersValue(result: AdminUsersResult?, isLoading: Boolean): String {
+    return if (isLoading) "读取中" else "${result?.users?.size ?: 0} 人"
+}
+
+internal fun adminUsersSubtitle(
+    result: AdminUsersResult?,
+    errorMessage: String?,
+    isLoading: Boolean,
+): String {
+    return when {
+        isLoading -> "正在读取用户和邀请状态"
+        errorMessage != null -> errorMessage
+        result != null -> "待接受邀请 ${result.invitations.size} 个"
+        else -> "邀请用户、查看状态和补发邀请"
+    }
+}
+
 internal fun shouldFetchStylePrompt(profile: WritingStyleProfileOption, filesToken: String): Boolean {
     return profile.remote && profile.body.isNullOrBlank() && filesToken.isNotBlank()
 }
@@ -1394,11 +1747,11 @@ internal fun settingsLastSyncDetail(
     return "上次从云端同步录音和成文状态：$formatted"
 }
 
-private suspend fun testBackendConnection(apiBaseUrl: String, filesToken: String): ConnectionTestResult =
+private suspend fun testBackendConnection(apiBaseUrl: String, accessToken: String): ConnectionTestResult =
     withContext(Dispatchers.IO) {
         val base = apiBaseUrl.trimEnd('/')
         if (base.isBlank()) {
-            return@withContext connectionInputError("API Base URL 为空", tokenProvided = filesToken.isNotBlank())
+            return@withContext connectionInputError("API Base URL 为空", tokenProvided = accessToken.isNotBlank())
         }
         try {
             val health = (URL("$base/health").openConnection() as HttpURLConnection).apply {
@@ -1409,13 +1762,13 @@ private suspend fun testBackendConnection(apiBaseUrl: String, filesToken: String
             if (health.responseCode !in 200..299) {
                 return@withContext buildConnectionResult(
                     healthStatusCode = health.responseCode,
-                    tokenProvided = filesToken.isNotBlank(),
+                    tokenProvided = accessToken.isNotBlank(),
                     recordingsStatusCode = null,
                     recordingCount = null,
                     errorMessage = null,
                 )
             }
-            if (filesToken.isBlank()) {
+            if (accessToken.isBlank()) {
                 return@withContext buildConnectionResult(
                     healthStatusCode = health.responseCode,
                     tokenProvided = false,
@@ -1430,7 +1783,7 @@ private suspend fun testBackendConnection(apiBaseUrl: String, filesToken: String
                     requestMethod = "GET"
                     connectTimeout = 8_000
                     readTimeout = 8_000
-                    setRequestProperty("Authorization", "Bearer $filesToken")
+                    setRequestProperty("Authorization", "Bearer $accessToken")
                 }
                 if (recordings.responseCode in 200..299) {
                     val count = JSONObject(recordings.inputStream.bufferedReader().use { it.readText() })
@@ -1466,7 +1819,7 @@ private suspend fun testBackendConnection(apiBaseUrl: String, filesToken: String
         } catch (error: Exception) {
             buildConnectionResult(
                 healthStatusCode = null,
-                tokenProvided = filesToken.isNotBlank(),
+                tokenProvided = accessToken.isNotBlank(),
                 recordingsStatusCode = null,
                 recordingCount = null,
                 errorMessage = error.message ?: error.javaClass.simpleName,
@@ -1498,7 +1851,7 @@ internal fun buildConnectionResult(
             },
         ),
         ConnectionCheckItem(
-            label = "FILES_TOKEN",
+            label = "登录会话",
             state = when {
                 !tokenProvided -> ConnectionCheckState.FAILED
                 authFailed -> ConnectionCheckState.FAILED
@@ -1507,10 +1860,10 @@ internal fun buildConnectionResult(
                 else -> ConnectionCheckState.SKIPPED
             },
             detail = when {
-                !tokenProvided -> "未填写，无法读取云端录音"
-                authFailed -> "Token 无效或没有权限，/api/recordings HTTP $recordingsStatusCode"
+                !tokenProvided -> "未登录，无法读取云端录音"
+                authFailed -> "登录已失效或没有权限，/api/recordings HTTP $recordingsStatusCode"
                 recordingsPassed -> "已通过授权接口校验"
-                healthPassed -> "已填写，但录音列表未通过，暂未确认权限"
+                healthPassed -> "已有登录会话，但录音列表未通过，暂未确认权限"
                 else -> "后端未连通，暂未校验"
             },
         ),
@@ -1526,7 +1879,7 @@ internal fun buildConnectionResult(
                 recordingsStatusCode != null -> "/api/recordings HTTP $recordingsStatusCode"
                 recordingsErrorMessage != null -> recordingsErrorMessage
                 !healthPassed -> "后端未连通，暂未请求"
-                !tokenProvided -> "需要 FILES_TOKEN"
+                !tokenProvided -> "需要登录"
                 else -> "没有拿到接口响应"
             },
         ),
@@ -1537,15 +1890,15 @@ internal fun buildConnectionResult(
         summary = when {
             healthPassed && tokenProvided && recordingsPassed -> "连接正常"
             !healthPassed -> "后端不可达"
-            !tokenProvided -> "缺少 FILES_TOKEN"
-            authFailed -> "FILES_TOKEN 无效"
+            !tokenProvided -> "尚未登录"
+            authFailed -> "登录已失效"
             else -> "录音列表接口异常"
         },
         nextAction = when {
             healthPassed && tokenProvided && recordingsPassed -> "可以继续录音、上传并等待成文。"
             !healthPassed -> "检查 API Base URL、网络或后端部署状态。"
-            !tokenProvided -> "粘贴 FILES_TOKEN 后重新测试连接。"
-            authFailed -> "在设置中更新 FILES_TOKEN，或检查 GitHub/Worker 使用的密钥是否一致。"
+            !tokenProvided -> "返回登录页完成账号登录后重新测试连接。"
+            authFailed -> "退出后重新登录，或请管理员确认账号状态。"
             else -> "稍后重试；如果持续失败，复制诊断信息反馈。"
         },
         checks = checks,
@@ -1577,9 +1930,15 @@ private fun copyWritingStylePrompt(context: Context, profile: WritingStyleProfil
     Toast.makeText(context, "提示词已复制", Toast.LENGTH_SHORT).show()
 }
 
+private fun copyPlainText(context: Context, label: String, value: String) {
+    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+    clipboard.setPrimaryClip(ClipData.newPlainText(label, value))
+    Toast.makeText(context, "已复制", Toast.LENGTH_SHORT).show()
+}
+
 private suspend fun buildDiagnostics(context: android.content.Context, preferences: AppPreferences): String =
     withContext(Dispatchers.IO) {
-        val recordings = AppDatabase.getDatabase(context).recordingDao().getAllRecordings()
+        val recordings = AppDatabase.getDatabase(context).recordingDao().getAllRecordings(preferences.effectiveUserId)
         val latest = recordings.firstOrNull()
         val syncText = if (preferences.lastSyncAtMs > 0) {
             SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date(preferences.lastSyncAtMs))
@@ -1593,7 +1952,9 @@ private suspend fun buildDiagnostics(context: android.content.Context, preferenc
             deviceName = "${Build.MANUFACTURER} ${Build.MODEL}",
             androidVersion = "${Build.VERSION.RELEASE} / SDK ${Build.VERSION.SDK_INT}",
             apiBaseUrl = preferences.apiBaseUrl,
-            tokenConfigured = preferences.filesToken.isNotBlank(),
+            tokenConfigured = preferences.accessToken.isNotBlank(),
+            userId = preferences.effectiveUserId,
+            userEmail = preferences.userEmail,
             lastSyncText = syncText,
             recordingCount = recordings.size,
             latest = latest,
@@ -1611,6 +1972,8 @@ internal fun formatDiagnostics(
     androidVersion: String,
     apiBaseUrl: String,
     tokenConfigured: Boolean,
+    userId: String = AppPreferences.DEFAULT_USER_ID,
+    userEmail: String = "",
     lastSyncText: String,
     recordingCount: Int,
     latest: RecordingEntity?,
@@ -1630,7 +1993,9 @@ internal fun formatDiagnostics(
     Device: $deviceName
     Android: $androidVersion
     API host: ${apiBaseUrl.ifBlank { "未配置" }}
-    Token: ${if (tokenConfigured) "已配置" else "未配置"}
+    Login: ${if (tokenConfigured) "已登录" else "未登录"}
+    User ID: $userId
+    User email: ${userEmail.ifBlank { "无" }}
     Last sync: $lastSyncText
     Recording count: $recordingCount
     $recentRecordingsText

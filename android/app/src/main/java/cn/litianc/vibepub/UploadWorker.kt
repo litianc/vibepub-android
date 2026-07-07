@@ -20,7 +20,8 @@ class UploadWorker(
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
         val path = inputData.getString(KEY_FILE_PATH) ?: return@withContext Result.failure()
         val apiBaseUrl = inputData.getString(KEY_API_BASE_URL) ?: return@withContext Result.failure()
-        val filesToken = inputData.getString(KEY_FILES_TOKEN).orEmpty()
+        val accessToken = inputData.getString(KEY_ACCESS_TOKEN).orEmpty()
+        val userId = inputData.getString(KEY_USER_ID).orEmpty().ifBlank { AppPreferences.DEFAULT_USER_ID }
         val styleProfileId = inputData.getString(KEY_STYLE_PROFILE_ID).orEmpty()
         val styleProfileVersion = inputData.getString(KEY_STYLE_PROFILE_VERSION).orEmpty()
         val styleProfileName = inputData.getString(KEY_STYLE_PROFILE_NAME).orEmpty()
@@ -31,7 +32,7 @@ class UploadWorker(
         val file = File(path)
 
         if (!file.exists()) {
-            updateLocalStatus(file.name, RecordingStatus.FAILED, "本地录音文件不存在")
+            updateLocalStatus(userId, file.name, RecordingStatus.FAILED, "本地录音文件不存在")
             return@withContext Result.failure()
         }
 
@@ -42,7 +43,7 @@ class UploadWorker(
                 connectTimeout = 15_000
                 readTimeout = 60_000
                 doOutput = true
-                setRequestProperty("Authorization", "Bearer $filesToken")
+                setRequestProperty("Authorization", "Bearer $accessToken")
                 setRequestProperty("Content-Type", audioContentTypeForFilename(file.name))
                 setRequestProperty("X-File-Name", file.name)
                 setOptionalRequestProperty("X-Style-Profile-Id", styleProfileId)
@@ -61,19 +62,19 @@ class UploadWorker(
 
             val responseCode = connection.responseCode
             if (responseCode in 200..299) {
-                updateLocalStatus(file.name, RecordingStatus.UPLOADED, null)
+                updateLocalStatus(userId, file.name, RecordingStatus.UPLOADED, null)
                 Result.success()
             } else if (responseCode >= 500) {
-                updateLocalStatus(file.name, RecordingStatus.UPLOADING, "服务器暂时不可用，稍后自动重试")
+                updateLocalStatus(userId, file.name, RecordingStatus.UPLOADING, "服务器暂时不可用，稍后自动重试")
                 Result.retry()
             } else {
                 val body = connection.errorStream?.bufferedReader()?.use { it.readText() }.orEmpty()
                 val message = if (responseCode == 401 || responseCode == 403) {
-                    "FILES_TOKEN 无效或没有权限"
+                    "登录已失效或没有权限，请重新登录"
                 } else {
                     "上传失败 HTTP $responseCode"
                 }
-                updateLocalStatus(file.name, RecordingStatus.FAILED, message)
+                updateLocalStatus(userId, file.name, RecordingStatus.FAILED, message)
                 Result.failure(
                     androidx.work.workDataOf(
                         KEY_ERROR to JSONObject.quote(body).take(256),
@@ -81,18 +82,19 @@ class UploadWorker(
                 )
             }
         } catch (error: Exception) {
-            updateLocalStatus(file.name, RecordingStatus.UPLOADING, "网络异常，稍后自动重试")
+            updateLocalStatus(userId, file.name, RecordingStatus.UPLOADING, "网络异常，稍后自动重试")
             Result.retry()
         }
     }
 
     private suspend fun updateLocalStatus(
+        userId: String,
         filename: String,
         status: RecordingStatus,
         error: String?,
     ) {
         val dao = AppDatabase.getDatabase(applicationContext).recordingDao()
-        val entity = dao.getRecordingByFilename(filename) ?: return
+        val entity = dao.getRecordingByFilename(userId, filename) ?: return
         if (entity.status == RecordingStatus.COMPLETED.value && status != RecordingStatus.COMPLETED) {
             return
         }
@@ -107,7 +109,8 @@ class UploadWorker(
     companion object {
         const val KEY_FILE_PATH = "file_path"
         const val KEY_API_BASE_URL = "api_base_url"
-        const val KEY_FILES_TOKEN = "files_token"
+        const val KEY_ACCESS_TOKEN = "access_token"
+        const val KEY_USER_ID = "user_id"
         const val KEY_STYLE_PROFILE_ID = "style_profile_id"
         const val KEY_STYLE_PROFILE_VERSION = "style_profile_version"
         const val KEY_STYLE_PROFILE_NAME = "style_profile_name"

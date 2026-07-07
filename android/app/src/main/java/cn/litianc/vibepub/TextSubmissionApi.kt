@@ -27,7 +27,7 @@ object TextSubmissionApi {
         layoutProfileVersion: String? = null,
     ): TextSubmissionResult = withContext(Dispatchers.IO) {
         val normalizedText = text.trim()
-        require(filesToken.isNotBlank()) { "请先在设置中配置 FILES_TOKEN" }
+        require(filesToken.isNotBlank()) { "请先登录后提交文字" }
         require(normalizedText.length >= MIN_TEXT_SUBMISSION_CHARS) { "文字太短，请再补充一些想法" }
 
         val body = buildTextSubmissionBody(
@@ -122,7 +122,7 @@ internal fun textSubmissionFailureMessage(responseCode: Int, responseBody: Strin
             .getOrNull()
             ?.takeIf { it.isNotBlank() }
             ?: "文字内容不符合要求"
-        401, 403 -> "FILES_TOKEN 无效或没有权限"
+        401, 403 -> "登录已失效或没有权限，请重新登录"
         in 500..599 -> "服务器暂时不可用，请稍后重试"
         else -> "文字提交失败 HTTP $responseCode"
     }

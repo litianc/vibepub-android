@@ -55,7 +55,7 @@ class DebugLatestRecordingActivity : ComponentActivity() {
                         } else {
                             AppDatabase.getDatabase(context)
                                 .recordingDao()
-                                .getAllRecordings()
+                                .getAllRecordings(preferences.effectiveUserId)
                                 .firstOrNull()
                                 ?.filename
                         }

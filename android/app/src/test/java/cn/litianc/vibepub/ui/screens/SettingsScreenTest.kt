@@ -217,11 +217,11 @@ class SettingsScreenTest {
         )
 
         assertFalse(result.success)
-        assertEquals("缺少 FILES_TOKEN", result.summary)
-        assertTrue(result.nextAction.contains("粘贴 FILES_TOKEN"))
+        assertEquals("尚未登录", result.summary)
+        assertTrue(result.nextAction.contains("完成账号登录"))
         assertEquals(ConnectionCheckState.PASSED, result.checks[0].state)
         assertEquals(ConnectionCheckState.FAILED, result.checks[1].state)
-        assertEquals("未填写，无法读取云端录音", result.checks[1].detail)
+        assertEquals("未登录，无法读取云端录音", result.checks[1].detail)
         assertEquals(ConnectionCheckState.SKIPPED, result.checks[2].state)
     }
 
@@ -236,8 +236,8 @@ class SettingsScreenTest {
         )
 
         assertFalse(result.success)
-        assertEquals("FILES_TOKEN 无效", result.summary)
-        assertTrue(result.nextAction.contains("更新 FILES_TOKEN"))
+        assertEquals("登录已失效", result.summary)
+        assertTrue(result.nextAction.contains("重新登录"))
         assertEquals(ConnectionCheckState.PASSED, result.checks[0].state)
         assertEquals(ConnectionCheckState.FAILED, result.checks[1].state)
         assertEquals(ConnectionCheckState.FAILED, result.checks[2].state)
@@ -314,7 +314,8 @@ class SettingsScreenTest {
         assertTrue(text.contains("Device ID: device-123"))
         assertTrue(text.contains("Device: Redmi Tablet"))
         assertTrue(text.contains("API host: https://api.example.com"))
-        assertTrue(text.contains("Token: 已配置"))
+        assertTrue(text.contains("Login: 已登录"))
+        assertTrue(text.contains("User ID: default_user"))
         assertTrue(text.contains("Recording count: 3"))
         assertTrue(text.contains("Recent recordings:"))
         assertTrue(text.contains("1. VibePub-20260629.m4a | 0m18s | FAILED | 需要处理"))
@@ -396,7 +397,7 @@ class SettingsScreenTest {
         )
 
         assertTrue(text.contains("API host: 未配置"))
-        assertTrue(text.contains("Token: 未配置"))
+        assertTrue(text.contains("Login: 未登录"))
         assertTrue(text.contains("Latest recording: 无"))
         assertTrue(text.contains("Latest processing stage: 无"))
         assertTrue(text.contains("Latest workflow: 无"))

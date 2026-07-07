@@ -1,10 +1,10 @@
-import { listUnprocessedFiles, createPresignedDownloadUrl, deleteFile, downloadFile, getFileMetadata, uploadCoverImage, uploadTranscript, isSupportedTextSubmissionKey } from "./r2.js";
+import { listUnprocessedFiles, createPresignedDownloadUrl, deleteFile, downloadFile, getFileMetadata, uploadCoverImage, uploadTranscript, isSupportedTextSubmissionKey, userIdFromPipelineKey } from "./r2.js";
 import { transcribeAudioUrl } from "./asr.js";
 import { reviseArticle, rewriteArticle } from "./writingAgent.js";
 import { generateWechatCoverBuffer } from "./coverRenderer.js";
 import { articleImagesForTranscript, insertArticleImagesIntoHtml, type ArticleImageAsset } from "./articleImageActions.js";
 import { prepareArticleImages, type PreparedArticleImage } from "./articleImages.js";
-import { getAccessToken, publishDraft, updateDraft, uploadWechatArticleImage } from "./wechat.js";
+import { getAccessToken, publishDraft, updateDraft, uploadWechatArticleImage, type WechatConfig } from "./wechat.js";
 import path from "path";
 import { pathToFileURL } from "url";
 
@@ -93,12 +93,17 @@ type TranscriptMetadata = {
 type RevisionRequest = {
   revisionId?: string;
   filename: string;
+  userId?: string;
   transcriptKey?: string;
   audioKey: string;
   createdAt?: string;
 };
 
-export function filterTargetFiles(files: string[], targetFilename?: string): string[] {
+export function filterTargetFiles(files: string[], targetFilename?: string, targetKey?: string): string[] {
+  const exactKey = targetKey?.trim();
+  if (exactKey) {
+    return files.filter(fileKey => fileKey === exactKey);
+  }
   const target = targetFilename?.trim();
   if (!target) {
     return files;
@@ -106,11 +111,11 @@ export function filterTargetFiles(files: string[], targetFilename?: string): str
   return files.filter(fileKey => path.basename(fileKey) === target);
 }
 
-async function updateStatus(filename: string, status: string, metadata: StatusMetadata = {}) {
+async function updateStatus(filename: string, status: string, metadata: StatusMetadata & { userId?: string } = {}) {
   const url = `${process.env.PUBLIC_BASE_URL}/api/internal/status`;
-  const token = process.env.FILES_TOKEN;
+  const token = process.env.MINING_SERVICE_TOKEN || process.env.FILES_TOKEN;
   if (!url || !token) {
-    console.warn("PUBLIC_BASE_URL or FILES_TOKEN missing, skipping status update");
+    console.warn("PUBLIC_BASE_URL or MINING_SERVICE_TOKEN missing, skipping status update");
     return;
   }
   try {
@@ -120,7 +125,7 @@ async function updateStatus(filename: string, status: string, metadata: StatusMe
         "Content-Type": "application/json",
         "Authorization": `Bearer ${token}`
       },
-      body: JSON.stringify({ filename, status, ...metadata })
+      body: JSON.stringify({ filename, status, userId: metadata.userId, ...metadata })
     });
     if (!res.ok) console.error(`Status update failed: ${res.status} ${await res.text()}`);
   } catch (e) {
@@ -128,12 +133,64 @@ async function updateStatus(filename: string, status: string, metadata: StatusMe
   }
 }
 
+async function getWechatConfigForUser(userId: string): Promise<WechatConfig> {
+  const token = process.env.MINING_SERVICE_TOKEN || process.env.FILES_TOKEN;
+  const baseUrl = process.env.PUBLIC_BASE_URL?.trim();
+  if (token && baseUrl) {
+    const res = await fetch(`${baseUrl.replace(/\/+$/, "")}/api/internal/publishing-account`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${token}`,
+      },
+      body: JSON.stringify({ userId }),
+    });
+    if (res.ok) {
+      const body = await res.json() as any;
+      const account = body.publishing_account;
+      return {
+        appId: account.app_id,
+        appSecret: account.app_secret,
+        proxyUrl: account.proxy_url,
+      };
+    }
+    if (res.status !== 404) {
+      throw new Error(`Failed to load publishing account: HTTP ${res.status} ${await res.text()}`);
+    }
+  }
+
+  if (process.env.WECHAT_APP_ID && process.env.WECHAT_APP_SECRET && process.env.WECHAT_PROXY) {
+    return {
+      appId: process.env.WECHAT_APP_ID,
+      appSecret: process.env.WECHAT_APP_SECRET,
+      proxyUrl: process.env.WECHAT_PROXY,
+    };
+  }
+
+  throw new Error("公众号未绑定，文章已生成但无法创建公众号草稿");
+}
+
+function userIdForPipelineKey(fileKey: string): string {
+  return userIdFromPipelineKey(fileKey) || process.env.WRITING_AGENT_USER_ID?.trim() || "default_user";
+}
+
+function workspaceIdForUser(userId: string): string {
+  return process.env.WRITING_AGENT_WORKSPACE_ID?.trim() ||
+    (userId === "default_user" ? "vibepub-dogfood" : `ws_${userId.replace(/^usr_/, "")}`);
+}
+
 function transcriptJsonKey(fileKey: string): string {
-  return `transcripts/${path.basename(fileKey).replace(/\.[^/.]+$/, ".json")}`;
+  return siblingArtifactKey(fileKey, "transcripts", ".json");
 }
 
 function coverImageKey(fileKey: string): string {
-  return `covers/${path.basename(fileKey).replace(/\.[^/.]+$/, ".png")}`;
+  return siblingArtifactKey(fileKey, "covers", ".png");
+}
+
+function siblingArtifactKey(fileKey: string, kind: string, extension: string): string {
+  const filename = path.basename(fileKey).replace(/\.[^/.]+$/, extension);
+  const userId = userIdFromPipelineKey(fileKey);
+  return userId ? `users/${userId}/${kind}/${filename}` : `${kind}/${filename}`;
 }
 
 function publicFileUrl(key: string): string | undefined {
@@ -189,6 +246,7 @@ async function attachArticleImages(
   fileKey: string,
   article: ArticleResult,
   wxToken?: string,
+  wechatConfig?: WechatConfig,
 ): Promise<{ article: ArticleResult; articleImages: ArticleImageAsset[] }> {
   const actions = article.imageActions || [];
   if (actions.length === 0) {
@@ -198,7 +256,7 @@ async function attachArticleImages(
   console.log(`Generating ${actions.length} article image(s)...`);
   const prepared = await prepareArticleImages(fileKey, actions);
   const withWechatUrls = wxToken
-    ? await uploadPreparedImagesToWechat(wxToken, prepared)
+    ? await uploadPreparedImagesToWechat(wxToken, prepared, wechatConfig)
     : prepared;
   const articleImages = articleImagesForTranscript(withWechatUrls);
   return {
@@ -214,11 +272,12 @@ async function attachArticleImages(
 async function uploadPreparedImagesToWechat(
   wxToken: string,
   images: PreparedArticleImage[],
+  wechatConfig?: WechatConfig,
 ): Promise<PreparedArticleImage[]> {
   const withWechatUrls: PreparedArticleImage[] = [];
   for (const image of images) {
     console.log(`Uploading article image ${image.imageId} to WeChat...`);
-    const wechatUrl = await uploadWechatArticleImage(wxToken, image.buffer);
+    const wechatUrl = await uploadWechatArticleImage(wxToken, image.buffer, wechatConfig);
     withWechatUrls.push({ ...image, wechatUrl });
   }
   return withWechatUrls;
@@ -232,6 +291,7 @@ function buildDraftFailureMessage(error: unknown): string {
 async function completeWithArticleOnly(
   fileKey: string,
   filename: string,
+  userId: string,
   rawText: string,
   article: ArticleResult,
   error: unknown,
@@ -258,6 +318,7 @@ async function completeWithArticleOnly(
   }
 
   await updateStatus(filename, "COMPLETED", {
+    userId,
     rawText,
     articleTitle: article.title,
     articleContent: article.content,
@@ -359,7 +420,7 @@ function profileSelectionFromMetadata(metadata: Record<string, string>): Profile
 
 async function profileSelectionForAudioFile(fileKey: string): Promise<ProfileSelection> {
   const metadataSelection = profileSelectionFromMetadata(await getFileMetadata(fileKey));
-  const sidecarKey = profileSelectionSidecarKey(path.basename(fileKey));
+  const sidecarKey = profileSelectionSidecarKey(fileKey);
   try {
     const sidecar = parseJsonBuffer(sidecarKey, await downloadFile(sidecarKey));
     return {
@@ -371,8 +432,11 @@ async function profileSelectionForAudioFile(fileKey: string): Promise<ProfileSel
   }
 }
 
-function profileSelectionSidecarKey(filename: string): string {
-  return `profile-selections/${filename.replace(/[^\w.\-]/g, "_")}.json`;
+function profileSelectionSidecarKey(fileKey: string): string {
+  const filename = path.basename(fileKey);
+  const userId = userIdFromPipelineKey(fileKey);
+  const sidecarName = `${filename.replace(/[^\w.\-]/g, "_")}.json`;
+  return userId ? `users/${userId}/profile-selections/${sidecarName}` : `profile-selections/${sidecarName}`;
 }
 
 function revisionFailureMessage(error: unknown): string {
@@ -389,16 +453,18 @@ async function processRevisionRequest(revisionRequestKey: string): Promise<void>
   const revisionRequest: RevisionRequest = {
     revisionId: optionalStringField(revisionRecord, "revisionId", "revision_id"),
     filename: requiredStringField(revisionRecord, "filename"),
+    userId: optionalStringField(revisionRecord, "userId", "user_id"),
     transcriptKey: optionalStringField(revisionRecord, "transcriptKey", "transcript_key"),
     audioKey: requiredStringField(revisionRecord, "audioKey", "audio_key"),
     createdAt: optionalStringField(revisionRecord, "createdAt", "created_at"),
   };
   const filename = path.basename(revisionRequest.filename);
-  const transcriptKey = revisionRequest.transcriptKey || `transcripts/${filename.replace(/\.[^/.]+$/, ".json")}`;
-  const fileKey = `inbox/${filename}`;
+  const userId = revisionRequest.userId || userIdForPipelineKey(revisionRequestKey);
+  const transcriptKey = revisionRequest.transcriptKey || `users/${userId}/transcripts/${filename.replace(/\.[^/.]+$/, ".json")}`;
+  const fileKey = userIdFromPipelineKey(revisionRequestKey) ? `users/${userId}/inbox/${filename}` : `inbox/${filename}`;
 
   try {
-    await updateStatus(filename, "PROCESSING", { processingStage: "ASR" });
+    await updateStatus(filename, "PROCESSING", { userId, processingStage: "ASR" });
     const transcript = parseJsonBuffer(transcriptKey, await downloadFile(transcriptKey));
     const rawText = optionalStringField(transcript, "rawText", "raw_text") || "";
     const currentTitle = optionalStringField(transcript, "articleTitle", "article_title", "title") || "";
@@ -420,13 +486,15 @@ async function processRevisionRequest(revisionRequestKey: string): Promise<void>
       throw new Error("修改语音没有识别到有效文字");
     }
 
-    await updateStatus(filename, "PROCESSING", { processingStage: "REWRITING" });
+    await updateStatus(filename, "PROCESSING", { userId, processingStage: "REWRITING" });
     console.log(`Voice revision instruction: ${instructionText.slice(0, 80)}...`);
     let article = await reviseArticle({
       rawText,
       currentTitle,
       currentContent,
       instructionText,
+      userId,
+      workspaceId: workspaceIdForUser(userId),
       clientJobId: revisionRequest.revisionId
         ? `${filename}:${revisionRequest.revisionId}`
         : `${filename}:${revisionRequestKey}`,
@@ -434,6 +502,7 @@ async function processRevisionRequest(revisionRequestKey: string): Promise<void>
     });
 
     await updateStatus(filename, "PROCESSING", {
+      userId,
       processingStage: "ARTICLE_READY",
       rawText,
       articleTitle: article.title,
@@ -441,14 +510,16 @@ async function processRevisionRequest(revisionRequestKey: string): Promise<void>
     });
 
     await updateStatus(filename, "PROCESSING", {
+      userId,
       processingStage: "DRAFTING",
       rawText,
       articleTitle: article.title,
       articleContent: article.content,
     });
 
-    const wxToken = currentDraftId ? await getAccessToken() : undefined;
-    const imageResult = await attachArticleImages(fileKey, article, wxToken);
+    const wechatConfig = currentDraftId ? await getWechatConfigForUser(userId) : undefined;
+    const wxToken = currentDraftId ? await getAccessToken(wechatConfig) : undefined;
+    const imageResult = await attachArticleImages(fileKey, article, wxToken, wechatConfig);
     article = imageResult.article;
 
     console.log(`Generating revised WeChat cover from title: ${article.title}`);
@@ -462,7 +533,7 @@ async function processRevisionRequest(revisionRequestKey: string): Promise<void>
 
     if (currentDraftId) {
       console.log(`Updating existing WeChat draft: ${currentDraftId}`);
-      await updateDraft(wxToken!, currentDraftId, article.title, article.content, coverBuffer);
+      await updateDraft(wxToken!, currentDraftId, article.title, article.content, coverBuffer, wechatConfig);
     } else {
       console.warn(`No WeChat draft ID found for ${filename}. Saving revised article without updating WeChat draft.`);
     }
@@ -502,6 +573,7 @@ async function processRevisionRequest(revisionRequestKey: string): Promise<void>
 
     await uploadTranscript(transcriptKey, JSON.stringify(updatedTranscript, null, 2));
     await updateStatus(filename, "COMPLETED", {
+      userId,
       rawText,
       articleTitle: article.title,
       articleContent: article.content,
@@ -516,6 +588,7 @@ async function processRevisionRequest(revisionRequestKey: string): Promise<void>
   } catch (error) {
     console.error(`Failed to process article revision ${revisionRequestKey}:`, describeError(error));
     await updateStatus(filename, "COMPLETED", {
+      userId,
       processingStage: "REVISION_FAILED",
       errorMessage: revisionFailureMessage(error),
     });
@@ -528,6 +601,7 @@ export async function main() {
   let failedCount = 0;
   let permanentFailedCount = 0;
   const targetFilename = process.env.TARGET_FILENAME?.trim();
+  const targetKey = process.env.TARGET_KEY?.trim();
   const revisionRequestKey = process.env.REVISION_REQUEST_KEY?.trim();
 
   if (revisionRequestKey) {
@@ -539,19 +613,19 @@ export async function main() {
   // 1. Check for new audio files
   console.log("Fetching unprocessed files from R2...");
   const allFiles = await listUnprocessedFiles();
-  const files = filterTargetFiles(allFiles, targetFilename);
+  const files = filterTargetFiles(allFiles, targetFilename, targetKey);
   
   if (files.length === 0) {
-    if (targetFilename) {
-      console.log(`No R2 inbox file found for TARGET_FILENAME=${targetFilename}. Exiting.`);
+    if (targetKey || targetFilename) {
+      console.log(`No R2 input found for TARGET_KEY=${targetKey || ""} TARGET_FILENAME=${targetFilename || ""}. Exiting.`);
     } else {
       console.log("No new audio files found. Exiting.");
     }
     return;
   }
   
-  if (targetFilename) {
-    console.log(`Found target file to process: ${targetFilename}`);
+  if (targetKey || targetFilename) {
+    console.log(`Found target file to process: ${targetKey || targetFilename}`);
   } else {
     console.log(`Found ${files.length} file(s) to process.`);
   }
@@ -560,6 +634,7 @@ export async function main() {
   for (const fileKey of files) {
     let processingStage = "QUEUED";
     const filename = path.basename(fileKey);
+    const userId = userIdForPipelineKey(fileKey);
     let rawText = "";
     let article: ArticleResult | undefined;
     let articleTranscriptSaved = false;
@@ -568,7 +643,7 @@ export async function main() {
     try {
       console.log(`\n--- Processing file: ${fileKey} ---`);
       
-      await updateStatus(filename, "PROCESSING", { processingStage });
+      await updateStatus(filename, "PROCESSING", { userId, processingStage });
 
       if (isSupportedTextSubmissionKey(fileKey)) {
         console.log("Reading text submission from R2...");
@@ -576,7 +651,7 @@ export async function main() {
         rawText = rawTextForArticleInput(textInput);
         profileSelection = textInput.profileSelection;
         processingStage = "REWRITING";
-        await updateStatus(filename, "PROCESSING", { processingStage, rawText });
+        await updateStatus(filename, "PROCESSING", { userId, processingStage, rawText });
       } else {
         profileSelection = await profileSelectionForAudioFile(fileKey);
         // 3. Build a short-lived R2 URL for Volcengine ASR.
@@ -586,7 +661,7 @@ export async function main() {
 
         // 4. ASR: Speech to text
         processingStage = "ASR";
-        await updateStatus(filename, "PROCESSING", { processingStage });
+        await updateStatus(filename, "PROCESSING", { userId, processingStage });
         console.log("Transcribing audio via Volcengine ASR...");
         try {
           rawText = await transcribeAudioUrl(audioUrl, ext || 'm4a');
@@ -601,24 +676,27 @@ export async function main() {
       if (!rawText || rawText.trim().length === 0) {
         console.log("Transcript was empty. Skipping.");
         await deleteFile(fileKey);
-        await updateStatus(filename, "FAILED", { processingStage, errorMessage: "转录结果为空" });
+        await updateStatus(filename, "FAILED", { userId, processingStage, errorMessage: "转录结果为空" });
         continue;
       }
 
       // 5. LLM: Style Distillation
       processingStage = "REWRITING";
-      await updateStatus(filename, "PROCESSING", { processingStage, rawText });
+      await updateStatus(filename, "PROCESSING", { userId, processingStage, rawText });
       console.log("Running Style Distillation via GLM...");
       article = await rewriteArticle({
         rawText,
         clientJobId: filename,
         sourceType: isSupportedTextSubmissionKey(fileKey) ? "text_submission" : "audio_transcript",
+        userId,
+        workspaceId: workspaceIdForUser(userId),
         ...profileSelection,
       });
       console.log(`Generated Article Title: ${article.title}`);
 
       processingStage = "ARTICLE_READY";
       await updateStatus(filename, "PROCESSING", {
+        userId,
         processingStage,
         rawText,
         articleTitle: article.title,
@@ -633,6 +711,7 @@ export async function main() {
       // 5.5 LLM: Image Generation
       processingStage = "DRAFTING";
       await updateStatus(filename, "PROCESSING", {
+        userId,
         processingStage,
         rawText,
         articleTitle: article.title,
@@ -650,9 +729,10 @@ export async function main() {
       
       // 6. WeChat: Publish Draft
       console.log("Getting WeChat Access Token...");
-      const wxToken = await getAccessToken();
+      const wechatConfig = await getWechatConfigForUser(userId);
+      const wxToken = await getAccessToken(wechatConfig);
       console.log("Publishing to WeChat Drafts...");
-      const mediaId = await publishDraft(wxToken, article.title, article.content, coverBuffer);
+      const mediaId = await publishDraft(wxToken, article.title, article.content, coverBuffer, wechatConfig);
       console.log(`Successfully published draft! Media ID: ${mediaId}`);
       
       // 6.5 Save Transcript JSON to R2
@@ -680,6 +760,7 @@ export async function main() {
       }
       
       await updateStatus(filename, "COMPLETED", {
+        userId,
         rawText,
         articleTitle: article.title,
         articleContent: article.content,
@@ -700,18 +781,20 @@ export async function main() {
         const recovered = await completeWithArticleOnly(
           fileKey,
           filename,
+          userId,
           rawText,
-        article,
-        e,
-        articleTranscriptSaved,
-        profileSelection,
-      );
+          article,
+          e,
+          articleTranscriptSaved,
+          profileSelection,
+        );
         if (recovered) {
           continue;
         }
       }
 
       await updateStatus(filename, "FAILED", {
+        userId,
         processingStage,
         errorMessage: getErrorMessage(e).slice(0, 500),
       });

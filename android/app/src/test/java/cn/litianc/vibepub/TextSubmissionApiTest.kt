@@ -20,8 +20,8 @@ class TextSubmissionApiTest {
 
     @Test
     fun failureMessageHandlesAuthAndServerErrors() {
-        assertEquals("FILES_TOKEN 无效或没有权限", textSubmissionFailureMessage(401, ""))
-        assertEquals("FILES_TOKEN 无效或没有权限", textSubmissionFailureMessage(403, ""))
+        assertEquals("登录已失效或没有权限，请重新登录", textSubmissionFailureMessage(401, ""))
+        assertEquals("登录已失效或没有权限，请重新登录", textSubmissionFailureMessage(403, ""))
         assertEquals("服务器暂时不可用，请稍后重试", textSubmissionFailureMessage(502, "bad gateway"))
     }
 

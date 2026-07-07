@@ -28,6 +28,7 @@ object RecordingUploadCoordinator {
         status: String = RecordingStatus.LOCAL_RECORDED.value,
         lastError: String? = null,
         sourceType: RecordingSourceType = RecordingSourceType.RECORDING,
+        userId: String = AppPreferences.DEFAULT_USER_ID,
         minDurationMs: Long = MIN_RECORDING_DURATION_MS,
     ): Boolean {
         if (!shouldSaveRecording(file, durationMs, minDurationMs)) {
@@ -39,6 +40,7 @@ object RecordingUploadCoordinator {
             .recordingDao()
             .upsertBest(
                 RecordingEntity(
+                    userId = userId,
                     filename = file.name,
                     durationMs = durationMs,
                     timestamp = System.currentTimeMillis(),
@@ -66,16 +68,17 @@ object RecordingUploadCoordinator {
         addUploadJobTag: Boolean = true,
         replaceExistingUpload: Boolean = false,
     ): Boolean {
-        val token = preferences.filesToken
-        if (token.isBlank()) {
-            markUploadBlocked(context, file.name, "请先在设置中配置 FILES_TOKEN")
+        val userId = preferences.effectiveUserId
+        val token = preferences.accessToken
+        if (!preferences.canUseCloudFeatures) {
+            markUploadBlocked(context, userId, file.name, "请先登录并完成邮箱验证后重试上传")
             return false
         }
         val selectedProfile = preferences.selectedWritingStyleProfile()
 
         CoroutineScope(Dispatchers.IO).launch {
             val dao = AppDatabase.getDatabase(context).recordingDao()
-            val existing = dao.getRecordingByFilename(file.name)
+            val existing = dao.getRecordingByFilename(userId, file.name)
             if (existing != null && existing.status != RecordingStatus.COMPLETED.value) {
                 dao.upsertBest(
                     existing.copy(
@@ -97,7 +100,8 @@ object RecordingUploadCoordinator {
                 workDataOf(
                     UploadWorker.KEY_FILE_PATH to file.absolutePath,
                     UploadWorker.KEY_API_BASE_URL to preferences.apiBaseUrl,
-                    UploadWorker.KEY_FILES_TOKEN to token,
+                    UploadWorker.KEY_ACCESS_TOKEN to token,
+                    UploadWorker.KEY_USER_ID to userId,
                     UploadWorker.KEY_STYLE_PROFILE_ID to selectedProfile.id,
                     UploadWorker.KEY_STYLE_PROFILE_VERSION to selectedProfile.version,
                     UploadWorker.KEY_STYLE_PROFILE_NAME to selectedProfile.name,
@@ -113,7 +117,7 @@ object RecordingUploadCoordinator {
         }
 
         WorkManager.getInstance(context).enqueueUniqueWork(
-            uniqueUploadWorkName(file.name),
+            uniqueUploadWorkName(file.name, userId),
             uploadExistingWorkPolicy(replaceExistingUpload),
             requestBuilder.build(),
         )
@@ -124,19 +128,19 @@ object RecordingUploadCoordinator {
         return if (replaceExistingUpload) ExistingWorkPolicy.REPLACE else ExistingWorkPolicy.KEEP
     }
 
-    internal fun uniqueUploadWorkName(filename: String): String {
+    internal fun uniqueUploadWorkName(filename: String, userId: String = AppPreferences.DEFAULT_USER_ID): String {
         val normalized = filename.trim().ifBlank { "unnamed" }
         val digest = MessageDigest.getInstance("SHA-256")
-            .digest(normalized.toByteArray())
+            .digest("${userId.trim().ifBlank { AppPreferences.DEFAULT_USER_ID }}/$normalized".toByteArray())
             .take(8)
             .joinToString("") { "%02x".format(it) }
         return "$UNIQUE_UPLOAD_WORK_PREFIX-$digest"
     }
 
-    private fun markUploadBlocked(context: Context, filename: String, error: String) {
+    private fun markUploadBlocked(context: Context, userId: String, filename: String, error: String) {
         CoroutineScope(Dispatchers.IO).launch {
             val dao = AppDatabase.getDatabase(context).recordingDao()
-            val existing = dao.getRecordingByFilename(filename)
+            val existing = dao.getRecordingByFilename(userId, filename)
             if (existing != null) {
                 dao.upsertBest(
                     existing.copy(

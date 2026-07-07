@@ -20,7 +20,7 @@ object ArticleRevisionApi {
         filename: String,
         audioFile: File,
     ): ArticleRevisionSubmitResult = withContext(Dispatchers.IO) {
-        require(filesToken.isNotBlank()) { "请先在设置中配置 FILES_TOKEN" }
+        require(filesToken.isNotBlank()) { "请先登录后提交修改" }
         require(audioFile.exists() && audioFile.length() > 0L) { "修改语音文件为空" }
 
         val connection = (articleRevisionEndpoint(apiBaseUrl, filename).openConnection() as HttpURLConnection).apply {
@@ -74,7 +74,7 @@ internal fun articleRevisionEndpoint(apiBaseUrl: String, filename: String): URL 
 
 internal fun articleRevisionFailureMessage(responseCode: Int, responseBody: String): String {
     return when (responseCode) {
-        401, 403 -> "FILES_TOKEN 无效或没有权限，无法提交修改"
+        401, 403 -> "登录已失效或没有权限，无法提交修改"
         409 -> "文章还没生成完成，暂不能说话修改"
         else -> {
             val error = articleRevisionResponseMessage(responseBody)

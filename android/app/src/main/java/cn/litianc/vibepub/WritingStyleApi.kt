@@ -34,7 +34,7 @@ object WritingStyleApi {
         apiBaseUrl: String,
         filesToken: String,
     ): List<WritingStyleProfileOption> = withContext(Dispatchers.IO) {
-        require(filesToken.isNotBlank()) { "请先在设置中配置 FILES_TOKEN" }
+        require(filesToken.isNotBlank()) { "请先登录后同步写作风格" }
         val response = requestJson(
             apiBaseUrl = apiBaseUrl,
             filesToken = filesToken,
@@ -50,7 +50,7 @@ object WritingStyleApi {
         profileId: String,
         includeBody: Boolean = true,
     ): WritingStyleProfileOption = withContext(Dispatchers.IO) {
-        require(filesToken.isNotBlank()) { "请先在设置中配置 FILES_TOKEN" }
+        require(filesToken.isNotBlank()) { "请先登录后查看写作风格" }
         val encodedId = URLEncoder.encode(profileId.trim(), "UTF-8")
         val response = requestJson(
             apiBaseUrl = apiBaseUrl,
@@ -65,7 +65,7 @@ object WritingStyleApi {
         apiBaseUrl: String,
         filesToken: String,
     ): List<StyleSourceImportSummary> = withContext(Dispatchers.IO) {
-        require(filesToken.isNotBlank()) { "请先在设置中配置 FILES_TOKEN" }
+        require(filesToken.isNotBlank()) { "请先登录后同步风格素材" }
         val response = requestJson(
             apiBaseUrl = apiBaseUrl,
             filesToken = filesToken,
@@ -83,7 +83,7 @@ object WritingStyleApi {
         url: String?,
         text: String?,
     ): StyleSourceImportResult = withContext(Dispatchers.IO) {
-        require(filesToken.isNotBlank()) { "请先在设置中配置 FILES_TOKEN" }
+        require(filesToken.isNotBlank()) { "请先登录后导入风格素材" }
         val payload = buildStyleSourceImportBody(
             sourceType = sourceType,
             title = title,
@@ -108,7 +108,7 @@ object WritingStyleApi {
         name: String?,
         description: String?,
     ): StyleDistillationResult = withContext(Dispatchers.IO) {
-        require(filesToken.isNotBlank()) { "请先在设置中配置 FILES_TOKEN" }
+        require(filesToken.isNotBlank()) { "请先登录后生成风格模板" }
         val payload = buildStyleDistillationBody(
             sourceImportIds = sourceImportIds,
             profileId = profileId,
@@ -287,7 +287,7 @@ private fun requestJson(
 
 internal fun writingStyleApiFailureMessage(responseCode: Int, responseBody: String): String {
     return when (responseCode) {
-        401, 403 -> "FILES_TOKEN 无效或没有权限"
+        401, 403 -> "登录已失效或没有权限，请重新登录"
         503 -> "WritingAgent 尚未配置，请先部署风格服务"
         in 500..599 -> "风格服务暂时不可用，请稍后重试"
         else -> runCatching { JSONObject(responseBody.ifBlank { "{}" }).optString("message") }

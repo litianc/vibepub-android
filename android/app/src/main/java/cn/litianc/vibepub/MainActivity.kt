@@ -27,6 +27,7 @@ import cn.litianc.vibepub.data.RecordingSourceType
 import cn.litianc.vibepub.data.RecordingStatus
 import cn.litianc.vibepub.data.asRecordingStatus
 import cn.litianc.vibepub.ui.navigation.AppNavigation
+import cn.litianc.vibepub.ui.screens.AuthScreen
 import cn.litianc.vibepub.ui.theme.VibePubTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -52,19 +53,10 @@ class MainActivity : ComponentActivity() {
         recorder = AudioRecorder(this)
         handleIncomingStyleSourceShare(intent)
         
-        // Schedule SyncWorker
-        val workManager = WorkManager.getInstance(this)
-        val syncRequest = PeriodicWorkRequestBuilder<SyncWorker>(15, TimeUnit.MINUTES)
-            .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
-            .build()
-        workManager.enqueueUniquePeriodicWork(PERIODIC_SYNC_WORK_NAME, ExistingPeriodicWorkPolicy.KEEP, syncRequest)
-        
-        // Also run once immediately on startup
-        workManager.enqueueUniqueWork(
-            ONE_TIME_SYNC_WORK_NAME,
-            syncWorkPolicyForRequest(SyncRequestKind.STARTUP),
-            OneTimeWorkRequestBuilder<SyncWorker>().build(),
-        )
+        schedulePeriodicSync()
+        if (preferences.isAuthenticated) {
+            enqueueStartupSync()
+        }
 
         setContent {
             VibePubTheme {
@@ -81,8 +73,8 @@ class MainActivity : ComponentActivity() {
 
     private fun handleIncomingStyleSourceShare(intent: Intent?) {
         val source = sharedStyleSourceFromIntent(intent) ?: return
-        if (preferences.filesToken.isBlank()) {
-            Toast.makeText(this, "请先在设置中配置 FILES_TOKEN，再导入风格素材", Toast.LENGTH_LONG).show()
+        if (!preferences.canUseCloudFeatures) {
+            Toast.makeText(this, "请先登录并完成邮箱验证，再导入风格素材", Toast.LENGTH_LONG).show()
             return
         }
         Toast.makeText(
@@ -95,7 +87,7 @@ class MainActivity : ComponentActivity() {
                 runCatching {
                     val imported = WritingStyleApi.importStyleSource(
                         apiBaseUrl = preferences.apiBaseUrl,
-                        filesToken = preferences.filesToken,
+                        filesToken = preferences.accessToken,
                         sourceType = source.sourceType,
                         title = source.title,
                         url = source.url,
@@ -106,7 +98,7 @@ class MainActivity : ComponentActivity() {
                     } else {
                         val distilled = WritingStyleApi.distillStyleProfile(
                             apiBaseUrl = preferences.apiBaseUrl,
-                            filesToken = preferences.filesToken,
+                            filesToken = preferences.accessToken,
                             sourceImportIds = listOf(imported.id),
                             profileId = null,
                             name = styleProfileNameHintForSource(source, imported.title),
@@ -132,6 +124,22 @@ class MainActivity : ComponentActivity() {
                 },
             )
         }
+    }
+
+    private fun schedulePeriodicSync() {
+        val workManager = WorkManager.getInstance(this)
+        val syncRequest = PeriodicWorkRequestBuilder<SyncWorker>(15, TimeUnit.MINUTES)
+            .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
+            .build()
+        workManager.enqueueUniquePeriodicWork(PERIODIC_SYNC_WORK_NAME, ExistingPeriodicWorkPolicy.KEEP, syncRequest)
+    }
+
+    private fun enqueueStartupSync() {
+        WorkManager.getInstance(this).enqueueUniqueWork(
+            ONE_TIME_SYNC_WORK_NAME,
+            syncWorkPolicyForRequest(SyncRequestKind.STARTUP),
+            OneTimeWorkRequestBuilder<SyncWorker>().build(),
+        )
     }
 }
 
@@ -180,6 +188,7 @@ fun VibePubApp(
     var openRecordingAfterPermission by remember { mutableStateOf(false) }
 
     fun runSync() {
+        if (!preferences.isAuthenticated) return
         WorkManager.getInstance(context)
             .enqueueUniqueWork(
                 ONE_TIME_SYNC_WORK_NAME,
@@ -196,7 +205,7 @@ fun VibePubApp(
             replaceExistingUpload = replaceExistingUpload,
         )
         if (!queued) {
-            Toast.makeText(context, "请先在设置中配置 FILES_TOKEN", Toast.LENGTH_LONG).show()
+            Toast.makeText(context, "请先登录后重试上传", Toast.LENGTH_LONG).show()
         }
         return queued
     }
@@ -218,14 +227,28 @@ fun VibePubApp(
         }
     }
 
+    val authStateVersion by remember(preferences) {
+        preferences.authStateFlow()
+    }.collectAsState(initial = preferences.authStateVersion)
+
+    if (!preferences.isAuthenticated) {
+        AuthScreen(
+            preferences = preferences,
+            onAuthenticated = {
+                runSync()
+            },
+        )
+        return
+    }
+
     fun handleImportedAudio(uri: Uri) {
         scope.launch {
             val result = withContext(Dispatchers.IO) {
                 runCatching {
                     val imported = AudioImportCoordinator.importAudio(context, uri)
-                    val hasUploadToken = preferences.filesToken.isNotBlank()
-                    val initialStatus = initialRecordingStatusForUploadToken(hasUploadToken)
-                    val initialError = initialRecordingErrorForUploadToken(hasUploadToken)
+                    val canUpload = preferences.canUseCloudFeatures
+                    val initialStatus = initialRecordingStatusForUploadToken(canUpload)
+                    val initialError = initialRecordingErrorForUploadToken(canUpload)
                     val saved = RecordingUploadCoordinator.saveRecording(
                         context = context,
                         file = imported.file,
@@ -233,22 +256,23 @@ fun VibePubApp(
                         status = initialStatus,
                         lastError = initialError,
                         sourceType = RecordingSourceType.AUDIO_FILE,
+                        userId = preferences.effectiveUserId,
                     )
-                    Triple(imported.file, hasUploadToken, saved)
+                    Triple(imported.file, canUpload, saved)
                 }
             }
 
             result.fold(
-                onSuccess = { (file, hasUploadToken, saved) ->
+                onSuccess = { (file, canUpload, saved) ->
                     if (!saved) {
                         Toast.makeText(context, "音频太短，已丢弃", Toast.LENGTH_SHORT).show()
                         return@fold
                     }
-                    val queued = hasUploadToken && enqueueUpload(file)
+                    val queued = canUpload && enqueueUpload(file)
                     val message = if (queued) {
                         "音频已导入，正在上传处理"
                     } else {
-                        "音频已导入，请配置 FILES_TOKEN 后重试上传"
+                        "音频已导入，请登录后重试上传"
                     }
                     Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
                 },
@@ -298,14 +322,14 @@ fun VibePubApp(
                 val remoteDeleted = withContext(Dispatchers.IO) {
                     AppDatabase.getDatabase(context)
                         .recordingDao()
-                        .markDeletedByFilename(recording.filename, System.currentTimeMillis())
+                        .markDeletedByFilename(recording.userId, recording.filename, System.currentTimeMillis())
                     recording.localAudioPath?.let { File(it).delete() }
                     File(context.filesDir, "recordings/${recording.filename}").delete()
                     File(context.filesDir, "recordings/${transcriptFileNameForRecording(recording.filename)}").delete()
                     File(context.filesDir, "recordings/${coverImageFileNameForRecording(recording.filename)}").delete()
                     deleteRemoteRecording(
                         apiBaseUrl = preferences.apiBaseUrl,
-                        filesToken = preferences.filesToken,
+                        filesToken = preferences.accessToken,
                         filename = recording.filename,
                     )
                 }
@@ -334,8 +358,8 @@ fun VibePubApp(
             audioImportLauncher.launch(arrayOf("audio/*", "video/mp4"))
         },
         onSubmitText = submitText@{ text, titleHint ->
-            if (preferences.filesToken.isBlank()) {
-                Toast.makeText(context, "请先在设置中配置 FILES_TOKEN", Toast.LENGTH_LONG).show()
+            if (!preferences.canUseCloudFeatures) {
+                Toast.makeText(context, "请先登录并完成邮箱验证", Toast.LENGTH_LONG).show()
                 return@submitText false
             }
 
@@ -344,7 +368,7 @@ fun VibePubApp(
                     val selectedProfile = preferences.selectedWritingStyleProfile()
                     val submitted = TextSubmissionApi.submitText(
                         apiBaseUrl = preferences.apiBaseUrl,
-                        filesToken = preferences.filesToken,
+                        filesToken = preferences.accessToken,
                         text = text,
                         titleHint = titleHint,
                         styleProfileId = selectedProfile.id,
@@ -360,6 +384,7 @@ fun VibePubApp(
                         .recordingDao()
                         .upsertBest(
                             RecordingEntity(
+                                userId = preferences.effectiveUserId,
                                 filename = submitted.filename,
                                 durationMs = 0L,
                                 timestamp = nowMs,
@@ -394,27 +419,28 @@ fun VibePubApp(
             val result = withContext(Dispatchers.IO) {
                 runCatching {
                     val (file, duration) = recorder.stop()
-                    val hasUploadToken = preferences.filesToken.isNotBlank()
-                    val initialStatus = initialRecordingStatusForUploadToken(hasUploadToken)
-                    val initialError = initialRecordingErrorForUploadToken(hasUploadToken)
+                    val canUpload = preferences.canUseCloudFeatures
+                    val initialStatus = initialRecordingStatusForUploadToken(canUpload)
+                    val initialError = initialRecordingErrorForUploadToken(canUpload)
                     val saved = RecordingUploadCoordinator.saveRecording(
                         context = context,
                         file = file,
                         durationMs = duration,
                         status = initialStatus,
                         lastError = initialError,
+                        userId = preferences.effectiveUserId,
                     )
-                    Triple(saved, file, hasUploadToken)
+                    Triple(saved, file, canUpload)
                 }
             }
             result.fold(
-                onSuccess = { (saved, file, hasUploadToken) ->
+                onSuccess = { (saved, file, canUpload) ->
                     if (saved) {
-                        val queued = hasUploadToken && enqueueUpload(file)
+                        val queued = canUpload && enqueueUpload(file)
                         val message = if (queued) {
                             "录音已保存，正在上传处理"
                         } else {
-                            "录音已保存，请配置 FILES_TOKEN 后重试上传"
+                            "录音已保存，请登录后重试上传"
                         }
                         Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
                     } else {
@@ -440,11 +466,11 @@ internal fun initialRecordingStatusForUploadToken(hasUploadToken: Boolean): Stri
 }
 
 internal fun initialRecordingErrorForUploadToken(hasUploadToken: Boolean): String? {
-    return if (hasUploadToken) null else "请先在设置中配置 FILES_TOKEN"
+    return if (hasUploadToken) null else "请先登录后重试上传"
 }
 
 internal fun retryUploadToastMessage(queued: Boolean): String {
-    return if (queued) "已重新加入上传队列" else "请先配置 FILES_TOKEN 后重试上传"
+    return if (queued) "已重新加入上传队列" else "请先登录后重试上传"
 }
 
 internal fun deleteRecordingToastMessage(remoteDeleted: Boolean): String {

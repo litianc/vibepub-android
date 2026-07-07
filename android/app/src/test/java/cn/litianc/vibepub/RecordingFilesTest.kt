@@ -115,7 +115,7 @@ class RecordingFilesTest {
             initialRecordingStatusForUploadToken(hasUploadToken = false),
         )
         assertEquals(
-            "请先在设置中配置 FILES_TOKEN",
+            "请先登录后重试上传",
             initialRecordingErrorForUploadToken(hasUploadToken = false),
         )
     }
@@ -123,7 +123,7 @@ class RecordingFilesTest {
     @Test
     fun retryUploadMessageMatchesWhetherWorkWasQueued() {
         assertEquals("已重新加入上传队列", retryUploadToastMessage(queued = true))
-        assertEquals("请先配置 FILES_TOKEN 后重试上传", retryUploadToastMessage(queued = false))
+        assertEquals("请先登录后重试上传", retryUploadToastMessage(queued = false))
     }
 
     @Test

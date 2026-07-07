@@ -37,8 +37,9 @@ fun AppNavigation(
     val navController = rememberNavController()
     val context = LocalContext.current
     
-    val recordingsFlow = remember {
-        AppDatabase.getDatabase(context).recordingDao().getAllRecordingsFlow()
+    val userId = preferences.effectiveUserId
+    val recordingsFlow = remember(userId) {
+        AppDatabase.getDatabase(context).recordingDao().getAllRecordingsFlow(userId)
     }
     val lastSyncAtMs by remember(preferences) {
         preferences.lastSyncAtMsFlow()

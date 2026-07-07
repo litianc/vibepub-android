@@ -20,7 +20,7 @@ class ArticleRevisionApiTest {
     @Test
     fun mapsRevisionSubmitFailuresToUserReadableMessages() {
         assertEquals(
-            "FILES_TOKEN 无效或没有权限，无法提交修改",
+            "登录已失效或没有权限，无法提交修改",
             articleRevisionFailureMessage(401, ""),
         )
         assertEquals(

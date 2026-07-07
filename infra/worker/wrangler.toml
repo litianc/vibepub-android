@@ -6,14 +6,20 @@ routes = [
   { pattern = "vibepub.litianc.cn", custom_domain = true }
 ]
 
+send_email = [
+  { name = "EMAIL" }
+]
+
 [[r2_buckets]]
 binding = "FILES_BUCKET"
 bucket_name = "vibepub-files"
 
 [vars]
 PUBLIC_BASE_URL = "https://vibepub.litianc.cn"
-GITHUB_WORKFLOW_REF = "codex/new-feature"
+GITHUB_WORKFLOW_REF = "codex/ui-development"
 WRITING_AGENT_BASE_URL = "https://writing-agent.719153161.workers.dev"
+EMAIL_FROM = "VibePub <no-reply@vibepub.litianc.cn>"
+INVITE_BASE_URL = "vibepub://auth"
 
 [[d1_databases]]
 binding = "DB"

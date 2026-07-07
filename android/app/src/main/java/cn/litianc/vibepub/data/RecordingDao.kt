@@ -12,10 +12,12 @@ interface RecordingDao {
     @Query("""
         SELECT * FROM recordings
         WHERE deletedAt IS NULL
+          AND userId = :userId
           AND NOT EXISTS (
             SELECT 1
             FROM recordings AS better
             WHERE better.filename = recordings.filename
+              AND better.userId = recordings.userId
               AND better.deletedAt IS NULL
               AND (
                   better.durationMs > recordings.durationMs
@@ -32,15 +34,20 @@ interface RecordingDao {
             )
         ORDER BY timestamp DESC
     """)
-    fun getAllRecordingsFlow(): Flow<List<RecordingEntity>>
+    fun getAllRecordingsFlow(userId: String): Flow<List<RecordingEntity>>
+
+    fun getAllRecordingsFlow(): Flow<List<RecordingEntity>> =
+        getAllRecordingsFlow(DEFAULT_RECORDING_USER_ID)
 
     @Query("""
         SELECT * FROM recordings
         WHERE deletedAt IS NULL
+          AND userId = :userId
           AND NOT EXISTS (
             SELECT 1
             FROM recordings AS better
             WHERE better.filename = recordings.filename
+              AND better.userId = recordings.userId
               AND better.deletedAt IS NULL
               AND (
                   better.durationMs > recordings.durationMs
@@ -57,7 +64,10 @@ interface RecordingDao {
             )
         ORDER BY timestamp DESC
     """)
-    suspend fun getAllRecordings(): List<RecordingEntity>
+    suspend fun getAllRecordings(userId: String): List<RecordingEntity>
+
+    suspend fun getAllRecordings(): List<RecordingEntity> =
+        getAllRecordings(DEFAULT_RECORDING_USER_ID)
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertAll(recordings: List<RecordingEntity>): List<Long>
@@ -67,7 +77,7 @@ interface RecordingDao {
 
     @Transaction
     suspend fun upsertBest(recording: RecordingEntity): Long {
-        val existing = getRecordingByFilenameIncludingDeleted(recording.filename)
+        val existing = getRecordingByFilenameIncludingDeleted(recording.userId, recording.filename)
         if (existing != null && recording.deletedAt == null && existing.deletedAt != null) {
             return existing.id.toLong()
         }
@@ -78,36 +88,51 @@ interface RecordingDao {
         }
     }
 
-    @Query("DELETE FROM recordings WHERE filename = :filename")
-    suspend fun deleteByFilename(filename: String): Int
+    @Query("DELETE FROM recordings WHERE userId = :userId AND filename = :filename")
+    suspend fun deleteByFilename(userId: String, filename: String): Int
 
-    @Query("UPDATE recordings SET deletedAt = :deletedAt WHERE filename = :filename")
-    suspend fun markDeletedByFilename(filename: String, deletedAt: Long): Int
+    suspend fun deleteByFilename(filename: String): Int =
+        deleteByFilename(DEFAULT_RECORDING_USER_ID, filename)
+
+    @Query("UPDATE recordings SET deletedAt = :deletedAt WHERE userId = :userId AND filename = :filename")
+    suspend fun markDeletedByFilename(userId: String, filename: String, deletedAt: Long): Int
+
+    suspend fun markDeletedByFilename(filename: String, deletedAt: Long): Int =
+        markDeletedByFilename(DEFAULT_RECORDING_USER_ID, filename, deletedAt)
 
     @Query("SELECT * FROM recordings WHERE id = :id LIMIT 1")
     suspend fun getRecordingById(id: Int): RecordingEntity?
 
     @Query("""
         SELECT * FROM recordings
-        WHERE filename = :filename
+        WHERE userId = :userId
+          AND filename = :filename
           AND deletedAt IS NULL
         ORDER BY durationMs DESC, timestamp ASC, id ASC
         LIMIT 1
     """)
-    fun observeRecordingByFilename(filename: String): Flow<RecordingEntity?>
+    fun observeRecordingByFilename(userId: String, filename: String): Flow<RecordingEntity?>
+
+    fun observeRecordingByFilename(filename: String): Flow<RecordingEntity?> =
+        observeRecordingByFilename(DEFAULT_RECORDING_USER_ID, filename)
     
     @Query("""
         SELECT * FROM recordings
-        WHERE filename = :filename
+        WHERE userId = :userId
+          AND filename = :filename
           AND deletedAt IS NULL
         ORDER BY durationMs DESC, timestamp ASC, id ASC
         LIMIT 1
     """)
-    suspend fun getRecordingByFilename(filename: String): RecordingEntity?
+    suspend fun getRecordingByFilename(userId: String, filename: String): RecordingEntity?
+
+    suspend fun getRecordingByFilename(filename: String): RecordingEntity? =
+        getRecordingByFilename(DEFAULT_RECORDING_USER_ID, filename)
 
     @Query("""
         SELECT * FROM recordings
-        WHERE filename = :filename
+        WHERE userId = :userId
+          AND filename = :filename
         ORDER BY
             CASE WHEN deletedAt IS NULL THEN 0 ELSE 1 END,
             durationMs DESC,
@@ -115,8 +140,13 @@ interface RecordingDao {
             id ASC
         LIMIT 1
     """)
-    suspend fun getRecordingByFilenameIncludingDeleted(filename: String): RecordingEntity?
+    suspend fun getRecordingByFilenameIncludingDeleted(userId: String, filename: String): RecordingEntity?
+
+    suspend fun getRecordingByFilenameIncludingDeleted(filename: String): RecordingEntity? =
+        getRecordingByFilenameIncludingDeleted(DEFAULT_RECORDING_USER_ID, filename)
 }
+
+private const val DEFAULT_RECORDING_USER_ID = "default_user"
 
 internal fun RecordingEntity.shouldReplaceExisting(existing: RecordingEntity): Boolean {
     if (deletedAt == null && existing.deletedAt != null) return false

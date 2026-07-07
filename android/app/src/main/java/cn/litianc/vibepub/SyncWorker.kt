@@ -130,6 +130,7 @@ internal fun mergeRemoteRecordingFromListItem(
     recObj: JSONObject,
     existing: RecordingEntity?,
     nowMs: Long = System.currentTimeMillis(),
+    userId: String = AppPreferences.DEFAULT_USER_ID,
 ): RecordingEntity? {
     val filename = recObj.optString("filename").trim()
     if (filename.isBlank() || shouldSkipRemoteRecording(existing)) return null
@@ -168,6 +169,7 @@ internal fun mergeRemoteRecordingFromListItem(
 
     if (existing == null) {
         return RecordingEntity(
+            userId = userId,
             filename = filename,
             durationMs = fallbackDurationMs ?: 0L,
             timestamp = remoteCreatedAtMs ?: nowMs,
@@ -239,15 +241,17 @@ class SyncWorker(
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
         val prefs = AppPreferences(applicationContext)
         val apiBaseUrl = prefs.apiBaseUrl
-        val filesToken = prefs.filesToken
+        val accessToken = prefs.accessToken
+        val userId = prefs.effectiveUserId
 
         val dir = File(applicationContext.filesDir, "recordings")
         val dao = AppDatabase.getDatabase(applicationContext).recordingDao()
         var allSuccess = true
 
-        if (filesToken.isBlank()) {
+        if (accessToken.isBlank()) {
             markSyncAuthFailure(
-                message = "请先在设置中配置 FILES_TOKEN，无法同步云端状态",
+                userId = userId,
+                message = "请先登录，无法同步云端状态",
                 onlyActive = true,
             )
             return@withContext Result.failure()
@@ -260,7 +264,7 @@ class SyncWorker(
                 requestMethod = "GET"
                 connectTimeout = 10_000
                 readTimeout = 10_000
-                setRequestProperty("Authorization", "Bearer $filesToken")
+                setRequestProperty("Authorization", "Bearer $accessToken")
             }
             val responseCode = connection.responseCode
             if (responseCode in 200..299) {
@@ -272,8 +276,8 @@ class SyncWorker(
                         val recObj = recordingsArray.getJSONObject(i)
                         val filename = recObj.optString("filename").trim()
                         if (filename.isBlank()) continue
-                        val existing = dao.getRecordingByFilenameIncludingDeleted(filename)
-                        val merged = mergeRemoteRecordingFromListItem(recObj, existing)
+                        val existing = dao.getRecordingByFilenameIncludingDeleted(userId, filename)
+                        val merged = mergeRemoteRecordingFromListItem(recObj, existing, userId = userId)
                         if (merged != null) {
                             dao.upsertBest(merged)
                         }
@@ -281,7 +285,8 @@ class SyncWorker(
                 }
             } else if (classifySyncHttpFailure(responseCode) == SyncHttpFailure.AUTH) {
                 markSyncAuthFailure(
-                    message = "FILES_TOKEN 无效或没有权限，无法同步云端录音列表",
+                    userId = userId,
+                    message = "登录已失效或没有权限，无法同步云端录音列表",
                     onlyActive = true,
                 )
                 return@withContext Result.failure()
@@ -293,7 +298,7 @@ class SyncWorker(
             allSuccess = false
         }
 
-        val recordings = dao.getAllRecordings()
+        val recordings = dao.getAllRecordings(userId)
 
         for (recording in recordings) {
             val jsonFile = File(dir, transcriptFileNameForRecording(recording.filename))
@@ -306,7 +311,7 @@ class SyncWorker(
                         requestMethod = "GET"
                         connectTimeout = 10_000
                         readTimeout = 10_000
-                        setRequestProperty("Authorization", "Bearer $filesToken")
+                        setRequestProperty("Authorization", "Bearer $accessToken")
                     }
 
                     val responseCode = connection.responseCode
@@ -323,7 +328,7 @@ class SyncWorker(
                             dir = dir,
                             filename = recording.filename,
                             coverImageUrl = transcriptCoverImageUrl ?: recording.coverImageUrl,
-                            filesToken = filesToken,
+                            filesToken = accessToken,
                             force = wasExistingTranscript,
                         )
                         dao.upsertBest(
@@ -357,7 +362,7 @@ class SyncWorker(
                                 dao.upsertBest(
                                     recording.copy(
                                         status = RecordingStatus.FAILED.value,
-                                        lastError = "FILES_TOKEN 无效或没有权限，无法同步转录结果",
+                                        lastError = "登录已失效或没有权限，无法同步转录结果",
                                         processingStage = recording.processingStage,
                                     ),
                                 )
@@ -378,7 +383,7 @@ class SyncWorker(
                     dir = dir,
                     filename = recording.filename,
                     coverImageUrl = transcriptCoverImageUrl ?: recording.coverImageUrl,
-                    filesToken = filesToken,
+                    filesToken = accessToken,
                 )
                 if (recording.status != RecordingStatus.COMPLETED.value) {
                     val transcriptTitle = transcriptArticleTitleOrNull(transcript)
@@ -415,9 +420,9 @@ class SyncWorker(
         }
     }
 
-    private suspend fun markSyncAuthFailure(message: String, onlyActive: Boolean) {
+    private suspend fun markSyncAuthFailure(userId: String, message: String, onlyActive: Boolean) {
         val dao = AppDatabase.getDatabase(applicationContext).recordingDao()
-        dao.getAllRecordings().forEach { recording ->
+        dao.getAllRecordings(userId).forEach { recording ->
             val status = recording.status.asRecordingStatus()
             if (shouldMarkSyncConfigurationFailure(status, onlyActive)) {
                 dao.upsertBest(

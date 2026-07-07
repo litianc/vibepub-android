@@ -28,16 +28,17 @@ class AppHealthCheckTest {
     fun testPreferencesTwoWayBinding() {
         val context = composeTestRule.activity
         val prefs = AppPreferences(context)
-        val testToken = "TEST_TOKEN_${System.currentTimeMillis()}"
+        val testApiBaseUrl = "https://api-${System.currentTimeMillis()}.example.test"
         
         composeTestRule.setContent {
             SettingsScreen(onBackClick = {})
         }
 
-        composeTestRule.onNodeWithTag("FilesTokenField").performTextClearance()
-        composeTestRule.onNodeWithTag("FilesTokenField").performTextInput(testToken)
+        composeTestRule.onNodeWithTag("ApiBaseUrlField").performTextClearance()
+        composeTestRule.onNodeWithTag("ApiBaseUrlField").performTextInput(testApiBaseUrl)
         
-        assertEquals(testToken, prefs.filesToken)
+        assertEquals(testApiBaseUrl, prefs.apiBaseUrl)
+        composeTestRule.onNodeWithTag("FilesTokenField").assertDoesNotExist()
     }
 
     @Test

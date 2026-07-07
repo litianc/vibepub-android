@@ -1,34 +1,4 @@
-DROP TABLE IF EXISTS recordings;
-
-CREATE TABLE recordings (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id TEXT NOT NULL,
-    filename TEXT NOT NULL,
-    r2_key TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'UPLOADED', -- 'UPLOADED', 'TRANSCRIBED', 'FAILED'
-    duration_ms INTEGER,
-    raw_text TEXT,
-    article_title TEXT,
-    article_content TEXT,
-    processing_stage TEXT,
-    wechat_url TEXT,
-    wechat_draft_id TEXT,
-    cover_image_url TEXT,
-    source_type TEXT DEFAULT 'RECORDING',
-    style_profile_id TEXT,
-    style_profile_version TEXT,
-    layout_profile_id TEXT,
-    layout_profile_version TEXT,
-    error_message TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(user_id, filename)
-);
-
-CREATE INDEX idx_recordings_user_id ON recordings(user_id);
-CREATE INDEX idx_recordings_filename ON recordings(filename);
-
-CREATE TABLE users (
+CREATE TABLE IF NOT EXISTS users (
     id TEXT PRIMARY KEY,
     email TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
@@ -42,9 +12,9 @@ CREATE TABLE users (
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE INDEX idx_users_workspace_id ON users(workspace_id);
+CREATE INDEX IF NOT EXISTS idx_users_workspace_id ON users(workspace_id);
 
-CREATE TABLE invitations (
+CREATE TABLE IF NOT EXISTS invitations (
     id TEXT PRIMARY KEY,
     email TEXT NOT NULL,
     role TEXT NOT NULL DEFAULT 'user',
@@ -56,10 +26,10 @@ CREATE TABLE invitations (
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE INDEX idx_invitations_email ON invitations(email);
-CREATE INDEX idx_invitations_token_hash ON invitations(token_hash);
+CREATE INDEX IF NOT EXISTS idx_invitations_email ON invitations(email);
+CREATE INDEX IF NOT EXISTS idx_invitations_token_hash ON invitations(token_hash);
 
-CREATE TABLE email_verification_tokens (
+CREATE TABLE IF NOT EXISTS email_verification_tokens (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL,
     token_hash TEXT NOT NULL UNIQUE,
@@ -69,9 +39,9 @@ CREATE TABLE email_verification_tokens (
     FOREIGN KEY (user_id) REFERENCES users(id)
 );
 
-CREATE INDEX idx_email_verification_user_id ON email_verification_tokens(user_id);
+CREATE INDEX IF NOT EXISTS idx_email_verification_user_id ON email_verification_tokens(user_id);
 
-CREATE TABLE password_reset_tokens (
+CREATE TABLE IF NOT EXISTS password_reset_tokens (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL,
     token_hash TEXT NOT NULL UNIQUE,
@@ -81,9 +51,9 @@ CREATE TABLE password_reset_tokens (
     FOREIGN KEY (user_id) REFERENCES users(id)
 );
 
-CREATE INDEX idx_password_reset_user_id ON password_reset_tokens(user_id);
+CREATE INDEX IF NOT EXISTS idx_password_reset_user_id ON password_reset_tokens(user_id);
 
-CREATE TABLE sessions (
+CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL,
     access_token_hash TEXT NOT NULL UNIQUE,
@@ -96,11 +66,11 @@ CREATE TABLE sessions (
     FOREIGN KEY (user_id) REFERENCES users(id)
 );
 
-CREATE INDEX idx_sessions_user_id ON sessions(user_id);
-CREATE INDEX idx_sessions_access_token_hash ON sessions(access_token_hash);
-CREATE INDEX idx_sessions_refresh_token_hash ON sessions(refresh_token_hash);
+CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_access_token_hash ON sessions(access_token_hash);
+CREATE INDEX IF NOT EXISTS idx_sessions_refresh_token_hash ON sessions(refresh_token_hash);
 
-CREATE TABLE publishing_accounts (
+CREATE TABLE IF NOT EXISTS publishing_accounts (
     user_id TEXT NOT NULL,
     type TEXT NOT NULL DEFAULT 'wechat',
     app_id TEXT NOT NULL,

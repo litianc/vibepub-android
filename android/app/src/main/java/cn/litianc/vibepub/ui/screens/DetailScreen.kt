@@ -200,8 +200,9 @@ fun DetailScreen(
     val preferences = remember { AppPreferences(context.applicationContext) }
     val revisionRecorder = remember { ArticleRevisionRecorder(context.applicationContext) }
     val coroutineScope = rememberCoroutineScope()
-    val recordingFlow = remember(filename) {
-        AppDatabase.getDatabase(context).recordingDao().observeRecordingByFilename(filename)
+    val userId = preferences.effectiveUserId
+    val recordingFlow = remember(userId, filename) {
+        AppDatabase.getDatabase(context).recordingDao().observeRecordingByFilename(userId, filename)
     }
     val recording by recordingFlow.collectAsState(initial = null)
     var transcript by remember(filename) { mutableStateOf<JSONObject?>(null) }
@@ -271,7 +272,7 @@ fun DetailScreen(
             runCatching {
                 ArticleRevisionApi.submitVoiceRevision(
                     apiBaseUrl = preferences.apiBaseUrl,
-                    filesToken = preferences.filesToken,
+                    filesToken = preferences.accessToken,
                     filename = currentRecording.filename,
                     audioFile = recorded.file,
                 )
@@ -534,7 +535,7 @@ fun DetailScreen(
 
             ArticleBodyContent(
                 blocks = articleBodyBlocks,
-                filesToken = preferences.filesToken,
+                filesToken = preferences.accessToken,
             )
             Spacer(modifier = Modifier.height(40.dp))
         }

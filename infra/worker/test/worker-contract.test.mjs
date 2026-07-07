@@ -129,9 +129,9 @@ test("deletes a recording and its remote files", async () => {
           valueCalls.push(values);
           return {
             results: [
-              {
-                r2_key: "inbox/custom-upload-key.m4a",
-              },
+      {
+        r2_key: "users/default_user/inbox/custom-upload-key.m4a",
+      },
             ],
           };
         },
@@ -171,11 +171,11 @@ test("deletes a recording and its remote files", async () => {
     "VibePub-2026-06-30-214139-0m30s-Debug-Audio-Import.mp3",
   ]);
   assert.deepEqual(deletedKeys.sort(), [
-    "covers/VibePub-2026-06-30-214139-0m30s-Debug-Audio-Import.png",
-    "inbox/VibePub-2026-06-30-214139-0m30s-Debug-Audio-Import.mp3",
-    "inbox/custom-upload-key.m4a",
-    "profile-selections/VibePub-2026-06-30-214139-0m30s-Debug-Audio-Import.mp3.json",
-    "transcripts/VibePub-2026-06-30-214139-0m30s-Debug-Audio-Import.json",
+    "users/default_user/covers/VibePub-2026-06-30-214139-0m30s-Debug-Audio-Import.png",
+    "users/default_user/inbox/VibePub-2026-06-30-214139-0m30s-Debug-Audio-Import.mp3",
+    "users/default_user/inbox/custom-upload-key.m4a",
+    "users/default_user/profile-selections/VibePub-2026-06-30-214139-0m30s-Debug-Audio-Import.mp3.json",
+    "users/default_user/transcripts/VibePub-2026-06-30-214139-0m30s-Debug-Audio-Import.json",
   ].sort());
 });
 
@@ -191,41 +191,222 @@ test("rejects unauthorized recording deletion", async () => {
   assert.equal(response.status, 401);
 });
 
-test("keeps rich recording fields when only processing_stage is not migrated yet", async () => {
-  let calls = 0;
+test("returns the current user from an access-token session", async () => {
+  const db = sessionDb({
+    id: "usr_1",
+    email: "reader@example.com",
+    role: "user",
+    workspace_id: "ws_reader",
+    email_verified_at: "2026-07-07T00:00:00.000Z",
+  });
+
+  const response = await worker.fetch(
+    sessionRequest("https://example.test/api/me"),
+    createEnv({ DB: db }),
+    createExecutionContext(),
+  );
+
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.deepEqual(body.user, {
+    id: "usr_1",
+    email: "reader@example.com",
+    role: "user",
+    workspace_id: "ws_reader",
+    email_verified: true,
+  });
+});
+
+test("blocks write APIs until the session email is verified", async () => {
+  let putCalled = false;
+  const db = sessionDb({
+    id: "usr_unverified",
+    email: "pending@example.com",
+    role: "user",
+    workspace_id: "ws_pending",
+    email_verified_at: null,
+  });
+  const bucket = {
+    async put() {
+      putCalled = true;
+    },
+  };
+
+  const response = await worker.fetch(
+    sessionRequest("https://example.test/api/uploads", {
+      method: "POST",
+      headers: { "X-File-Name": "voice.m4a" },
+      body: "audio",
+    }),
+    createEnv({ DB: db, FILES_BUCKET: bucket }),
+    createExecutionContext(),
+  );
+
+  assert.equal(response.status, 403);
+  assert.equal((await response.json()).error, "email_unverified");
+  assert.equal(putCalled, false);
+});
+
+test("allows the bootstrap admin to invite users and send email", async () => {
+  const invitationInserts = [];
+  const emails = [];
   const db = {
     prepare(sql) {
-      calls += 1;
-      if (calls === 1) {
-        assert.match(sql, /duration_ms/);
-        assert.match(sql, /processing_stage/);
+      assert.match(sql, /INSERT INTO invitations/);
+      return statement({
+        run: async (values) => {
+          invitationInserts.push(values);
+          return { meta: { changes: 1 } };
+        },
+      });
+    },
+  };
+
+  const response = await worker.fetch(
+    authorizedRequest("https://example.test/api/admin/users", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "new-user@example.com", role: "user" }),
+    }),
+    createEnv({
+      DB: db,
+      EMAIL: {
+        send: async (message) => {
+          emails.push(message);
+        },
+      },
+    }),
+    createExecutionContext(),
+  );
+
+  assert.equal(response.status, 201);
+  const body = await response.json();
+  assert.equal(body.invitation.email, "new-user@example.com");
+  assert.equal(body.invitation.role, "user");
+  assert.match(body.invitation.invite_url, /accept-invite/);
+  assert.equal(invitationInserts.length, 1);
+  assert.equal(invitationInserts[0][1], "new-user@example.com");
+  assert.equal(invitationInserts[0][4], "default_user");
+  assert.equal(emails.length, 1);
+  assert.equal(emails[0].to, "new-user@example.com");
+});
+
+test("stores publishing credentials encrypted and exposes them only to internal callers", async () => {
+  let publishingRow = null;
+  const db = {
+    prepare(sql) {
+      if (sql.includes("FROM sessions")) {
+        return sessionStatement({
+          id: "usr_publisher",
+          email: "publisher@example.com",
+          role: "user",
+          workspace_id: "ws_publisher",
+          email_verified_at: "2026-07-07T00:00:00.000Z",
+        });
+      }
+      if (sql.includes("SELECT app_secret_ciphertext FROM publishing_accounts")) {
+        return statement({ all: async () => ({ results: [] }) });
+      }
+      if (sql.includes("INSERT INTO publishing_accounts")) {
+        return statement({
+          run: async (values) => {
+            publishingRow = {
+              user_id: values[0],
+              app_id: values[1],
+              app_secret_ciphertext: values[2],
+              proxy_url: values[3],
+              updated_at: values[5],
+            };
+            return { meta: { changes: 1 } };
+          },
+        });
+      }
+      if (sql.includes("SELECT app_id, proxy_url, updated_at FROM publishing_accounts")) {
+        return statement({
+          all: async () => ({
+            results: publishingRow
+              ? [{
+                  app_id: publishingRow.app_id,
+                  proxy_url: publishingRow.proxy_url,
+                  updated_at: publishingRow.updated_at,
+                }]
+              : [],
+          }),
+        });
+      }
+      if (sql.includes("SELECT app_id, app_secret_ciphertext, proxy_url FROM publishing_accounts")) {
+        return statement({
+          all: async () => ({
+            results: publishingRow
+              ? [{
+                  app_id: publishingRow.app_id,
+                  app_secret_ciphertext: publishingRow.app_secret_ciphertext,
+                  proxy_url: publishingRow.proxy_url,
+                }]
+              : [],
+          }),
+        });
+      }
+      throw new Error(`Unexpected SQL: ${sql}`);
+    },
+  };
+
+  const updateResponse = await worker.fetch(
+    sessionRequest("https://example.test/api/publishing-account", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        app_id: "wx123",
+        app_secret: "secret-value",
+        proxy_url: "https://proxy.example.test",
+      }),
+    }),
+    createEnv({
+      DB: db,
+      CREDENTIAL_ENCRYPTION_KEY: "test-credential-key",
+    }),
+    createExecutionContext(),
+  );
+
+  assert.equal(updateResponse.status, 200);
+  assert.equal((await updateResponse.json()).publishing_account.connected, true);
+  assert.equal(publishingRow.user_id, "usr_publisher");
+  assert.notEqual(publishingRow.app_secret_ciphertext, "secret-value");
+  assert.match(publishingRow.app_secret_ciphertext, /^v1:/);
+
+  const internalResponse = await worker.fetch(
+    new Request("https://example.test/api/internal/publishing-account", {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer mining-token",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ user_id: "usr_publisher" }),
+    }),
+    createEnv({
+      DB: db,
+      MINING_SERVICE_TOKEN: "mining-token",
+      CREDENTIAL_ENCRYPTION_KEY: "test-credential-key",
+    }),
+    createExecutionContext(),
+  );
+
+  assert.equal(internalResponse.status, 200);
+  assert.equal((await internalResponse.json()).publishing_account.app_secret, "secret-value");
+});
+
+test("keeps rich recording fields when only processing_stage is not migrated yet", async () => {
+  const sqlCalls = [];
+  const db = {
+    prepare(sql) {
+      sqlCalls.push(sql);
+      if (/\n\s*processing_stage,/.test(sql)) {
         return statement({
           all: async () => {
             throw new Error("D1_ERROR: no such column: processing_stage");
           },
         });
       }
-      if (calls === 2) {
-        assert.match(sql, /duration_ms/);
-        assert.match(sql, /processing_stage/);
-        assert.doesNotMatch(sql, /cover_image_url/);
-        return statement({
-          all: async () => {
-            throw new Error("D1_ERROR: no such column: processing_stage");
-          },
-        });
-      }
-      if (calls === 3) {
-        assert.doesNotMatch(sql, /duration_ms/);
-        assert.match(sql, /processing_stage/);
-        return statement({
-          all: async () => {
-            throw new Error("D1_ERROR: no such column: processing_stage");
-          },
-        });
-      }
-      assert.doesNotMatch(sql, /duration_ms/);
-      assert.doesNotMatch(sql, /processing_stage/);
       return statement({
         all: async () => ({
           results: [
@@ -237,6 +418,7 @@ test("keeps rich recording fields when only processing_stage is not migrated yet
               updated_at: "2026-06-29 08:01:00",
               article_title: "旧库文章",
               raw_text_preview: "旧库转录预览",
+              processing_stage: null,
               wechat_url: null,
               wechat_draft_id: "MEDIA_ID_OLD",
               error_message: null,
@@ -260,34 +442,23 @@ test("keeps rich recording fields when only processing_stage is not migrated yet
   assert.equal(body.recordings[0].duration_ms, null);
   assert.equal(body.recordings[0].wechat_draft_id, "MEDIA_ID_OLD");
   assert.equal(body.recordings[0].cover_image_url, null);
+  assert.equal(sqlCalls.length, 2);
+  assert.match(sqlCalls[0], /\n\s*processing_stage,/);
+  assert.match(sqlCalls[1], /NULL AS processing_stage/);
 });
 
 test("keeps processing stage when only duration column is not migrated yet", async () => {
-  let calls = 0;
+  const sqlCalls = [];
   const db = {
     prepare(sql) {
-      calls += 1;
-      if (calls === 1) {
-        assert.match(sql, /duration_ms/);
-        assert.match(sql, /processing_stage/);
+      sqlCalls.push(sql);
+      if (/\n\s*duration_ms,/.test(sql)) {
         return statement({
           all: async () => {
             throw new Error("D1_ERROR: no such column: duration_ms");
           },
         });
       }
-      if (calls === 2) {
-        assert.match(sql, /duration_ms/);
-        assert.match(sql, /processing_stage/);
-        assert.doesNotMatch(sql, /cover_image_url/);
-        return statement({
-          all: async () => {
-            throw new Error("D1_ERROR: no such column: duration_ms");
-          },
-        });
-      }
-      assert.doesNotMatch(sql, /duration_ms/);
-      assert.match(sql, /processing_stage/);
       return statement({
         all: async () => ({
           results: [
@@ -321,6 +492,10 @@ test("keeps processing stage when only duration column is not migrated yet", asy
   assert.equal(body.recordings[0].duration_ms, null);
   assert.equal(body.recordings[0].processing_stage, "DRAFTING");
   assert.equal(body.recordings[0].cover_image_url, null);
+  assert.equal(sqlCalls.length, 2);
+  assert.match(sqlCalls[0], /\n\s*duration_ms,/);
+  assert.match(sqlCalls[1], /NULL AS duration_ms/);
+  assert.match(sqlCalls[1], /\n\s*processing_stage,/);
 });
 
 test("stores parsed duration on upload when duration column exists", async () => {
@@ -368,14 +543,14 @@ test("stores parsed duration on upload when duration column exists", async () =>
   assert.equal(putCalls.length, 2);
   assert.equal(putCalls[0].options.customMetadata.styleProfileId, "style_product_review");
   assert.equal(putCalls[0].options.customMetadata.layoutProfileId, "wechat_clean_article");
-  assert.equal(putCalls[1].key, "profile-selections/VibePub-2026-06-30-160000-0m18s-Tue-Afternoon.m4a.json");
+  assert.equal(putCalls[1].key, "users/default_user/profile-selections/VibePub-2026-06-30-160000-0m18s-Tue-Afternoon.m4a.json");
   const sidecarBody = JSON.parse(String(putCalls[1].body));
   assert.equal(sidecarBody.styleProfileName, "我的产品复盘风格");
   assert.equal(sidecarBody.styleProfileBody, "请用真实克制的产品复盘风格写作。");
   assert.match(String(sqlCalls[0]), /duration_ms = COALESCE/);
   assert.match(String(sqlCalls[1]), /processing_stage, duration_ms/);
   assert.deepEqual(valueCalls[0].slice(0, 4), [
-    "inbox/VibePub-2026-06-30-160000-0m18s-Tue-Afternoon.m4a",
+    "users/default_user/inbox/VibePub-2026-06-30-160000-0m18s-Tue-Afternoon.m4a",
     "UPLOADED",
     "QUEUED",
     18_000,
@@ -389,7 +564,7 @@ test("stores parsed duration on upload when duration column exists", async () =>
   assert.deepEqual(valueCalls[1].slice(0, 6), [
     "default_user",
     "VibePub-2026-06-30-160000-0m18s-Tue-Afternoon.m4a",
-    "inbox/VibePub-2026-06-30-160000-0m18s-Tue-Afternoon.m4a",
+    "users/default_user/inbox/VibePub-2026-06-30-160000-0m18s-Tue-Afternoon.m4a",
     "UPLOADED",
     "QUEUED",
     18_000,
@@ -441,14 +616,14 @@ test("keeps upload stage when only duration column is not migrated yet", async (
   assert.doesNotMatch(String(sqlCalls[2]), /duration_ms/);
   assert.match(String(sqlCalls[2]), /processing_stage/);
   assert.deepEqual(valueCalls[1].slice(0, 3), [
-    "inbox/VibePub-2026-06-30-160000-0m18s-Tue-Afternoon.m4a",
+    "users/default_user/inbox/VibePub-2026-06-30-160000-0m18s-Tue-Afternoon.m4a",
     "UPLOADED",
     "QUEUED",
   ]);
   assert.deepEqual(valueCalls[2].slice(0, 5), [
     "default_user",
     "VibePub-2026-06-30-160000-0m18s-Tue-Afternoon.m4a",
-    "inbox/VibePub-2026-06-30-160000-0m18s-Tue-Afternoon.m4a",
+    "users/default_user/inbox/VibePub-2026-06-30-160000-0m18s-Tue-Afternoon.m4a",
     "UPLOADED",
     "QUEUED",
   ]);
@@ -507,6 +682,8 @@ test("dispatches mining workflow for the uploaded filename", async () => {
   assert.equal(dispatches[0].body.ref, "codex/android-experience-v1");
   assert.deepEqual(dispatches[0].body.inputs, {
     target_filename: "VibePub-2026-06-30-160000-0m18s-Tue-Afternoon.m4a",
+    target_key: "users/default_user/inbox/VibePub-2026-06-30-160000-0m18s-Tue-Afternoon.m4a",
+    user_id: "default_user",
   });
 });
 
@@ -581,7 +758,7 @@ test("creates text submission and dispatches mining workflow", async () => {
     assert.equal(body.status, "PROCESSING");
     assert.equal(body.processing_stage, "REWRITING");
     assert.equal(putCalls.length, 1);
-    assert.equal(putCalls[0].key, `text-submissions/${body.filename}`);
+  assert.equal(putCalls[0].key, `users/default_user/text-submissions/${body.filename}`);
     assert.equal(putCalls[0].options.httpMetadata.contentType, "application/json; charset=utf-8");
     const textPayload = JSON.parse(String(putCalls[0].body));
     assert.equal(textPayload.text, "这是一段手动输入的文字，后续应该直接进入文章改写流程。");
@@ -595,7 +772,7 @@ test("creates text submission and dispatches mining workflow", async () => {
     assert.deepEqual(valueCalls[1].slice(0, 9), [
       "default_user",
       body.filename,
-      `text-submissions/${body.filename}`,
+    `users/default_user/text-submissions/${body.filename}`,
       "PROCESSING",
       "REWRITING",
       0,
@@ -617,7 +794,9 @@ test("creates text submission and dispatches mining workflow", async () => {
 
   assert.equal(dispatches.length, 1);
   assert.deepEqual(dispatches[0].body.inputs, {
-    target_filename: putCalls[0].key.replace("text-submissions/", ""),
+    target_filename: putCalls[0].key.replace("users/default_user/text-submissions/", ""),
+    target_key: putCalls[0].key,
+    user_id: "default_user",
   });
 });
 
@@ -683,12 +862,12 @@ test("creates voice article revision request and dispatches mining workflow with
     assert.equal(response.status, 202);
     const body = await response.json();
     assert.equal(body.status, "QUEUED");
-    assert.match(body.revision_request_key, /^revision-requests\/VibePub-2026-07-02-160000-0m18s-Test\/.+\.json$/);
-    assert.deepEqual(getCalls, [
-      "transcripts/VibePub-2026-07-02-160000-0m18s-Test.json",
-    ]);
-    assert.equal(putCalls.length, 2);
-    assert.match(putCalls[0].key, /^revision-requests\/VibePub-2026-07-02-160000-0m18s-Test\/.+\.m4a$/);
+  assert.match(body.revision_request_key, /^users\/default_user\/revision-requests\/VibePub-2026-07-02-160000-0m18s-Test\/.+\.json$/);
+  assert.deepEqual(getCalls, [
+    "users/default_user/transcripts/VibePub-2026-07-02-160000-0m18s-Test.json",
+  ]);
+  assert.equal(putCalls.length, 2);
+  assert.match(putCalls[0].key, /^users\/default_user\/revision-requests\/VibePub-2026-07-02-160000-0m18s-Test\/.+\.m4a$/);
     assert.equal(putCalls[0].options.httpMetadata.contentType, "audio/mp4");
     assert.equal(putCalls[1].key, body.revision_request_key);
     assert.match(sqlCalls[0], /processing_stage = \?/);
@@ -707,6 +886,7 @@ test("creates voice article revision request and dispatches mining workflow with
   assert.equal(dispatches.length, 1);
   assert.deepEqual(dispatches[0].body.inputs, {
     target_filename: "VibePub-2026-07-02-160000-0m18s-Test.m4a",
+    user_id: "default_user",
     revision_request_key: putCalls[1].key,
   });
 });
@@ -1087,8 +1267,10 @@ test("proxies style source imports without exposing WritingAgent token to Androi
   }
 
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].url, "https://writing-agent.example.test/v1/style-source-imports");
+  assert.equal(calls[0].url, "https://writing-agent.example.test/v1/style-source-imports?workspace_id=vibepub-dogfood");
   assert.equal(calls[0].init.headers.get("Authorization"), "Bearer writing-token");
+  assert.equal(calls[0].init.headers.get("X-VibePub-User-Id"), "default_user");
+  assert.equal(calls[0].init.headers.get("X-VibePub-Workspace-Id"), "vibepub-dogfood");
   assert.equal(calls[0].init.headers.get("Content-Type"), "application/json");
   assert.equal(JSON.parse(calls[0].body).title, "参考文章");
 });
@@ -1120,8 +1302,39 @@ async function loadWorker() {
 
 function authorizedRequest(url, init = {}) {
   const headers = new Headers(init.headers || {});
-  headers.set("Authorization", "Bearer test-token");
+  headers.set("X-Files-Token", "test-token");
   return new Request(url, { ...init, headers });
+}
+
+function sessionRequest(url, init = {}) {
+  const headers = new Headers(init.headers || {});
+  headers.set("Authorization", "Bearer session-access-token");
+  return new Request(url, { ...init, headers });
+}
+
+function sessionDb(userRow) {
+  return {
+    prepare(sql) {
+      assert.match(sql, /FROM sessions/);
+      return sessionStatement(userRow);
+    },
+  };
+}
+
+function sessionStatement(userRow) {
+  return statement({
+    all: async () => ({
+      results: [
+        {
+          session_id: "ses_1",
+          access_expires_at: futureIso(),
+          revoked_at: null,
+          status: "active",
+          ...userRow,
+        },
+      ],
+    }),
+  });
 }
 
 function createEnv(overrides = {}) {
@@ -1132,6 +1345,10 @@ function createEnv(overrides = {}) {
     DB: createDb([]),
     ...overrides,
   };
+}
+
+function futureIso() {
+  return new Date(Date.now() + 60 * 60 * 1000).toISOString();
 }
 
 function createExecutionContext() {

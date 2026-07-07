@@ -13,9 +13,101 @@ class AppPreferences(context: Context) {
         get() = prefs.getString(KEY_API_BASE_URL, DEFAULT_API_BASE_URL) ?: DEFAULT_API_BASE_URL
         set(value) = prefs.edit().putString(KEY_API_BASE_URL, value.trim()).apply()
 
+    var accessToken: String
+        get() = prefs.getString(KEY_ACCESS_TOKEN, "") ?: ""
+        set(value) {
+            val normalized = value.trim()
+            prefs.edit()
+                .putString(KEY_ACCESS_TOKEN, normalized)
+                .putString(KEY_FILES_TOKEN, normalized)
+                .apply()
+            authStateUpdates.tryEmit(authStateVersion)
+        }
+
+    var refreshToken: String
+        get() = prefs.getString(KEY_REFRESH_TOKEN, "") ?: ""
+        set(value) = prefs.edit().putString(KEY_REFRESH_TOKEN, value.trim()).apply()
+
+    var userId: String
+        get() = prefs.getString(KEY_USER_ID, "") ?: ""
+        set(value) = prefs.edit().putString(KEY_USER_ID, value.trim()).apply()
+
+    var userEmail: String
+        get() = prefs.getString(KEY_USER_EMAIL, "") ?: ""
+        set(value) = prefs.edit().putString(KEY_USER_EMAIL, value.trim()).apply()
+
+    var userRole: String
+        get() = prefs.getString(KEY_USER_ROLE, "user") ?: "user"
+        set(value) = prefs.edit().putString(KEY_USER_ROLE, value.trim().ifBlank { "user" }).apply()
+
+    var emailVerified: Boolean
+        get() = prefs.getBoolean(KEY_EMAIL_VERIFIED, false)
+        set(value) = prefs.edit().putBoolean(KEY_EMAIL_VERIFIED, value).apply()
+
+    val effectiveUserId: String
+        get() = userId.ifBlank { DEFAULT_USER_ID }
+
+    val isAuthenticated: Boolean
+        get() = accessToken.isNotBlank() && userId.isNotBlank()
+
+    val canUseCloudFeatures: Boolean
+        get() = isAuthenticated && emailVerified
+
+    val authStateVersion: Long
+        get() = prefs.getLong(KEY_AUTH_STATE_VERSION, 0L)
+
+    fun authStateFlow(): Flow<Long> = authStateUpdates
+        .onStart { emit(authStateVersion) }
+        .distinctUntilChanged()
+
+    fun saveAuthSession(session: AuthSession) {
+        val nextVersion = System.currentTimeMillis()
+        prefs.edit()
+            .putString(KEY_ACCESS_TOKEN, session.accessToken.trim())
+            .putString(KEY_REFRESH_TOKEN, session.refreshToken.trim())
+            .putString(KEY_FILES_TOKEN, session.accessToken.trim())
+            .putString(KEY_USER_ID, session.user.id.trim())
+            .putString(KEY_USER_EMAIL, session.user.email.trim())
+            .putString(KEY_USER_ROLE, session.user.role.trim().ifBlank { "user" })
+            .putBoolean(KEY_EMAIL_VERIFIED, session.user.emailVerified)
+            .putLong(KEY_AUTH_STATE_VERSION, nextVersion)
+            .apply()
+        authStateUpdates.tryEmit(nextVersion)
+    }
+
+    fun updateCurrentUser(user: AuthUser) {
+        val nextVersion = System.currentTimeMillis()
+        prefs.edit()
+            .putString(KEY_USER_ID, user.id.trim())
+            .putString(KEY_USER_EMAIL, user.email.trim())
+            .putString(KEY_USER_ROLE, user.role.trim().ifBlank { "user" })
+            .putBoolean(KEY_EMAIL_VERIFIED, user.emailVerified)
+            .putLong(KEY_AUTH_STATE_VERSION, nextVersion)
+            .apply()
+        authStateUpdates.tryEmit(nextVersion)
+    }
+
+    fun clearAuthSession() {
+        val nextVersion = System.currentTimeMillis()
+        prefs.edit()
+            .remove(KEY_ACCESS_TOKEN)
+            .remove(KEY_REFRESH_TOKEN)
+            .remove(KEY_FILES_TOKEN)
+            .remove(KEY_USER_ID)
+            .remove(KEY_USER_EMAIL)
+            .remove(KEY_USER_ROLE)
+            .remove(KEY_EMAIL_VERIFIED)
+            .putLong(KEY_AUTH_STATE_VERSION, nextVersion)
+            .apply()
+        authStateUpdates.tryEmit(nextVersion)
+    }
+
+    @Deprecated("Use accessToken. This remains only for old local preferences and tests.")
     var filesToken: String
-        get() = prefs.getString(KEY_FILES_TOKEN, "") ?: ""
-        set(value) = prefs.edit().putString(KEY_FILES_TOKEN, value.trim()).apply()
+        get() = accessToken
+        set(value) {
+            accessToken = value
+        }
 
     var lastSyncAtMs: Long
         get() = prefs.getLong(KEY_LAST_SYNC_AT_MS, 0L)
@@ -146,8 +238,16 @@ class AppPreferences(context: Context) {
 
     companion object {
         const val DEFAULT_API_BASE_URL = "https://vibepub.litianc.cn"
+        const val DEFAULT_USER_ID = "default_user"
         private const val KEY_API_BASE_URL = "api_base_url"
         private const val KEY_FILES_TOKEN = "files_token"
+        private const val KEY_ACCESS_TOKEN = "access_token"
+        private const val KEY_REFRESH_TOKEN = "refresh_token"
+        private const val KEY_USER_ID = "user_id"
+        private const val KEY_USER_EMAIL = "user_email"
+        private const val KEY_USER_ROLE = "user_role"
+        private const val KEY_EMAIL_VERIFIED = "email_verified"
+        private const val KEY_AUTH_STATE_VERSION = "auth_state_version"
         private const val KEY_TRANSCRIBED_FILES = "transcribed_files"
         private const val KEY_LAST_SYNC_AT_MS = "last_sync_at_ms"
         private const val KEY_SELECTED_STYLE_PROFILE_ID = "selected_style_profile_id"
@@ -157,5 +257,6 @@ class AppPreferences(context: Context) {
         private const val KEY_CUSTOM_WRITING_STYLE_PROFILES = "custom_writing_style_profiles"
         private const val KEY_REMOTE_WRITING_STYLE_PROFILES = "remote_writing_style_profiles"
         private val lastSyncAtMsUpdates = MutableSharedFlow<Long>(extraBufferCapacity = 1)
+        private val authStateUpdates = MutableSharedFlow<Long>(extraBufferCapacity = 1)
     }
 }

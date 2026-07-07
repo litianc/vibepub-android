@@ -88,7 +88,7 @@ class WorkflowHelpDialogTest {
                     durationMs = 42_000L,
                     timestamp = 1L,
                     status = RecordingStatus.FAILED.value,
-                    lastError = "FILES_TOKEN 无效",
+                    lastError = "登录已失效",
                 ),
                 onDismiss = {},
             )
@@ -96,8 +96,8 @@ class WorkflowHelpDialogTest {
 
         composeTestRule.onAllNodesWithText("上传音频 · 需处理").assertCountEquals(1)
         composeTestRule.onNodeWithText("需要关注").assertIsDisplayed()
-        composeTestRule.onNodeWithText("需要处理：到设置页更新 FILES_TOKEN，并用“测试后端连接”确认授权。").assertIsDisplayed()
-        composeTestRule.onAllNodesWithText("失败后可以先重试；如果仍失败，到设置页检查后端连接和 FILES_TOKEN。").assertCountEquals(1)
+        composeTestRule.onNodeWithText("需要处理：到设置页重新登录，并用“测试后端连接”确认授权。").assertIsDisplayed()
+        composeTestRule.onAllNodesWithText("失败后可以先重试；如果仍失败，到设置页检查后端连接和登录状态。").assertCountEquals(1)
     }
 
     @Test
@@ -221,7 +221,7 @@ class WorkflowHelpDialogTest {
                     durationMs = 42_000L,
                     timestamp = 1L,
                     status = RecordingStatus.FAILED.value,
-                    lastError = "FILES_TOKEN 无效",
+                    lastError = "登录已失效",
                 ),
                 lastSyncAtMs = 1_000L,
                 onClick = {},
@@ -334,14 +334,14 @@ class WorkflowHelpDialogTest {
                     durationMs = 42_000L,
                     timestamp = 1L,
                     status = RecordingStatus.FAILED.value,
-                    lastError = "FILES_TOKEN 无效",
+                    lastError = "登录已失效",
                 ),
             )
         }
 
         composeTestRule.onAllNodesWithText("需要处理").assertCountEquals(2)
         composeTestRule.onNodeWithText("第 2/7 步").assertIsDisplayed()
-        composeTestRule.onNodeWithText("到设置页更新 FILES_TOKEN，并用“测试后端连接”确认授权。").assertIsDisplayed()
+        composeTestRule.onNodeWithText("到设置页重新登录，并用“测试后端连接”确认授权。").assertIsDisplayed()
         composeTestRule.onAllNodesWithText("上传音频 · 需处理").assertCountEquals(0)
 
         composeTestRule.onNodeWithTag("DetailWorkflowHelpButton").performClick()

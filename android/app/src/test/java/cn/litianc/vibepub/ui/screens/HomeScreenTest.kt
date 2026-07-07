@@ -69,7 +69,7 @@ class HomeScreenTest {
             nowMs = 1_000L,
         )
 
-        assertEquals("有本机内容还没上传，先点卡片上的上传；反复失败时检查 FILES_TOKEN。", notice?.message)
+        assertEquals("有本机内容还没上传，先点卡片上的上传；反复失败时检查登录状态。", notice?.message)
     }
 
     @Test

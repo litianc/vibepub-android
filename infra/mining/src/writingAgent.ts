@@ -5,6 +5,8 @@ type RewriteArticleInput = {
   rawText: string;
   clientJobId: string;
   sourceType: "audio_transcript" | "text_submission";
+  userId?: string;
+  workspaceId?: string;
   titleHint?: string;
   styleProfileId?: string;
   styleProfileVersion?: string;
@@ -42,6 +44,8 @@ type ReviseArticleInput = {
   currentContent: string;
   instructionText: string;
   clientJobId?: string;
+  userId?: string;
+  workspaceId?: string;
   styleProfileId?: string;
   styleProfileVersion?: string;
   styleProfileName?: string;
@@ -67,6 +71,7 @@ export async function rewriteArticle(input: RewriteArticleInput): Promise<Articl
     headers: {
       "Authorization": `Bearer ${token}`,
       "Content-Type": "application/json",
+      ...writingAgentIdentityHeaders(input),
     },
     body: JSON.stringify(buildWritingAgentRequest(input)),
   });
@@ -100,6 +105,7 @@ export async function reviseArticle(input: ReviseArticleInput): Promise<ArticleR
     headers: {
       "Authorization": `Bearer ${token}`,
       "Content-Type": "application/json",
+      ...writingAgentIdentityHeaders(input),
     },
     body: JSON.stringify(buildWritingAgentRevisionRequest(input)),
   });
@@ -118,8 +124,8 @@ export function buildWritingAgentRequest(input: RewriteArticleInput): Record<str
     client_job_id: input.clientJobId,
     idempotency_key: input.clientJobId,
     user: {
-      user_id: process.env.WRITING_AGENT_USER_ID?.trim() || "default_user",
-      workspace_id: process.env.WRITING_AGENT_WORKSPACE_ID?.trim() || "vibepub-dogfood",
+      user_id: writingAgentUserId(input),
+      workspace_id: writingAgentWorkspaceId(input),
     },
     input: {
       source_type: input.sourceType,
@@ -165,8 +171,8 @@ export function buildWritingAgentRevisionRequest(input: ReviseArticleInput): Rec
     client_job_id: clientJobId,
     idempotency_key: clientJobId,
     user: {
-      user_id: process.env.WRITING_AGENT_USER_ID?.trim() || "default_user",
-      workspace_id: process.env.WRITING_AGENT_WORKSPACE_ID?.trim() || "vibepub-dogfood",
+      user_id: writingAgentUserId(input),
+      workspace_id: writingAgentWorkspaceId(input),
     },
     current_article: {
       raw_text: input.rawText,
@@ -206,6 +212,23 @@ export function buildWritingAgentRevisionRequest(input: ReviseArticleInput): Rec
         supported_positions: ["start", "end", "before", "after"],
       },
     },
+  };
+}
+
+function writingAgentUserId(input: { userId?: string }): string {
+  return input.userId?.trim() || process.env.WRITING_AGENT_USER_ID?.trim() || "default_user";
+}
+
+function writingAgentWorkspaceId(input: { workspaceId?: string; userId?: string }): string {
+  return input.workspaceId?.trim() ||
+    process.env.WRITING_AGENT_WORKSPACE_ID?.trim() ||
+    (input.userId ? `ws_${input.userId.replace(/^usr_/, "")}` : "vibepub-dogfood");
+}
+
+function writingAgentIdentityHeaders(input: { userId?: string; workspaceId?: string }): Record<string, string> {
+  return {
+    "X-VibePub-User-Id": writingAgentUserId(input),
+    "X-VibePub-Workspace-Id": writingAgentWorkspaceId(input),
   };
 }
 
