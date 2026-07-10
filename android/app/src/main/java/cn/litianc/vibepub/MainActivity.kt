@@ -111,8 +111,7 @@ class MainActivity : ComponentActivity() {
             val result = withContext(Dispatchers.IO) {
                 runCatching {
                     val imported = WritingStyleApi.importStyleSource(
-                        apiBaseUrl = preferences.apiBaseUrl,
-                        filesToken = preferences.accessToken,
+                        preferences = preferences,
                         sourceType = source.sourceType,
                         title = source.title,
                         url = source.url,
@@ -122,8 +121,7 @@ class MainActivity : ComponentActivity() {
                         IncomingStyleSourceResult(imported = imported)
                     } else {
                         val distilled = WritingStyleApi.distillStyleProfile(
-                            apiBaseUrl = preferences.apiBaseUrl,
-                            filesToken = preferences.accessToken,
+                            preferences = preferences,
                             sourceImportIds = listOf(imported.id),
                             profileId = null,
                             name = styleProfileNameHintForSource(source, imported.title),
@@ -358,8 +356,7 @@ fun VibePubApp(
                     File(context.filesDir, "recordings/${transcriptFileNameForRecording(recording.filename)}").delete()
                     File(context.filesDir, "recordings/${coverImageFileNameForRecording(recording.filename)}").delete()
                     deleteRemoteRecording(
-                        apiBaseUrl = preferences.apiBaseUrl,
-                        filesToken = preferences.accessToken,
+                        preferences = preferences,
                         filename = recording.filename,
                     )
                 }
@@ -397,8 +394,7 @@ fun VibePubApp(
                 runCatching {
                     val selectedProfile = preferences.selectedWritingStyleProfile()
                     val submitted = TextSubmissionApi.submitText(
-                        apiBaseUrl = preferences.apiBaseUrl,
-                        filesToken = preferences.accessToken,
+                        preferences = preferences,
                         text = text,
                         titleHint = titleHint,
                         styleProfileId = selectedProfile.id,

@@ -97,6 +97,7 @@ import cn.litianc.vibepub.AppPreferences
 import cn.litianc.vibepub.AdminInviteResult
 import cn.litianc.vibepub.AdminUsersResult
 import cn.litianc.vibepub.AuthApi
+import cn.litianc.vibepub.AuthenticatedHttpClient
 import cn.litianc.vibepub.BuildConfig
 import cn.litianc.vibepub.PublishingAccount
 import cn.litianc.vibepub.StyleSourceImportSummary
@@ -193,6 +194,9 @@ fun SettingsScreen(
     val lastSyncAtMs by remember(preferences) {
         preferences.lastSyncAtMsFlow()
     }.collectAsState(initial = preferences.lastSyncAtMs)
+    val authStateVersion by remember(preferences) {
+        preferences.authStateFlow()
+    }.collectAsState(initial = preferences.authStateVersion)
     var lastTestedConfig by remember {
         mutableStateOf(SettingsConnectionConfig(apiBaseUrl, accessToken).normalized())
     }
@@ -248,8 +252,7 @@ fun SettingsScreen(
         scope.launch {
             runCatching {
                 WritingStyleApi.getStyleProfile(
-                    apiBaseUrl = apiBaseUrl,
-                    filesToken = accessToken,
+                    preferences = preferences,
                     profileId = profile.id,
                     includeBody = true,
                 )
@@ -263,6 +266,13 @@ fun SettingsScreen(
         }
     }
 
+    LaunchedEffect(authStateVersion) {
+        accessToken = preferences.accessToken
+        accountEmail = preferences.userEmail
+        accountRole = preferences.userRole
+        accountEmailVerified = preferences.emailVerified
+    }
+
     LaunchedEffect(apiBaseUrl, accessToken) {
         val currentConfig = SettingsConnectionConfig(apiBaseUrl, accessToken).normalized()
         if (!shouldAutoTestSettingsConnection(lastTestedConfig, currentConfig)) {
@@ -272,8 +282,8 @@ fun SettingsScreen(
         isTesting = true
         connectionResult = null
         try {
-            connectionResult = testBackendConnection(currentConfig.apiBaseUrl, currentConfig.accessToken)
-            lastTestedConfig = currentConfig
+            connectionResult = testBackendConnection(preferences)
+            lastTestedConfig = SettingsConnectionConfig(apiBaseUrl, preferences.accessToken).normalized()
         } finally {
             isTesting = false
         }
@@ -285,13 +295,13 @@ fun SettingsScreen(
             return@LaunchedEffect
         }
         runCatching {
-            WritingStyleApi.listStyleProfiles(apiBaseUrl, accessToken)
+            WritingStyleApi.listStyleProfiles(preferences)
         }.onSuccess { profiles ->
             remoteStyleProfiles = profiles
             preferences.remoteWritingStyleProfiles = profiles
         }
         runCatching {
-            WritingStyleApi.listStyleSources(apiBaseUrl, accessToken)
+            WritingStyleApi.listStyleSources(preferences)
         }.onSuccess { sources ->
             styleSourceImports = sources
         }
@@ -300,7 +310,7 @@ fun SettingsScreen(
     LaunchedEffect(apiBaseUrl, accessToken) {
         if (accessToken.isBlank()) return@LaunchedEffect
         runCatching {
-            AuthApi.me(apiBaseUrl, accessToken)
+            AuthApi.me(preferences)
         }.onSuccess { user ->
             preferences.updateCurrentUser(user)
             accountEmail = user.email
@@ -310,7 +320,7 @@ fun SettingsScreen(
         isLoadingPublishingAccount = true
         publishingError = null
         runCatching {
-            AuthApi.getPublishingAccount(apiBaseUrl, accessToken)
+            AuthApi.getPublishingAccount(preferences)
         }.onSuccess { account ->
             publishingAccount = account
         }.onFailure { error ->
@@ -324,7 +334,7 @@ fun SettingsScreen(
         isLoadingAdminUsers = true
         adminError = null
         runCatching {
-            AuthApi.listAdminUsers(apiBaseUrl, accessToken)
+            AuthApi.listAdminUsers(preferences)
         }.onSuccess { result ->
             adminUsersResult = result
         }.onFailure { error ->
@@ -421,16 +431,15 @@ fun SettingsScreen(
                     Divider(color = MaterialTheme.colorScheme.background, thickness = 1.dp)
                     Column(modifier = Modifier.padding(16.dp)) {
                         Button(
-                            onClick = {
-                                isTesting = true
-                                connectionResult = null
-                                val currentConfig = SettingsConnectionConfig(apiBaseUrl, accessToken).normalized()
-                                scope.launch {
-                                    connectionResult = testBackendConnection(currentConfig.apiBaseUrl, currentConfig.accessToken)
-                                    lastTestedConfig = currentConfig
-                                    isTesting = false
-                                }
-                            },
+	                            onClick = {
+	                                isTesting = true
+	                                connectionResult = null
+	                                scope.launch {
+	                                    connectionResult = testBackendConnection(preferences)
+	                                    lastTestedConfig = SettingsConnectionConfig(apiBaseUrl, preferences.accessToken).normalized()
+	                                    isTesting = false
+	                                }
+	                            },
                             modifier = Modifier.testTag("TestBackendButton"),
                         ) {
                             Icon(Icons.Default.CloudDone, contentDescription = null, modifier = Modifier.size(18.dp))
@@ -510,12 +519,12 @@ fun SettingsScreen(
                                 Toast.makeText(context, "请先登录并完成邮箱验证", Toast.LENGTH_SHORT).show()
                             } else if (styleSourceImports.isEmpty()) {
                                 isLoadingStyleSources = true
-                                scope.launch {
-                                    runCatching {
-                                        WritingStyleApi.listStyleSources(apiBaseUrl, accessToken)
-                                    }.onSuccess { sources ->
-                                        styleSourceImports = sources
-                                        if (sources.isEmpty()) {
+	                                scope.launch {
+	                                    runCatching {
+	                                        WritingStyleApi.listStyleSources(preferences)
+	                                    }.onSuccess { sources ->
+	                                        styleSourceImports = sources
+	                                        if (sources.isEmpty()) {
                                             Toast.makeText(context, "先把参考文章或文本分享给 VibePub", Toast.LENGTH_SHORT).show()
                                         } else {
                                             showStyleDistillationDialog = true
@@ -699,12 +708,11 @@ fun SettingsScreen(
                 isLoadingPublishingAccount = true
                 publishingError = null
                 scope.launch {
-                    runCatching {
-                        AuthApi.updatePublishingAccount(
-                            apiBaseUrl = apiBaseUrl,
-                            accessToken = accessToken,
-                            appId = appId,
-                            appSecret = appSecret,
+	                    runCatching {
+	                        AuthApi.updatePublishingAccount(
+	                            preferences = preferences,
+	                            appId = appId,
+	                            appSecret = appSecret,
                             proxyUrl = proxyUrl,
                         )
                     }.onSuccess { account ->
@@ -731,18 +739,17 @@ fun SettingsScreen(
                 isLoadingAdminUsers = true
                 adminError = null
                 scope.launch {
-                    runCatching {
-                        AuthApi.inviteUser(
-                            apiBaseUrl = apiBaseUrl,
-                            accessToken = accessToken,
-                            email = email,
-                            role = role,
-                        )
-                    }.onSuccess { invite ->
-                        adminInviteResult = invite
-                        adminUsersResult = runCatching {
-                            AuthApi.listAdminUsers(apiBaseUrl, accessToken)
-                        }.getOrNull() ?: adminUsersResult
+	                    runCatching {
+	                        AuthApi.inviteUser(
+	                            preferences = preferences,
+	                            email = email,
+	                            role = role,
+	                        )
+	                    }.onSuccess { invite ->
+	                        adminInviteResult = invite
+	                        adminUsersResult = runCatching {
+	                            AuthApi.listAdminUsers(preferences)
+	                        }.getOrNull() ?: adminUsersResult
                         showAdminInviteDialog = false
                         Toast.makeText(context, "邀请已创建", Toast.LENGTH_SHORT).show()
                     }.onFailure { error ->
@@ -766,11 +773,10 @@ fun SettingsScreen(
                 isDistillingStyleProfile = true
                 styleDistillationError = null
                 scope.launch {
-                    runCatching {
+	                    runCatching {
 	                        WritingStyleApi.distillStyleProfile(
-	                            apiBaseUrl = apiBaseUrl,
-	                            filesToken = accessToken,
-                            sourceImportIds = styleSourceImports.map { it.id },
+	                            preferences = preferences,
+	                            sourceImportIds = styleSourceImports.map { it.id },
                             profileId = null,
                             name = name,
                             description = description,
@@ -799,29 +805,27 @@ fun SettingsScreen(
                 isDistillingStyleLink = true
                 styleLinkDistillationError = null
                 scope.launch {
-                    runCatching {
-                        val sourceType = if (link.contains("mp.weixin.qq.com")) "wechat_article" else "url"
+	                    runCatching {
+	                        val sourceType = if (link.contains("mp.weixin.qq.com")) "wechat_article" else "url"
 	                        val imported = WritingStyleApi.importStyleSource(
-	                            apiBaseUrl = apiBaseUrl,
-	                            filesToken = accessToken,
-                            sourceType = sourceType,
-                            title = null,
+	                            preferences = preferences,
+	                            sourceType = sourceType,
+	                            title = null,
                             url = link,
                             text = null,
-                        )
+	                        )
 	                        WritingStyleApi.distillStyleProfile(
-	                            apiBaseUrl = apiBaseUrl,
-	                            filesToken = accessToken,
-                            sourceImportIds = listOf(imported.id),
+	                            preferences = preferences,
+	                            sourceImportIds = listOf(imported.id),
                             profileId = null,
                             name = name.takeIf { it.isNotBlank() },
                             description = description.takeIf { it.isNotBlank() },
                         )
-                    }.onSuccess { result ->
-                        selectRemoteStyleProfile(result.profile)
+	                    }.onSuccess { result ->
+	                        selectRemoteStyleProfile(result.profile)
 	                        runCatching {
-	                            WritingStyleApi.listStyleSources(apiBaseUrl, accessToken)
-                        }.onSuccess { sources ->
+	                            WritingStyleApi.listStyleSources(preferences)
+	                        }.onSuccess { sources ->
                             styleSourceImports = sources
                         }
                         showStyleLinkDistillationDialog = false
@@ -1747,8 +1751,10 @@ internal fun settingsLastSyncDetail(
     return "上次从云端同步录音和成文状态：$formatted"
 }
 
-private suspend fun testBackendConnection(apiBaseUrl: String, accessToken: String): ConnectionTestResult =
+private suspend fun testBackendConnection(preferences: AppPreferences): ConnectionTestResult =
     withContext(Dispatchers.IO) {
+        val apiBaseUrl = preferences.apiBaseUrl
+        val accessToken = preferences.accessToken
         val base = apiBaseUrl.trimEnd('/')
         if (base.isBlank()) {
             return@withContext connectionInputError("API Base URL 为空", tokenProvided = accessToken.isNotBlank())
@@ -1779,21 +1785,22 @@ private suspend fun testBackendConnection(apiBaseUrl: String, accessToken: Strin
             }
 
             runCatching {
-                val recordings = (URL("$base/api/recordings").openConnection() as HttpURLConnection).apply {
-                    requestMethod = "GET"
-                    connectTimeout = 8_000
-                    readTimeout = 8_000
-                    setRequestProperty("Authorization", "Bearer $accessToken")
-                }
-                if (recordings.responseCode in 200..299) {
-                    val count = JSONObject(recordings.inputStream.bufferedReader().use { it.readText() })
+                val recordings = AuthenticatedHttpClient.request(
+                    preferences = preferences,
+                    url = URL("$base/api/recordings"),
+                    method = "GET",
+                    connectTimeoutMs = 8_000,
+                    readTimeoutMs = 8_000,
+                )
+                if (recordings.statusCode in 200..299) {
+                    val count = JSONObject(recordings.body)
                         .optJSONArray("recordings")
                         ?.length()
                         ?: 0
                     buildConnectionResult(
                         healthStatusCode = health.responseCode,
                         tokenProvided = true,
-                        recordingsStatusCode = recordings.responseCode,
+                        recordingsStatusCode = recordings.statusCode,
                         recordingCount = count,
                         errorMessage = null,
                     )
@@ -1801,7 +1808,7 @@ private suspend fun testBackendConnection(apiBaseUrl: String, accessToken: Strin
                     buildConnectionResult(
                         healthStatusCode = health.responseCode,
                         tokenProvided = true,
-                        recordingsStatusCode = recordings.responseCode,
+                        recordingsStatusCode = recordings.statusCode,
                         recordingCount = null,
                         errorMessage = null,
                     )

@@ -241,14 +241,13 @@ class SyncWorker(
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
         val prefs = AppPreferences(applicationContext)
         val apiBaseUrl = prefs.apiBaseUrl
-        val accessToken = prefs.accessToken
         val userId = prefs.effectiveUserId
 
         val dir = File(applicationContext.filesDir, "recordings")
         val dao = AppDatabase.getDatabase(applicationContext).recordingDao()
         var allSuccess = true
 
-        if (accessToken.isBlank()) {
+        if (prefs.accessToken.isBlank()) {
             markSyncAuthFailure(
                 userId = userId,
                 message = "请先登录，无法同步云端状态",
@@ -259,17 +258,16 @@ class SyncWorker(
 
         // Sync missing recordings from D1
         try {
-            val endpoint = URL("${apiBaseUrl.trimEnd('/')}/api/recordings")
-            val connection = (endpoint.openConnection() as HttpURLConnection).apply {
-                requestMethod = "GET"
-                connectTimeout = 10_000
-                readTimeout = 10_000
-                setRequestProperty("Authorization", "Bearer $accessToken")
-            }
-            val responseCode = connection.responseCode
+            val response = AuthenticatedHttpClient.request(
+                preferences = prefs,
+                url = URL("${apiBaseUrl.trimEnd('/')}/api/recordings"),
+                method = "GET",
+                connectTimeoutMs = 10_000,
+                readTimeoutMs = 10_000,
+            )
+            val responseCode = response.statusCode
             if (responseCode in 200..299) {
-                val jsonText = connection.inputStream.bufferedReader().use { it.readText() }
-                val json = JSONObject(jsonText)
+                val json = JSONObject(response.body)
                 val recordingsArray = json.optJSONArray("recordings")
                 if (recordingsArray != null) {
                     for (i in 0 until recordingsArray.length()) {
@@ -306,17 +304,16 @@ class SyncWorker(
                 try {
                     val wasExistingTranscript = jsonFile.exists()
                     val encodedFilename = URLEncoder.encode(recording.filename, "UTF-8").replace("+", "%20")
-                    val endpoint = URL("${apiBaseUrl.trimEnd('/')}/api/transcripts/$encodedFilename")
-                    val connection = (endpoint.openConnection() as HttpURLConnection).apply {
-                        requestMethod = "GET"
-                        connectTimeout = 10_000
-                        readTimeout = 10_000
-                        setRequestProperty("Authorization", "Bearer $accessToken")
-                    }
-
-                    val responseCode = connection.responseCode
+                    val response = AuthenticatedHttpClient.request(
+                        preferences = prefs,
+                        url = URL("${apiBaseUrl.trimEnd('/')}/api/transcripts/$encodedFilename"),
+                        method = "GET",
+                        connectTimeoutMs = 10_000,
+                        readTimeoutMs = 10_000,
+                    )
+                    val responseCode = response.statusCode
                     if (responseCode in 200..299) {
-                        val jsonText = connection.inputStream.bufferedReader().use { it.readText() }
+                        val jsonText = response.body
                         dir.mkdirs()
                         jsonFile.writeText(jsonText)
                         val transcript = JSONObject(jsonText)
@@ -328,7 +325,7 @@ class SyncWorker(
                             dir = dir,
                             filename = recording.filename,
                             coverImageUrl = transcriptCoverImageUrl ?: recording.coverImageUrl,
-                            filesToken = accessToken,
+                            preferences = prefs,
                             force = wasExistingTranscript,
                         )
                         dao.upsertBest(
@@ -383,7 +380,7 @@ class SyncWorker(
                     dir = dir,
                     filename = recording.filename,
                     coverImageUrl = transcriptCoverImageUrl ?: recording.coverImageUrl,
-                    filesToken = accessToken,
+                    preferences = prefs,
                 )
                 if (recording.status != RecordingStatus.COMPLETED.value) {
                     val transcriptTitle = transcriptArticleTitleOrNull(transcript)
@@ -437,11 +434,11 @@ class SyncWorker(
 
     private fun JSONObject.errorMessageOrNull(): String? = syncErrorMessageOrNull()
 
-    private fun downloadCoverImageIfNeeded(
+    private suspend fun downloadCoverImageIfNeeded(
         dir: File,
         filename: String,
         coverImageUrl: String?,
-        filesToken: String,
+        preferences: AppPreferences,
         force: Boolean = false,
     ) {
         val url = coverImageUrl?.trim()?.takeIf { it.isNotBlank() } ?: return
@@ -452,29 +449,43 @@ class SyncWorker(
         runCatching {
             dir.mkdirs()
             tempFile.delete()
-            val connection = (URL(url).openConnection() as HttpURLConnection).apply {
-                requestMethod = "GET"
-                connectTimeout = 10_000
-                readTimeout = 20_000
-                setRequestProperty("Authorization", "Bearer $filesToken")
+            val parsed = URL(url)
+            val bytes = if (shouldAuthorizeVibePubFileUrl(parsed, preferences.apiBaseUrl)) {
+                val response = AuthenticatedHttpClient.requestBytes(
+                    preferences = preferences,
+                    url = parsed,
+                    method = "GET",
+                    connectTimeoutMs = 10_000,
+                    readTimeoutMs = 20_000,
+                )
+                if (response.statusCode !in 200..299) return@runCatching
+                response.body
+            } else {
+                downloadPublicCoverImageBytes(parsed) ?: return@runCatching
             }
-            try {
-                if (connection.responseCode in 200..299) {
-                    connection.inputStream.use { input ->
-                        tempFile.outputStream().use { output -> input.copyTo(output) }
-                    }
-                    if (file.exists() && file.length() == 0L) file.delete()
-                    if (!tempFile.renameTo(file)) {
-                        tempFile.copyTo(file, overwrite = true)
-                        tempFile.delete()
-                    }
-                }
-            } finally {
-                connection.disconnect()
+            tempFile.writeBytes(bytes)
+            if (file.exists() && file.length() == 0L) file.delete()
+            if (!tempFile.renameTo(file)) {
+                tempFile.copyTo(file, overwrite = true)
+                tempFile.delete()
             }
         }.onFailure {
             tempFile.delete()
         }
+    }
+}
+
+private fun downloadPublicCoverImageBytes(url: URL): ByteArray? {
+    val connection = (url.openConnection() as HttpURLConnection).apply {
+        requestMethod = "GET"
+        connectTimeout = 10_000
+        readTimeout = 20_000
+    }
+    return try {
+        if (connection.responseCode !in 200..299) return null
+        connection.inputStream.use { it.readBytes() }
+    } finally {
+        connection.disconnect()
     }
 }
 

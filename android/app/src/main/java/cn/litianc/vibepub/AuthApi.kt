@@ -112,10 +112,23 @@ object AuthApi {
             parseUser(JSONObject(requestJson(apiBaseUrl, "/api/me", "GET", accessToken = accessToken)).getJSONObject("user"))
         }
 
+    suspend fun me(preferences: AppPreferences): AuthUser =
+        withContext(Dispatchers.IO) {
+            parseUser(JSONObject(authenticatedJson(preferences, "/api/me", "GET")).getJSONObject("user"))
+        }
+
     suspend fun getPublishingAccount(apiBaseUrl: String, accessToken: String): PublishingAccount =
         withContext(Dispatchers.IO) {
             parsePublishingAccount(
                 JSONObject(requestJson(apiBaseUrl, "/api/publishing-account", "GET", accessToken = accessToken))
+                    .getJSONObject("publishing_account"),
+            )
+        }
+
+    suspend fun getPublishingAccount(preferences: AppPreferences): PublishingAccount =
+        withContext(Dispatchers.IO) {
+            parsePublishingAccount(
+                JSONObject(authenticatedJson(preferences, "/api/publishing-account", "GET"))
                     .getJSONObject("publishing_account"),
             )
         }
@@ -146,9 +159,38 @@ object AuthApi {
         )
     }
 
+    suspend fun updatePublishingAccount(
+        preferences: AppPreferences,
+        appId: String,
+        appSecret: String,
+        proxyUrl: String,
+    ): PublishingAccount = withContext(Dispatchers.IO) {
+        val body = JSONObject()
+            .put("app_id", appId.trim())
+            .put("proxy_url", proxyUrl.trim())
+        if (appSecret.isNotBlank()) {
+            body.put("app_secret", appSecret.trim())
+        }
+        parsePublishingAccount(
+            JSONObject(
+                authenticatedJson(
+                    preferences,
+                    "/api/publishing-account",
+                    "PUT",
+                    body = body.toString(),
+                ),
+            ).getJSONObject("publishing_account"),
+        )
+    }
+
     suspend fun listAdminUsers(apiBaseUrl: String, accessToken: String): AdminUsersResult =
         withContext(Dispatchers.IO) {
             parseAdminUsers(requestJson(apiBaseUrl, "/api/admin/users", "GET", accessToken = accessToken))
+        }
+
+    suspend fun listAdminUsers(preferences: AppPreferences): AdminUsersResult =
+        withContext(Dispatchers.IO) {
+            parseAdminUsers(authenticatedJson(preferences, "/api/admin/users", "GET"))
         }
 
     suspend fun inviteUser(apiBaseUrl: String, accessToken: String, email: String, role: String): AdminInviteResult =
@@ -166,6 +208,46 @@ object AuthApi {
                 token = invitation.optString("token").blankToNull(),
             )
         }
+
+    suspend fun inviteUser(preferences: AppPreferences, email: String, role: String): AdminInviteResult =
+        withContext(Dispatchers.IO) {
+            val body = JSONObject()
+                .put("email", email.trim())
+                .put("role", if (role == "admin") "admin" else "user")
+                .toString()
+            val json = JSONObject(authenticatedJson(preferences, "/api/admin/users", "POST", body = body))
+            val invitation = json.getJSONObject("invitation")
+            AdminInviteResult(
+                email = invitation.optString("email"),
+                role = invitation.optString("role", "user"),
+                inviteUrl = invitation.optString("invite_url").blankToNull(),
+                token = invitation.optString("token").blankToNull(),
+            )
+        }
+
+    private suspend fun authenticatedJson(
+        preferences: AppPreferences,
+        path: String,
+        method: String,
+        body: String? = null,
+    ): String {
+        val payload = body?.toByteArray(Charsets.UTF_8)
+        val response = AuthenticatedHttpClient.request(
+            preferences = preferences,
+            url = URL("${preferences.apiBaseUrl.trimEnd('/')}$path"),
+            method = method,
+            body = payload,
+            contentType = if (payload != null) "application/json; charset=utf-8" else null,
+        )
+        if (response.statusCode !in 200..299) {
+            throw AuthApiException(
+                statusCode = response.statusCode,
+                responseBody = response.body,
+                userMessage = authFailureMessage(response.statusCode, response.body),
+            )
+        }
+        return response.body
+    }
 
     private fun requestJson(
         apiBaseUrl: String,
@@ -200,11 +282,21 @@ object AuthApi {
         }
         connection.disconnect()
         if (status !in 200..299) {
-            throw IllegalStateException(authFailureMessage(status, responseBody))
+            throw AuthApiException(
+                statusCode = status,
+                responseBody = responseBody,
+                userMessage = authFailureMessage(status, responseBody),
+            )
         }
         return responseBody
     }
 }
+
+class AuthApiException(
+    val statusCode: Int,
+    val responseBody: String,
+    userMessage: String,
+) : IllegalStateException(userMessage)
 
 internal fun parseAuthSession(responseBody: String): AuthSession {
     val json = JSONObject(responseBody)

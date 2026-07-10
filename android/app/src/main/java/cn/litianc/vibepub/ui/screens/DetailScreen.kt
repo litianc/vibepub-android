@@ -98,8 +98,10 @@ import androidx.core.content.ContextCompat
 import cn.litianc.vibepub.AppPreferences
 import cn.litianc.vibepub.ArticleRevisionApi
 import cn.litianc.vibepub.ArticleRevisionRecorder
+import cn.litianc.vibepub.AuthenticatedHttpClient
 import cn.litianc.vibepub.BuildConfig
 import cn.litianc.vibepub.coverImageFileNameForRecording
+import cn.litianc.vibepub.shouldAuthorizeVibePubFileUrl
 import cn.litianc.vibepub.transcriptFileNameForRecording
 import cn.litianc.vibepub.data.AppDatabase
 import cn.litianc.vibepub.data.RecordingEntity
@@ -271,8 +273,7 @@ fun DetailScreen(
         coroutineScope.launch {
             runCatching {
                 ArticleRevisionApi.submitVoiceRevision(
-                    apiBaseUrl = preferences.apiBaseUrl,
-                    filesToken = preferences.accessToken,
+                    preferences = preferences,
                     filename = currentRecording.filename,
                     audioFile = recorded.file,
                 )
@@ -535,7 +536,7 @@ fun DetailScreen(
 
             ArticleBodyContent(
                 blocks = articleBodyBlocks,
-                filesToken = preferences.accessToken,
+                preferences = preferences,
             )
             Spacer(modifier = Modifier.height(40.dp))
         }
@@ -545,7 +546,7 @@ fun DetailScreen(
 @Composable
 private fun ArticleBodyContent(
     blocks: List<ArticleBodyBlock>,
-    filesToken: String,
+    preferences: AppPreferences,
 ) {
     Column(
         modifier = Modifier
@@ -563,7 +564,7 @@ private fun ArticleBodyContent(
                 )
                 is ArticleBodyBlock.Image -> RemoteArticleImagePreview(
                     image = block.image,
-                    filesToken = filesToken,
+                    preferences = preferences,
                 )
             }
         }
@@ -574,17 +575,15 @@ private fun ArticleBodyContent(
 @OptIn(ExperimentalFoundationApi::class)
 private fun RemoteArticleImagePreview(
     image: ArticleImagePreview,
-    filesToken: String,
+    preferences: AppPreferences,
 ) {
-    var bitmap by remember(image.url, filesToken) { mutableStateOf<Bitmap?>(null) }
-    var failed by remember(image.url, filesToken) { mutableStateOf(false) }
+    var bitmap by remember(image.url, preferences.authStateVersion) { mutableStateOf<Bitmap?>(null) }
+    var failed by remember(image.url, preferences.authStateVersion) { mutableStateOf(false) }
     var expanded by remember(image.url) { mutableStateOf(false) }
 
-    LaunchedEffect(image.url, filesToken) {
+    LaunchedEffect(image.url, preferences.authStateVersion) {
         failed = false
-        bitmap = withContext(Dispatchers.IO) {
-            downloadArticleImageBitmap(image.url, filesToken)
-        }
+        bitmap = downloadArticleImageBitmap(image.url, preferences)
         failed = bitmap == null
     }
 
@@ -1605,31 +1604,41 @@ private fun String.blankToMissingString(): String? {
     return sanitizedRemoteReference(this)
 }
 
-private fun downloadArticleImageBitmap(url: String, filesToken: String): Bitmap? {
+private suspend fun downloadArticleImageBitmap(url: String, preferences: AppPreferences): Bitmap? =
+    withContext(Dispatchers.IO) {
+        runCatching {
+            val parsed = URL(url)
+            val bytes = if (shouldAuthorizeVibePubFileUrl(parsed, preferences.apiBaseUrl)) {
+                val response = AuthenticatedHttpClient.requestBytes(
+                    preferences = preferences,
+                    url = parsed,
+                    method = "GET",
+                    connectTimeoutMs = 10_000,
+                    readTimeoutMs = 20_000,
+                )
+                if (response.statusCode !in 200..299) return@runCatching null
+                response.body
+            } else {
+                downloadPublicArticleImageBytes(parsed) ?: return@runCatching null
+            }
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+        }.getOrNull()
+    }
+
+private fun downloadPublicArticleImageBytes(url: URL): ByteArray? {
     return runCatching {
-        val parsed = URL(url)
-        val connection = (parsed.openConnection() as HttpURLConnection).apply {
+        val connection = (url.openConnection() as HttpURLConnection).apply {
             requestMethod = "GET"
             connectTimeout = 10_000
             readTimeout = 20_000
-            if (shouldAuthorizeArticleImageRequest(parsed, filesToken)) {
-                setRequestProperty("Authorization", "Bearer $filesToken")
-            }
         }
         try {
             if (connection.responseCode !in 200..299) return null
-            connection.inputStream.use { input -> BitmapFactory.decodeStream(input) }
+            connection.inputStream.use { input -> input.readBytes() }
         } finally {
             connection.disconnect()
         }
     }.getOrNull()
-}
-
-private fun shouldAuthorizeArticleImageRequest(url: URL, filesToken: String): Boolean {
-    return filesToken.isNotBlank() &&
-        url.protocol.equals("https", ignoreCase = true) &&
-        url.host.equals("vibepub.litianc.cn", ignoreCase = true) &&
-        url.path.startsWith("/api/files/")
 }
 
 internal fun buildArticleExportText(

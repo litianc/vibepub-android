@@ -128,8 +128,9 @@ audio output.
 
 Required for upload/transcript checks:
 
-- `FILES_TOKEN`
 - `API_BASE_URL`, normally `https://vibepub.litianc.cn`
+- A test account email/password, or a pre-issued `ACCESS_TOKEN` plus matching
+  `REFRESH_TOKEN` for non-interactive runs.
 
 Required for fully automated transcript completion checks:
 
@@ -154,7 +155,8 @@ set +a
 
 ```bash
 API_BASE_URL=https://vibepub.litianc.cn
-FILES_TOKEN=...
+TEST_ACCOUNT_EMAIL=...
+TEST_ACCOUNT_PASSWORD=...
 ```
 
 ### 5. APK Source
@@ -198,9 +200,10 @@ Recommended full end-to-end smoke test:
 scripts/run-android-device-smoke.sh
 ```
 
-It loads `secrets/device-test.env` when present, otherwise it falls back to
-`secrets/files-token.txt` and `https://vibepub.litianc.cn`. It downloads the
-latest successful debug APK unless an APK path is passed as the first argument.
+It loads `secrets/device-test.env` when present and reuses the authenticated
+session already stored in the debug app; it never injects a client credential.
+It downloads the latest successful debug APK unless an APK path is passed as the
+first argument.
 It also runs `scripts/check-android-device-ready.sh` before recording. By
 default it sets `TRIGGER_MINING_JOB=true`, so after the phone upload appears in
 the backend it dispatches `mining-job.yml` with `target_filename`, waits for

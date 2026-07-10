@@ -20,7 +20,8 @@ Status: account `litianc` is authenticated locally.
 Completed:
 
 - private repo `litianc/vibepub-android`
-- `FILES_TOKEN` secret
+- `WORKFLOW_DISPATCH_PAT` secret for Worker-triggered mining dispatch
+- `MINING_SERVICE_TOKEN` secret for internal mining status callbacks
 - `GLM_BASE_URL` secret
 - `GLM_API_KEY` secret
 - `GLM_MODEL` secret
@@ -148,22 +149,21 @@ See `docs/wechat-setup.md` for the browser-assisted setup checklist.
 
 ### Auth, Accounts, and Community
 
-This is the item that was previously unclear.
+The current product uses invite-only VibePub accounts instead of a shared
+client token. Android stores account session tokens, refreshes access tokens,
+and scopes recordings, style templates, drafts, and WeChat publishing bindings
+to the authenticated user.
 
-There are two separate identity questions:
+Identity decisions for this stage:
 
-1. Who can upload audio to the service?
-2. Who can read, edit, or publish generated articles?
+- First version is invite-only, not public self-registration.
+- Existing content is bootstrapped to the initial admin user.
+- Each user can bind at most one WeChat publishing account.
+- Admin user management lives in Android settings for now; there is no separate
+  web admin console yet.
 
-For internal installation, the recommended MVP answer is: no public user accounts yet. The Android app stores a private `FILES_TOKEN`, and anyone who has the APK plus token can upload. This is simple and fast, but it is not suitable for broad public distribution.
-
-Later, if the app needs multiple users or community features, add real login. The likely options are:
-
-- Google Sign-In or Firebase Auth for Android users.
-- WeChat OAuth if the product becomes tightly coupled to a WeChat public-account workflow.
-- Admin-only web login for reviewing drafts before publishing.
-
-Recommendation for now: keep token-only upload, add an admin-only publishing backend later, and do not build community/social accounts until recording-to-draft-to-WeChat works end to end.
+If the product later needs public onboarding or community features, add that on
+top of this account model instead of reintroducing a shared upload token.
 
 ## Remaining User Inputs
 

@@ -22,6 +22,7 @@ class UploadWorker(
         val apiBaseUrl = inputData.getString(KEY_API_BASE_URL) ?: return@withContext Result.failure()
         val accessToken = inputData.getString(KEY_ACCESS_TOKEN).orEmpty()
         val userId = inputData.getString(KEY_USER_ID).orEmpty().ifBlank { AppPreferences.DEFAULT_USER_ID }
+        val preferences = AppPreferences(applicationContext)
         val styleProfileId = inputData.getString(KEY_STYLE_PROFILE_ID).orEmpty()
         val styleProfileVersion = inputData.getString(KEY_STYLE_PROFILE_VERSION).orEmpty()
         val styleProfileName = inputData.getString(KEY_STYLE_PROFILE_NAME).orEmpty()
@@ -38,29 +39,41 @@ class UploadWorker(
 
         try {
             val endpoint = URL("${apiBaseUrl.trimEnd('/')}/api/uploads")
-            val connection = (endpoint.openConnection() as HttpURLConnection).apply {
-                requestMethod = "POST"
-                connectTimeout = 15_000
-                readTimeout = 60_000
-                doOutput = true
-                setRequestProperty("Authorization", "Bearer $accessToken")
-                setRequestProperty("Content-Type", audioContentTypeForFilename(file.name))
-                setRequestProperty("X-File-Name", file.name)
-                setOptionalRequestProperty("X-Style-Profile-Id", styleProfileId)
-                setOptionalRequestProperty("X-Style-Profile-Version", styleProfileVersion)
-                setOptionalRequestProperty("X-Style-Profile-Name-B64", styleProfileName.base64OrBlank())
-                setOptionalRequestProperty("X-Style-Profile-Description-B64", styleProfileDescription.base64OrBlank())
-                setOptionalRequestProperty("X-Style-Profile-Body-B64", styleProfileBody.base64OrBlank())
-                setOptionalRequestProperty("X-Layout-Profile-Id", layoutProfileId)
-                setOptionalRequestProperty("X-Layout-Profile-Version", layoutProfileVersion)
-                setFixedLengthStreamingMode(file.length())
+            fun openUploadConnection(token: String): HttpURLConnection {
+                return (endpoint.openConnection() as HttpURLConnection).apply {
+                    requestMethod = "POST"
+                    connectTimeout = 15_000
+                    readTimeout = 60_000
+                    doOutput = true
+                    setRequestProperty("Authorization", "Bearer $token")
+                    setRequestProperty("Content-Type", audioContentTypeForFilename(file.name))
+                    setRequestProperty("X-File-Name", file.name)
+                    setOptionalRequestProperty("X-Style-Profile-Id", styleProfileId)
+                    setOptionalRequestProperty("X-Style-Profile-Version", styleProfileVersion)
+                    setOptionalRequestProperty("X-Style-Profile-Name-B64", styleProfileName.base64OrBlank())
+                    setOptionalRequestProperty("X-Style-Profile-Description-B64", styleProfileDescription.base64OrBlank())
+                    setOptionalRequestProperty("X-Style-Profile-Body-B64", styleProfileBody.base64OrBlank())
+                    setOptionalRequestProperty("X-Layout-Profile-Id", layoutProfileId)
+                    setOptionalRequestProperty("X-Layout-Profile-Version", layoutProfileVersion)
+                    setFixedLengthStreamingMode(file.length())
+                    file.inputStream().use { input ->
+                        outputStream.use { output -> input.copyTo(output) }
+                    }
+                }
             }
 
-            file.inputStream().use { input ->
-                connection.outputStream.use { output -> input.copyTo(output) }
+            val canRefreshCurrentSession =
+                preferences.effectiveUserId == userId &&
+                    preferences.accessToken.isNotBlank() &&
+                    apiBaseUrlsMatch(preferences.apiBaseUrl, apiBaseUrl)
+
+            val response = if (canRefreshCurrentSession) {
+                AuthenticatedHttpClient.execute(preferences) { token -> openUploadConnection(token) }
+            } else {
+                performUploadRequest(openUploadConnection(accessToken))
             }
 
-            val responseCode = connection.responseCode
+            val responseCode = response.statusCode
             if (responseCode in 200..299) {
                 updateLocalStatus(userId, file.name, RecordingStatus.UPLOADED, null)
                 Result.success()
@@ -68,7 +81,6 @@ class UploadWorker(
                 updateLocalStatus(userId, file.name, RecordingStatus.UPLOADING, "服务器暂时不可用，稍后自动重试")
                 Result.retry()
             } else {
-                val body = connection.errorStream?.bufferedReader()?.use { it.readText() }.orEmpty()
                 val message = if (responseCode == 401 || responseCode == 403) {
                     "登录已失效或没有权限，请重新登录"
                 } else {
@@ -77,7 +89,7 @@ class UploadWorker(
                 updateLocalStatus(userId, file.name, RecordingStatus.FAILED, message)
                 Result.failure(
                     androidx.work.workDataOf(
-                        KEY_ERROR to JSONObject.quote(body).take(256),
+                        KEY_ERROR to JSONObject.quote(response.body).take(256),
                     ),
                 )
             }
@@ -133,4 +145,22 @@ private fun String.base64OrBlank(): String {
     val normalized = trim()
     if (normalized.isBlank()) return ""
     return Base64.encodeToString(normalized.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
+}
+
+private fun performUploadRequest(connection: HttpURLConnection): AuthenticatedHttpResponse {
+    return try {
+        val status = connection.responseCode
+        val body = if (status in 200..299) {
+            connection.inputStream.bufferedReader().use { it.readText() }
+        } else {
+            connection.errorStream?.bufferedReader()?.use { it.readText() }.orEmpty()
+        }
+        AuthenticatedHttpResponse(status, body)
+    } finally {
+        connection.disconnect()
+    }
+}
+
+private fun apiBaseUrlsMatch(left: String, right: String): Boolean {
+    return left.trimEnd('/').equals(right.trimEnd('/'), ignoreCase = true)
 }

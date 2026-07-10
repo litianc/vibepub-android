@@ -175,7 +175,7 @@ require_pattern \
 
 require_pattern \
   "Settings screen exposes API/token connection test and diagnostics" \
-  'API Base URL|FILES_TOKEN|测试后端连接|ConnectionResultCard|诊断信息' \
+  'API Base URL|账号与安全|测试后端连接|ConnectionResultCard|诊断信息' \
   "android/app/src/main/java/cn/litianc/vibepub/ui/screens/SettingsScreen.kt" \
   "android/app/src/test/java/cn/litianc/vibepub/ui/screens/SettingsScreenTest.kt"
 

@@ -60,6 +60,44 @@ object ArticleRevisionApi {
             status = json.optString("status", "QUEUED"),
         )
     }
+
+    suspend fun submitVoiceRevision(
+        preferences: AppPreferences,
+        filename: String,
+        audioFile: File,
+    ): ArticleRevisionSubmitResult = withContext(Dispatchers.IO) {
+        require(preferences.accessToken.isNotBlank()) { "请先登录后提交修改" }
+        require(audioFile.exists() && audioFile.length() > 0L) { "修改语音文件为空" }
+
+        val response = AuthenticatedHttpClient.execute(preferences) { accessToken ->
+            (articleRevisionEndpoint(preferences.apiBaseUrl, filename).openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"
+                connectTimeout = 15_000
+                readTimeout = 60_000
+                doOutput = true
+                setRequestProperty("Authorization", "Bearer $accessToken")
+                setRequestProperty("Content-Type", "audio/mp4")
+                setRequestProperty("X-Revision-Instruction-File-Name", audioFile.name)
+                setFixedLengthStreamingMode(audioFile.length())
+                audioFile.inputStream().use { input ->
+                    outputStream.use { output -> input.copyTo(output) }
+                }
+            }
+        }
+
+        if (response.statusCode !in 200..299) {
+            throw ArticleRevisionSubmitException(
+                userMessage = articleRevisionFailureMessage(response.statusCode, response.body),
+                responseCode = response.statusCode,
+            )
+        }
+
+        val json = JSONObject(response.body)
+        ArticleRevisionSubmitResult(
+            revisionId = json.optString("revision_id", ""),
+            status = json.optString("status", "QUEUED"),
+        )
+    }
 }
 
 class ArticleRevisionSubmitException(

@@ -68,7 +68,7 @@ Status info surface:
 - Current backend stage when available.
 - Full lifecycle from recording to WeChat draft.
 - Which steps are done, current, waiting, or blocked.
-- Expected user action, such as wait, refresh, retry upload, fix token, or inspect diagnostics.
+- Expected user action, such as wait, refresh, retry upload, sign in again, verify email, or inspect diagnostics.
 
 ### Review Result
 
@@ -94,7 +94,7 @@ Failures should not look like endless processing.
 
 Required behavior:
 
-- Token/auth failures map to configuration error guidance.
+- Account/auth failures map to sign-in, email-verification, or permission guidance.
 - Network and server failures retain retry paths.
 - Backend stage failures show the most specific available reason.
 - Diagnostics expose API host, device id, last upload filename, last error, recent sync time, and app version.
@@ -145,7 +145,7 @@ Backend `processingStage` should refine the info surface:
 - Article title/body display.
 - WeChat draft readiness and open-draft action when backend provides URL.
 - Copy/share/export actions for generated text.
-- Settings for API base URL and `FILES_TOKEN`.
+- Settings for account/security, WeChat publishing, connection diagnostics, and advanced API base URL diagnostics.
 - Connection test for `/health` and authorized `/api/recordings`.
 - Diagnostics good enough for screenshot-based support.
 - Real-device automated smoke evidence.

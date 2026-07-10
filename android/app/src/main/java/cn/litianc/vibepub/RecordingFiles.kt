@@ -29,6 +29,21 @@ fun remoteRecordingDeleteUrl(apiBaseUrl: String, filename: String): URL {
     return URL("${apiBaseUrl.trimEnd('/')}/api/recordings/$encodedFilename")
 }
 
+suspend fun deleteRemoteRecording(preferences: AppPreferences, filename: String): Boolean {
+    if (preferences.accessToken.isBlank()) return false
+
+    return runCatching {
+        val response = AuthenticatedHttpClient.request(
+            preferences = preferences,
+            url = remoteRecordingDeleteUrl(preferences.apiBaseUrl, filename),
+            method = "DELETE",
+            connectTimeoutMs = 15_000,
+            readTimeoutMs = 30_000,
+        )
+        response.statusCode in 200..206
+    }.getOrDefault(false)
+}
+
 fun deleteRemoteRecording(apiBaseUrl: String, filesToken: String, filename: String): Boolean {
     val token = filesToken.trim()
     if (token.isBlank()) return false
@@ -45,4 +60,11 @@ fun deleteRemoteRecording(apiBaseUrl: String, filesToken: String, filename: Stri
     } finally {
         connection.disconnect()
     }
+}
+
+internal fun shouldAuthorizeVibePubFileUrl(url: URL, apiBaseUrl: String): Boolean {
+    val base = runCatching { URL(apiBaseUrl.trimEnd('/')) }.getOrNull() ?: return false
+    return url.path.startsWith("/api/files/") &&
+        url.host.equals(base.host, ignoreCase = true) &&
+        url.protocol.equals(base.protocol, ignoreCase = true)
 }

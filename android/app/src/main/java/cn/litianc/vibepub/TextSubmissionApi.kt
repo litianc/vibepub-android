@@ -79,6 +79,59 @@ object TextSubmissionApi {
                 .takeIf { it.isNotBlank() },
         )
     }
+
+    suspend fun submitText(
+        preferences: AppPreferences,
+        text: String,
+        titleHint: String?,
+        styleProfileId: String? = null,
+        styleProfileVersion: String? = null,
+        styleProfileName: String? = null,
+        styleProfileDescription: String? = null,
+        styleProfileBody: String? = null,
+        layoutProfileId: String? = null,
+        layoutProfileVersion: String? = null,
+    ): TextSubmissionResult = withContext(Dispatchers.IO) {
+        val normalizedText = text.trim()
+        require(preferences.accessToken.isNotBlank()) { "请先登录后提交文字" }
+        require(normalizedText.length >= MIN_TEXT_SUBMISSION_CHARS) { "文字太短，请再补充一些想法" }
+
+        val body = buildTextSubmissionBody(
+            text = normalizedText,
+            titleHint = titleHint,
+            styleProfileId = styleProfileId,
+            styleProfileVersion = styleProfileVersion,
+            styleProfileName = styleProfileName,
+            styleProfileDescription = styleProfileDescription,
+            styleProfileBody = styleProfileBody,
+            layoutProfileId = layoutProfileId,
+            layoutProfileVersion = layoutProfileVersion,
+        )
+
+        val response = AuthenticatedHttpClient.request(
+            preferences = preferences,
+            url = URL("${preferences.apiBaseUrl.trimEnd('/')}/api/text-submissions"),
+            method = "POST",
+            body = body.toByteArray(Charsets.UTF_8),
+            contentType = "application/json; charset=utf-8",
+        )
+
+        if (response.statusCode !in 200..299) {
+            throw IllegalStateException(textSubmissionFailureMessage(response.statusCode, response.body))
+        }
+
+        val json = JSONObject(response.body)
+        TextSubmissionResult(
+            filename = json.optString("filename")
+                .ifBlank { json.optString("name") }
+                .takeIf { it.isNotBlank() }
+                ?: throw IllegalStateException("后端没有返回文字任务文件名"),
+            status = json.optString("status").ifBlank { "PROCESSING" },
+            processingStage = json.optString("processing_stage")
+                .ifBlank { json.optString("processingStage") }
+                .takeIf { it.isNotBlank() },
+        )
+    }
 }
 
 internal fun buildTextSubmissionBody(

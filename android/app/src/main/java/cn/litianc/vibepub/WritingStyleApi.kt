@@ -44,6 +44,19 @@ object WritingStyleApi {
         parseStyleProfilesResponse(response)
     }
 
+    suspend fun listStyleProfiles(
+        preferences: AppPreferences,
+    ): List<WritingStyleProfileOption> = withContext(Dispatchers.IO) {
+        require(preferences.accessToken.isNotBlank()) { "请先登录后同步写作风格" }
+        parseStyleProfilesResponse(
+            requestJson(
+                preferences = preferences,
+                path = "/api/style-profiles",
+                method = "GET",
+            ),
+        )
+    }
+
     suspend fun getStyleProfile(
         apiBaseUrl: String,
         filesToken: String,
@@ -61,6 +74,22 @@ object WritingStyleApi {
         parseStyleProfileResponse(response)
     }
 
+    suspend fun getStyleProfile(
+        preferences: AppPreferences,
+        profileId: String,
+        includeBody: Boolean = true,
+    ): WritingStyleProfileOption = withContext(Dispatchers.IO) {
+        require(preferences.accessToken.isNotBlank()) { "请先登录后查看写作风格" }
+        val encodedId = URLEncoder.encode(profileId.trim(), "UTF-8")
+        parseStyleProfileResponse(
+            requestJson(
+                preferences = preferences,
+                path = "/api/style-profiles/$encodedId?include_body=$includeBody",
+                method = "GET",
+            ),
+        )
+    }
+
     suspend fun listStyleSources(
         apiBaseUrl: String,
         filesToken: String,
@@ -73,6 +102,19 @@ object WritingStyleApi {
             method = "GET",
         )
         parseStyleSourceImportsResponse(response)
+    }
+
+    suspend fun listStyleSources(
+        preferences: AppPreferences,
+    ): List<StyleSourceImportSummary> = withContext(Dispatchers.IO) {
+        require(preferences.accessToken.isNotBlank()) { "请先登录后同步风格素材" }
+        parseStyleSourceImportsResponse(
+            requestJson(
+                preferences = preferences,
+                path = "/api/style-source-imports",
+                method = "GET",
+            ),
+        )
     }
 
     suspend fun importStyleSource(
@@ -100,6 +142,29 @@ object WritingStyleApi {
         parseStyleSourceImportResponse(response)
     }
 
+    suspend fun importStyleSource(
+        preferences: AppPreferences,
+        sourceType: String,
+        title: String?,
+        url: String?,
+        text: String?,
+    ): StyleSourceImportResult = withContext(Dispatchers.IO) {
+        require(preferences.accessToken.isNotBlank()) { "请先登录后导入风格素材" }
+        parseStyleSourceImportResponse(
+            requestJson(
+                preferences = preferences,
+                path = "/api/style-source-imports",
+                method = "POST",
+                body = buildStyleSourceImportBody(
+                    sourceType = sourceType,
+                    title = title,
+                    url = url,
+                    text = text,
+                ),
+            ),
+        )
+    }
+
     suspend fun distillStyleProfile(
         apiBaseUrl: String,
         filesToken: String,
@@ -123,6 +188,29 @@ object WritingStyleApi {
             body = payload,
         )
         parseStyleDistillationResponse(response)
+    }
+
+    suspend fun distillStyleProfile(
+        preferences: AppPreferences,
+        sourceImportIds: List<String>,
+        profileId: String?,
+        name: String?,
+        description: String?,
+    ): StyleDistillationResult = withContext(Dispatchers.IO) {
+        require(preferences.accessToken.isNotBlank()) { "请先登录后生成风格模板" }
+        parseStyleDistillationResponse(
+            requestJson(
+                preferences = preferences,
+                path = "/api/style-distillation-jobs",
+                method = "POST",
+                body = buildStyleDistillationBody(
+                    sourceImportIds = sourceImportIds,
+                    profileId = profileId,
+                    name = name,
+                    description = description,
+                ),
+            ),
+        )
     }
 }
 
@@ -283,6 +371,25 @@ private fun requestJson(
         throw IllegalStateException(writingStyleApiFailureMessage(status, responseBody))
     }
     return responseBody
+}
+
+private suspend fun requestJson(
+    preferences: AppPreferences,
+    path: String,
+    method: String,
+    body: String? = null,
+): String {
+    val response = AuthenticatedHttpClient.request(
+        preferences = preferences,
+        url = URL("${preferences.apiBaseUrl.trimEnd('/')}$path"),
+        method = method,
+        body = body?.toByteArray(Charsets.UTF_8),
+        contentType = if (body != null) "application/json; charset=utf-8" else null,
+    )
+    if (response.statusCode !in 200..299) {
+        throw IllegalStateException(writingStyleApiFailureMessage(response.statusCode, response.body))
+    }
+    return response.body
 }
 
 internal fun writingStyleApiFailureMessage(responseCode: Int, responseBody: String): String {

@@ -119,7 +119,7 @@ All gates must pass before declaring the flow complete.
 4. Production API state:
 
    ```bash
-   curl -H "Authorization: Bearer $FILES_TOKEN" \
+   curl -H "Authorization: Bearer $ACCESS_TOKEN" \
      https://vibepub.litianc.cn/api/recordings
    ```
 
