@@ -2,6 +2,7 @@
 
 # Android / Gradle
 .gradle/
+android/.gradle-user-home/
 android/.kotlin/
 **/build/
 local.properties
@@ -22,9 +23,16 @@ artifacts/android-device-visual/
 artifacts/android-device-readiness/
 artifacts/android-experience-readiness/
 artifacts/android-db-inspect/
+artifacts/android-install/
 artifacts/android-install-local/
+artifacts/android-install-timeout-test/
 artifacts/apk/
+artifacts/ci-test-*/
 artifacts/ci-test-report-*/
+artifacts/device-debug/
+artifacts/generated-covers/
+artifacts/mining-*.log
+artifacts/revision-image-smoke-*/
 artifacts/vibepub-debug-apk/
 
 # macOS / IDE

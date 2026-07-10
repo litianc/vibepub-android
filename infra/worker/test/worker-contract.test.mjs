@@ -16,6 +16,73 @@ test("rejects unauthorized API requests", async () => {
   assert.equal(response.status, 401);
 });
 
+test("health check exposes deploy version metadata", async () => {
+  const response = await worker.fetch(
+    new Request("https://example.test/health"),
+    createEnv({
+      DEPLOY_COMMIT: "abc1234",
+      DEPLOY_REF: "main",
+      DEPLOYED_AT: "2026-07-10T05:32:00Z",
+    }),
+    createExecutionContext(),
+  );
+
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.ok, true);
+  assert.equal(body.service, "vibepub-api");
+  assert.deepEqual(body.version, {
+    commit: "abc1234",
+    ref: "main",
+    deployed_at: "2026-07-10T05:32:00Z",
+  });
+});
+
+test("mining input claims allow one active holder and keep completed inputs out of repeat processing", async () => {
+  const db = miningClaimDb();
+  const targetKey = "users/usr_claim/inbox/voice.m4a";
+  const claimResponses = await Promise.all([
+    worker.fetch(
+      miningClaimRequest("claim", "usr_claim", targetKey, "claim-a"),
+      createEnv({ DB: db, MINING_SERVICE_TOKEN: "mining-token" }),
+      createExecutionContext(),
+    ),
+    worker.fetch(
+      miningClaimRequest("claim", "usr_claim", targetKey, "claim-b"),
+      createEnv({ DB: db, MINING_SERVICE_TOKEN: "mining-token" }),
+      createExecutionContext(),
+    ),
+  ]);
+  const claimBodies = await Promise.all(claimResponses.map((response) => response.json()));
+  assert.equal(claimBodies.filter((body) => body.claimed).length, 1);
+
+  const winningClaimId = claimBodies[0].claimed ? "claim-a" : "claim-b";
+  const complete = await worker.fetch(
+    miningClaimRequest("complete", "usr_claim", targetKey, winningClaimId),
+    createEnv({ DB: db, MINING_SERVICE_TOKEN: "mining-token" }),
+    createExecutionContext(),
+  );
+  assert.equal((await complete.json()).completed, true);
+
+  const repeated = await worker.fetch(
+    miningClaimRequest("claim", "usr_claim", targetKey, "claim-later"),
+    createEnv({ DB: db, MINING_SERVICE_TOKEN: "mining-token" }),
+    createExecutionContext(),
+  );
+  assert.equal((await repeated.json()).claimed, false);
+});
+
+test("mining input claims reject a target outside the stated user scope", async () => {
+  const response = await worker.fetch(
+    miningClaimRequest("claim", "usr_one", "users/usr_two/inbox/voice.m4a", "claim-one"),
+    createEnv({ MINING_SERVICE_TOKEN: "mining-token" }),
+    createExecutionContext(),
+  );
+
+  assert.equal(response.status, 400);
+  assert.equal((await response.json()).error, "invalid_claim_target");
+});
+
 test("lists Android recording display fields including processing stage", async () => {
   const db = createDb([
     {
@@ -661,7 +728,7 @@ test("dispatches mining workflow for the uploaded filename", async () => {
       createEnv({
         FILES_BUCKET: bucket,
         GITHUB_PAT: "github-token",
-        GITHUB_WORKFLOW_REF: "codex/android-experience-v1",
+        GITHUB_WORKFLOW_REF: "main",
       }),
       context,
     );
@@ -679,7 +746,7 @@ test("dispatches mining workflow for the uploaded filename", async () => {
     "https://api.github.com/repos/litianc/vibepub-android/actions/workflows/mining-job.yml/dispatches",
   );
   assert.equal(dispatches[0].init.method, "POST");
-  assert.equal(dispatches[0].body.ref, "codex/android-experience-v1");
+  assert.equal(dispatches[0].body.ref, "main");
   assert.deepEqual(dispatches[0].body.inputs, {
     target_filename: "VibePub-2026-06-30-160000-0m18s-Tue-Afternoon.m4a",
     target_key: "users/default_user/inbox/VibePub-2026-06-30-160000-0m18s-Tue-Afternoon.m4a",
@@ -1312,6 +1379,22 @@ function sessionRequest(url, init = {}) {
   return new Request(url, { ...init, headers });
 }
 
+function miningClaimRequest(action, userId, targetKey, claimId) {
+  return new Request("https://example.test/api/internal/mining-claims", {
+    method: "POST",
+    headers: {
+      "Authorization": "Bearer mining-token",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      action,
+      user_id: userId,
+      target_key: targetKey,
+      claim_id: claimId,
+    }),
+  });
+}
+
 function sessionDb(userRow) {
   return {
     prepare(sql) {
@@ -1365,6 +1448,62 @@ function createDb(results, options = {}) {
         all: async () => ({ results }),
         run: async () => ({ meta: { changes: 1 } }),
       });
+    },
+  };
+}
+
+function miningClaimDb() {
+  const claims = new Map();
+  return {
+    prepare(sql) {
+      if (sql.includes("INSERT INTO mining_input_claims")) {
+        return statement({
+          run: async (values) => {
+            const [userId, targetKey, claimId, leaseExpiresAt, now, , staleBefore] = values;
+            const key = `${userId}:${targetKey}`;
+            const existing = claims.get(key);
+            if (!existing || (existing.state === "processing" && existing.lease_expires_at <= staleBefore)) {
+              claims.set(key, {
+                state: "processing",
+                claim_id: claimId,
+                lease_expires_at: leaseExpiresAt,
+                updated_at: now,
+              });
+              return { meta: { changes: 1 } };
+            }
+            return { meta: { changes: 0 } };
+          },
+        });
+      }
+      if (sql.includes("UPDATE mining_input_claims")) {
+        return statement({
+          run: async (values) => {
+            const [, , userId, targetKey, claimId] = values;
+            const key = `${userId}:${targetKey}`;
+            const existing = claims.get(key);
+            if (!existing || existing.state !== "processing" || existing.claim_id !== claimId) {
+              return { meta: { changes: 0 } };
+            }
+            claims.set(key, { ...existing, state: "completed", lease_expires_at: null });
+            return { meta: { changes: 1 } };
+          },
+        });
+      }
+      if (sql.includes("DELETE FROM mining_input_claims")) {
+        return statement({
+          run: async (values) => {
+            const [userId, targetKey, claimId] = values;
+            const key = `${userId}:${targetKey}`;
+            const existing = claims.get(key);
+            if (!existing || existing.state !== "processing" || existing.claim_id !== claimId) {
+              return { meta: { changes: 0 } };
+            }
+            claims.delete(key);
+            return { meta: { changes: 1 } };
+          },
+        });
+      }
+      throw new Error(`Unexpected SQL: ${sql}`);
     },
   };
 }

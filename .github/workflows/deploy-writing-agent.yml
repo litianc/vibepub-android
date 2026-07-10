@@ -1,4 +1,4 @@
-name: Deploy WritingAgent
+name: Validate / Deploy WritingAgent
 
 on:
   pull_request:
@@ -14,7 +14,7 @@ on:
   workflow_dispatch:
     inputs:
       deploy:
-        description: Deploy WritingAgent after validation
+        description: Set true to deploy WritingAgent after validation; push and PR runs validate only
         required: true
         default: "false"
         type: choice
@@ -24,6 +24,7 @@ on:
 
 jobs:
   validate:
+    name: Validate WritingAgent
     runs-on: ubuntu-latest
 
     defaults:
@@ -54,6 +55,7 @@ jobs:
         run: npx wrangler deploy --dry-run
 
   deploy:
+    name: Deploy WritingAgent (manual)
     if: github.event_name == 'workflow_dispatch' && inputs.deploy == 'true'
     needs: validate
     runs-on: ubuntu-latest

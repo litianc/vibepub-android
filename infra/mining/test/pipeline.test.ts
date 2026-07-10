@@ -55,6 +55,14 @@ describe('VibePub Cloud Pipeline', () => {
 
   function mockFetchWithPublishingAccount(account = testWechatConfig) {
     vi.stubGlobal('fetch', vi.fn(async (input) => {
+      if (String(input).includes('/api/internal/mining-claims')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ claimed: true, completed: true, released: true }),
+          text: async () => '',
+        } as any;
+      }
       if (String(input).includes('/api/internal/publishing-account')) {
         return {
           ok: true,
@@ -80,7 +88,7 @@ describe('VibePub Cloud Pipeline', () => {
 
   function statusUpdateBodies() {
     return vi.mocked(fetch).mock.calls
-      .filter(([input]) => !String(input).includes('/api/internal/publishing-account'))
+      .filter(([input]) => String(input).includes('/api/internal/status'))
       .map(([, init]) => JSON.parse(String(init?.body)));
   }
 
@@ -90,6 +98,7 @@ describe('VibePub Cloud Pipeline', () => {
       ...originalEnv,
       PUBLIC_BASE_URL: 'https://vibepub.example.test',
       FILES_TOKEN: 'test-files-token',
+      MINING_SERVICE_TOKEN: 'test-mining-service-token',
       TARGET_FILENAME: '',
       REVISION_REQUEST_KEY: '',
       WECHAT_APP_ID: '',
@@ -162,6 +171,29 @@ describe('VibePub Cloud Pipeline', () => {
     ]);
     expect(filterTargetFiles(files, undefined)).toEqual(files);
     expect(filterTargetFiles(files, 'missing.mp3')).toEqual([]);
+  });
+
+  it('should skip an input already claimed by an active or completed mining run', async () => {
+    const fileKey = 'inbox/VibePub-2026-07-10-140000-0m30s-Already-Claimed.mp3';
+    vi.stubGlobal('fetch', vi.fn(async (input) => {
+      if (String(input).includes('/api/internal/mining-claims')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ claimed: false }),
+          text: async () => '',
+        } as any;
+      }
+      throw new Error(`Unexpected request: ${String(input)}`);
+    }));
+    vi.mocked(listUnprocessedFiles).mockResolvedValue([fileKey]);
+
+    await expect(main()).resolves.toBeUndefined();
+
+    expect(transcribeAudioUrl).not.toHaveBeenCalled();
+    expect(processAudioText).not.toHaveBeenCalled();
+    expect(publishDraft).not.toHaveBeenCalled();
+    expect(statusUpdateBodies()).toEqual([]);
   });
 
   it('should build transcript payload with article and draft metadata', () => {
@@ -370,6 +402,14 @@ describe('VibePub Cloud Pipeline', () => {
     process.env.WECHAT_APP_SECRET = 'legacy-secret';
     process.env.WECHAT_PROXY = 'https://legacy-wechat-proxy.example.test';
     vi.stubGlobal('fetch', vi.fn(async (input) => {
+      if (String(input).includes('/api/internal/mining-claims')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ claimed: true, completed: true, released: true }),
+          text: async () => '',
+        } as any;
+      }
       if (String(input).includes('/api/internal/publishing-account')) {
         return {
           ok: false,

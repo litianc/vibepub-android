@@ -98,9 +98,11 @@ rotating ADB ports does not require editing the command itself.
 The Worker expects:
 
 - R2 bucket: `vibepub-files`
+- D1 database: `vibepub-db`
 - Worker name: `vibepub-api`
 - Custom domain: `vibepub.litianc.cn`
-- Secret: `FILES_TOKEN`
+- Invite-based user accounts with access/refresh session tokens.
+- Runtime secrets for GitHub workflow dispatch, WritingAgent access, credential encryption, and email sending.
 
 Local development:
 
@@ -115,7 +117,7 @@ Deploy after Cloudflare auth is configured:
 ```bash
 cd infra/worker
 npx wrangler r2 bucket create vibepub-files
-npx wrangler secret put FILES_TOKEN
+npm run migrate:remote
 npx wrangler deploy
 ```
 
@@ -134,7 +136,12 @@ cd infra/worker
 npx wrangler secret put GITHUB_PAT
 ```
 
-`GITHUB_WORKFLOW_REF` is currently set to `codex/android-experience-v1` in
-`infra/worker/wrangler.toml` because that branch contains the targeted
-`mining-job.yml` input. Switch it back to `main` after the workflow input lands
-there.
+`GITHUB_WORKFLOW_REF` is set to `main` in `infra/worker/wrangler.toml`, so
+upload-triggered mining runs the same workflow definition as scheduled fallback
+processing. Mining serializes workflow runs and atomically claims each R2 input
+before draft creation, so an immediate dispatch and the scheduled fallback cannot
+create duplicate drafts for the same object. Worker and WritingAgent GitHub Actions are named
+`Validate / Deploy ...`: PR and push runs validate only, while production deploys
+require a manual `workflow_dispatch` with `deploy=true` after validation passes.
+The Worker deploy injects commit/ref metadata that can be checked through
+`GET /health`.

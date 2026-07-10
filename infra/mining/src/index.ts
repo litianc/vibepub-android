@@ -7,6 +7,7 @@ import { prepareArticleImages, type PreparedArticleImage } from "./articleImages
 import { getAccessToken, publishDraft, updateDraft, uploadWechatArticleImage, type WechatConfig } from "./wechat.js";
 import path from "path";
 import { pathToFileURL } from "url";
+import { randomUUID } from "node:crypto";
 
 function describeError(error: unknown): Record<string, unknown> {
   if (typeof error !== "object" || error === null) {
@@ -130,6 +131,68 @@ async function updateStatus(filename: string, status: string, metadata: StatusMe
     if (!res.ok) console.error(`Status update failed: ${res.status} ${await res.text()}`);
   } catch (e) {
     console.error("Failed to update status:", e);
+  }
+}
+
+type MiningClaimAction = "claim" | "complete" | "release";
+
+function miningInternalConfig(): { baseUrl: string; token: string } {
+  const baseUrl = process.env.PUBLIC_BASE_URL?.trim();
+  const token = process.env.MINING_SERVICE_TOKEN?.trim();
+  if (!baseUrl || !token) {
+    throw new Error("PUBLIC_BASE_URL and MINING_SERVICE_TOKEN are required for mining input claims");
+  }
+  return { baseUrl: baseUrl.replace(/\/+$/, ""), token };
+}
+
+async function updateMiningClaim(
+  action: MiningClaimAction,
+  userId: string,
+  targetKey: string,
+  claimId: string,
+): Promise<Record<string, unknown>> {
+  const { baseUrl, token } = miningInternalConfig();
+  const response = await fetch(`${baseUrl}/api/internal/mining-claims`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${token}`,
+    },
+    body: JSON.stringify({
+      action,
+      user_id: userId,
+      target_key: targetKey,
+      claim_id: claimId,
+    }),
+  });
+  const body = await response.json().catch(() => ({})) as Record<string, unknown>;
+  if (!response.ok) {
+    throw new Error(`Mining claim ${action} failed HTTP ${response.status}`);
+  }
+  return body;
+}
+
+async function claimMiningInput(userId: string, targetKey: string): Promise<string | null> {
+  const claimId = randomUUID();
+  const response = await updateMiningClaim("claim", userId, targetKey, claimId);
+  return response.claimed === true ? claimId : null;
+}
+
+async function completeMiningInput(userId: string, targetKey: string, claimId: string): Promise<void> {
+  const response = await updateMiningClaim("complete", userId, targetKey, claimId);
+  if (response.completed !== true) {
+    throw new Error("Mining input claim could not be completed");
+  }
+}
+
+async function releaseMiningInput(userId: string, targetKey: string, claimId: string): Promise<void> {
+  try {
+    const response = await updateMiningClaim("release", userId, targetKey, claimId);
+    if (response.released !== true) {
+      console.warn(`Mining input claim was not released for ${targetKey}`);
+    }
+  } catch (error) {
+    console.error(`Failed to release mining input claim for ${targetKey}:`, describeError(error));
   }
 }
 
@@ -643,6 +706,13 @@ export async function main() {
     let article: ArticleResult | undefined;
     let articleTranscriptSaved = false;
     let profileSelection: ProfileSelection = {};
+    const claimId = await claimMiningInput(userId, fileKey);
+
+    if (!claimId) {
+      console.log(`Skipping already claimed or completed input: ${fileKey}`);
+      continue;
+    }
+    let resultFinalized = false;
 
     try {
       console.log(`\n--- Processing file: ${fileKey} ---`);
@@ -681,6 +751,8 @@ export async function main() {
         console.log("Transcript was empty. Skipping.");
         await deleteFile(fileKey);
         await updateStatus(filename, "FAILED", { userId, processingStage, errorMessage: "转录结果为空" });
+        resultFinalized = true;
+        await completeMiningInput(userId, fileKey, claimId);
         continue;
       }
 
@@ -772,6 +844,8 @@ export async function main() {
         processingStage: "COMPLETED",
         wechatDraftId: mediaId,
       });
+      resultFinalized = true;
+      await completeMiningInput(userId, fileKey, claimId);
       
       console.log(`Finished processing: ${fileKey}`);
     } catch (e) {
@@ -793,8 +867,15 @@ export async function main() {
           profileSelection,
         );
         if (recovered) {
+          resultFinalized = true;
+          await completeMiningInput(userId, fileKey, claimId);
           continue;
         }
+      }
+
+      if (resultFinalized) {
+        failedCount += 1;
+        continue;
       }
 
       await updateStatus(filename, "FAILED", {
@@ -806,11 +887,14 @@ export async function main() {
       if (isPermanentAudioFailure(e) && shouldCleanupPermanentAudioFailures()) {
         console.warn(`Deleting permanently invalid audio file from R2 inbox: ${fileKey}`);
         await deleteFile(fileKey);
+        resultFinalized = true;
+        await completeMiningInput(userId, fileKey, claimId);
         permanentFailedCount += 1;
         continue;
       }
 
       // Keep retryable failures in the inbox so the next run can try again.
+      await releaseMiningInput(userId, fileKey, claimId);
       failedCount += 1;
     }
   }

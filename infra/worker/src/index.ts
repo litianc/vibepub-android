@@ -6,6 +6,9 @@ export interface Env {
   PUBLIC_BASE_URL: string;
   GITHUB_PAT?: string;
   GITHUB_WORKFLOW_REF?: string;
+  DEPLOY_COMMIT?: string;
+  DEPLOY_REF?: string;
+  DEPLOYED_AT?: string;
   WRITING_AGENT_BASE_URL?: string;
   WRITING_AGENT_TOKEN?: string;
   CREDENTIAL_ENCRYPTION_KEY?: string;
@@ -23,6 +26,8 @@ export interface Env {
   BOOTSTRAP_ADMIN_EMAIL?: string;
   BOOTSTRAP_ADMIN_USER_ID?: string;
 }
+
+const MINING_CLAIM_LEASE_MS = 2 * 60 * 60 * 1000;
 
 type AuthContext = {
   userId: string;
@@ -85,7 +90,11 @@ export default {
     const url = new URL(request.url);
 
     if (request.method === "GET" && url.pathname === "/health") {
-      return json({ ok: true, service: "vibepub-api" });
+      return json({
+        ok: true,
+        service: "vibepub-api",
+        version: deploymentVersion(env),
+      });
     }
 
     if (url.pathname.startsWith("/api/auth/")) {
@@ -104,6 +113,13 @@ export default {
         return json({ error: "unauthorized" }, 401);
       }
       return getInternalPublishingAccount(request, env);
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/internal/mining-claims") {
+      if (!(await isInternalAuthorized(request, env))) {
+        return json({ error: "unauthorized" }, 401);
+      }
+      return handleMiningClaim(request, env);
     }
 
     if (!url.pathname.startsWith("/api/")) {
@@ -1564,6 +1580,85 @@ async function updateStatus(request: Request, env: Env): Promise<Response> {
   }
 }
 
+async function handleMiningClaim(request: Request, env: Env): Promise<Response> {
+  const body = await parseJson(request);
+  const action = normalizeOptionalString(body?.action);
+  const userId = normalizeOptionalString(body?.user_id ?? body?.userId);
+  const targetKey = normalizeOptionalString(body?.target_key ?? body?.targetKey);
+  const claimId = normalizeOptionalString(body?.claim_id ?? body?.claimId);
+
+  if (!userId || !targetKey || !isMiningInputOwnedBy(userId, targetKey)) {
+    return json({ error: "invalid_claim_target" }, 400);
+  }
+  if (!claimId || claimId.length > 200) {
+    return json({ error: "invalid_claim_id" }, 400);
+  }
+
+  if (action === "claim") {
+    const now = nowIso();
+    const leaseExpiresAt = isoAfter(MINING_CLAIM_LEASE_MS);
+    const result = await env.DB.prepare(
+      `
+      INSERT INTO mining_input_claims
+        (user_id, target_key, state, claim_id, lease_expires_at, created_at, updated_at)
+      VALUES (?, ?, 'processing', ?, ?, ?, ?)
+      ON CONFLICT(user_id, target_key) DO UPDATE SET
+        state = 'processing',
+        claim_id = excluded.claim_id,
+        lease_expires_at = excluded.lease_expires_at,
+        updated_at = excluded.updated_at,
+        completed_at = NULL
+      WHERE mining_input_claims.state = 'processing'
+        AND mining_input_claims.lease_expires_at <= ?
+      `,
+    )
+      .bind(userId, targetKey, claimId, leaseExpiresAt, now, now, now)
+      .run();
+    const claimed = (result.meta.changes ?? 0) > 0;
+    return json({
+      claimed,
+      state: claimed ? "processing" : "already_claimed_or_completed",
+    });
+  }
+
+  if (action === "complete") {
+    const now = nowIso();
+    const result = await env.DB.prepare(
+      `
+      UPDATE mining_input_claims
+      SET state = 'completed', lease_expires_at = NULL, completed_at = ?, updated_at = ?
+      WHERE user_id = ? AND target_key = ? AND claim_id = ? AND state = 'processing'
+      `,
+    )
+      .bind(now, now, userId, targetKey, claimId)
+      .run();
+    return json({ completed: (result.meta.changes ?? 0) > 0 });
+  }
+
+  if (action === "release") {
+    const result = await env.DB.prepare(
+      `
+      DELETE FROM mining_input_claims
+      WHERE user_id = ? AND target_key = ? AND claim_id = ? AND state = 'processing'
+      `,
+    )
+      .bind(userId, targetKey, claimId)
+      .run();
+    return json({ released: (result.meta.changes ?? 0) > 0 });
+  }
+
+  return json({ error: "invalid_claim_action" }, 400);
+}
+
+function isMiningInputOwnedBy(userId: string, targetKey: string): boolean {
+  if (targetKey.includes("..")) return false;
+  if (targetKey.startsWith(`users/${userId}/`)) return true;
+  if (userId !== "default_user") return false;
+  return targetKey.startsWith("inbox/") ||
+    targetKey.startsWith("text-submissions/") ||
+    targetKey.startsWith("revision-requests/");
+}
+
 function resolveStatusErrorUpdate(input: {
   status: string;
   processingStage?: string | null;
@@ -1976,4 +2071,17 @@ function json(body: unknown, status = 200): Response {
       "content-type": "application/json; charset=utf-8",
     },
   });
+}
+
+function deploymentVersion(env: Env): Record<string, string | null> {
+  return {
+    commit: metadataValue(env.DEPLOY_COMMIT),
+    ref: metadataValue(env.DEPLOY_REF),
+    deployed_at: metadataValue(env.DEPLOYED_AT),
+  };
+}
+
+function metadataValue(value: string | undefined): string | null {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : null;
 }

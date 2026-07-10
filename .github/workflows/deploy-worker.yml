@@ -1,4 +1,4 @@
-name: Deploy Worker
+name: Validate / Deploy Worker
 
 on:
   pull_request:
@@ -14,7 +14,7 @@ on:
   workflow_dispatch:
     inputs:
       deploy:
-        description: Deploy the Worker after validation
+        description: Set true to deploy the Worker after validation; push and PR runs validate only
         required: true
         default: "false"
         type: choice
@@ -24,6 +24,7 @@ on:
 
 jobs:
   validate:
+    name: Validate Worker
     runs-on: ubuntu-latest
 
     defaults:
@@ -48,7 +49,16 @@ jobs:
       - name: Test
         run: npm test
 
+      - name: Deploy dry run
+        run: |
+          DEPLOYED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          npx wrangler deploy --dry-run \
+            --var "DEPLOY_COMMIT:${GITHUB_SHA}" \
+            --var "DEPLOY_REF:${GITHUB_REF_NAME}" \
+            --var "DEPLOYED_AT:${DEPLOYED_AT}"
+
   deploy:
+    name: Deploy Worker (manual)
     if: github.event_name == 'workflow_dispatch' && inputs.deploy == 'true'
     needs: validate
     runs-on: ubuntu-latest
@@ -84,6 +94,12 @@ jobs:
           WRITING_AGENT_TOKEN: ${{ secrets.WRITING_AGENT_TOKEN }}
 
       - name: Deploy
-        run: npx wrangler deploy
+        run: |
+          DEPLOYED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          npx wrangler deploy \
+            --message "GitHub Actions ${GITHUB_SHA} (${GITHUB_REF_NAME})" \
+            --var "DEPLOY_COMMIT:${GITHUB_SHA}" \
+            --var "DEPLOY_REF:${GITHUB_REF_NAME}" \
+            --var "DEPLOYED_AT:${DEPLOYED_AT}"
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
