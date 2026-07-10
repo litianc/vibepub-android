@@ -75,49 +75,79 @@ object AuthenticatedHttpClient {
         preferences: AppPreferences,
         openConnection: (accessToken: String) -> HttpURLConnection,
     ): AuthenticatedHttpResponse = withContext(Dispatchers.IO) {
-        val initialToken = preferences.accessToken.trim()
-        if (initialToken.isBlank()) {
-            throw AuthenticatedRequestException(
-                message = "登录信息不完整，请重新登录",
-                retryable = false,
-            )
-        }
+        val initialSession = requireAuthenticatedSession(preferences.currentAuthSessionSnapshot())
 
-        val first = perform(openConnection, initialToken)
+        val first = perform(openConnection, initialSession.accessToken)
         if (first.statusCode != HttpURLConnection.HTTP_UNAUTHORIZED) {
             return@withContext first
         }
 
-        if (!refreshAccessToken(preferences, failedAccessToken = initialToken)) {
-            return@withContext first
-        }
+        val refreshedSession = refreshAccessToken(preferences, failedSession = initialSession)
+            ?: return@withContext first
+        ensureSameSession(preferences.currentAuthSessionSnapshot(), refreshedSession)
 
-        retryAfterRefresh { perform(openConnection, preferences.accessToken.trim()) }
+        retryAfterRefresh { perform(openConnection, refreshedSession.accessToken) }
     }
 
     suspend fun executeBytes(
         preferences: AppPreferences,
         openConnection: (accessToken: String) -> HttpURLConnection,
     ): AuthenticatedHttpBinaryResponse = withContext(Dispatchers.IO) {
-        val initialToken = preferences.accessToken.trim()
-        if (initialToken.isBlank()) {
+        val initialSession = requireAuthenticatedSession(preferences.currentAuthSessionSnapshot())
+
+        val first = performBytes(openConnection, initialSession.accessToken)
+        if (first.statusCode != HttpURLConnection.HTTP_UNAUTHORIZED) {
+            return@withContext first
+        }
+
+        val refreshedSession = refreshAccessToken(preferences, failedSession = initialSession)
+            ?: return@withContext first
+        ensureSameSession(preferences.currentAuthSessionSnapshot(), refreshedSession)
+
+        retryAfterRefresh { performBytes(openConnection, refreshedSession.accessToken) }
+    }
+
+    private fun requireAuthenticatedSession(session: AuthSessionSnapshot): AuthSessionSnapshot {
+        if (
+            session.accessToken.isBlank() ||
+            session.userId.isBlank() ||
+            session.sessionId.isBlank()
+        ) {
             throw AuthenticatedRequestException(
                 message = "登录信息不完整，请重新登录",
                 retryable = false,
             )
         }
-
-        val first = performBytes(openConnection, initialToken)
-        if (first.statusCode != HttpURLConnection.HTTP_UNAUTHORIZED) {
-            return@withContext first
-        }
-
-        if (!refreshAccessToken(preferences, failedAccessToken = initialToken)) {
-            return@withContext first
-        }
-
-        retryAfterRefresh { performBytes(openConnection, preferences.accessToken.trim()) }
+        return session
     }
+
+    private fun requireRefreshableSession(session: AuthSessionSnapshot): AuthSessionSnapshot {
+        requireAuthenticatedSession(session)
+        if (session.refreshToken.isBlank()) {
+            throw AuthenticatedRequestException(
+                message = "登录信息不完整，请重新登录",
+                retryable = false,
+            )
+        }
+        return session
+    }
+
+    private fun ensureSameSession(
+        currentSession: AuthSessionSnapshot,
+        expectedSession: AuthSessionSnapshot,
+    ) {
+        if (
+            currentSession.sessionId != expectedSession.sessionId ||
+            currentSession.userId != expectedSession.userId
+        ) {
+            throw sessionChangedException()
+        }
+    }
+
+    private fun sessionChangedException() = AuthenticatedRequestException(
+        message = "登录账号已切换，已取消当前请求，请重新登录后重试",
+        retryable = false,
+    )
 
     private fun perform(
         openConnection: (accessToken: String) -> HttpURLConnection,
@@ -157,27 +187,16 @@ object AuthenticatedHttpClient {
 
     private suspend fun refreshAccessToken(
         preferences: AppPreferences,
-        failedAccessToken: String,
-    ): Boolean = refreshMutex.withLock {
-        val currentAccessToken = preferences.accessToken.trim()
-        if (currentAccessToken.isBlank()) {
-            throw AuthenticatedRequestException(
-                message = "登录信息不完整，请重新登录",
-                retryable = false,
-            )
-        }
-        if (currentAccessToken != failedAccessToken) return@withLock true
-
-        val currentRefreshToken = preferences.refreshToken.trim()
-        if (currentRefreshToken.isBlank()) {
-            throw AuthenticatedRequestException(
-                message = "登录信息不完整，请重新登录",
-                retryable = false,
-            )
+        failedSession: AuthSessionSnapshot,
+    ): AuthSessionSnapshot? = refreshMutex.withLock {
+        val currentSession = requireRefreshableSession(preferences.currentAuthSessionSnapshot())
+        ensureSameSession(currentSession, failedSession)
+        if (currentSession.accessToken != failedSession.accessToken) {
+            return@withLock currentSession
         }
 
         runCatching {
-            AuthApi.refresh(preferences.apiBaseUrl, currentRefreshToken)
+            AuthApi.refresh(preferences.apiBaseUrl, currentSession.refreshToken)
         }.fold(
             onSuccess = { session ->
                 if (session.accessToken.isBlank() || session.refreshToken.isBlank()) {
@@ -186,16 +205,22 @@ object AuthenticatedHttpClient {
                         retryable = true,
                     )
                 }
-                preferences.saveAuthSession(session)
-                true
+                if (!preferences.saveRefreshedAuthSession(session, failedSession)) {
+                    throw sessionChangedException()
+                }
+                requireRefreshableSession(preferences.currentAuthSessionSnapshot()).also {
+                    ensureSameSession(it, failedSession)
+                }
             },
             onFailure = { error ->
                 if (error is CancellationException) {
                     throw error
                 }
                 if (error is AuthApiException && error.statusCode in INVALID_REFRESH_TOKEN_STATUS_CODES) {
-                    preferences.clearAuthSession()
-                    return@fold false
+                    if (!preferences.clearAuthSessionIfMatches(failedSession)) {
+                        throw sessionChangedException()
+                    }
+                    return@fold null
                 }
                 if (error is AuthenticatedRequestException) {
                     throw error

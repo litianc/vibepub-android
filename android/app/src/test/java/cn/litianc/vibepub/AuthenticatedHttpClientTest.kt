@@ -125,6 +125,123 @@ class AuthenticatedHttpClientTest {
     }
 
     @Test
+    fun requestDoesNotReplayWithAnotherAccountsSessionAfterAccountSwitch() = runBlocking {
+        val protectedHits = AtomicInteger(0)
+        val refreshHits = AtomicInteger(0)
+        val baseUrl = startServer(
+            protectedHits = protectedHits,
+            refreshHits = refreshHits,
+            refreshStatus = 200,
+            onProtected = {
+                preferences.saveAuthSession(
+                    testSession(
+                        accessToken = "account-b-access",
+                        refreshToken = "account-b-refresh",
+                        userId = "usr_account_b",
+                    ),
+                )
+                401 to """{"error":"unauthorized"}"""
+            },
+        )
+        preferences.apiBaseUrl = baseUrl
+        preferences.saveAuthSession(
+            testSession(
+                accessToken = "account-a-expired",
+                refreshToken = "account-a-refresh",
+                userId = "usr_account_a",
+            ),
+        )
+
+        val error = expectAuthenticatedFailure {
+            AuthenticatedHttpClient.request(
+                preferences = preferences,
+                url = URL("$baseUrl/api/protected"),
+            )
+        }
+
+        assertFalse(error.retryable)
+        assertTrue(error.message.orEmpty().contains("已切换"))
+        assertEquals(1, protectedHits.get())
+        assertEquals(0, refreshHits.get())
+        assertEquals("usr_account_b", preferences.userId)
+        assertEquals("account-b-access", preferences.accessToken)
+        assertEquals("account-b-refresh", preferences.refreshToken)
+    }
+
+    @Test
+    fun requestDoesNotReplayAfterLogoutDuringUnauthorizedResponse() = runBlocking {
+        val protectedHits = AtomicInteger(0)
+        val refreshHits = AtomicInteger(0)
+        val baseUrl = startServer(
+            protectedHits = protectedHits,
+            refreshHits = refreshHits,
+            refreshStatus = 200,
+            onProtected = {
+                preferences.clearAuthSession()
+                401 to """{"error":"unauthorized"}"""
+            },
+        )
+        preferences.apiBaseUrl = baseUrl
+        preferences.saveAuthSession(
+            testSession(accessToken = "account-a-expired", refreshToken = "account-a-refresh"),
+        )
+
+        val error = expectAuthenticatedFailure {
+            AuthenticatedHttpClient.request(
+                preferences = preferences,
+                url = URL("$baseUrl/api/protected"),
+            )
+        }
+
+        assertFalse(error.retryable)
+        assertEquals(1, protectedHits.get())
+        assertEquals(0, refreshHits.get())
+        assertFalse(preferences.isAuthenticated)
+    }
+
+    @Test
+    fun refreshCompletionDoesNotOverwriteAnotherAccountThatLoggedInDuringRefresh() = runBlocking {
+        val protectedHits = AtomicInteger(0)
+        val refreshHits = AtomicInteger(0)
+        val baseUrl = startServer(
+            protectedHits = protectedHits,
+            refreshHits = refreshHits,
+            refreshStatus = 200,
+            onRefresh = {
+                preferences.saveAuthSession(
+                    testSession(
+                        accessToken = "account-b-access",
+                        refreshToken = "account-b-refresh",
+                        userId = "usr_account_b",
+                    ),
+                )
+            },
+        )
+        preferences.apiBaseUrl = baseUrl
+        preferences.saveAuthSession(
+            testSession(
+                accessToken = "account-a-expired",
+                refreshToken = "account-a-refresh",
+                userId = "usr_account_a",
+            ),
+        )
+
+        val error = expectAuthenticatedFailure {
+            AuthenticatedHttpClient.request(
+                preferences = preferences,
+                url = URL("$baseUrl/api/protected"),
+            )
+        }
+
+        assertFalse(error.retryable)
+        assertEquals(1, protectedHits.get())
+        assertEquals(1, refreshHits.get())
+        assertEquals("usr_account_b", preferences.userId)
+        assertEquals("account-b-access", preferences.accessToken)
+        assertEquals("account-b-refresh", preferences.refreshToken)
+    }
+
+    @Test
     fun requestClearsSessionWhenRefreshTokenIsRejected() = runBlocking {
         listOf(400, 401, 403).forEach { refreshStatus ->
             server?.stop(0)
@@ -348,6 +465,7 @@ class AuthenticatedHttpClientTest {
         refreshHits: AtomicInteger,
         refreshStatus: Int?,
         refreshBody: String? = null,
+        onRefresh: () -> Unit = {},
         onProtected: (authHeader: String?) -> Pair<Int, String> = { authHeader ->
             if (authHeader == "Bearer fresh-access") {
                 200 to """{"ok":true}"""
@@ -370,6 +488,7 @@ class AuthenticatedHttpClientTest {
         httpServer.createContext("/api/auth/refresh") { exchange ->
             refreshHits.incrementAndGet()
             exchange.requestBody.use { it.readBytes() }
+            onRefresh()
             if (refreshStatus == null) {
                 exchange.close()
                 return@createContext
@@ -403,12 +522,16 @@ class AuthenticatedHttpClientTest {
         return "http://127.0.0.1:${httpServer.address.port}"
     }
 
-    private fun testSession(accessToken: String, refreshToken: String) = AuthSession(
+    private fun testSession(
+        accessToken: String,
+        refreshToken: String,
+        userId: String = "usr_current",
+    ) = AuthSession(
         user = AuthUser(
-            id = "usr_current",
-            email = "current@example.test",
+            id = userId,
+            email = "$userId@example.test",
             role = "user",
-            workspaceId = "ws_current",
+            workspaceId = "ws_$userId",
             emailVerified = true,
         ),
         accessToken = accessToken,
@@ -416,9 +539,15 @@ class AuthenticatedHttpClientTest {
     )
 
     private suspend fun <T> expectRetryableFailure(block: suspend () -> T): AuthenticatedRequestException {
+        val error = expectAuthenticatedFailure(block)
+        assertTrue("Expected a retryable authentication request failure", error.retryable)
+        return error
+    }
+
+    private suspend fun <T> expectAuthenticatedFailure(block: suspend () -> T): AuthenticatedRequestException {
         return try {
             block()
-            throw AssertionError("Expected a retryable authentication request failure")
+            throw AssertionError("Expected an authentication request failure")
         } catch (expected: AuthenticatedRequestException) {
             expected
         }

@@ -94,8 +94,13 @@ class UploadWorker(
                 )
             }
         } catch (error: Exception) {
-            updateLocalStatus(userId, file.name, RecordingStatus.UPLOADING, "网络异常，稍后自动重试")
-            Result.retry()
+            val outcome = classifyUploadFailure(error)
+            updateLocalStatus(userId, file.name, outcome.status, outcome.message)
+            if (outcome.retryable) {
+                Result.retry()
+            } else {
+                Result.failure(androidx.work.workDataOf(KEY_ERROR to JSONObject.quote(outcome.message)))
+            }
         }
     }
 
@@ -132,6 +137,31 @@ class UploadWorker(
         const val KEY_LAYOUT_PROFILE_VERSION = "layout_profile_version"
         const val KEY_ERROR = "error"
     }
+}
+
+internal data class UploadFailureOutcome(
+    val status: RecordingStatus,
+    val message: String,
+    val retryable: Boolean,
+)
+
+internal fun classifyUploadFailure(error: Throwable): UploadFailureOutcome {
+    if (error is AuthenticatedRequestException && !error.retryable) {
+        return UploadFailureOutcome(
+            status = RecordingStatus.FAILED,
+            message = error.message ?: "登录已失效或账号已切换，请重新登录后重新上传",
+            retryable = false,
+        )
+    }
+    return UploadFailureOutcome(
+        status = RecordingStatus.UPLOADING,
+        message = if (error is AuthenticatedRequestException) {
+            error.message ?: "会话刷新暂时失败，请稍后自动重试"
+        } else {
+            "网络异常，稍后自动重试"
+        },
+        retryable = true,
+    )
 }
 
 private fun HttpURLConnection.setOptionalRequestProperty(name: String, value: String) {

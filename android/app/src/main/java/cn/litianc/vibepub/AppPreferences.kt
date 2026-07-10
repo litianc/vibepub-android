@@ -5,6 +5,14 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.onStart
+import java.util.UUID
+
+internal data class AuthSessionSnapshot(
+    val sessionId: String,
+    val userId: String,
+    val accessToken: String,
+    val refreshToken: String,
+)
 
 class AppPreferences(context: Context) {
     private val prefs = context.getSharedPreferences("vibepub", Context.MODE_PRIVATE)
@@ -56,12 +64,99 @@ class AppPreferences(context: Context) {
     val authStateVersion: Long
         get() = prefs.getLong(KEY_AUTH_STATE_VERSION, 0L)
 
+    /**
+     * A login receives a stable local identity that survives token rotation but
+     * changes on logout or a fresh login. It prevents cross-account retries.
+     */
+    internal fun currentAuthSessionSnapshot(): AuthSessionSnapshot = synchronized(authSessionLock) {
+        val accessToken = prefs.getString(KEY_ACCESS_TOKEN, "").orEmpty().trim()
+        val refreshToken = prefs.getString(KEY_REFRESH_TOKEN, "").orEmpty().trim()
+        val userId = prefs.getString(KEY_USER_ID, "").orEmpty().trim()
+        val storedSessionId = prefs.getString(KEY_AUTH_SESSION_ID, "").orEmpty().trim()
+        val sessionId = if (storedSessionId.isBlank() && accessToken.isNotBlank() && userId.isNotBlank()) {
+            UUID.randomUUID().toString().also {
+                prefs.edit().putString(KEY_AUTH_SESSION_ID, it).apply()
+            }
+        } else {
+            storedSessionId
+        }
+        AuthSessionSnapshot(
+            sessionId = sessionId,
+            userId = userId,
+            accessToken = accessToken,
+            refreshToken = refreshToken,
+        )
+    }
+
     fun authStateFlow(): Flow<Long> = authStateUpdates
         .onStart { emit(authStateVersion) }
         .distinctUntilChanged()
 
     fun saveAuthSession(session: AuthSession) {
-        val nextVersion = System.currentTimeMillis()
+        val nextVersion = synchronized(authSessionLock) {
+            writeAuthSessionLocked(session, UUID.randomUUID().toString())
+        }
+        authStateUpdates.tryEmit(nextVersion)
+    }
+
+    /** Returns false when logout or another login replaced the expected session. */
+    internal fun saveRefreshedAuthSession(
+        session: AuthSession,
+        expectedSession: AuthSessionSnapshot,
+    ): Boolean {
+        val nextVersion = synchronized(authSessionLock) {
+            if (!matchesSessionLocked(expectedSession) || session.user.id.trim() != expectedSession.userId) {
+                return@synchronized null
+            }
+            writeAuthSessionLocked(session, expectedSession.sessionId)
+        } ?: return false
+        authStateUpdates.tryEmit(nextVersion)
+        return true
+    }
+
+    fun updateCurrentUser(user: AuthUser) {
+        val nextVersion = synchronized(authSessionLock) {
+            val nextUserId = user.id.trim()
+            val currentUserId = prefs.getString(KEY_USER_ID, "").orEmpty().trim()
+            val sessionId = if (nextUserId.isNotBlank() && nextUserId == currentUserId) {
+                prefs.getString(KEY_AUTH_SESSION_ID, "").orEmpty().trim()
+                    .ifBlank { UUID.randomUUID().toString() }
+            } else {
+                UUID.randomUUID().toString()
+            }
+            val version = nextAuthStateVersionLocked()
+            prefs.edit()
+                .putString(KEY_USER_ID, nextUserId)
+                .putString(KEY_USER_EMAIL, user.email.trim())
+                .putString(KEY_USER_ROLE, user.role.trim().ifBlank { "user" })
+                .putBoolean(KEY_EMAIL_VERIFIED, user.emailVerified)
+                .putString(KEY_AUTH_SESSION_ID, sessionId)
+                .putLong(KEY_AUTH_STATE_VERSION, version)
+                .apply()
+            version
+        }
+        authStateUpdates.tryEmit(nextVersion)
+    }
+
+    fun clearAuthSession() {
+        val nextVersion = synchronized(authSessionLock) { clearAuthSessionLocked() }
+        authStateUpdates.tryEmit(nextVersion)
+    }
+
+    /** Clears only the session that initiated a refresh, never a newer login. */
+    internal fun clearAuthSessionIfMatches(expectedSession: AuthSessionSnapshot): Boolean {
+        val nextVersion = synchronized(authSessionLock) {
+            if (!matchesSessionLocked(expectedSession)) {
+                return@synchronized null
+            }
+            clearAuthSessionLocked()
+        } ?: return false
+        authStateUpdates.tryEmit(nextVersion)
+        return true
+    }
+
+    private fun writeAuthSessionLocked(session: AuthSession, sessionId: String): Long {
+        val nextVersion = nextAuthStateVersionLocked()
         prefs.edit()
             .putString(KEY_ACCESS_TOKEN, session.accessToken.trim())
             .putString(KEY_REFRESH_TOKEN, session.refreshToken.trim())
@@ -70,25 +165,14 @@ class AppPreferences(context: Context) {
             .putString(KEY_USER_EMAIL, session.user.email.trim())
             .putString(KEY_USER_ROLE, session.user.role.trim().ifBlank { "user" })
             .putBoolean(KEY_EMAIL_VERIFIED, session.user.emailVerified)
+            .putString(KEY_AUTH_SESSION_ID, sessionId)
             .putLong(KEY_AUTH_STATE_VERSION, nextVersion)
             .apply()
-        authStateUpdates.tryEmit(nextVersion)
+        return nextVersion
     }
 
-    fun updateCurrentUser(user: AuthUser) {
-        val nextVersion = System.currentTimeMillis()
-        prefs.edit()
-            .putString(KEY_USER_ID, user.id.trim())
-            .putString(KEY_USER_EMAIL, user.email.trim())
-            .putString(KEY_USER_ROLE, user.role.trim().ifBlank { "user" })
-            .putBoolean(KEY_EMAIL_VERIFIED, user.emailVerified)
-            .putLong(KEY_AUTH_STATE_VERSION, nextVersion)
-            .apply()
-        authStateUpdates.tryEmit(nextVersion)
-    }
-
-    fun clearAuthSession() {
-        val nextVersion = System.currentTimeMillis()
+    private fun clearAuthSessionLocked(): Long {
+        val nextVersion = nextAuthStateVersionLocked()
         prefs.edit()
             .remove(KEY_ACCESS_TOKEN)
             .remove(KEY_REFRESH_TOKEN)
@@ -97,10 +181,22 @@ class AppPreferences(context: Context) {
             .remove(KEY_USER_EMAIL)
             .remove(KEY_USER_ROLE)
             .remove(KEY_EMAIL_VERIFIED)
+            .remove(KEY_AUTH_SESSION_ID)
             .putLong(KEY_AUTH_STATE_VERSION, nextVersion)
             .apply()
-        authStateUpdates.tryEmit(nextVersion)
+        return nextVersion
     }
+
+    private fun matchesSessionLocked(expectedSession: AuthSessionSnapshot): Boolean {
+        if (expectedSession.sessionId.isBlank() || expectedSession.userId.isBlank()) return false
+        return prefs.getString(KEY_AUTH_SESSION_ID, "").orEmpty().trim() == expectedSession.sessionId &&
+            prefs.getString(KEY_USER_ID, "").orEmpty().trim() == expectedSession.userId
+    }
+
+    private fun nextAuthStateVersionLocked(): Long = maxOf(
+        System.currentTimeMillis(),
+        prefs.getLong(KEY_AUTH_STATE_VERSION, 0L) + 1L,
+    )
 
     @Deprecated("Use accessToken. This remains only for old local preferences and tests.")
     var filesToken: String
@@ -248,6 +344,7 @@ class AppPreferences(context: Context) {
         private const val KEY_USER_ROLE = "user_role"
         private const val KEY_EMAIL_VERIFIED = "email_verified"
         private const val KEY_AUTH_STATE_VERSION = "auth_state_version"
+        private const val KEY_AUTH_SESSION_ID = "auth_session_id"
         private const val KEY_TRANSCRIBED_FILES = "transcribed_files"
         private const val KEY_LAST_SYNC_AT_MS = "last_sync_at_ms"
         private const val KEY_SELECTED_STYLE_PROFILE_ID = "selected_style_profile_id"
@@ -258,5 +355,6 @@ class AppPreferences(context: Context) {
         private const val KEY_REMOTE_WRITING_STYLE_PROFILES = "remote_writing_style_profiles"
         private val lastSyncAtMsUpdates = MutableSharedFlow<Long>(extraBufferCapacity = 1)
         private val authStateUpdates = MutableSharedFlow<Long>(extraBufferCapacity = 1)
+        private val authSessionLock = Any()
     }
 }
