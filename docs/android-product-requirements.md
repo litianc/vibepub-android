@@ -19,7 +19,7 @@ This stage is an internal Android dogfood version. It should feel daily-usable f
 4. Create or prepare a WeChat Official Account draft.
 5. Return to the app to review, play original audio, copy/share text, and open the draft when available.
 
-It is not a public social product yet. The app should avoid account, community, public publishing, and full voice-editing complexity until the core loop is reliable.
+It is not a public social product yet. The app uses invite-only accounts with verified-email gating and per-user isolation for recordings, writing styles, drafts, and WeChat bindings; public registration and community features remain out of scope.
 
 ## Reference Product Mapping
 
@@ -29,7 +29,7 @@ The reference product describes five capability layers:
 | --- | --- |
 | Recording | In scope now. Recording must be calm, reliable, non-duplicating, and recoverable. |
 | Processing and rewriting | In scope now as visible output and progress. The app should show generated title, article body, raw transcript preview, and processing stage. |
-| Voice-driven article modification | Defer. This is important, but not required for the first trusted Android dogfood loop. |
+| Voice-driven article modification | In scope now. The detail page records and submits a revision request, then shows the resulting article update without replacing the original draft workflow. |
 | WeChat Official Account draft | In scope now. Android never stores WeChat secrets, but should show draft readiness and open the draft URL when backend provides it. |
 | Community sharing and voice replies | Defer. Sharing must be explicit in a later product stage. |
 
@@ -146,6 +146,7 @@ Backend `processingStage` should refine the info surface:
 - WeChat draft readiness and open-draft action when backend provides URL.
 - Copy/share/export actions for generated text.
 - Settings for account/security, WeChat publishing, connection diagnostics, and advanced API base URL diagnostics.
+- Invite-only sign-in, verified-email gating, and user-isolated local/cloud recording and publishing state.
 - Connection test for `/health` and authorized `/api/recordings`.
 - Diagnostics good enough for screenshot-based support.
 - Real-device automated smoke evidence.
@@ -160,13 +161,12 @@ Backend `processingStage` should refine the info surface:
 
 ### Later
 
-- Voice-driven article modification.
 - Combining multiple recordings into one article.
 - User style fingerprint management.
 - Remembered writing preferences.
 - Community sharing.
 - Voice replies and article-to-article links.
-- Public accounts and multi-user permissions.
+- Public self-registration and community permissions beyond the current invite-only account model.
 - Formal app-store distribution.
 
 ## Acceptance Criteria

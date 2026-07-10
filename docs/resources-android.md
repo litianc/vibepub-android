@@ -37,7 +37,7 @@ Secrets still planned:
 
 ### Cloudflare
 
-Status: Wrangler is installed through `npx`, but current auth is expired.
+Status: Wrangler is available through `npx`, but the repository does not prove an active local Cloudflare login or deployment credential. Treat Cloudflare access as unverified until `npx wrangler whoami` or the explicit deployment workflow succeeds in the integration environment.
 
 Needed from account:
 
@@ -167,6 +167,6 @@ top of this account model instead of reintroducing a shared upload token.
 
 ## Remaining User Inputs
 
-All necessary secrets and external resources for the internal installation have been fully configured and tested.
+The repository cannot by itself prove that external secrets, Cloudflare credentials, service access, or production deployment are current. Verify them through the deployment and production-health gates in `docs/e2e-acceptance-runbook.md` before treating an internal installation as release-ready.
 
 Everything else in this repo has been defaulted for Android internal installation.

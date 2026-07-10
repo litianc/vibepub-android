@@ -130,6 +130,28 @@ All gates must pass before declaring the flow complete.
    metadata and means the article is consumable while the draft step is still
    pending.
 
+5. Release provenance and mining deduplication:
+
+   ```bash
+   MAIN_SHA="$(git rev-parse origin/main)"
+   gh workflow run deploy-worker.yml --ref main -f deploy=true
+   curl https://vibepub.litianc.cn/health
+   ```
+
+   Required evidence: the source commit is on `main`; the matching Validate run
+   passed; an explicit manual deploy run succeeded; and production `/health`
+   returns non-empty `version.commit`, `version.ref`, and `version.deployed_at`,
+   with `version.commit` equal to `MAIN_SHA` and `version.ref` equal to `main`.
+   Record the equivalent source-commit-to-validated-to-deployed evidence for
+   WritingAgent (or its verifiable deploy version when it has no health field).
+   A green pull-request or push validation run is not deployment evidence.
+
+   For one real uploaded `target_key` owned by its authenticated user, retain the
+   Worker dispatch evidence showing `ref=main`, then trigger the same target a
+   second time while the first dispatch or fallback schedule is eligible. The
+   result must show one effective mining claim and one article/draft result, with
+   the duplicate run recorded as skipped or otherwise deduplicated.
+
 ## Anti-False-Success Rules
 
 - Do not accept a green Android test as proof of end-to-end success; Android CI
@@ -143,3 +165,7 @@ All gates must pass before declaring the flow complete.
   share, and export behavior must be present in `debug-detail-actions.json`.
 - Do not accept old transcript fixtures or dummy recordings as proof for a new
   recording attempt.
+- Do not accept CI green, a workflow name containing "Deploy", or a dry run as
+  proof of production deployment; require the commit-to-health provenance above.
+- Do not accept a dispatch log alone as duplicate protection; retain both the
+  duplicate trigger and the single effective claim/result evidence.
