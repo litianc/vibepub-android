@@ -118,13 +118,13 @@ Status: configured as GitHub Actions secrets.
 
 Configured:
 
-- `GLM_BASE_URL`
+- `GLM_BASE_URL=https://open.bigmodel.cn/api/coding/paas/v4/`
 - `GLM_API_KEY`
 - `GLM_MODEL=glm-5.2`
 
 Implementation notes:
 
-- The provided coding base URL works with OpenAI-compatible `POST /chat/completions`.
+- Production GLM-5.2 uses `https://open.bigmodel.cn/api/coding/paas/v4/` with OpenAI-compatible `POST /chat/completions`; configure the GitHub `GLM_BASE_URL` secret to this Coding endpoint.
 - GLM-5.2 defaults to Thinking mode. For deterministic short outputs in the mining job, pass `thinking: { "type": "disabled" }`; otherwise allocate enough `max_tokens` for reasoning plus final content.
 - If a future GLM endpoint is vendor-specific, add a thin adapter in the mining job rather than changing Android or Worker code.
 

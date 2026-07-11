@@ -92,7 +92,7 @@ type AuthIdentity = {
 };
 
 const PROTOCOL_VERSION = "vibepub.rewrite.v1";
-const DEFAULT_GLM_BASE_URL = "https://open.bigmodel.cn/api/paas/v4/";
+const DEFAULT_GLM_BASE_URL = "https://open.bigmodel.cn/api/coding/paas/v4/";
 const DEFAULT_GLM_MODEL = "glm-5.2";
 const MAX_INLINE_STYLE_PROFILE_BODY_CHARS = 8_000;
 const MAX_STYLE_SOURCE_TEXT_CHARS = 30_000;

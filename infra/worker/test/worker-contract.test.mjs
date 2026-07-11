@@ -38,6 +38,23 @@ test("health check exposes deploy version metadata", async () => {
   });
 });
 
+test("GLM production defaults keep Mining and WritingAgent on the Coding endpoint", async () => {
+  const codingBaseUrl = "https://open.bigmodel.cn/api/coding/paas/v4/";
+  const [miningLlm, writingAgent, writingAgentWrangler] = await Promise.all([
+    readFile(new URL("../../mining/src/llm.ts", import.meta.url), "utf8"),
+    readFile(new URL("../../writing-agent/src/index.ts", import.meta.url), "utf8"),
+    readFile(new URL("../../writing-agent/wrangler.toml", import.meta.url), "utf8"),
+  ]);
+
+  assert.ok(
+    miningLlm.includes(`const GLM_BASE_URL = process.env.GLM_BASE_URL || "${codingBaseUrl}";`),
+  );
+  assert.ok(
+    writingAgent.includes(`const DEFAULT_GLM_BASE_URL = "${codingBaseUrl}";`),
+  );
+  assert.ok(writingAgentWrangler.includes(`GLM_BASE_URL = "${codingBaseUrl}"`));
+});
+
 test("mining input claims allow one active holder and keep completed inputs out of repeat processing", async () => {
   const db = miningClaimDb();
   const targetKey = "users/usr_claim/inbox/voice.m4a";
