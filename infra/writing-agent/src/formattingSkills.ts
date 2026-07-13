@@ -1,4 +1,5 @@
 import type { ArticlePackage } from "./article";
+import { decodeHTML } from "entities";
 
 export const FORMATTING_SKILL_ID = "md_to_wechat";
 export const FORMATTING_SKILL_VERSION = "1.0.0";
@@ -519,27 +520,11 @@ function htmlToText(value: string): string {
 function decodeHtmlEntities(value: string): string {
   let decoded = value;
   for (let pass = 0; pass < 4; pass += 1) {
-    const next = decoded.replace(/&(#\d{1,7}|#x[0-9a-f]{1,6}|amp|quot|apos|lt|gt|nbsp);/gi, (entity, code) => {
-      const normalizedCode = String(code).toLowerCase();
-      if (normalizedCode === "amp") return "&";
-      if (normalizedCode === "quot") return "\"";
-      if (normalizedCode === "apos") return "'";
-      if (normalizedCode === "lt") return "<";
-      if (normalizedCode === "gt") return ">";
-      if (normalizedCode === "nbsp") return " ";
-      const point = normalizedCode.startsWith("#x")
-        ? Number.parseInt(normalizedCode.slice(2), 16)
-        : Number.parseInt(normalizedCode.slice(1), 10);
-      return isSafeCodePoint(point) ? String.fromCodePoint(point) : entity;
-    });
+    const next = decodeHTML(decoded);
     if (next === decoded) break;
     decoded = next;
   }
   return decoded;
-}
-
-function isSafeCodePoint(value: number): boolean {
-  return Number.isInteger(value) && value > 0 && value <= 0x10ffff && !(value >= 0xd800 && value <= 0xdfff);
 }
 
 function escapeHtml(value: string): string {

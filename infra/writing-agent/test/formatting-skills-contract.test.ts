@@ -163,12 +163,13 @@ describe("md_to_wechat normalizer", () => {
 
   it("preserves named, decimal, and hexadecimal entity meaning without enabling markup", () => {
     const output = validateAndNormalizeArticlePackage(syntheticArticle(
-      `<p>研发 &amp;amp; 发布，&amp;quot;引号&amp;quot;，&amp;#20013;&amp;#x6587;，&amp;lt;script&amp;gt;</p>`,
+      `<p>研发 &amp;amp; 发布，&amp;quot;引号&amp;quot;，&amp;#20013;&amp;#x6587;，&amp;copy; &amp;hellip; &amp;mdash; &amp;ldquo;引用&amp;rdquo; Caf&amp;eacute;，深层 &amp;amp;amp;copy;，未知 &amp;amp;definitelyInvalid;，危险 &amp;amp;lt;script&amp;amp;gt;</p>`,
     ), resolveFormattingSkill(undefined));
 
-    expect(output.content_html).toContain("研发 &amp; 发布，&quot;引号&quot;，中文，&lt;script&gt;");
-    expect(output.content_html).not.toMatch(/&amp;(amp|quot|#20013|#x6587|lt|gt);/i);
+    expect(output.content_html).toContain("研发 &amp; 发布，&quot;引号&quot;，中文，© … — “引用” Café，深层 ©，未知 &amp;definitelyInvalid;，危险 &lt;script&gt;");
+    expect(output.content_html).not.toMatch(/&amp;(amp|quot|#20013|#x6587|copy|hellip|mdash|ldquo|rdquo|eacute|lt|gt);/i);
     expect(output.content_html).not.toMatch(/<script\b/i);
+    expect(output.content_html).not.toMatch(/\son[a-z]+\s*=|javascript\s*:/i);
   });
 });
 

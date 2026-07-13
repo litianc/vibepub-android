@@ -285,7 +285,7 @@ Rewrite/revision 的 `profiles` 可选传入：
 
 MVP 不执行任意 `SKILL.md`、不读取包内 `.env`、不调用 SkillHub 或第三方排版服务，也不下载图片、上传微信 CDN 或直接发布草稿。`content_html` 只保留安全白名单标签；图片继续通过现有 `image_actions` 交给 Mining/发布链路处理。公式和 Mermaid 会降级为可读 code 并返回 warning。
 
-代码 registry 的每个 entry 绑定公开 manifest 与完整 adapter：`buildInstructions` 和 `validateAndNormalizeOutput`。Rewrite/revision 只执行 `resolve -> adapter instructions -> GLM -> adapter normalize`；新增经过审核的 Skill 只增加 registry/adapter 和测试。共享层只保留通用协议错误、合法 HTML 实体语义恢复及不可绕过的危险标签、属性、URL 和外图安全检查。兼容 `layout_profile_*` 元数据从所选 adapter 的 alias 派生；没有 legacy alias 的 Skill 不返回伪造的 layout profile。
+代码 registry 的每个 entry 绑定公开 manifest 与完整 adapter：`buildInstructions` 和 `validateAndNormalizeOutput`。Rewrite/revision 只执行 `resolve -> adapter instructions -> GLM -> adapter normalize`；新增经过审核的 Skill 只增加 registry/adapter 和测试。共享层只保留通用协议错误、完整 HTML5 命名字符引用与十进制/十六进制嵌套实体的语义恢复，以及不可绕过的危险标签、属性、URL 和外图安全检查。兼容 `layout_profile_*` 元数据从所选 adapter 的 alias 派生；没有 legacy alias 的 Skill 不返回伪造的 layout profile。
 
 ## 创建改写任务
 

@@ -74,6 +74,7 @@ def inspect_page(page) -> dict[str, object]:
             overlaps,
             formatted_content_count: document.querySelectorAll('[data-formatted-content]').length,
             formatted_content_tag_names: [...document.querySelectorAll('[data-formatted-content]')].flatMap(container => [...container.children].map(element => element.tagName.toLowerCase())),
+            formatted_content_inner_texts: [...document.querySelectorAll('[data-formatted-content]')].map(container => container.innerText),
             article_bounds: articleRect ? { x: articleRect.x, y: articleRect.y, width: articleRect.width, height: articleRect.height } : null,
           };
         }"""
@@ -161,6 +162,23 @@ def main() -> None:
 
     all_requests = mobile_requests + desktop_requests + hostile_requests + alternate_requests + comparison_requests + entity_requests
     non_local_requests = [url for url in all_requests if urlparse(url).hostname not in {"127.0.0.1", "localhost"}]
+    expected_entity_inner_text = '实体语义\n\n研发 & 发布，"引号"，中文，© … — “引用” Café，深层 ©，未知 &definitelyInvalid;，危险 <script>'
+    actual_entity_inner_texts = entity.get("formatted_content_inner_texts", [])
+    actual_entity_inner_text = actual_entity_inner_texts[0] if actual_entity_inner_texts else ""
+    entity_dom_assertion = {
+        "expected_inner_text": expected_entity_inner_text,
+        "actual_inner_text": actual_entity_inner_text,
+        "inner_text_matches": actual_entity_inner_text == expected_entity_inner_text,
+        "script_element_count": entity["forbidden_tag_counts"]["script"],
+        "event_attribute_count": entity["event_attribute_count"],
+        "javascript_url_count": entity["javascript_url_count"],
+    }
+    entity_dom_assertion["passed"] = (
+        entity_dom_assertion["inner_text_matches"]
+        and entity_dom_assertion["script_element_count"] == 0
+        and entity_dom_assertion["event_attribute_count"] == 0
+        and entity_dom_assertion["javascript_url_count"] == 0
+    )
     audit = {
         "generator": "playwright-python",
         "browser": {"engine": "chromium", "version": browser_version},
@@ -183,6 +201,9 @@ def main() -> None:
         },
     }
     (evidence_dir / "layout-dom-network-audit.json").write_text(json.dumps(audit, ensure_ascii=False, indent=2) + "\n")
+    (evidence_dir / "entity-dom-assertion.json").write_text(json.dumps(entity_dom_assertion, ensure_ascii=False, indent=2) + "\n")
+    if not entity_dom_assertion["passed"]:
+        raise RuntimeError("Entity preview DOM assertion failed")
 
 
 if __name__ == "__main__":

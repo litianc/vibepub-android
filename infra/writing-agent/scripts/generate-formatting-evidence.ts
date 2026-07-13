@@ -110,7 +110,7 @@ try {
     },
   });
 
-  const entityInput = `<section><h2>实体语义</h2><p>研发 &amp;amp; 发布，&amp;quot;引号&amp;quot;，&amp;#20013;&amp;#x6587;，&amp;lt;script&amp;gt;</p></section>`;
+  const entityInput = `<section><h2>实体语义</h2><p>研发 &amp;amp; 发布，&amp;quot;引号&amp;quot;，&amp;#20013;&amp;#x6587;，&amp;copy; &amp;hellip; &amp;mdash; &amp;ldquo;引用&amp;rdquo; Caf&amp;eacute;，深层 &amp;amp;amp;copy;，未知 &amp;amp;definitelyInvalid;，危险 &amp;amp;lt;script&amp;amp;gt;</p></section>`;
   const entityOutput = validateAndNormalizeArticlePackage(articleFromHtml(entityInput), resolveFormattingSkill(undefined));
   await writeJson("entity-input.json", { content_html: entityInput });
   await writeJson("entity-normalized-output.json", { content_html: entityOutput.content_html, warnings: entityOutput.warnings });
