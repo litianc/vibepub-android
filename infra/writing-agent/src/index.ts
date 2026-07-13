@@ -6,9 +6,19 @@ import {
   findStyleProfile,
   publicLayoutProfile,
   publicStyleProfile,
-  type LayoutProfile,
   type StyleProfile,
 } from "./defaultProfiles";
+import {
+  buildFormattingInstructions,
+  FormattingSkillError,
+  getFormattingSkill,
+  LEGACY_LAYOUT_PROFILE_ID,
+  LEGACY_LAYOUT_PROFILE_VERSION,
+  listFormattingSkills,
+  resolveFormattingSkill,
+  validateAndNormalizeArticlePackage,
+  type ResolvedFormattingSkill,
+} from "./formattingSkills";
 
 export interface Env {
   DB?: D1Database;
@@ -41,6 +51,8 @@ type RewriteJobRequest = {
     style_profile_body?: string;
     layout_profile_id?: string;
     layout_profile_version?: string;
+    formatting_skill_id?: string;
+    formatting_skill_version?: string;
   };
   output_contract?: {
     format?: string;
@@ -158,11 +170,21 @@ export default {
       return profile ? json({ layout_profile: publicLayoutProfile(profile) }) : profileNotFound("layout_profile");
     }
 
+    if (request.method === "GET" && url.pathname === "/v1/formatting-skills") {
+      return json({ formatting_skills: listFormattingSkills() });
+    }
+
+    if (request.method === "GET" && url.pathname.startsWith("/v1/formatting-skills/")) {
+      return routeJson(() => Promise.resolve({
+        formatting_skill: getFormattingSkill(decodeURIComponent(url.pathname.slice("/v1/formatting-skills/".length))),
+      }));
+    }
+
     if (request.method === "POST" && url.pathname === "/v1/rewrite-jobs") {
       try {
         return await createRewriteJob(request, env, identity!);
       } catch (error) {
-        if (error instanceof ResponseError) {
+        if (isPublicResponseError(error)) {
           return json({ error: { code: error.code, message: error.message } }, error.status);
         }
         const message = error instanceof Error ? error.message : String(error);
@@ -174,7 +196,7 @@ export default {
       try {
         return await createRevisionJob(request, env, identity!);
       } catch (error) {
-        if (error instanceof ResponseError) {
+        if (isPublicResponseError(error)) {
           return json({ error: { code: error.code, message: error.message } }, error.status);
         }
         const message = error instanceof Error ? error.message : String(error);
@@ -201,14 +223,11 @@ async function createRewriteJob(request: Request, env: Env, identity: AuthIdenti
 
   const styleProfile = await resolveStyleProfile(env, body.profiles, workspaceIdFromRequest(body, identity));
 
-  const layoutProfile = findLayoutProfile(body.profiles?.layout_profile_id);
-  if (!layoutProfile) {
-    return profileNotFound("layout_profile");
-  }
+  const formattingSkill = resolveFormattingSkill(body.profiles);
 
   const jobId = await deterministicJobId(body, rawText);
-  const prompt = buildRewritePrompt(body, styleProfile, layoutProfile);
-  const article = await generateArticlePackage(env, prompt);
+  const prompt = buildRewritePrompt(body, styleProfile, formattingSkill);
+  const article = validateAndNormalizeArticlePackage(await generateArticlePackage(env, prompt), formattingSkill);
 
   return json({
     protocol_version: PROTOCOL_VERSION,
@@ -218,8 +237,7 @@ async function createRewriteJob(request: Request, env: Env, identity: AuthIdenti
     profile_versions: {
       style_profile_id: styleProfile.id,
       style_profile_version: styleProfile.version,
-      layout_profile_id: layoutProfile.id,
-      layout_profile_version: layoutProfile.version,
+      ...formattingProfileVersions(formattingSkill),
     },
   }, 201);
 }
@@ -248,18 +266,15 @@ async function createRevisionJob(request: Request, env: Env, identity: AuthIdent
 
   const styleProfile = await resolveStyleProfile(env, body.profiles, workspaceIdFromRequest(body, identity));
 
-  const layoutProfile = findLayoutProfile(body.profiles?.layout_profile_id);
-  if (!layoutProfile) {
-    return profileNotFound("layout_profile");
-  }
+  const formattingSkill = resolveFormattingSkill(body.profiles);
 
   const jobId = await deterministicJobId(body, `${currentContent}\n\n${instructionText}`);
-  const prompt = buildRevisionPrompt(body, styleProfile, layoutProfile, currentContent, instructionText);
-  const article = ensureRequestedImageAction(
+  const prompt = buildRevisionPrompt(body, styleProfile, formattingSkill, currentContent, instructionText);
+  const article = validateAndNormalizeArticlePackage(ensureRequestedImageAction(
     await generateArticlePackage(env, prompt),
     instructionText,
     Boolean(body.output_contract?.allow_image_actions),
-  );
+  ), formattingSkill);
 
   return json({
     protocol_version: PROTOCOL_VERSION,
@@ -269,8 +284,7 @@ async function createRevisionJob(request: Request, env: Env, identity: AuthIdent
     profile_versions: {
       style_profile_id: styleProfile.id,
       style_profile_version: styleProfile.version,
-      layout_profile_id: layoutProfile.id,
-      layout_profile_version: layoutProfile.version,
+      ...formattingProfileVersions(formattingSkill),
     },
   }, 201);
 }
@@ -663,7 +677,7 @@ function normalizeInlineStyleProfileBody(value: unknown): string {
 function buildRewritePrompt(
   request: RewriteJobRequest,
   styleProfile: StyleProfile,
-  layoutProfile: LayoutProfile,
+  formattingSkill: ResolvedFormattingSkill,
 ): string {
   const titleHint = request.input?.title_hint?.trim();
   return `你是 WritingAgent，一个独立的公众号文章改写平台。
@@ -672,8 +686,8 @@ function buildRewritePrompt(
 【写作风格画像：${styleProfile.name} / ${styleProfile.version}】
 ${styleProfile.body}
 
-【公众号排版要求：${layoutProfile.name} / ${layoutProfile.version}】
-${layoutProfile.body}
+【公众号排版 Skill：${formattingSkill.manifest.name} / ${formattingSkill.version}】
+${buildFormattingInstructions(formattingSkill)}
 
 【输出要求】
 请只返回 JSON 对象，不要返回 Markdown 代码块或额外说明。
@@ -695,7 +709,7 @@ ${request.input?.raw_text?.trim()}`;
 function buildRevisionPrompt(
   request: RevisionJobRequest,
   styleProfile: StyleProfile,
-  layoutProfile: LayoutProfile,
+  formattingSkill: ResolvedFormattingSkill,
   currentContent: string,
   instructionText: string,
 ): string {
@@ -720,8 +734,8 @@ function buildRevisionPrompt(
 【写作风格画像：${styleProfile.name} / ${styleProfile.version}】
 ${styleProfile.body}
 
-【公众号排版要求：${layoutProfile.name} / ${layoutProfile.version}】
-${layoutProfile.body}
+【公众号排版 Skill：${formattingSkill.manifest.name} / ${formattingSkill.version}】
+${buildFormattingInstructions(formattingSkill)}
 
 【修改原则】
 1. 优先修改当前文章，不要因为一次修改指令就另起炉灶。
@@ -754,7 +768,7 @@ ${currentContent}
 ${instructionText}`;
 }
 
-async function generateArticlePackage(env: Env, prompt: string) {
+async function generateArticlePackage(env: Env, prompt: string): Promise<ArticlePackage> {
   const apiKey = env.GLM_API_KEY?.trim();
   if (!apiKey) {
     throw new ResponseError(503, "upstream_unconfigured", "GLM_API_KEY is required");
@@ -1231,7 +1245,7 @@ async function routeJson(fn: () => Promise<unknown>, successStatus = 200): Promi
   try {
     return json(await fn(), successStatus);
   } catch (error) {
-    if (error instanceof ResponseError) {
+    if (isPublicResponseError(error)) {
       return json({ error: { code: error.code, message: error.message } }, error.status);
     }
     const message = error instanceof Error ? error.message : String(error);
@@ -1294,6 +1308,19 @@ class ResponseError extends Error {
   ) {
     super(message);
   }
+}
+
+function isPublicResponseError(error: unknown): error is ResponseError | FormattingSkillError {
+  return error instanceof ResponseError || error instanceof FormattingSkillError;
+}
+
+function formattingProfileVersions(formattingSkill: ResolvedFormattingSkill) {
+  return {
+    formatting_skill_id: formattingSkill.id,
+    formatting_skill_version: formattingSkill.version,
+    layout_profile_id: LEGACY_LAYOUT_PROFILE_ID,
+    layout_profile_version: LEGACY_LAYOUT_PROFILE_VERSION,
+  };
 }
 
 function json(data: unknown, status = 200): Response {

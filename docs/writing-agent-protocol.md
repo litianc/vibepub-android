@@ -4,8 +4,8 @@ WritingAgent 是独立于 VibePub 的文章改写平台。VibePub 负责录音�
 
 ## 设计目标
 
-- VibePub 不再硬编码写作风格和公众号排版要求，只传入 `style_profile_id` 和 `layout_profile_id`。
-- WritingAgent 管理用户可配置、可版本化的写作风格画像和排版模板。
+- VibePub 继续传入写作风格；排版默认由 WritingAgent 的审核、版本化、声明式 formatting Skill 代码注册表决定。
+- `md_to_wechat@1.0.0` 是当前默认排版 Skill，旧 `layout_profile_id=wechat_clean_article@2026-07-05` 只作为兼容 alias。
 - 初次成文和后续对话/语音修改都由 WritingAgent 决定“文章怎么写”；VibePub 只决定“改哪篇文章、更新哪个公众号草稿、如何展示状态”。
 - 写作风格模板会从单一默认提示词演进为可选择、可版本化、可由用户自定义的风格市场。
 - 两个系统可以共用身份体系；服务间调用使用 bearer token，用户级权限由 token 中的 `user_id/workspace_id/scope` 或上游网关保证。
@@ -50,7 +50,7 @@ Webhook 回调后续增加时，需要 `X-WritingAgent-Signature` 和 `X-Writing
 
 ## Profile 接口
 
-当前代码已实现 `GET /v1/style-profiles`、`GET /v1/layout-profiles`、`POST /v1/rewrite-jobs`、`POST /v1/revision-jobs`、`POST /v1/style-source-imports`、`GET /v1/style-source-imports`、`POST /v1/style-distillation-jobs` 和 `GET /v1/style-distillation-jobs/:id`。Android 也已支持本地自定义模板：模板正文会以内联 `style_profile_body` 方式随录音/文字任务提交给 WritingAgent。
+当前代码已实现 `GET /v1/style-profiles`、`GET /v1/layout-profiles`、`GET /v1/formatting-skills`、`GET /v1/formatting-skills/:id`、`POST /v1/rewrite-jobs`、`POST /v1/revision-jobs`、`POST /v1/style-source-imports`、`GET /v1/style-source-imports`、`POST /v1/style-distillation-jobs` 和 `GET /v1/style-distillation-jobs/:id`。Android 也已支持本地自定义模板：模板正文会以内联 `style_profile_body` 方式随录音/文字任务提交给 WritingAgent。
 
 创建/更新自定义模板与风格画像对话草稿仍是下一阶段平台化协议目标；风格素材导入和蒸馏已先以 D1 持久化接口落地，供 VibePub Worker 代理给 Android 使用。
 
@@ -251,6 +251,39 @@ Android 不直接调用 WritingAgent；VibePub Worker 通过 `GET /api/style-pro
 }
 ```
 
+### Formatting Skills
+
+`GET /v1/formatting-skills` 和 `GET /v1/formatting-skills/:id` 只返回公开 manifest 摘要，例如 id、version、alias、输出合同、允许标签和能力；不会返回内部提示词、adapter 实现或凭据。
+
+```json
+{
+  "formatting_skills": [
+    {
+      "id": "md_to_wechat",
+      "version": "1.0.0",
+      "output_format": "wechat_html_fragment",
+      "image_policy": "image_actions_only",
+      "aliases": [
+        { "type": "layout_profile", "id": "wechat_clean_article", "version": "2026-07-05" }
+      ]
+    }
+  ]
+}
+```
+
+Rewrite/revision 的 `profiles` 可选传入：
+
+```json
+{
+  "formatting_skill_id": "md_to_wechat",
+  "formatting_skill_version": "1.0.0"
+}
+```
+
+显式 id 必须同时带 version。未知 id 返回 `404 formatting_skill_not_found`，不可用版本返回 `409 formatting_skill_version_conflict`。新字段与 legacy layout 字段同时传入时，只有两者映射到相同 canonical Skill 才允许；否则返回 `409 formatting_profile_conflict`，不会调用模型或静默回退。未传新旧字段时默认使用 `md_to_wechat@1.0.0`。
+
+MVP 不执行任意 `SKILL.md`、不读取包内 `.env`、不调用 SkillHub 或第三方排版服务，也不下载图片、上传微信 CDN 或直接发布草稿。`content_html` 只保留安全白名单标签；图片继续通过现有 `image_actions` 交给 Mining/发布链路处理。公式和 Mermaid 会降级为可读 code 并返回 warning。
+
 ## 创建改写任务
 
 ### `POST /v1/rewrite-jobs`
@@ -322,6 +355,8 @@ Android 不直接调用 WritingAgent；VibePub Worker 通过 `GET /api/style-pro
   "profile_versions": {
     "style_profile_id": "style_litianc_default",
     "style_profile_version": "2026-07-05",
+    "formatting_skill_id": "md_to_wechat",
+    "formatting_skill_version": "1.0.0",
     "layout_profile_id": "wechat_clean_article",
     "layout_profile_version": "2026-07-05"
   }

@@ -1,6 +1,6 @@
 # WritingAgent
 
-WritingAgent is the standalone rewrite platform for VibePub. It owns writing style profiles, WeChat layout profiles, and the rewrite protocol described in `../../docs/writing-agent-protocol.md`.
+WritingAgent is the standalone rewrite platform for VibePub. It owns writing style profiles, compatibility layout profiles, and the versioned formatting Skill contract described in `../../docs/writing-agent-protocol.md`.
 
 ## Endpoints
 
@@ -13,10 +13,21 @@ WritingAgent is the standalone rewrite platform for VibePub. It owns writing sty
 - `GET /v1/style-distillation-jobs/:id`
 - `GET /v1/layout-profiles`
 - `GET /v1/layout-profiles/:id`
+- `GET /v1/formatting-skills`
+- `GET /v1/formatting-skills/:id`
 - `POST /v1/rewrite-jobs`
 - `POST /v1/revision-jobs`
 
 Rewrite and revision jobs can reference a built-in `style_profile_id`, a D1-backed distilled profile, or provide an inline private `style_profile_body` from Android local custom templates.
+
+Formatting defaults to `md_to_wechat@1.0.0`. The legacy
+`layout_profile_id=wechat_clean_article` and version `2026-07-05` resolve to
+that canonical Skill, so existing Mining and Android requests keep working.
+An explicit `formatting_skill_id` must include `formatting_skill_version`.
+Unknown IDs, unavailable versions, and incompatible new/legacy selections fail
+before the GLM request; there is no silent fallback. Formatting Skills are a
+code registry plus a trusted adapter, not executable `SKILL.md` files or
+dynamic user configuration.
 
 Style source import and distillation are the Voice Drop style distillation path:
 

@@ -92,7 +92,7 @@ describe("WritingAgent Worker", () => {
     expect(response.status).toBe(201);
     const glmBody = JSON.parse(String(vi.mocked(fetch).mock.calls[0][1]?.body));
     expect(glmBody.messages[0].content).toContain("litianc 默认写作风格");
-    expect(glmBody.messages[0].content).toContain("微信公众号克制长文排版");
+    expect(glmBody.messages[0].content).toContain("公众号 Markdown 排版 / 1.0.0");
     expect(glmBody.messages[0].content).toContain("写作成本");
 
     await expect(response.json()).resolves.toMatchObject({
@@ -100,12 +100,18 @@ describe("WritingAgent Worker", () => {
       status: "article_ready",
       result: {
         title: "把原始想法变成文章",
-        content_html: "<section><p>整理后的正文。</p></section>",
+        content_html: expect.stringContaining("整理后的正文。"),
         cover: {
           cover_title: ["原始想法", "变文章"],
           cover_subtitle: "减少写作成本",
           image_prompt: "A clean editorial image, no text",
         },
+      },
+      profile_versions: {
+        formatting_skill_id: "md_to_wechat",
+        formatting_skill_version: "1.0.0",
+        layout_profile_id: "wechat_clean_article",
+        layout_profile_version: "2026-07-05",
       },
     });
   });
@@ -251,7 +257,7 @@ describe("WritingAgent Worker", () => {
       status: "article_ready",
       result: {
         title: "新版标题",
-        content_html: "<section><p>按修改要求更新后的正文。</p></section>",
+        content_html: expect.stringContaining("按修改要求更新后的正文。"),
         image_actions: [
           expect.objectContaining({
             image_id: "opening-desk",

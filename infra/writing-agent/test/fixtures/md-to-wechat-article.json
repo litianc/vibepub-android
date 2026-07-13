@@ -1,0 +1,16 @@
+{
+  "title": "合成夹具：让复杂内容在公众号里仍然清楚",
+  "content_html": "<section><h2>先把结构定下来</h2><p>这是一段完全合成的短段落，用来验证正常公众号正文的行距和边距。</p><h3>两类清单</h3><ul><li>无序项：先确认事实。</li><li>无序项：再写判断。</li></ul><ol><li>有序项：整理证据。</li><li>有序项：给出下一步。</li></ol><blockquote>引用块只保留一个清楚的判断，不承担一整段解释。</blockquote><h3>代码和表格</h3><pre><code>const publishable = true;\nconsole.log(publishable);</code></pre><table><thead><tr><th>内容</th><th>安全策略</th></tr></thead><tbody><tr><td>表格</td><td>固定布局和断词</td></tr><tr><td>图片</td><td>只返回 image_actions</td></tr></tbody></table><hr><h2>复杂内容安全降级</h2><p>公式示例：$E=mc^2$。</p><pre class=\"mermaid\">graph TD; A[输入] --> B[规范化];</pre></section>",
+  "cover_title": ["合成夹具", "清楚排版"],
+  "cover_subtitle": "稳定的公众号正文",
+  "image_prompt": "Synthetic editorial notebook and pen, no text, no logo, no watermark",
+  "image_actions": [
+    {
+      "image_id": "fixture-notebook",
+      "kind": "insert_image",
+      "prompt": "Synthetic notebook beside a pen, natural daylight, no text",
+      "alt": "合成笔记本插图动作",
+      "anchor": { "position": "after", "paragraph_index": 2 }
+    }
+  ]
+}
