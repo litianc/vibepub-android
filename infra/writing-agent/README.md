@@ -29,6 +29,13 @@ before the GLM request; there is no silent fallback. Formatting Skills are a
 code registry plus a trusted adapter, not executable `SKILL.md` files or
 dynamic user configuration.
 
+Each registry entry binds its public manifest to a complete adapter that owns
+prompt instructions, heading behavior, inline styles, and complex-content
+fallbacks. Rewrite and revision use the same resolver/adapter pipeline; adding
+another reviewed Skill requires only its registry entry, adapter, and tests.
+The shared normalizer keeps the non-bypassable HTML safety floor and does not
+choose `md_to_wechat` presentation rules for other adapters.
+
 Style source import and distillation are the Voice Drop style distillation path:
 
 - Android shares articles or text to VibePub, and the Worker proxies `POST /api/style-source-imports` to this service.

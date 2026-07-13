@@ -5,6 +5,7 @@ WritingAgent 是独立于 VibePub 的文章改写平台。VibePub 负责录音�
 ## 设计目标
 
 - VibePub 继续传入写作风格；排版默认由 WritingAgent 的审核、版本化、声明式 formatting Skill 代码注册表决定。
+- WritingAgent 是 VibePub 产品模块；每个 formatting Skill 是其内部可替换的完整 adapter，独立拥有提示指令、标题规则、inline style 与复杂内容降级，主任务流程不判断具体 Skill。
 - `md_to_wechat@1.0.0` 是当前默认排版 Skill，旧 `layout_profile_id=wechat_clean_article@2026-07-05` 只作为兼容 alias。
 - 初次成文和后续对话/语音修改都由 WritingAgent 决定“文章怎么写”；VibePub 只决定“改哪篇文章、更新哪个公众号草稿、如何展示状态”。
 - 写作风格模板会从单一默认提示词演进为可选择、可版本化、可由用户自定义的风格市场。
@@ -283,6 +284,8 @@ Rewrite/revision 的 `profiles` 可选传入：
 显式 id 必须同时带 version。未知 id 返回 `404 formatting_skill_not_found`，不可用版本返回 `409 formatting_skill_version_conflict`。新字段与 legacy layout 字段同时传入时，只有两者映射到相同 canonical Skill 才允许；否则返回 `409 formatting_profile_conflict`，不会调用模型或静默回退。未传新旧字段时默认使用 `md_to_wechat@1.0.0`。
 
 MVP 不执行任意 `SKILL.md`、不读取包内 `.env`、不调用 SkillHub 或第三方排版服务，也不下载图片、上传微信 CDN 或直接发布草稿。`content_html` 只保留安全白名单标签；图片继续通过现有 `image_actions` 交给 Mining/发布链路处理。公式和 Mermaid 会降级为可读 code 并返回 warning。
+
+代码 registry 的每个 entry 绑定公开 manifest 与完整 adapter：`buildInstructions` 和 `validateAndNormalizeOutput`。Rewrite/revision 只执行 `resolve -> adapter instructions -> GLM -> adapter normalize`；新增经过审核的 Skill 只增加 registry/adapter 和测试。共享层只保留通用协议错误、合法 HTML 实体语义恢复及不可绕过的危险标签、属性、URL 和外图安全检查。兼容 `layout_profile_*` 元数据从所选 adapter 的 alias 派生；没有 legacy alias 的 Skill 不返回伪造的 layout profile。
 
 ## 创建改写任务
 

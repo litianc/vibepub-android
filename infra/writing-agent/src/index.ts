@@ -10,13 +10,14 @@ import {
 } from "./defaultProfiles";
 import {
   buildFormattingInstructions,
+  createFormattingSkillRegistry,
   FormattingSkillError,
+  formattingProfileVersions,
   getFormattingSkill,
-  LEGACY_LAYOUT_PROFILE_ID,
-  LEGACY_LAYOUT_PROFILE_VERSION,
   listFormattingSkills,
   resolveFormattingSkill,
   validateAndNormalizeArticlePackage,
+  type FormattingSkillDefinition,
   type ResolvedFormattingSkill,
 } from "./formattingSkills";
 
@@ -121,8 +122,11 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "Authorization, Content-Type, X-Writing-Agent-Token, X-VibePub-User-Id, X-VibePub-Workspace-Id",
 };
 
-export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+export function createWritingAgentWorker(
+  formattingRegistry: readonly FormattingSkillDefinition[] = createFormattingSkillRegistry(),
+) {
+  const registry = [...formattingRegistry];
+  const fetch = async (request: Request, env: Env): Promise<Response> => {
     if (request.method === "OPTIONS") {
       return new Response(null, { headers: corsHeaders });
     }
@@ -171,18 +175,21 @@ export default {
     }
 
     if (request.method === "GET" && url.pathname === "/v1/formatting-skills") {
-      return json({ formatting_skills: listFormattingSkills() });
+      return json({ formatting_skills: listFormattingSkills(registry) });
     }
 
     if (request.method === "GET" && url.pathname.startsWith("/v1/formatting-skills/")) {
       return routeJson(() => Promise.resolve({
-        formatting_skill: getFormattingSkill(decodeURIComponent(url.pathname.slice("/v1/formatting-skills/".length))),
+        formatting_skill: getFormattingSkill(
+          decodeURIComponent(url.pathname.slice("/v1/formatting-skills/".length)),
+          registry,
+        ),
       }));
     }
 
     if (request.method === "POST" && url.pathname === "/v1/rewrite-jobs") {
       try {
-        return await createRewriteJob(request, env, identity!);
+        return await createRewriteJob(request, env, identity!, registry);
       } catch (error) {
         if (isPublicResponseError(error)) {
           return json({ error: { code: error.code, message: error.message } }, error.status);
@@ -194,7 +201,7 @@ export default {
 
     if (request.method === "POST" && url.pathname === "/v1/revision-jobs") {
       try {
-        return await createRevisionJob(request, env, identity!);
+        return await createRevisionJob(request, env, identity!, registry);
       } catch (error) {
         if (isPublicResponseError(error)) {
           return json({ error: { code: error.code, message: error.message } }, error.status);
@@ -205,10 +212,18 @@ export default {
     }
 
     return json({ error: { code: "not_found", message: "Route not found" } }, 404);
-  },
-};
+  };
+  return { fetch };
+}
 
-async function createRewriteJob(request: Request, env: Env, identity: AuthIdentity): Promise<Response> {
+export default createWritingAgentWorker();
+
+async function createRewriteJob(
+  request: Request,
+  env: Env,
+  identity: AuthIdentity,
+  formattingRegistry: readonly FormattingSkillDefinition[],
+): Promise<Response> {
   let body: RewriteJobRequest;
   try {
     body = await request.json();
@@ -223,7 +238,7 @@ async function createRewriteJob(request: Request, env: Env, identity: AuthIdenti
 
   const styleProfile = await resolveStyleProfile(env, body.profiles, workspaceIdFromRequest(body, identity));
 
-  const formattingSkill = resolveFormattingSkill(body.profiles);
+  const formattingSkill = resolveFormattingSkill(body.profiles, formattingRegistry);
 
   const jobId = await deterministicJobId(body, rawText);
   const prompt = buildRewritePrompt(body, styleProfile, formattingSkill);
@@ -242,7 +257,12 @@ async function createRewriteJob(request: Request, env: Env, identity: AuthIdenti
   }, 201);
 }
 
-async function createRevisionJob(request: Request, env: Env, identity: AuthIdentity): Promise<Response> {
+async function createRevisionJob(
+  request: Request,
+  env: Env,
+  identity: AuthIdentity,
+  formattingRegistry: readonly FormattingSkillDefinition[],
+): Promise<Response> {
   let body: RevisionJobRequest;
   try {
     body = await request.json();
@@ -266,7 +286,7 @@ async function createRevisionJob(request: Request, env: Env, identity: AuthIdent
 
   const styleProfile = await resolveStyleProfile(env, body.profiles, workspaceIdFromRequest(body, identity));
 
-  const formattingSkill = resolveFormattingSkill(body.profiles);
+  const formattingSkill = resolveFormattingSkill(body.profiles, formattingRegistry);
 
   const jobId = await deterministicJobId(body, `${currentContent}\n\n${instructionText}`);
   const prompt = buildRevisionPrompt(body, styleProfile, formattingSkill, currentContent, instructionText);
@@ -1312,15 +1332,6 @@ class ResponseError extends Error {
 
 function isPublicResponseError(error: unknown): error is ResponseError | FormattingSkillError {
   return error instanceof ResponseError || error instanceof FormattingSkillError;
-}
-
-function formattingProfileVersions(formattingSkill: ResolvedFormattingSkill) {
-  return {
-    formatting_skill_id: formattingSkill.id,
-    formatting_skill_version: formattingSkill.version,
-    layout_profile_id: LEGACY_LAYOUT_PROFILE_ID,
-    layout_profile_version: LEGACY_LAYOUT_PROFILE_VERSION,
-  };
 }
 
 function json(data: unknown, status = 200): Response {

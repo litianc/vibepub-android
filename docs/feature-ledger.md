@@ -13,6 +13,7 @@
 
 | 时间 | 功能更新 |
 | --- | --- |
+| 2026-07-13 22:32 CST | WritingAgent 排版注册表升级为可替换的完整 Skill adapter，并修复合法 HTML 实体在安全规范化时被重复转义的问题。 |
 | 2026-07-13 16:12 CST | WritingAgent 默认使用版本化 `md_to_wechat@1.0.0` 排版 Skill，兼容旧 layout profile，并在改写和修文响应中返回可追溯的 Skill 版本。 |
 | 2026-07-11 16:32 CST | Mining 和 WritingAgent 的 GLM-5.2 默认配置统一切换到智谱 Coding API 端点，避免生产改写链路误用通用 API 路径。 |
 | 2026-07-10 15:51 CST | 发布验收文档明确要求从 main 源码提交、验证、手动部署到线上 health 的版本对账，并要求保留上传主动派发与重复输入去重证据。 |

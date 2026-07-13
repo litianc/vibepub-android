@@ -10,7 +10,12 @@ import {
   resolveFormattingSkill,
   validateAndNormalizeArticlePackage,
 } from "../src/formattingSkills";
-import worker from "../src/index";
+import worker, { createWritingAgentWorker } from "../src/index";
+import {
+  createTestFormattingSkillRegistry,
+  TEST_FORMATTING_SKILL_ID,
+  TEST_FORMATTING_SKILL_VERSION,
+} from "../test/fixtures/testFormattingSkill";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const fixturePath = resolve(here, "../test/fixtures/md-to-wechat-article.json");
@@ -33,6 +38,8 @@ globalThis.fetch = async (input) => {
 };
 
 try {
+  const testRegistry = createTestFormattingSkillRegistry();
+  const testWorker = createWritingAgentWorker(testRegistry);
   const canonicalRequest = rewriteRequest({
     formatting_skill_id: FORMATTING_SKILL_ID,
     formatting_skill_version: FORMATTING_SKILL_VERSION,
@@ -53,12 +60,66 @@ try {
   await writeJson("legacy-alias-request.json", legacyRequest.redacted);
   await writeJson("legacy-alias-response.json", responseMetadata(legacyBody));
 
+  const alternateRequest = rewriteRequest({
+    formatting_skill_id: TEST_FORMATTING_SKILL_ID,
+    formatting_skill_version: TEST_FORMATTING_SKILL_VERSION,
+  });
+  const alternateResponse = await testWorker.fetch(alternateRequest.request, workerEnv());
+  const alternateBody = await alternateResponse.json() as Record<string, unknown>;
+  assertStatus(alternateResponse.status, 201, "alternate test adapter rewrite");
+  await writeJson("alternate-skill-request.json", alternateRequest.redacted);
+  await writeJson("alternate-skill-response.json", responseMetadata(alternateBody));
+
   const contentHtml = String((canonicalBody.result as Record<string, unknown>).content_html || "");
+  const alternateContentHtml = String((alternateBody.result as Record<string, unknown>).content_html || "");
   await writeFile(resolve(outputDir, "preview.html"), renderPreview({
+    label: `${FORMATTING_SKILL_ID}@${FORMATTING_SKILL_VERSION}`,
     title: fixture.title,
     contentHtml,
     imageActions: fixture.image_actions,
     warnings: ((canonicalBody.result as Record<string, unknown>).warnings || []) as string[],
+  }));
+  await writeFile(resolve(outputDir, "alternate-preview.html"), renderPreview({
+    label: `${TEST_FORMATTING_SKILL_ID}@${TEST_FORMATTING_SKILL_VERSION}`,
+    title: fixture.title,
+    contentHtml: alternateContentHtml,
+    imageActions: fixture.image_actions,
+    warnings: ((alternateBody.result as Record<string, unknown>).warnings || []) as string[],
+  }));
+  await writeFile(resolve(outputDir, "side-by-side.html"), renderSideBySide({
+    title: fixture.title,
+    canonical: { label: `${FORMATTING_SKILL_ID}@${FORMATTING_SKILL_VERSION}`, contentHtml },
+    alternate: { label: `${TEST_FORMATTING_SKILL_ID}@${TEST_FORMATTING_SKILL_VERSION}`, contentHtml: alternateContentHtml },
+  }));
+  await writeJson("replaceability-comparison.json", {
+    fixture: "md-to-wechat-article.json",
+    content_html_equal: contentHtml === alternateContentHtml,
+    canonical: {
+      id: FORMATTING_SKILL_ID,
+      version: FORMATTING_SKILL_VERSION,
+      heading_marker: "border-left:4px solid #1677ff",
+      formula_fallback: "inline_code",
+      mermaid_fallback: "pre_code",
+    },
+    alternate: {
+      id: TEST_FORMATTING_SKILL_ID,
+      version: TEST_FORMATTING_SKILL_VERSION,
+      heading_marker: "border-bottom:2px solid #0f766e",
+      formula_fallback: "labelled_strong_text",
+      mermaid_fallback: "quoted_source",
+    },
+  });
+
+  const entityInput = `<section><h2>实体语义</h2><p>研发 &amp;amp; 发布，&amp;quot;引号&amp;quot;，&amp;#20013;&amp;#x6587;，&amp;lt;script&amp;gt;</p></section>`;
+  const entityOutput = validateAndNormalizeArticlePackage(articleFromHtml(entityInput), resolveFormattingSkill(undefined));
+  await writeJson("entity-input.json", { content_html: entityInput });
+  await writeJson("entity-normalized-output.json", { content_html: entityOutput.content_html, warnings: entityOutput.warnings });
+  await writeFile(resolve(outputDir, "entity-preview.html"), renderPreview({
+    label: `${FORMATTING_SKILL_ID}@${FORMATTING_SKILL_VERSION} · entity regression`,
+    title: "合成实体语义夹具",
+    contentHtml: entityOutput.content_html,
+    imageActions: [],
+    warnings: entityOutput.warnings,
   }));
 
   const hostileInput = `<section><p onclick="alert(1)">合成安全正文 <a href="javascript:alert(2)">危险链接</a></p><img src="https://remote.example.test/image.png"><form><input></form><script>fetch('https://bad.example.test')</script><p>公式：$x^2$</p><pre class="mermaid">graph TD; X-->Y;</pre></section>`;
@@ -69,6 +130,7 @@ try {
     warnings: hostileOutput.warnings,
   });
   await writeFile(resolve(outputDir, "hostile-preview.html"), renderPreview({
+    label: `${FORMATTING_SKILL_ID}@${FORMATTING_SKILL_VERSION} · hostile fixture`,
     title: "合成 hostile fixture",
     contentHtml: hostileOutput.content_html,
     imageActions: [],
@@ -89,6 +151,8 @@ try {
 
   const checks = {
     content_html: inspectContentHtml(contentHtml),
+    alternate_content_html: inspectContentHtml(alternateContentHtml),
+    entity_content_html: inspectContentHtml(entityOutput.content_html),
     hostile_content_html: inspectContentHtml(hostileOutput.content_html),
     network: {
       request_count: networkRequests.length,
@@ -152,6 +216,7 @@ function articleFromHtml(content_html: string): ArticlePackage {
 }
 
 function renderPreview(input: {
+  label: string;
   title: string;
   contentHtml: string;
   imageActions: Fixture["image_actions"];
@@ -166,10 +231,10 @@ function renderPreview(input: {
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
 <body style="margin:0;background:#eef2f6;color:#1f2937;font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif;">
   <main style="max-width:760px;margin:0 auto;padding:24px 16px 48px;box-sizing:border-box;">
-    <div style="margin:0 0 16px;color:#64748b;font-size:13px;line-height:1.5;">md_to_wechat@1.0.0 · synthetic fixture · wechat_html_fragment</div>
+    <div style="margin:0 0 16px;color:#64748b;font-size:13px;line-height:1.5;">${escapeHtml(input.label)} · synthetic fixture · wechat_html_fragment</div>
     <article style="box-sizing:border-box;width:100%;margin:0;padding:28px 22px;background:#ffffff;border:1px solid #dbe3ec;">
       <h1 style="margin:0 0 28px;font-size:28px;line-height:1.35;color:#0f172a;">${escapeHtml(input.title)}</h1>
-      <div id="formatted-content">${input.contentHtml}</div>
+      <div data-formatted-content>${input.contentHtml}</div>
       <section style="margin:28px 0 0;padding:14px 16px;border:1px solid #bfdbfe;background:#eff6ff;">
         <strong style="color:#1d4ed8;">image_actions</strong>
         <ul style="margin:10px 0 0;padding-left:20px;">${actionRows || "<li>none</li>"}</ul>
@@ -179,6 +244,32 @@ function renderPreview(input: {
         <ul style="margin:10px 0 0;padding-left:20px;">${warningRows || "<li>none</li>"}</ul>
       </section>
     </article>
+  </main>
+</body>
+</html>`;
+}
+
+function renderSideBySide(input: {
+  title: string;
+  canonical: { label: string; contentHtml: string };
+  alternate: { label: string; contentHtml: string };
+}): string {
+  const panel = (value: { label: string; contentHtml: string }) => `
+    <article style="box-sizing:border-box;min-width:0;padding:24px 20px;background:#ffffff;border:1px solid #dbe3ec;">
+      <div style="margin:0 0 18px;color:#475569;font-size:13px;line-height:1.5;">${escapeHtml(value.label)}</div>
+      <h1 style="margin:0 0 24px;font-size:25px;line-height:1.35;color:#0f172a;">${escapeHtml(input.title)}</h1>
+      <div data-formatted-content>${value.contentHtml}</div>
+    </article>`;
+  return `<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;background:#eef2f6;color:#1f2937;font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif;">
+  <main style="max-width:1380px;margin:0 auto;padding:28px 18px 48px;box-sizing:border-box;">
+    <div style="margin:0 0 18px;color:#334155;font-size:16px;line-height:1.5;font-weight:700;">同一合成夹具 · 两个可替换 Formatting Skill adapter</div>
+    <section style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:18px;align-items:start;">
+      ${panel(input.canonical)}
+      ${panel(input.alternate)}
+    </section>
   </main>
 </body>
 </html>`;

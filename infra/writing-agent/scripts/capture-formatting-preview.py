@@ -43,7 +43,7 @@ def inspect_page(page) -> dict[str, object]:
             .filter(element => /javascript\\s*:/i.test(element.getAttribute('href') || element.getAttribute('src') || ''))
             .map(element => element.tagName.toLowerCase());
           const images = [...document.images].map(image => ({ src: image.currentSrc || image.src, complete: image.complete, naturalWidth: image.naturalWidth }));
-          const blocks = [...document.querySelectorAll('#formatted-content p, #formatted-content h2, #formatted-content h3, #formatted-content blockquote, #formatted-content li, #formatted-content pre, #formatted-content th, #formatted-content td')];
+          const blocks = [...document.querySelectorAll('[data-formatted-content] p, [data-formatted-content] h2, [data-formatted-content] h3, [data-formatted-content] blockquote, [data-formatted-content] li, [data-formatted-content] pre, [data-formatted-content] th, [data-formatted-content] td')];
           const overlaps = [];
           for (let index = 0; index < blocks.length; index += 1) {
             const a = blocks[index];
@@ -72,7 +72,8 @@ def inspect_page(page) -> dict[str, object]:
             image_count: images.length,
             overlap_count: overlaps.length,
             overlaps,
-            formatted_content_tag_names: [...document.querySelector('#formatted-content')?.children || []].map(element => element.tagName.toLowerCase()),
+            formatted_content_count: document.querySelectorAll('[data-formatted-content]').length,
+            formatted_content_tag_names: [...document.querySelectorAll('[data-formatted-content]')].flatMap(container => [...container.children].map(element => element.tagName.toLowerCase())),
             article_bounds: articleRect ? { x: articleRect.x, y: articleRect.y, width: articleRect.width, height: articleRect.height } : null,
           };
         }"""
@@ -96,7 +97,7 @@ def main() -> None:
     parser.add_argument("--dir", required=True, type=Path, help="Evidence directory containing preview.html")
     args = parser.parse_args()
     evidence_dir: Path = args.dir.resolve()
-    for filename in ("preview.html", "hostile-preview.html"):
+    for filename in ("preview.html", "alternate-preview.html", "side-by-side.html", "entity-preview.html", "hostile-preview.html"):
         if not (evidence_dir / filename).is_file():
             raise RuntimeError(f"Missing {filename} in {evidence_dir}")
 
@@ -130,6 +131,27 @@ def main() -> None:
                 {"width": 1440, "height": 1200},
                 full_page=True,
             )
+            alternate, alternate_requests = capture(
+                browser,
+                f"{base_url}/alternate-preview.html",
+                evidence_dir / "alternate-mobile.png",
+                {"width": 390, "height": 844},
+                full_page=False,
+            )
+            comparison, comparison_requests = capture(
+                browser,
+                f"{base_url}/side-by-side.html",
+                evidence_dir / "replaceability-side-by-side.png",
+                {"width": 1440, "height": 1200},
+                full_page=True,
+            )
+            entity, entity_requests = capture(
+                browser,
+                f"{base_url}/entity-preview.html",
+                evidence_dir / "entity-preview.png",
+                {"width": 900, "height": 700},
+                full_page=True,
+            )
             browser_version = browser.version
             browser.close()
     finally:
@@ -137,7 +159,7 @@ def main() -> None:
         server.server_close()
         os.chdir(previous_directory)
 
-    all_requests = mobile_requests + desktop_requests + hostile_requests
+    all_requests = mobile_requests + desktop_requests + hostile_requests + alternate_requests + comparison_requests + entity_requests
     non_local_requests = [url for url in all_requests if urlparse(url).hostname not in {"127.0.0.1", "localhost"}]
     audit = {
         "generator": "playwright-python",
@@ -147,8 +169,11 @@ def main() -> None:
             "mobile.png": {"viewport": {"width": 390, "height": 844}, "pixels": screenshot_dimensions(evidence_dir / "mobile.png"), "full_page": False},
             "desktop.png": {"viewport": {"width": 1440, "height": 1200}, "pixels": screenshot_dimensions(evidence_dir / "desktop.png"), "full_page": True},
             "hostile-preview.png": {"viewport": {"width": 1440, "height": 1200}, "pixels": screenshot_dimensions(evidence_dir / "hostile-preview.png"), "full_page": True},
+            "alternate-mobile.png": {"viewport": {"width": 390, "height": 844}, "pixels": screenshot_dimensions(evidence_dir / "alternate-mobile.png"), "full_page": False},
+            "replaceability-side-by-side.png": {"viewport": {"width": 1440, "height": 1200}, "pixels": screenshot_dimensions(evidence_dir / "replaceability-side-by-side.png"), "full_page": True},
+            "entity-preview.png": {"viewport": {"width": 900, "height": 700}, "pixels": screenshot_dimensions(evidence_dir / "entity-preview.png"), "full_page": True},
         },
-        "layout": {"mobile": mobile, "desktop": desktop, "hostile": hostile},
+        "layout": {"mobile": mobile, "desktop": desktop, "hostile": hostile, "alternate_mobile": alternate, "replaceability_comparison": comparison, "entity": entity},
         "network": {
             "request_count": len(all_requests),
             "urls": all_requests,
