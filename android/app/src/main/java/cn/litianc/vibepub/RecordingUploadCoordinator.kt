@@ -2,6 +2,7 @@ package cn.litianc.vibepub
 
 import android.content.Context
 import androidx.work.Constraints
+import androidx.work.Data
 import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
@@ -68,13 +69,12 @@ object RecordingUploadCoordinator {
         addUploadJobTag: Boolean = true,
         replaceExistingUpload: Boolean = false,
     ): Boolean {
-        val userId = preferences.effectiveUserId
-        val token = preferences.accessToken
-        if (!preferences.canUseCloudFeatures) {
-            markUploadBlocked(context, userId, file.name, "请先登录并完成邮箱验证后重试上传")
+        val session = preferences.currentAuthSessionSnapshot()
+        if (!preferences.canUseCloudFeatures || session.sessionId.isBlank() || session.userId.isBlank()) {
+            markUploadBlocked(context, preferences.effectiveUserId, file.name, "请先登录并完成邮箱验证后重试上传")
             return false
         }
-        val selectedProfile = preferences.selectedWritingStyleProfile()
+        val userId = session.userId
 
         CoroutineScope(Dispatchers.IO).launch {
             val dao = AppDatabase.getDatabase(context).recordingDao()
@@ -96,21 +96,7 @@ object RecordingUploadCoordinator {
                     .setRequiredNetworkType(NetworkType.CONNECTED)
                     .build(),
             )
-            .setInputData(
-                workDataOf(
-                    UploadWorker.KEY_FILE_PATH to file.absolutePath,
-                    UploadWorker.KEY_API_BASE_URL to preferences.apiBaseUrl,
-                    UploadWorker.KEY_ACCESS_TOKEN to token,
-                    UploadWorker.KEY_USER_ID to userId,
-                    UploadWorker.KEY_STYLE_PROFILE_ID to selectedProfile.id,
-                    UploadWorker.KEY_STYLE_PROFILE_VERSION to selectedProfile.version,
-                    UploadWorker.KEY_STYLE_PROFILE_NAME to selectedProfile.name,
-                    UploadWorker.KEY_STYLE_PROFILE_DESCRIPTION to selectedProfile.description,
-                    UploadWorker.KEY_STYLE_PROFILE_BODY to WritingStyleProfiles.submissionBodyFor(selectedProfile),
-                    UploadWorker.KEY_LAYOUT_PROFILE_ID to preferences.selectedLayoutProfileId,
-                    UploadWorker.KEY_LAYOUT_PROFILE_VERSION to preferences.selectedLayoutProfileVersion,
-                ),
-            )
+            .setInputData(uploadWorkInputData(preferences, file, session))
 
         if (addUploadJobTag) {
             requestBuilder.addTag("upload_job")
@@ -122,6 +108,27 @@ object RecordingUploadCoordinator {
             requestBuilder.build(),
         )
         return true
+    }
+
+    internal fun uploadWorkInputData(
+        preferences: AppPreferences,
+        file: File,
+        session: AuthSessionSnapshot = preferences.currentAuthSessionSnapshot(),
+    ): Data {
+        val selectedProfile = preferences.selectedWritingStyleProfile()
+        return workDataOf(
+            UploadWorker.KEY_FILE_PATH to file.absolutePath,
+            UploadWorker.KEY_API_BASE_URL to preferences.apiBaseUrl,
+            UploadWorker.KEY_LOCAL_SESSION_ID to session.sessionId,
+            UploadWorker.KEY_USER_ID to session.userId,
+            UploadWorker.KEY_STYLE_PROFILE_ID to selectedProfile.id,
+            UploadWorker.KEY_STYLE_PROFILE_VERSION to selectedProfile.version,
+            UploadWorker.KEY_STYLE_PROFILE_NAME to selectedProfile.name,
+            UploadWorker.KEY_STYLE_PROFILE_DESCRIPTION to selectedProfile.description,
+            UploadWorker.KEY_STYLE_PROFILE_BODY to WritingStyleProfiles.submissionBodyFor(selectedProfile),
+            UploadWorker.KEY_LAYOUT_PROFILE_ID to preferences.selectedLayoutProfileId,
+            UploadWorker.KEY_LAYOUT_PROFILE_VERSION to preferences.selectedLayoutProfileVersion,
+        )
     }
 
     internal fun uploadExistingWorkPolicy(replaceExistingUpload: Boolean): ExistingWorkPolicy {

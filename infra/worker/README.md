@@ -37,6 +37,19 @@ creation failed after article generation.
 `cover_image_url` points at the generated WeChat cover PNG in R2 when the mining
 job has saved one; older recordings may omit it.
 
+Session revocation exposes `current` and `all` scopes in this MVP. Current logout
+can use the current refresh token to revoke its exact family when the access
+token has already expired; all-device logout still requires valid access-token
+authentication. Password reset and admin disable update the account, write one
+audit per newly revoked session, and revoke those sessions in a single D1 batch.
+Arbitrary device-session selection is not part of this phase.
+
+Android upload work persists only the non-secret local session ID, user ID, API
+base, file path, and presentation metadata. The Worker process reads tokens from
+the Keystore-backed store at execution time and rejects queued work after logout,
+account switch, or local-session replacement. Legacy queued access-token fields
+are ignored.
+
 ## Setup
 
 ```bash
@@ -95,6 +108,10 @@ Migration `0010` is additive and forward-only. Apply it before deploying the v2
 Worker. A legacy Worker may create a session with `family_id = NULL` in the short
 interval between migration and Worker rollout; the v2 refresh CAS lazily and
 atomically upgrades that row before it can be revoked.
+
+The canonical `schema.sql` contains the same final session columns, history and
+audit tables, indexes, and identity triggers as `0010`, so fresh databases and
+incrementally migrated databases enforce the same model.
 
 Do not down-migrate `0010`. If the v2 Worker must be backed out after it has
 served authentication traffic, first stop writes to login, invite acceptance,

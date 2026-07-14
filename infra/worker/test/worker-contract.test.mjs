@@ -5,7 +5,9 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import ts from "typescript";
 
-const worker = await loadWorker();
+const workerModule = await loadWorker();
+const worker = workerModule.default;
+const { handleAdminRoute, resetPassword, revokeSessionFamily, revokeUserSessions, verifyPassword } = workerModule;
 
 test("rejects unauthorized API requests", async () => {
   const response = await worker.fetch(
@@ -313,7 +315,9 @@ test("refresh request id recovers the same rotation across worker restarts", asy
   );
   assert.equal(first.status, 200);
   const firstBody = await first.json();
+  assert.equal(firstBody.user.id, "usr_device");
   assert.equal(firstBody.tokens.session_id, "ses_device");
+  assert.notEqual(firstBody.user.id, firstBody.tokens.session_id);
   assert.equal(firstBody.tokens.generation, 1);
   assert.equal(firstBody.tokens.contract_version, 2);
   assert.match(firstBody.tokens.access_expires_at, /^\d{4}-\d{2}-\d{2}T/);
@@ -328,6 +332,9 @@ test("refresh request id recovers the same rotation across worker restarts", asy
   assert.equal(recovered.status, 200);
   const recoveredBody = await recovered.json();
 
+  assert.equal(recoveredBody.user.id, "usr_device");
+  assert.equal(recoveredBody.tokens.session_id, "ses_device");
+  assert.notEqual(recoveredBody.user.id, recoveredBody.tokens.session_id);
   assert.deepEqual(recoveredBody.tokens, firstBody.tokens);
   assert.equal(db.state.generation, 1);
   assert.equal(db.state.revoked_at, null);
@@ -581,6 +588,177 @@ test("history insert failure rolls back CAS and the same request can retry", asy
   assert.equal(db.history.length, 1);
 });
 
+test("current-session revocation rolls back both session and audit when either batch statement fails", async () => {
+  for (const failingStatement of [1, 2]) {
+    const db = persistentSessionDb("device-refresh-token");
+    db.failRevocationStatement = failingStatement;
+
+    await assert.rejects(() => revokeSessionFamily(
+      createEnv({ DB: db }),
+      { id: db.state.id, family_id: db.state.family_id, user_id: db.state.user_id },
+      "logout_current",
+      null,
+    ), /injected revocation statement failure/);
+
+    assert.equal(db.state.revoked_at, null);
+    assert.equal(db.state.revocation_reason, null);
+    assert.equal(db.audit.length, 0);
+  }
+});
+
+test("user-wide revocations roll back both sessions and audits when either batch statement fails", async () => {
+  for (const reason of ["logout_all", "password_reset", "admin_disabled"]) {
+    for (const failingStatement of [1, 2]) {
+      const db = persistentSessionDb("device-refresh-token");
+      db.failRevocationStatement = failingStatement;
+
+      await assert.rejects(
+        () => revokeUserSessions(createEnv({ DB: db }), db.state.user_id, reason),
+        /injected revocation statement failure/,
+      );
+
+      assert.equal(db.state.revoked_at, null);
+      assert.equal(db.state.revocation_reason, null);
+      assert.equal(db.audit.length, 0);
+    }
+  }
+});
+
+test("successful revocation retries create exactly one audit per newly revoked session", async () => {
+  const currentDb = persistentSessionDb("current-token");
+  const currentSession = {
+    id: currentDb.state.id,
+    family_id: currentDb.state.family_id,
+    user_id: currentDb.state.user_id,
+  };
+  await revokeSessionFamily(createEnv({ DB: currentDb }), currentSession, "logout_current", null);
+  await revokeSessionFamily(createEnv({ DB: currentDb }), currentSession, "logout_current", null);
+  assert.equal(currentDb.audit.length, 1);
+  assert.equal(currentDb.state.revocation_reason, "logout_current");
+
+  for (const reason of ["logout_all", "password_reset", "admin_disabled"]) {
+    const db = persistentSessionDb(`${reason}-token`);
+    await revokeUserSessions(createEnv({ DB: db }), db.state.user_id, reason);
+    await revokeUserSessions(createEnv({ DB: db }), db.state.user_id, reason);
+    assert.equal(db.audit.length, 1);
+    assert.equal(db.state.revocation_reason, reason);
+  }
+});
+
+test("password reset rolls back password token session and audit when any batch statement fails", async () => {
+  for (const failingStatement of [1, 2, 3, 4]) {
+    const db = accountSecurityDb();
+    db.failBatchStatement = failingStatement;
+
+    await assert.rejects(
+      () => resetPassword(passwordResetRequest(), createEnv({ DB: db })),
+      /injected account security statement failure/,
+    );
+
+    assert.equal(db.user.password_hash, "old-password-hash");
+    assert.equal(db.resetToken.consumed_at, null);
+    assert.equal(db.session.revoked_at, null);
+    assert.equal(db.audit.length, 0);
+  }
+});
+
+test("successful password reset is single-use and creates one revocation audit", async () => {
+  const db = accountSecurityDb();
+  const env = createEnv({ DB: db });
+
+  const first = await resetPassword(passwordResetRequest(), env);
+  assert.equal(first.status, 200);
+  assert.notEqual(db.user.password_hash, "old-password-hash");
+  assert.ok(db.resetToken.consumed_at);
+  assert.equal(db.session.revocation_reason, "password_reset");
+  assert.equal(db.audit.length, 1);
+
+  const snapshot = structuredClone({ user: db.user, resetToken: db.resetToken, session: db.session, audit: db.audit });
+  const repeated = await resetPassword(passwordResetRequest(), env);
+  assert.equal(repeated.status, 400);
+  assert.equal((await repeated.json()).error, "invalid_token");
+  assert.deepEqual({ user: db.user, resetToken: db.resetToken, session: db.session, audit: db.audit }, snapshot);
+});
+
+test("concurrent password resets consume one token once and only the winner password takes effect", async () => {
+  const db = accountSecurityDb();
+  const env = createEnv({ DB: db });
+  const attempts = ["ConcurrentWinnerA1234", "ConcurrentWinnerB5678"];
+
+  const responses = await Promise.all(attempts.map((password) =>
+    resetPassword(passwordResetRequest(password), env)));
+  assert.deepEqual(responses.map((response) => response.status).sort(), [200, 400]);
+  const winningPassword = attempts[responses.findIndex((response) => response.status === 200)];
+  const losingPassword = attempts[responses.findIndex((response) => response.status === 400)];
+
+  assert.equal(db.consumeCount, 1);
+  assert.equal(await verifyPassword(
+    winningPassword,
+    db.user.password_salt,
+    db.user.password_hash,
+    db.user.password_iterations,
+  ), true);
+  assert.equal(await verifyPassword(
+    losingPassword,
+    db.user.password_salt,
+    db.user.password_hash,
+    db.user.password_iterations,
+  ), false);
+  assert.equal(db.audit.length, 1);
+  assert.equal(db.session.revocation_reason, "password_reset");
+});
+
+test("password reset succeeds when there are no active sessions to audit or revoke", async () => {
+  const db = accountSecurityDb();
+  db.session.revoked_at = "2026-07-13T00:00:00.000Z";
+  db.session.revocation_reason = "logout_current";
+
+  const response = await resetPassword(passwordResetRequest(), createEnv({ DB: db }));
+
+  assert.equal(response.status, 200);
+  assert.equal(db.consumeCount, 1);
+  assert.notEqual(db.user.password_hash, "old-password-hash");
+  assert.equal(db.audit.length, 0);
+  assert.equal(db.session.revocation_reason, "logout_current");
+});
+
+test("admin disable rolls back user session and audit when any batch statement fails", async () => {
+  for (const failingStatement of [1, 2, 3]) {
+    const db = accountSecurityDb();
+    db.failBatchStatement = failingStatement;
+
+    await assert.rejects(
+      () => handleAdminRoute(
+        new Request("https://example.test/api/admin/users/usr_target/disable", { method: "POST" }),
+        createEnv({ DB: db }),
+        new URL("https://example.test/api/admin/users/usr_target/disable"),
+        adminAuthContext(),
+      ),
+      /injected account security statement failure/,
+    );
+
+    assert.equal(db.user.status, "active");
+    assert.equal(db.session.revoked_at, null);
+    assert.equal(db.audit.length, 0);
+  }
+});
+
+test("repeated admin disable remains disabled and creates one revocation audit", async () => {
+  const db = accountSecurityDb();
+  const env = createEnv({ DB: db });
+  const request = () => new Request("https://example.test/api/admin/users/usr_target/disable", { method: "POST" });
+  const url = new URL("https://example.test/api/admin/users/usr_target/disable");
+
+  const responses = await Promise.all([
+    handleAdminRoute(request(), env, url, adminAuthContext()),
+    handleAdminRoute(request(), env, url, adminAuthContext()),
+  ]);
+  assert.deepEqual(responses.map((response) => response.status), [200, 200]);
+  assert.equal(db.user.status, "disabled");
+  assert.equal(db.session.revocation_reason, "admin_disabled");
+  assert.equal(db.audit.length, 1);
+});
+
 test("logout current revokes only the authenticated session family with an auditable reason", async () => {
   const db = persistentSessionDb("device-refresh-token");
   const response = await worker.fetch(
@@ -615,6 +793,61 @@ test("logout all revokes every user session with an auditable reason", async () 
   assert.deepEqual(await response.json(), { ok: true, scope: "all" });
   assert.equal(db.state.revocation_reason, "logout_all");
   assert.equal(db.audit[0].reason, "logout_all");
+});
+
+test("expired access can revoke only its current family with a valid current refresh token", async () => {
+  const db = persistentSessionDb("device-refresh-token");
+  db.state.access_expires_at = "2020-01-01T00:00:00.000Z";
+  const response = await worker.fetch(
+    sessionRequest("https://example.test/api/auth/logout", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ scope: "current", refresh_token: "device-refresh-token" }),
+    }),
+    createEnv({ DB: db }),
+    createExecutionContext(),
+  );
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { ok: true, scope: "current" });
+  assert.equal(db.state.revocation_reason, "logout_current");
+  assert.equal(db.audit.length, 1);
+});
+
+test("unknown refresh token cannot revoke a session when access is expired", async () => {
+  const db = persistentSessionDb("device-refresh-token");
+  db.state.access_expires_at = "2020-01-01T00:00:00.000Z";
+  const response = await worker.fetch(
+    sessionRequest("https://example.test/api/auth/logout", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ scope: "current", refresh_token: "unknown-refresh-token" }),
+    }),
+    createEnv({ DB: db }),
+    createExecutionContext(),
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(db.state.revoked_at, null);
+  assert.equal(db.audit.length, 0);
+});
+
+test("logout all rejects expired access even when a current refresh token is supplied", async () => {
+  const db = persistentSessionDb("device-refresh-token");
+  db.state.access_expires_at = "2020-01-01T00:00:00.000Z";
+  const response = await worker.fetch(
+    sessionRequest("https://example.test/api/auth/logout", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ scope: "all", refresh_token: "device-refresh-token" }),
+    }),
+    createEnv({ DB: db }),
+    createExecutionContext(),
+  );
+
+  assert.equal(response.status, 401);
+  assert.equal(db.state.revoked_at, null);
+  assert.equal(db.audit.length, 0);
 });
 
 test("blocks write APIs until the session email is verified", async () => {
@@ -1696,8 +1929,9 @@ async function loadWorker() {
     },
     fileName: sourcePath,
   });
-  const moduleUrl = `data:text/javascript;base64,${Buffer.from(outputText).toString("base64")}`;
-  return (await import(moduleUrl)).default;
+  const testableOutput = `${outputText}\nexport { handleAdminRoute, resetPassword, revokeSessionFamily, revokeUserSessions, verifyPassword };`;
+  const moduleUrl = `data:text/javascript;base64,${Buffer.from(testableOutput).toString("base64")}`;
+  return import(moduleUrl);
 }
 
 function authorizedRequest(url, init = {}) {
@@ -1803,6 +2037,7 @@ function persistentSessionDb(refreshToken) {
     family_id: "fam_device",
     user_id: "usr_device",
     generation: 0,
+    access_expires_at: futureIso(),
     access_token_hash: digest("session-access-token"),
     refresh_token_hash: digest(refreshToken),
     previous_refresh_token_hash: null,
@@ -1828,12 +2063,19 @@ function persistentSessionDb(refreshToken) {
     audit,
     history,
     failHistoryInsert: false,
+    failRevocationStatement: null,
     async batch(statements) {
       const stateSnapshot = structuredClone(state);
       const historySnapshot = structuredClone(history);
       const auditSnapshot = structuredClone(audit);
       try {
+        if (db.failRevocationStatement === 1) {
+          throw new Error("injected revocation statement failure");
+        }
         const first = await statements[0].run();
+        if (db.failRevocationStatement === 2) {
+          throw new Error("injected revocation statement failure");
+        }
         const second = (first.meta?.changes || 0) === 1
           ? await statements[1].run()
           : { meta: { changes: 0 } };
@@ -1851,7 +2093,7 @@ function persistentSessionDb(refreshToken) {
         return statement({
           all: async ([accessHash]) => ({
             results: state.access_token_hash === accessHash
-              ? [{ ...state, id: state.user_id, session_id: state.id, access_expires_at: futureIso() }]
+              ? [{ ...state, id: state.user_id, session_id: state.id }]
               : [],
           }),
         });
@@ -1925,8 +2167,25 @@ function persistentSessionDb(refreshToken) {
         return statement({
           run: async (values) => {
             if (sql.includes("SELECT 'sra_'")) {
+              if (sql.includes("family_id = ?")) {
+                const [reason, requestIdHash, createdAt, familyId, sessionId] = values;
+                const matches = (state.family_id === familyId || (!state.family_id && state.id === sessionId)) && !state.revoked_at;
+                if (matches) {
+                  audit.push({
+                    id: `sra_${audit.length + 1}`,
+                    session_id: state.id,
+                    family_id: state.family_id || state.id,
+                    user_id: state.user_id,
+                    reason,
+                    request_id_hash: requestIdHash,
+                    created_at: createdAt,
+                  });
+                }
+                return { meta: { changes: matches ? 1 : 0 } };
+              }
               const [reason, createdAt, userId] = values;
-              if (state.user_id === userId && !state.revoked_at) {
+              const matches = state.user_id === userId && !state.revoked_at;
+              if (matches) {
                 audit.push({
                   id: `sra_${audit.length + 1}`,
                   session_id: state.id,
@@ -1937,7 +2196,7 @@ function persistentSessionDb(refreshToken) {
                   created_at: createdAt,
                 });
               }
-              return { meta: { changes: 1 } };
+              return { meta: { changes: matches ? 1 : 0 } };
             }
             const [id, sessionId, familyId, userId, reason, requestIdHash, createdAt] = values;
             audit.push({ id, session_id: sessionId, family_id: familyId, user_id: userId, reason, request_id_hash: requestIdHash, created_at: createdAt });
@@ -1979,6 +2238,168 @@ function persistentSessionDb(refreshToken) {
         });
       }
       throw new Error(`Unexpected persistent session SQL: ${sql}`);
+    },
+  };
+  return db;
+}
+
+function passwordResetRequest(password = "NewPassword1234") {
+  return new Request("https://example.test/api/auth/reset-password", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ token: "reset-token", password }),
+  });
+}
+
+function adminAuthContext() {
+  return {
+    userId: "usr_admin",
+    workspaceId: "ws_admin",
+    email: "admin@example.test",
+    role: "admin",
+    emailVerified: true,
+  };
+}
+
+function accountSecurityDb() {
+  const user = {
+    id: "usr_target",
+    password_hash: "old-password-hash",
+    password_salt: "old-salt",
+    password_iterations: 100000,
+    status: "active",
+  };
+  const resetToken = {
+    id: "prt_target",
+    user_id: user.id,
+    token_hash: digest("reset-token"),
+    expires_at: futureIso(),
+    consumed_at: null,
+    consumed_request_id: null,
+  };
+  const session = {
+    id: "ses_target",
+    family_id: "fam_target",
+    user_id: user.id,
+    revoked_at: null,
+    revocation_reason: null,
+    updated_at: "2026-07-14T00:00:00.000Z",
+  };
+  const audit = [];
+  let batchTail = Promise.resolve();
+  const db = {
+    user,
+    resetToken,
+    session,
+    audit,
+    consumeCount: 0,
+    failBatchStatement: null,
+    async batch(statements) {
+      const previousBatch = batchTail;
+      let releaseBatch;
+      batchTail = new Promise((resolve) => { releaseBatch = resolve; });
+      await previousBatch;
+      const snapshot = structuredClone({ user, resetToken, session, audit, consumeCount: db.consumeCount });
+      try {
+        const results = [];
+        for (let index = 0; index < statements.length; index += 1) {
+          if (db.failBatchStatement === index + 1) {
+            throw new Error("injected account security statement failure");
+          }
+          results.push(await statements[index].run());
+        }
+        return results;
+      } catch (error) {
+        Object.assign(user, snapshot.user);
+        Object.assign(resetToken, snapshot.resetToken);
+        Object.assign(session, snapshot.session);
+        audit.splice(0, audit.length, ...snapshot.audit);
+        db.consumeCount = snapshot.consumeCount;
+        throw error;
+      } finally {
+        releaseBatch();
+      }
+    },
+    prepare(sql) {
+      if (sql.trimStart().startsWith("SELECT") && sql.includes("FROM password_reset_tokens")) {
+        return statement({
+          all: async ([tokenHash]) => ({
+            results: resetToken.token_hash === tokenHash ? [{ ...resetToken }] : [],
+          }),
+        });
+      }
+      if (sql.includes("UPDATE users") && sql.includes("password_hash")) {
+        return statement({
+          run: async ([passwordHash, passwordSalt, iterations, , userId, tokenId, requestId]) => {
+            const consumptionMatches = !sql.includes("consumed_request_id") || (
+              resetToken.id === tokenId && resetToken.consumed_request_id === requestId
+            );
+            if (user.id !== userId || !consumptionMatches) return { meta: { changes: 0 } };
+            Object.assign(user, {
+              password_hash: passwordHash,
+              password_salt: passwordSalt,
+              password_iterations: iterations,
+            });
+            return { meta: { changes: 1 } };
+          },
+        });
+      }
+      if (sql.includes("UPDATE password_reset_tokens")) {
+        return statement({
+          run: async (values) => {
+            const [consumedAt, consumedRequestId, tokenId] = values.length === 2
+              ? [values[0], null, values[1]]
+              : values;
+            if (resetToken.id !== tokenId || resetToken.consumed_at) return { meta: { changes: 0 } };
+            resetToken.consumed_at = consumedAt;
+            resetToken.consumed_request_id = consumedRequestId;
+            db.consumeCount += 1;
+            return { meta: { changes: 1 } };
+          },
+        });
+      }
+      if (sql.includes("UPDATE users SET status = 'disabled'")) {
+        return statement({
+          run: async ([, userId]) => {
+            if (user.id !== userId) return { meta: { changes: 0 } };
+            user.status = "disabled";
+            return { meta: { changes: 1 } };
+          },
+        });
+      }
+      if (sql.includes("INSERT INTO session_revocation_audit")) {
+        return statement({
+          run: async ([reason, createdAt, userId, tokenId, requestId]) => {
+            const consumptionMatches = !sql.includes("consumed_request_id") || (
+              resetToken.id === tokenId && resetToken.consumed_request_id === requestId
+            );
+            const matches = userId === session.user_id && !session.revoked_at && consumptionMatches;
+            if (matches) {
+              audit.push({
+                session_id: session.id,
+                family_id: session.family_id,
+                user_id: session.user_id,
+                reason,
+                created_at: createdAt,
+              });
+            }
+            return { meta: { changes: matches ? 1 : 0 } };
+          },
+        });
+      }
+      if (sql.includes("UPDATE sessions") && sql.includes("revocation_reason")) {
+        return statement({
+          run: async ([revokedAt, reason, updatedAt, userId, tokenId, requestId]) => {
+            const consumptionMatches = !sql.includes("consumed_request_id") || (
+              resetToken.id === tokenId && resetToken.consumed_request_id === requestId
+            );
+            const matches = userId === session.user_id && !session.revoked_at && consumptionMatches;
+            if (matches) Object.assign(session, { revoked_at: revokedAt, revocation_reason: reason, updated_at: updatedAt });
+            return { meta: { changes: matches ? 1 : 0 } };
+          },
+        });
+      }
+      throw new Error(`Unexpected account security SQL: ${sql}`);
     },
   };
   return db;

@@ -8,7 +8,6 @@ import cn.litianc.vibepub.data.AppDatabase
 import cn.litianc.vibepub.data.RecordingStatus
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import org.json.JSONObject
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
@@ -27,7 +26,7 @@ class UploadWorker internal constructor(
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
         val path = inputData.getString(KEY_FILE_PATH) ?: return@withContext Result.failure()
         val apiBaseUrl = inputData.getString(KEY_API_BASE_URL) ?: return@withContext Result.failure()
-        val accessToken = inputData.getString(KEY_ACCESS_TOKEN).orEmpty()
+        val localSessionId = inputData.getString(KEY_LOCAL_SESSION_ID).orEmpty()
         val userId = inputData.getString(KEY_USER_ID).orEmpty().ifBlank { AppPreferences.DEFAULT_USER_ID }
         val styleProfileId = inputData.getString(KEY_STYLE_PROFILE_ID).orEmpty()
         val styleProfileVersion = inputData.getString(KEY_STYLE_PROFILE_VERSION).orEmpty()
@@ -37,6 +36,18 @@ class UploadWorker internal constructor(
         val layoutProfileId = inputData.getString(KEY_LAYOUT_PROFILE_ID).orEmpty()
         val layoutProfileVersion = inputData.getString(KEY_LAYOUT_PROFILE_VERSION).orEmpty()
         val file = File(path)
+
+        val currentSession = preferences.currentAuthSessionSnapshot()
+        val matchesQueuedSession =
+            localSessionId.isNotBlank() &&
+                currentSession.sessionId == localSessionId &&
+                currentSession.userId == userId &&
+                currentSession.accessToken.isNotBlank() &&
+                apiBaseUrlsMatch(preferences.apiBaseUrl, apiBaseUrl)
+        if (!matchesQueuedSession) {
+            updateLocalStatus(userId, file.name, RecordingStatus.FAILED, "登录会话已变更，请在当前账号下重新上传")
+            return@withContext Result.failure()
+        }
 
         if (!file.exists()) {
             updateLocalStatus(userId, file.name, RecordingStatus.FAILED, "本地录音文件不存在")
@@ -68,16 +79,7 @@ class UploadWorker internal constructor(
                 }
             }
 
-            val canRefreshCurrentSession =
-                preferences.effectiveUserId == userId &&
-                    preferences.accessToken.isNotBlank() &&
-                    apiBaseUrlsMatch(preferences.apiBaseUrl, apiBaseUrl)
-
-            val response = if (canRefreshCurrentSession) {
-                AuthenticatedHttpClient.execute(preferences) { token -> openUploadConnection(token) }
-            } else {
-                performUploadRequest(openUploadConnection(accessToken))
-            }
+            val response = AuthenticatedHttpClient.execute(preferences) { token -> openUploadConnection(token) }
 
             val responseCode = response.statusCode
             if (responseCode in 200..299) {
@@ -95,7 +97,7 @@ class UploadWorker internal constructor(
                 updateLocalStatus(userId, file.name, RecordingStatus.FAILED, message)
                 Result.failure(
                     androidx.work.workDataOf(
-                        KEY_ERROR to JSONObject.quote(response.body).take(256),
+                        KEY_ERROR to "upload_http_$responseCode",
                     ),
                 )
             }
@@ -105,7 +107,7 @@ class UploadWorker internal constructor(
             if (outcome.retryable) {
                 Result.retry()
             } else {
-                Result.failure(androidx.work.workDataOf(KEY_ERROR to JSONObject.quote(outcome.message)))
+                Result.failure(androidx.work.workDataOf(KEY_ERROR to "upload_non_retryable"))
             }
         }
     }
@@ -132,6 +134,8 @@ class UploadWorker internal constructor(
     companion object {
         const val KEY_FILE_PATH = "file_path"
         const val KEY_API_BASE_URL = "api_base_url"
+        const val KEY_LOCAL_SESSION_ID = "local_session_id"
+        @Deprecated("Legacy queued work may contain this key; UploadWorker intentionally ignores it.")
         const val KEY_ACCESS_TOKEN = "access_token"
         const val KEY_USER_ID = "user_id"
         const val KEY_STYLE_PROFILE_ID = "style_profile_id"
@@ -181,20 +185,6 @@ private fun String.base64OrBlank(): String {
     val normalized = trim()
     if (normalized.isBlank()) return ""
     return Base64.encodeToString(normalized.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
-}
-
-private fun performUploadRequest(connection: HttpURLConnection): AuthenticatedHttpResponse {
-    return try {
-        val status = connection.responseCode
-        val body = if (status in 200..299) {
-            connection.inputStream.bufferedReader().use { it.readText() }
-        } else {
-            connection.errorStream?.bufferedReader()?.use { it.readText() }.orEmpty()
-        }
-        AuthenticatedHttpResponse(status, body)
-    } finally {
-        connection.disconnect()
-    }
 }
 
 private fun apiBaseUrlsMatch(left: String, right: String): Boolean {

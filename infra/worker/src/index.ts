@@ -277,7 +277,6 @@ async function handleAuthRoute(request: Request, env: Env, url: URL): Promise<Re
   }
   if (request.method === "POST" && url.pathname === "/api/auth/logout") {
     const auth = await authenticateRequest(request, env);
-    if (!auth) return json({ ok: true });
     return logout(request, env, auth);
   }
   return json({ error: "not_found" }, 404);
@@ -507,7 +506,7 @@ async function loadRefreshHistory(env: Env, refreshHash: string): Promise<any | 
 }
 
 function sessionResponse(session: any, rotation: RotationResponse): Response {
-  return json({ user: publicUser(authFromUserRow(session)), tokens: publicTokens(rotation, rotation) });
+  return json({ user: publicUser(authFromSessionRow(session)), tokens: publicTokens(rotation, rotation) });
 }
 
 type PublicAuthReason =
@@ -546,26 +545,19 @@ async function revokeSessionFamily(
 ): Promise<void> {
   const now = nowIso();
   const familyId = session.family_id || session.id;
-  const result = await env.DB.prepare(
+  const auditStatement = env.DB.prepare(
+    `INSERT INTO session_revocation_audit
+      (id, session_id, family_id, user_id, reason, request_id_hash, created_at)
+     SELECT 'sra_' || lower(hex(randomblob(16))), id, COALESCE(family_id, id), user_id, ?, ?, ?
+     FROM sessions
+     WHERE (family_id = ? OR (family_id IS NULL AND id = ?)) AND revoked_at IS NULL`,
+  ).bind(reason, requestIdHash, now, familyId, session.id);
+  const revokeStatement = env.DB.prepare(
     `UPDATE sessions
      SET revoked_at = COALESCE(revoked_at, ?), revocation_reason = COALESCE(revocation_reason, ?), updated_at = ?
      WHERE (family_id = ? OR (family_id IS NULL AND id = ?)) AND revoked_at IS NULL`,
-  ).bind(now, reason, now, familyId, session.id).run();
-  if ((result.meta?.changes || 0) > 0) {
-    await env.DB.prepare(
-      `INSERT INTO session_revocation_audit
-        (id, session_id, family_id, user_id, reason, request_id_hash, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    ).bind(
-      `sra_${crypto.randomUUID()}`,
-      session.id,
-      familyId,
-      session.user_id,
-      reason,
-      requestIdHash,
-      now,
-    ).run();
-  }
+  ).bind(now, reason, now, familyId, session.id);
+  await env.DB.batch([auditStatement, revokeStatement]);
 }
 
 async function revokeUserSessions(
@@ -574,18 +566,36 @@ async function revokeUserSessions(
   reason: "logout_all" | "password_reset" | "admin_disabled",
 ): Promise<void> {
   const now = nowIso();
-  await env.DB.prepare(
+  await env.DB.batch(userRevocationStatements(env, userId, reason, now));
+}
+
+function userRevocationStatements(
+  env: Env,
+  userId: string,
+  reason: "logout_all" | "password_reset" | "admin_disabled",
+  now: string,
+  resetConsumption?: { tokenId: string; requestId: string },
+): D1PreparedStatement[] {
+  const resetGuard = resetConsumption
+    ? ` AND EXISTS (
+        SELECT 1 FROM password_reset_tokens prt
+        WHERE prt.id = ? AND prt.consumed_request_id = ?
+      )`
+    : "";
+  const resetValues = resetConsumption ? [resetConsumption.tokenId, resetConsumption.requestId] : [];
+  const auditStatement = env.DB.prepare(
     `INSERT INTO session_revocation_audit
       (id, session_id, family_id, user_id, reason, request_id_hash, created_at)
      SELECT 'sra_' || lower(hex(randomblob(16))), id, COALESCE(family_id, id), user_id, ?, NULL, ?
      FROM sessions
-     WHERE user_id = ? AND revoked_at IS NULL`,
-  ).bind(reason, now, userId).run();
-  await env.DB.prepare(
+     WHERE user_id = ? AND revoked_at IS NULL${resetGuard}`,
+  ).bind(reason, now, userId, ...resetValues);
+  const revokeStatement = env.DB.prepare(
     `UPDATE sessions
      SET revoked_at = COALESCE(revoked_at, ?), revocation_reason = COALESCE(revocation_reason, ?), updated_at = ?
-     WHERE user_id = ? AND revoked_at IS NULL`,
-  ).bind(now, reason, now, userId).run();
+     WHERE user_id = ? AND revoked_at IS NULL${resetGuard}`,
+  ).bind(now, reason, now, userId, ...resetValues);
+  return [auditStatement, revokeStatement];
 }
 
 async function acceptInvite(request: Request, env: Env): Promise<Response> {
@@ -727,40 +737,76 @@ async function resetPassword(request: Request, env: Env): Promise<Response> {
   }
   const passwordHash = await hashPassword(password);
   const now = nowIso();
-  await env.DB.prepare(
-    `UPDATE users
-     SET password_hash = ?, password_salt = ?, password_iterations = ?, updated_at = ?
-     WHERE id = ?`,
-  )
-    .bind(passwordHash.hash, passwordHash.salt, passwordHash.iterations, now, row.user_id)
-    .run();
-  await env.DB.prepare(`UPDATE password_reset_tokens SET consumed_at = ? WHERE id = ?`)
-    .bind(now, row.id)
-    .run();
-  await revokeUserSessions(env, row.user_id, "password_reset");
+  const consumptionRequestId = crypto.randomUUID();
+  const resetConsumption = { tokenId: row.id, requestId: consumptionRequestId };
+  const [auditStatement, revokeStatement] = userRevocationStatements(
+    env, row.user_id, "password_reset", now, resetConsumption,
+  );
+  const results = await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE password_reset_tokens
+       SET consumed_at = ?, consumed_request_id = ?
+       WHERE id = ? AND consumed_at IS NULL`,
+    ).bind(now, consumptionRequestId, row.id),
+    env.DB.prepare(
+      `UPDATE users
+       SET password_hash = ?, password_salt = ?, password_iterations = ?, updated_at = ?
+       WHERE id = ?
+         AND EXISTS (
+           SELECT 1 FROM password_reset_tokens prt
+           WHERE prt.id = ? AND prt.consumed_request_id = ?
+         )`,
+    ).bind(
+      passwordHash.hash, passwordHash.salt, passwordHash.iterations, now,
+      row.user_id, row.id, consumptionRequestId,
+    ),
+    auditStatement,
+    revokeStatement,
+  ]);
+  if ((results[0]?.meta?.changes || 0) !== 1) {
+    return json({ error: "invalid_token" }, 400);
+  }
   return json({ ok: true });
 }
 
-async function logout(request: Request, env: Env, auth: AuthContext): Promise<Response> {
+async function logout(request: Request, env: Env, auth: AuthContext | null): Promise<Response> {
   let scope: "current" | "all" = "current";
+  let refreshToken = "";
   try {
     const body = await request.clone().json() as any;
     scope = body?.scope === "all" ? "all" : "current";
+    refreshToken = normalizeOptionalString(body?.refresh_token ?? body?.refreshToken) || "";
   } catch {
     scope = "current";
   }
 
+  if (!auth) {
+    if (scope === "all") return json({ error: "unauthorized" }, 401);
+    if (!refreshToken) return json({ ok: true, scope });
+    const session = await loadCurrentRefreshSession(env, await sha256Hex(refreshToken));
+    const idleExpiry = session?.idle_expires_at || session?.refresh_expires_at;
+    if (
+      session &&
+      !session.revoked_at &&
+      session.status !== "disabled" &&
+      !isPast(idleExpiry)
+    ) {
+      await revokeSessionFamily(env, session, "logout_current", null);
+    }
+    return json({ ok: true, scope });
+  }
+
+  if (scope === "all") {
+    await revokeUserSessions(env, auth.userId, "logout_all");
+    return json({ ok: true, scope });
+  }
   if (!auth.sessionId) return json({ ok: true, scope });
   const session = {
     id: auth.sessionId,
     family_id: auth.familyId || auth.sessionId,
     user_id: auth.userId,
   };
-  if (scope === "current") {
-    await revokeSessionFamily(env, session, "logout_current", null);
-  } else {
-    await revokeUserSessions(env, auth.userId, "logout_all");
-  }
+  await revokeSessionFamily(env, session, "logout_current", null);
   return json({ ok: true, scope });
 }
 
@@ -809,10 +855,14 @@ async function handleAdminRoute(request: Request, env: Env, url: URL, auth: Auth
   if (request.method === "POST" && url.pathname.startsWith("/api/admin/users/") && url.pathname.endsWith("/disable")) {
     const userId = safeDecodeURIComponent(url.pathname.slice("/api/admin/users/".length, -"/disable".length));
     if (userId === auth.userId) return json({ error: "cannot_disable_self" }, 400);
-    await env.DB.prepare(`UPDATE users SET status = 'disabled', updated_at = ? WHERE id = ?`)
-      .bind(nowIso(), userId)
-      .run();
-    await revokeUserSessions(env, userId, "admin_disabled");
+    const now = nowIso();
+    const [auditStatement, revokeStatement] = userRevocationStatements(env, userId, "admin_disabled", now);
+    await env.DB.batch([
+      env.DB.prepare(`UPDATE users SET status = 'disabled', updated_at = ? WHERE id = ? AND status != 'disabled'`)
+        .bind(now, userId),
+      auditStatement,
+      revokeStatement,
+    ]);
     return json({ ok: true });
   }
 
@@ -876,8 +926,16 @@ function requireVerifiedEmail(auth: AuthContext): Response | null {
 }
 
 function authFromUserRow(row: any): AuthContext {
+  return authFromRow(row, row.id);
+}
+
+function authFromSessionRow(row: any): AuthContext {
+  return authFromRow(row, row.user_id);
+}
+
+function authFromRow(row: any, userId: string): AuthContext {
   return {
-    userId: row.id || row.user_id,
+    userId,
     workspaceId: row.workspace_id || DEFAULT_WORKSPACE_ID,
     email: row.email,
     role: row.role === "admin" ? "admin" : "user",

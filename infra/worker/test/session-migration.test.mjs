@@ -38,6 +38,8 @@ test("persistent session migration upgrades a populated legacy sessions table", 
 
     const indexes = queryJson(database, "PRAGMA index_list('sessions')");
     assert.ok(indexes.some((index) => index.name === "idx_sessions_family_generation" && index.unique === 1));
+    assert.ok(queryJson(database, "PRAGMA table_info('password_reset_tokens')")
+      .some((column) => column.name === "consumed_request_id"));
 
     const auditColumns = queryJson(database, "PRAGMA table_info('session_revocation_audit')")
       .map((column) => column.name);
@@ -76,6 +78,43 @@ test("persistent session migration upgrades a populated legacy sessions table", 
       VALUES ('srh_duplicate', 'ses_fresh', 'ses_fresh', 0, 'another-token-hash',
               '2026-07-14T00:01:00.000Z', '2027-01-10T00:00:00.000Z', CURRENT_TIMESTAMP);
     `], { stdio: "pipe" }));
+    assert.throws(() => execFileSync("sqlite3", [database, `
+      INSERT INTO session_rotation_history
+        (id, session_id, family_id, generation, refresh_token_hash, request_id_hash,
+         valid_until, retain_until, created_at)
+      VALUES ('srh_wrong_family', 'ses_fresh', 'fam_wrong', 1, 'wrong-family-token', 'wrong-family-request',
+              '2026-07-14T00:01:00.000Z', '2027-01-10T00:00:00.000Z', CURRENT_TIMESTAMP);
+    `], { stdio: "pipe" }));
+    assert.throws(() => execFileSync("sqlite3", [database, `
+      INSERT INTO session_rotation_history
+        (id, session_id, family_id, generation, refresh_token_hash, request_id_hash,
+         valid_until, retain_until, created_at)
+      VALUES ('srh_reused_request', 'ses_fresh', 'ses_fresh', 1, 'reused-request-token', 'request-digest',
+              '2026-07-14T00:01:00.000Z', '2027-01-10T00:00:00.000Z', CURRENT_TIMESTAMP);
+    `], { stdio: "pipe" }));
+
+    assert.throws(() => execFileSync("sqlite3", [database, `
+      INSERT INTO session_revocation_audit
+        (id, session_id, family_id, user_id, reason, created_at)
+      VALUES ('audit_wrong_family', 'ses_fresh', 'fam_wrong', 'usr_fresh', 'logout_current', CURRENT_TIMESTAMP);
+    `], { stdio: "pipe" }));
+    assert.throws(() => execFileSync("sqlite3", [database, `
+      INSERT INTO session_revocation_audit
+        (id, session_id, family_id, user_id, reason, created_at)
+      VALUES ('audit_wrong_user', 'ses_fresh', 'ses_fresh', 'usr_legacy', 'logout_current', CURRENT_TIMESTAMP);
+    `], { stdio: "pipe" }));
+
+    execFileSync("sqlite3", [database, postMigrationLegacyNullFamilyInsert()], { stdio: "pipe" });
+    assert.deepEqual(queryJson(database, `
+      SELECT h.session_id, h.family_id, a.user_id
+      FROM session_rotation_history h
+      JOIN session_revocation_audit a ON a.session_id = h.session_id
+      WHERE h.session_id = 'ses_post_migration_legacy'
+    `)[0], {
+      session_id: "ses_post_migration_legacy",
+      family_id: "ses_post_migration_legacy",
+      user_id: "usr_legacy",
+    });
 
     assert.throws(() => execFileSync("sqlite3", [database, `
       UPDATE sessions SET revocation_reason = 'arbitrary_reason' WHERE id = 'ses_legacy';
@@ -88,6 +127,40 @@ test("persistent session migration upgrades a populated legacy sessions table", 
         (id, session_id, family_id, user_id, reason, created_at)
       VALUES ('bad', 'ses_legacy', 'ses_legacy', 'usr_legacy', 'arbitrary_reason', CURRENT_TIMESTAMP);
     `], { stdio: "pipe" }));
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("canonical schema creates the complete persistent-session model on a fresh database", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "vibepub-fresh-schema-"));
+  const database = join(directory, "fresh.db");
+  const script = join(directory, "schema.sql");
+  try {
+    await writeFile(script, await readFile(new URL("../schema.sql", import.meta.url), "utf8"));
+    execFileSync("sqlite3", [database, `.read ${script}`], { stdio: "pipe" });
+
+    const sessionColumns = queryJson(database, "PRAGMA table_info('sessions')").map((column) => column.name);
+    for (const column of [
+      "family_id", "generation", "last_used_at", "idle_expires_at", "previous_refresh_token_hash",
+      "previous_generation", "previous_valid_until", "previous_request_id_hash",
+      "previous_rotation_ciphertext", "revocation_reason",
+    ]) {
+      assert.ok(sessionColumns.includes(column), `missing sessions.${column}`);
+    }
+    assert.ok(queryJson(database, "PRAGMA table_info('password_reset_tokens')")
+      .some((column) => column.name === "consumed_request_id"));
+    assert.deepEqual(
+      queryJson(database, `SELECT name FROM sqlite_master WHERE type = 'table' AND name IN
+        ('session_rotation_history', 'session_revocation_audit') ORDER BY name`).map((row) => row.name),
+      ["session_revocation_audit", "session_rotation_history"],
+    );
+    const indexes = queryJson(database, `SELECT name FROM sqlite_master WHERE type = 'index'`).map((row) => row.name);
+    assert.ok(indexes.includes("idx_session_rotation_history_family_request"));
+    const triggers = queryJson(database, `SELECT name FROM sqlite_master WHERE type = 'trigger'`).map((row) => row.name);
+    assert.ok(triggers.includes("trg_session_rotation_history_identity_insert"));
+    assert.ok(triggers.includes("trg_session_revocation_audit_identity_insert"));
+    assert.ok(triggers.includes("trg_sessions_child_identity_update"));
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -134,5 +207,29 @@ function freshSessionAndHistoryInsert() {
       ('srh_fresh', 'ses_fresh', 'ses_fresh', 0, 'fresh-refresh-zero', 'request-digest',
        '2026-07-14T00:01:00.000Z', '2027-01-10T00:00:00.000Z', 'encrypted-response',
        '2026-07-14T00:00:00.000Z');
+  `;
+}
+
+function postMigrationLegacyNullFamilyInsert() {
+  return `
+    INSERT INTO sessions
+      (id, user_id, access_token_hash, refresh_token_hash, access_expires_at, refresh_expires_at,
+       family_id, generation, created_at, updated_at)
+    VALUES
+      ('ses_post_migration_legacy', 'usr_legacy', 'legacy-late-access', 'legacy-late-refresh',
+       '2026-07-14T01:00:00.000Z', '2026-08-14T00:00:00.000Z', NULL, 0,
+       '2026-07-14T00:00:00.000Z', '2026-07-14T00:00:00.000Z');
+    INSERT INTO session_rotation_history
+      (id, session_id, family_id, generation, refresh_token_hash, request_id_hash,
+       valid_until, retain_until, created_at)
+    VALUES
+      ('srh_post_migration_legacy', 'ses_post_migration_legacy', 'ses_post_migration_legacy', 0,
+       'legacy-late-refresh', 'legacy-late-request', '2026-07-14T00:01:00.000Z',
+       '2026-08-14T00:00:00.000Z', CURRENT_TIMESTAMP);
+    INSERT INTO session_revocation_audit
+      (id, session_id, family_id, user_id, reason, created_at)
+    VALUES
+      ('audit_post_migration_legacy', 'ses_post_migration_legacy', 'ses_post_migration_legacy',
+       'usr_legacy', 'logout_current', CURRENT_TIMESTAMP);
   `;
 }
