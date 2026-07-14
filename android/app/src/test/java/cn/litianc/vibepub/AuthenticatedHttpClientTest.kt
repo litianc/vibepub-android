@@ -15,6 +15,7 @@ import org.junit.runner.RunWith
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import org.json.JSONObject
 import java.net.InetSocketAddress
 import java.io.IOException
 import java.net.URL
@@ -23,6 +24,8 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
+import java.time.Instant
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
@@ -33,7 +36,7 @@ class AuthenticatedHttpClientTest {
 
     @Before
     fun setUp() {
-        preferences = AppPreferences(RuntimeEnvironment.getApplication())
+        preferences = AppPreferences(RuntimeEnvironment.getApplication(), TestAuthTokenStore())
         preferences.clearAuthSession()
     }
 
@@ -42,6 +45,65 @@ class AuthenticatedHttpClientTest {
         server?.stop(0)
         serverExecutor?.shutdownNow()
         preferences.clearAuthSession()
+    }
+
+    @Test
+    fun authApiExceptionReadsExplicitRefreshDisposition() {
+        val error = AuthApiException(
+            statusCode = 401,
+            responseBody = """{"reason":"replay_detected","code":"request_id_mismatch","retryable":false,"clear_session":true}""",
+            userMessage = "rejected",
+        )
+
+        assertEquals("replay_detected", error.reason)
+        assertFalse(error.retryable)
+        assertTrue(error.clearSession)
+    }
+
+    @Test
+    fun authApiPreservesRefreshDispositionFromHttpError() = runBlocking {
+        val baseUrl = startServer(
+            protectedHits = AtomicInteger(0),
+            refreshHits = AtomicInteger(0),
+            refreshStatus = 401,
+            refreshBody = """{"reason":"replay_detected","code":"request_id_mismatch","retryable":false,"clear_session":true}""",
+        )
+
+        val error = try {
+            AuthApi.refresh(baseUrl, "refresh-token", "request-id")
+            throw AssertionError("Expected refresh rejection")
+        } catch (expected: AuthApiException) {
+            expected
+        }
+
+        assertTrue("responseBody=${error.responseBody}", error.responseBody.contains("clear_session"))
+        assertEquals("replay_detected", error.reason)
+        assertTrue(error.clearSession)
+    }
+
+    @Test
+    fun authApiLogoutCurrentSendsPublicScopeContract() = runBlocking {
+        val body = AtomicReference<String>()
+        val authorization = AtomicReference<String>()
+        val baseUrl = startLogoutServer(body, authorization)
+
+        AuthApi.logout(baseUrl, "access-token", "refresh-token")
+
+        assertEquals("Bearer access-token", authorization.get())
+        assertEquals("refresh-token", JSONObject(body.get()).getString("refresh_token"))
+        assertEquals("current", JSONObject(body.get()).getString("scope"))
+    }
+
+    @Test
+    fun authApiLogoutAllSendsPublicScopeContract() = runBlocking {
+        val body = AtomicReference<String>()
+        val authorization = AtomicReference<String>()
+        val baseUrl = startLogoutServer(body, authorization)
+
+        AuthApi.logout(baseUrl, "access-token", "refresh-token", allDevices = true)
+
+        assertEquals("Bearer access-token", authorization.get())
+        assertEquals("all", JSONObject(body.get()).getString("scope"))
     }
 
     @Test
@@ -69,6 +131,46 @@ class AuthenticatedHttpClientTest {
         assertEquals(2, protectedHits.get())
         assertEquals(1, refreshHits.get())
         assertTrue(preferences.isAuthenticated)
+    }
+
+    @Test
+    fun foregroundRefreshesWhenAccessTokenIsNearExpiry() = runBlocking {
+        val refreshHits = AtomicInteger(0)
+        val baseUrl = startServer(
+            protectedHits = AtomicInteger(0),
+            refreshHits = refreshHits,
+            refreshStatus = 200,
+        )
+        preferences.apiBaseUrl = baseUrl
+        preferences.saveAuthSession(testSession(
+            accessToken = "aging-access",
+            refreshToken = "refresh-token",
+            accessExpiresAt = Instant.now().plusSeconds(60).toString(),
+        ))
+
+        assertTrue(AuthenticatedHttpClient.refreshIfNeeded(preferences))
+        assertEquals(1, refreshHits.get())
+        assertEquals("fresh-access", preferences.accessToken)
+    }
+
+    @Test
+    fun foregroundKeepsFreshAccessTokenWithoutRefresh() = runBlocking {
+        val refreshHits = AtomicInteger(0)
+        val baseUrl = startServer(
+            protectedHits = AtomicInteger(0),
+            refreshHits = refreshHits,
+            refreshStatus = 200,
+        )
+        preferences.apiBaseUrl = baseUrl
+        preferences.saveAuthSession(testSession(
+            accessToken = "fresh-enough-access",
+            refreshToken = "refresh-token",
+            accessExpiresAt = Instant.now().plusSeconds(30 * 60).toString(),
+        ))
+
+        assertFalse(AuthenticatedHttpClient.refreshIfNeeded(preferences))
+        assertEquals(0, refreshHits.get())
+        assertEquals("fresh-enough-access", preferences.accessToken)
     }
 
     @Test
@@ -243,13 +345,25 @@ class AuthenticatedHttpClientTest {
 
     @Test
     fun requestClearsSessionWhenRefreshTokenIsRejected() = runBlocking {
-        listOf(400, 401, 403).forEach { refreshStatus ->
+        listOf(
+            401 to "expired",
+            401 to "revoked",
+            401 to "replay_detected",
+            401 to "security_event",
+            403 to "user_disabled",
+        ).forEach { (refreshStatus, reason) ->
             server?.stop(0)
             serverExecutor?.shutdownNow()
             val baseUrl = startServer(
                 protectedHits = AtomicInteger(0),
                 refreshHits = AtomicInteger(0),
                 refreshStatus = refreshStatus,
+                refreshBody = """{
+                    "error":"invalid_refresh_token",
+                    "reason":"$reason",
+                    "retryable":false,
+                    "clear_session":true
+                }""",
             )
             preferences.apiBaseUrl = baseUrl
             preferences.saveAuthSession(testSession(accessToken = "expired-access", refreshToken = "expired-refresh"))
@@ -268,8 +382,38 @@ class AuthenticatedHttpClientTest {
     }
 
     @Test
+    fun refreshClientErrorsWithoutClearSignalPreserveSession() = runBlocking {
+        listOf(400, 401, 403).forEach { refreshStatus ->
+            server?.stop(0)
+            serverExecutor?.shutdownNow()
+            val baseUrl = startServer(
+                protectedHits = AtomicInteger(0),
+                refreshHits = AtomicInteger(0),
+                refreshStatus = refreshStatus,
+                refreshBody = """{
+                    "error":"malformed_request",
+                    "reason":"malformed",
+                    "code":"invalid_json",
+                    "retryable":true,
+                    "clear_session":false
+                }""",
+            )
+            preferences.apiBaseUrl = baseUrl
+            preferences.saveAuthSession(testSession(accessToken = "expired-access", refreshToken = "preserved-refresh"))
+
+            val error = expectRetryableFailure {
+                AuthenticatedHttpClient.request(preferences, URL("$baseUrl/api/protected"))
+            }
+
+            assertTrue(error.retryable)
+            assertTrue(preferences.isAuthenticated)
+            assertEquals("preserved-refresh", preferences.refreshToken)
+        }
+    }
+
+    @Test
     fun refreshRateLimitAndServerErrorsDoNotClearSession() = runBlocking {
-        listOf(429, 500, 503).forEach { refreshStatus ->
+        listOf(408, 429, 500, 503).forEach { refreshStatus ->
             server?.stop(0)
             serverExecutor?.shutdownNow()
             val protectedHits = AtomicInteger(0)
@@ -301,6 +445,43 @@ class AuthenticatedHttpClientTest {
     }
 
     @Test
+    fun lostRefreshResponseReusesPersistedV2RequestId() = runBlocking {
+        val refreshBodies = mutableListOf<String>()
+        var baseUrl = startServer(
+            protectedHits = AtomicInteger(0),
+            refreshHits = AtomicInteger(0),
+            refreshStatus = null,
+            refreshBodies = refreshBodies,
+        )
+        preferences.apiBaseUrl = baseUrl
+        preferences.saveAuthSession(testSession(accessToken = "expired-access", refreshToken = "stable-refresh"))
+        expectRetryableFailure {
+            AuthenticatedHttpClient.request(preferences, URL("$baseUrl/api/protected"))
+        }
+
+        server?.stop(0)
+        serverExecutor?.shutdownNow()
+        baseUrl = startServer(
+            protectedHits = AtomicInteger(0),
+            refreshHits = AtomicInteger(0),
+            refreshStatus = 200,
+            refreshBodies = refreshBodies,
+        )
+        preferences.apiBaseUrl = baseUrl
+        val response = AuthenticatedHttpClient.request(preferences, URL("$baseUrl/api/protected"))
+
+        assertEquals(200, response.statusCode)
+        assertTrue(refreshBodies.size >= 2)
+        val first = org.json.JSONObject(refreshBodies.first())
+        assertEquals(2, first.getInt("contract_version"))
+        assertTrue(refreshBodies.all { body ->
+            org.json.JSONObject(body).getString("refresh_request_id") == first.getString("refresh_request_id") &&
+                org.json.JSONObject(body).getInt("contract_version") == 2
+        })
+        assertEquals("", preferences.pendingRefreshRequestIdForTest())
+    }
+
+    @Test
     fun refreshNetworkErrorDoesNotClearSession() = runBlocking {
         val protectedHits = AtomicInteger(0)
         val refreshHits = AtomicInteger(0)
@@ -326,7 +507,7 @@ class AuthenticatedHttpClientTest {
         assertEquals("refresh-token", preferences.refreshToken)
         assertTrue(preferences.isAuthenticated)
         assertEquals(1, protectedHits.get())
-        assertEquals(1, refreshHits.get())
+        assertTrue(refreshHits.get() >= 1)
     }
 
     @Test
@@ -465,6 +646,7 @@ class AuthenticatedHttpClientTest {
         refreshHits: AtomicInteger,
         refreshStatus: Int?,
         refreshBody: String? = null,
+        refreshBodies: MutableList<String> = mutableListOf(),
         onRefresh: () -> Unit = {},
         onProtected: (authHeader: String?) -> Pair<Int, String> = { authHeader ->
             if (authHeader == "Bearer fresh-access") {
@@ -487,7 +669,7 @@ class AuthenticatedHttpClientTest {
         }
         httpServer.createContext("/api/auth/refresh") { exchange ->
             refreshHits.incrementAndGet()
-            exchange.requestBody.use { it.readBytes() }
+            refreshBodies += exchange.requestBody.use { it.readBytes().toString(Charsets.UTF_8) }
             onRefresh()
             if (refreshStatus == null) {
                 exchange.close()
@@ -505,7 +687,13 @@ class AuthenticatedHttpClientTest {
                   },
                   "tokens": {
                     "access_token": "fresh-access",
-                    "refresh_token": "fresh-refresh"
+                    "refresh_token": "fresh-refresh",
+                    "session_id": "ses_device",
+                    "generation": 1,
+                    "access_expires_at": "2026-07-14T10:00:00.000Z",
+                    "idle_expires_at": "2027-01-10T00:00:00.000Z",
+                    "refresh_expires_at": "2027-01-10T00:00:00.000Z",
+                    "contract_version": 2
                   }
                 }
                 """.trimIndent().toByteArray()
@@ -522,10 +710,31 @@ class AuthenticatedHttpClientTest {
         return "http://127.0.0.1:${httpServer.address.port}"
     }
 
+    private fun startLogoutServer(
+        requestBody: AtomicReference<String>,
+        authorization: AtomicReference<String>,
+    ): String {
+        val httpServer = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        val executor = Executors.newCachedThreadPool()
+        httpServer.executor = executor
+        httpServer.createContext("/api/auth/logout") { exchange ->
+            authorization.set(exchange.requestHeaders.getFirst("Authorization"))
+            requestBody.set(exchange.requestBody.use { it.readBytes().toString(Charsets.UTF_8) })
+            val response = """{"ok":true}""".toByteArray()
+            exchange.sendResponseHeaders(200, response.size.toLong())
+            exchange.responseBody.use { it.write(response) }
+        }
+        httpServer.start()
+        server = httpServer
+        serverExecutor = executor
+        return "http://127.0.0.1:${httpServer.address.port}"
+    }
+
     private fun testSession(
         accessToken: String,
         refreshToken: String,
         userId: String = "usr_current",
+        accessExpiresAt: String = "",
     ) = AuthSession(
         user = AuthUser(
             id = userId,
@@ -536,6 +745,7 @@ class AuthenticatedHttpClientTest {
         ),
         accessToken = accessToken,
         refreshToken = refreshToken,
+        accessExpiresAt = accessExpiresAt,
     )
 
     private suspend fun <T> expectRetryableFailure(block: suspend () -> T): AuthenticatedRequestException {

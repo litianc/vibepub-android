@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { test } from "node:test";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
@@ -299,6 +300,321 @@ test("returns the current user from an access-token session", async () => {
     workspace_id: "ws_reader",
     email_verified: true,
   });
+});
+
+test("refresh request id recovers the same rotation across worker restarts", async () => {
+  const db = persistentSessionDb("device-refresh-token");
+  const env = createEnv({ DB: db });
+
+  const first = await worker.fetch(
+    refreshRequest("device-refresh-token", "req-stable-001"),
+    env,
+    createExecutionContext(),
+  );
+  assert.equal(first.status, 200);
+  const firstBody = await first.json();
+  assert.equal(firstBody.tokens.session_id, "ses_device");
+  assert.equal(firstBody.tokens.generation, 1);
+  assert.equal(firstBody.tokens.contract_version, 2);
+  assert.match(firstBody.tokens.access_expires_at, /^\d{4}-\d{2}-\d{2}T/);
+  assert.match(firstBody.tokens.idle_expires_at, /^\d{4}-\d{2}-\d{2}T/);
+  assert.equal(firstBody.tokens.refresh_expires_at, firstBody.tokens.idle_expires_at);
+
+  const recovered = await worker.fetch(
+    refreshRequest("device-refresh-token", "req-stable-001"),
+    env,
+    createExecutionContext(),
+  );
+  assert.equal(recovered.status, 200);
+  const recoveredBody = await recovered.json();
+
+  assert.deepEqual(recoveredBody.tokens, firstBody.tokens);
+  assert.equal(db.state.generation, 1);
+  assert.equal(db.state.revoked_at, null);
+});
+
+test("refresh replay with a different request id revokes and audits the token family", async () => {
+  const db = persistentSessionDb("device-refresh-token");
+  const env = createEnv({ DB: db });
+  const first = await worker.fetch(
+    refreshRequest("device-refresh-token", "req-original-001"),
+    env,
+    createExecutionContext(),
+  );
+  assert.equal(first.status, 200);
+
+  const replay = await worker.fetch(
+    refreshRequest("device-refresh-token", "req-attacker-002"),
+    env,
+    createExecutionContext(),
+  );
+  assert.equal(replay.status, 401);
+  assert.deepEqual(await replay.json(), {
+    error: "refresh_token_reuse",
+    reason: "replay_detected",
+    code: "request_id_mismatch",
+    retryable: false,
+    clear_session: true,
+  });
+  assert.equal(db.state.revocation_reason, "refresh_token_reuse");
+  assert.equal(db.audit.length, 1);
+  assert.equal(db.audit[0].reason, "refresh_token_reuse");
+});
+
+test("concurrent refreshes with the same request id converge on one CAS rotation", async () => {
+  const db = persistentSessionDb("device-refresh-token");
+  const env = createEnv({ DB: db });
+  const responses = await Promise.all([
+    worker.fetch(refreshRequest("device-refresh-token", "req-concurrent-001"), env, createExecutionContext()),
+    worker.fetch(refreshRequest("device-refresh-token", "req-concurrent-001"), env, createExecutionContext()),
+  ]);
+  const bodies = await Promise.all(responses.map((response) => response.json()));
+
+  assert.deepEqual(responses.map((response) => response.status), [200, 200]);
+  assert.deepEqual(bodies[0].tokens, bodies[1].tokens);
+  assert.equal(db.state.generation, 1);
+  assert.equal(db.history.length, 1);
+});
+
+test("legacy refresh without request id has bounded same-rotation recovery", async () => {
+  const db = persistentSessionDb("legacy-refresh-token");
+  const env = createEnv({ DB: db });
+  const first = await worker.fetch(refreshRequest("legacy-refresh-token", null, null), env, createExecutionContext());
+  const recovered = await worker.fetch(refreshRequest("legacy-refresh-token", null, null), env, createExecutionContext());
+
+  assert.equal(first.status, 200);
+  assert.equal(recovered.status, 200);
+  assert.deepEqual((await recovered.json()).tokens, (await first.json()).tokens);
+  assert.equal(db.state.generation, 1);
+});
+
+test("v2 refresh without request id is retryable and does not rotate", async () => {
+  const db = persistentSessionDb("device-refresh-token");
+  const response = await worker.fetch(
+    refreshRequest("device-refresh-token", null, 2),
+    createEnv({ DB: db }),
+    createExecutionContext(),
+  );
+
+  assert.equal(response.status, 400);
+  assert.deepEqual(await response.json(), {
+    error: "missing_refresh_request_id",
+    reason: "malformed",
+    code: "contract_v2_requires_request_id",
+    retryable: true,
+    clear_session: false,
+  });
+  assert.equal(db.state.generation, 0);
+  assert.equal(db.history.length, 0);
+});
+
+test("malformed refresh JSON is retryable and never clears a session", async () => {
+  const response = await worker.fetch(
+    new Request("https://example.test/api/auth/refresh", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{not-json",
+    }),
+    createEnv(),
+    createExecutionContext(),
+  );
+
+  assert.equal(response.status, 400);
+  assert.deepEqual(await response.json(), {
+    error: "malformed_request",
+    reason: "malformed",
+    code: "invalid_json",
+    retryable: true,
+    clear_session: false,
+  });
+});
+
+test("an unrecognized refresh token is a clearable revoked terminal state", async () => {
+  const db = persistentSessionDb("known-token");
+  const response = await worker.fetch(
+    refreshRequest("unknown-token", "req-unknown-001"),
+    createEnv({ DB: db }),
+    createExecutionContext(),
+  );
+
+  assert.equal(response.status, 401);
+  assert.deepEqual(await response.json(), {
+    error: "invalid_refresh_token",
+    reason: "revoked",
+    code: "unrecognized_token",
+    retryable: false,
+    clear_session: true,
+  });
+});
+
+test("idle expiry is a clearable terminal refresh result", async () => {
+  const db = persistentSessionDb("expired-token");
+  db.state.idle_expires_at = "2020-01-01T00:00:00.000Z";
+  const response = await worker.fetch(
+    refreshRequest("expired-token", "req-expired-terminal"),
+    createEnv({ DB: db }),
+    createExecutionContext(),
+  );
+
+  assert.equal(response.status, 401);
+  assert.deepEqual(await response.json(), {
+    error: "invalid_refresh_token",
+    reason: "expired",
+    code: "idle_expired",
+    retryable: false,
+    clear_session: true,
+  });
+});
+
+test("replaying generation zero after generation two revokes its family", async () => {
+  const db = persistentSessionDb("generation-zero-token");
+  const env = createEnv({ DB: db });
+  const generationOne = await worker.fetch(
+    refreshRequest("generation-zero-token", "req-generation-zero"), env, createExecutionContext(),
+  );
+  const generationOneBody = await generationOne.json();
+  const generationTwo = await worker.fetch(
+    refreshRequest(generationOneBody.tokens.refresh_token, "req-generation-one"), env, createExecutionContext(),
+  );
+  assert.equal(generationTwo.status, 200);
+
+  const replay = await worker.fetch(
+    refreshRequest("generation-zero-token", "req-generation-zero"), env, createExecutionContext(),
+  );
+
+  assert.equal(replay.status, 401);
+  assert.deepEqual(await replay.json(), {
+    error: "refresh_token_reuse",
+    reason: "replay_detected",
+    code: "superseded_generation",
+    retryable: false,
+    clear_session: true,
+  });
+  assert.equal(db.state.revocation_reason, "refresh_token_reuse");
+  assert.equal(db.history.length, 2);
+});
+
+test("same request id after rotation grace revokes the family", async () => {
+  const db = persistentSessionDb("device-refresh-token");
+  const env = createEnv({ DB: db });
+  await worker.fetch(refreshRequest("device-refresh-token", "req-expired-001"), env, createExecutionContext());
+  db.history[0].valid_until = "2020-01-01T00:00:00.000Z";
+
+  const replay = await worker.fetch(
+    refreshRequest("device-refresh-token", "req-expired-001"),
+    env,
+    createExecutionContext(),
+  );
+
+  assert.equal(replay.status, 401);
+  assert.deepEqual(await replay.json(), {
+    error: "refresh_token_reuse",
+    reason: "replay_detected",
+    code: "grace_expired",
+    retryable: false,
+    clear_session: true,
+  });
+  assert.equal(db.audit[0].reason, "refresh_token_reuse");
+});
+
+test("new worker upgrades and can revoke a null-family row created after migration", async () => {
+  const db = persistentSessionDb("post-migration-legacy-token");
+  db.state.family_id = null;
+  const env = createEnv({ DB: db });
+
+  const rotated = await worker.fetch(
+    refreshRequest("post-migration-legacy-token", "req-upgrade-001"), env, createExecutionContext(),
+  );
+  assert.equal(rotated.status, 200);
+  assert.equal(db.state.family_id, "ses_device");
+
+  const replay = await worker.fetch(
+    refreshRequest("post-migration-legacy-token", "req-replay-002"), env, createExecutionContext(),
+  );
+  assert.equal(replay.status, 401);
+  assert.equal(db.state.revocation_reason, "refresh_token_reuse");
+});
+
+test("a later rotation clears expired recovery ciphertext but retains token attribution", async () => {
+  const db = persistentSessionDb("generation-zero-token");
+  const env = createEnv({ DB: db });
+  const generationOne = await worker.fetch(
+    refreshRequest("generation-zero-token", "req-zero"), env, createExecutionContext(),
+  );
+  const generationOneBody = await generationOne.json();
+  db.history[0].valid_until = "2020-01-01T00:00:00.000Z";
+
+  await worker.fetch(
+    refreshRequest(generationOneBody.tokens.refresh_token, "req-one"), env, createExecutionContext(),
+  );
+
+  assert.equal(db.history[0].rotation_ciphertext, null);
+  assert.equal(db.history[0].refresh_token_hash, digest("generation-zero-token"));
+});
+
+test("history insert failure rolls back CAS and the same request can retry", async () => {
+  const db = persistentSessionDb("atomic-refresh-token");
+  db.failHistoryInsert = true;
+  const env = createEnv({ DB: db });
+
+  const failed = await worker.fetch(
+    refreshRequest("atomic-refresh-token", "req-atomic-001"), env, createExecutionContext(),
+  );
+  assert.equal(failed.status, 503);
+  assert.deepEqual(await failed.json(), {
+    error: "refresh_persistence_failed",
+    reason: "retryable",
+    code: "atomic_rotation_failed",
+    retryable: true,
+    clear_session: false,
+  });
+  assert.equal(db.state.generation, 0);
+  assert.equal(db.state.refresh_token_hash, digest("atomic-refresh-token"));
+  assert.equal(db.history.length, 0);
+
+  db.failHistoryInsert = false;
+  const retried = await worker.fetch(
+    refreshRequest("atomic-refresh-token", "req-atomic-001"), env, createExecutionContext(),
+  );
+  assert.equal(retried.status, 200);
+  assert.equal(db.state.generation, 1);
+  assert.equal(db.history.length, 1);
+});
+
+test("logout current revokes only the authenticated session family with an auditable reason", async () => {
+  const db = persistentSessionDb("device-refresh-token");
+  const response = await worker.fetch(
+    sessionRequest("https://example.test/api/auth/logout", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ scope: "current" }),
+    }),
+    createEnv({ DB: db }),
+    createExecutionContext(),
+  );
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { ok: true, scope: "current" });
+  assert.equal(db.state.revocation_reason, "logout_current");
+  assert.equal(db.audit[0].reason, "logout_current");
+});
+
+test("logout all revokes every user session with an auditable reason", async () => {
+  const db = persistentSessionDb("device-refresh-token");
+  const response = await worker.fetch(
+    sessionRequest("https://example.test/api/auth/logout", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ scope: "all" }),
+    }),
+    createEnv({ DB: db }),
+    createExecutionContext(),
+  );
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { ok: true, scope: "all" });
+  assert.equal(db.state.revocation_reason, "logout_all");
+  assert.equal(db.audit[0].reason, "logout_all");
 });
 
 test("blocks write APIs until the session email is verified", async () => {
@@ -1396,6 +1712,18 @@ function sessionRequest(url, init = {}) {
   return new Request(url, { ...init, headers });
 }
 
+function refreshRequest(refreshToken, requestId, contractVersion = 2) {
+  return new Request("https://example.test/api/auth/refresh", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      refresh_token: refreshToken,
+      ...(requestId ? { refresh_request_id: requestId } : {}),
+      ...(contractVersion == null ? {} : { contract_version: contractVersion }),
+    }),
+  });
+}
+
 function miningClaimRequest(action, userId, targetKey, claimId) {
   return new Request("https://example.test/api/internal/mining-claims", {
     method: "POST",
@@ -1467,6 +1795,197 @@ function createDb(results, options = {}) {
       });
     },
   };
+}
+
+function persistentSessionDb(refreshToken) {
+  const state = {
+    id: "ses_device",
+    family_id: "fam_device",
+    user_id: "usr_device",
+    generation: 0,
+    access_token_hash: digest("session-access-token"),
+    refresh_token_hash: digest(refreshToken),
+    previous_refresh_token_hash: null,
+    previous_generation: null,
+    previous_valid_until: null,
+    previous_request_id_hash: null,
+    previous_rotation_ciphertext: null,
+    refresh_expires_at: futureIso(180),
+    idle_expires_at: futureIso(180),
+    revoked_at: null,
+    revocation_reason: null,
+    email: "device@example.test",
+    role: "user",
+    workspace_id: "ws_device",
+    status: "active",
+    email_verified_at: "2026-07-01T00:00:00.000Z",
+  };
+  const audit = [];
+  const history = [];
+
+  const db = {
+    state,
+    audit,
+    history,
+    failHistoryInsert: false,
+    async batch(statements) {
+      const stateSnapshot = structuredClone(state);
+      const historySnapshot = structuredClone(history);
+      const auditSnapshot = structuredClone(audit);
+      try {
+        const first = await statements[0].run();
+        const second = (first.meta?.changes || 0) === 1
+          ? await statements[1].run()
+          : { meta: { changes: 0 } };
+        return [first, second];
+      } catch (error) {
+        Object.keys(state).forEach((key) => delete state[key]);
+        Object.assign(state, stateSnapshot);
+        history.splice(0, history.length, ...historySnapshot);
+        audit.splice(0, audit.length, ...auditSnapshot);
+        throw error;
+      }
+    },
+    prepare(sql) {
+      if (sql.includes("FROM sessions s") && sql.includes("access_token_hash")) {
+        return statement({
+          all: async ([accessHash]) => ({
+            results: state.access_token_hash === accessHash
+              ? [{ ...state, id: state.user_id, session_id: state.id, access_expires_at: futureIso() }]
+              : [],
+          }),
+        });
+      }
+      if (sql.includes("FROM sessions s") && sql.includes("refresh_token_hash")) {
+        return statement({
+          all: async ([currentHash]) => ({
+            results: state.refresh_token_hash === currentHash
+              ? [{ ...state }]
+              : [],
+          }),
+        });
+      }
+      if (sql.includes("FROM session_rotation_history")) {
+        return statement({
+          all: async ([refreshHash]) => ({
+            results: history
+              .filter((entry) => entry.refresh_token_hash === refreshHash)
+              .map((entry) => ({ ...state, ...entry, current_generation: state.generation })),
+          }),
+        });
+      }
+      if (sql.includes("UPDATE sessions") && sql.includes("previous_rotation_ciphertext")) {
+        return statement({
+          run: async (values) => {
+            const expectedId = values.at(-3);
+            const expectedGeneration = values.at(-2);
+            const expectedHash = values.at(-1);
+            if (state.id !== expectedId || state.generation !== expectedGeneration || state.refresh_token_hash !== expectedHash) {
+              return { meta: { changes: 0 } };
+            }
+            const [
+              accessTokenHash, nextRefreshHash, accessExpiresAt, refreshExpiresAt,
+              lastUsedAt, idleExpiresAt, previousRefreshHash, previousGeneration,
+              previousValidUntil, previousRequestIdHash, previousRotationCiphertext,
+              nextGeneration, updatedAt,
+            ] = values;
+            Object.assign(state, {
+              access_token_hash: accessTokenHash,
+              refresh_token_hash: nextRefreshHash,
+              access_expires_at: accessExpiresAt,
+              refresh_expires_at: refreshExpiresAt,
+              last_used_at: lastUsedAt,
+              idle_expires_at: idleExpiresAt,
+              previous_refresh_token_hash: previousRefreshHash,
+              previous_generation: previousGeneration,
+              previous_valid_until: previousValidUntil,
+              previous_request_id_hash: previousRequestIdHash,
+              previous_rotation_ciphertext: previousRotationCiphertext,
+              generation: nextGeneration,
+              updated_at: updatedAt,
+              family_id: sql.includes("family_id = COALESCE(family_id, id)")
+                ? state.family_id || state.id
+                : state.family_id,
+            });
+            return { meta: { changes: 1 } };
+          },
+        });
+      }
+      if (sql.includes("UPDATE sessions") && sql.includes("revocation_reason")) {
+        return statement({
+          run: async ([revokedAt, reason, updatedAt, target]) => {
+            const matches = sql.includes("user_id = ?") ? state.user_id === target : state.family_id === target;
+            if (!matches || state.revoked_at) return { meta: { changes: 0 } };
+            Object.assign(state, { revoked_at: revokedAt, revocation_reason: reason, updated_at: updatedAt });
+            return { meta: { changes: 1 } };
+          },
+        });
+      }
+      if (sql.includes("INSERT INTO session_revocation_audit")) {
+        return statement({
+          run: async (values) => {
+            if (sql.includes("SELECT 'sra_'")) {
+              const [reason, createdAt, userId] = values;
+              if (state.user_id === userId && !state.revoked_at) {
+                audit.push({
+                  id: `sra_${audit.length + 1}`,
+                  session_id: state.id,
+                  family_id: state.family_id || state.id,
+                  user_id: userId,
+                  reason,
+                  request_id_hash: null,
+                  created_at: createdAt,
+                });
+              }
+              return { meta: { changes: 1 } };
+            }
+            const [id, sessionId, familyId, userId, reason, requestIdHash, createdAt] = values;
+            audit.push({ id, session_id: sessionId, family_id: familyId, user_id: userId, reason, request_id_hash: requestIdHash, created_at: createdAt });
+            return { meta: { changes: 1 } };
+          },
+        });
+      }
+      if (sql.includes("INSERT INTO session_rotation_history")) {
+        return statement({
+          run: async (values) => {
+            if (db.failHistoryInsert) throw new Error("injected history insert failure");
+            const [id, sessionId, familyId, generation, tokenHash, requestIdHash, validUntil, retainUntil, ciphertext, createdAt] = values;
+            if (history.some((entry) => entry.refresh_token_hash === tokenHash ||
+              (entry.family_id === familyId && entry.generation === generation))) {
+              throw new Error("UNIQUE constraint failed: session_rotation_history");
+            }
+            history.push({
+              id, session_id: sessionId, family_id: familyId, generation,
+              refresh_token_hash: tokenHash, request_id_hash: requestIdHash,
+              valid_until: validUntil, retain_until: retainUntil,
+              rotation_ciphertext: ciphertext, created_at: createdAt,
+            });
+            return { meta: { changes: 1 } };
+          },
+        });
+      }
+      if (sql.includes("UPDATE session_rotation_history") && sql.includes("rotation_ciphertext = NULL")) {
+        return statement({
+          run: async ([cutoff]) => {
+            let changes = 0;
+            history.forEach((entry) => {
+              if (entry.valid_until <= cutoff && entry.rotation_ciphertext != null) {
+                entry.rotation_ciphertext = null;
+                changes += 1;
+              }
+            });
+            return { meta: { changes } };
+          },
+        });
+      }
+      throw new Error(`Unexpected persistent session SQL: ${sql}`);
+    },
+  };
+  return db;
+}
+
+function digest(value) {
+  return createHash("sha256").update(value).digest("hex");
 }
 
 function miningClaimDb() {

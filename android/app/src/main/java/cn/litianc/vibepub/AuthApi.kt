@@ -19,6 +19,12 @@ data class AuthSession(
     val user: AuthUser,
     val accessToken: String,
     val refreshToken: String,
+    val serverSessionId: String = "",
+    val generation: Int = 0,
+    val accessExpiresAt: String = "",
+    val idleExpiresAt: String = "",
+    val refreshExpiresAt: String = "",
+    val contractVersion: Int = 2,
 )
 
 data class PublishingAccount(
@@ -65,10 +71,12 @@ object AuthApi {
             parseAuthSession(requestJson(apiBaseUrl, "/api/auth/login", "POST", body = body))
         }
 
-    suspend fun refresh(apiBaseUrl: String, refreshToken: String): AuthSession =
+    suspend fun refresh(apiBaseUrl: String, refreshToken: String, refreshRequestId: String): AuthSession =
         withContext(Dispatchers.IO) {
             val body = JSONObject()
                 .put("refresh_token", refreshToken.trim())
+                .put("refresh_request_id", refreshRequestId.trim())
+                .put("contract_version", 2)
                 .toString()
             parseAuthSession(requestJson(apiBaseUrl, "/api/auth/refresh", "POST", body = body))
         }
@@ -99,10 +107,16 @@ object AuthApi {
             requestJson(apiBaseUrl, "/api/auth/reset-password", "POST", body = body)
         }
 
-    suspend fun logout(apiBaseUrl: String, accessToken: String, refreshToken: String) =
+    suspend fun logout(
+        apiBaseUrl: String,
+        accessToken: String,
+        refreshToken: String,
+        allDevices: Boolean = false,
+    ) =
         withContext(Dispatchers.IO) {
             val body = JSONObject()
                 .put("refresh_token", refreshToken.trim())
+                .put("scope", if (allDevices) "all" else "current")
                 .toString()
             requestJson(apiBaseUrl, "/api/auth/logout", "POST", accessToken = accessToken, body = body)
         }
@@ -267,7 +281,6 @@ object AuthApi {
             if (payload != null) {
                 doOutput = true
                 setRequestProperty("Content-Type", "application/json; charset=utf-8")
-                setFixedLengthStreamingMode(payload.size)
             }
         }
         if (payload != null) {
@@ -278,7 +291,12 @@ object AuthApi {
         val responseBody = if (status in 200..299) {
             connection.inputStream.bufferedReader().use { it.readText() }
         } else {
-            connection.errorStream?.bufferedReader()?.use { it.readText() }.orEmpty()
+            val responseStream = try {
+                connection.inputStream
+            } catch (_: Exception) {
+                connection.errorStream
+            }
+            responseStream?.bufferedReader()?.use { it.readText() }.orEmpty()
         }
         connection.disconnect()
         if (status !in 200..299) {
@@ -296,17 +314,35 @@ class AuthApiException(
     val statusCode: Int,
     val responseBody: String,
     userMessage: String,
+    val reason: String = parseAuthErrorField(responseBody, "reason"),
+    val retryable: Boolean = parseAuthErrorBoolean(responseBody, "retryable", statusCode == 408 || statusCode == 429 || statusCode >= 500),
+    val clearSession: Boolean = parseAuthErrorBoolean(responseBody, "clear_session", false),
 ) : IllegalStateException(userMessage)
 
 internal fun parseAuthSession(responseBody: String): AuthSession {
     val json = JSONObject(responseBody)
     val tokens = json.getJSONObject("tokens")
+    require(tokens.getInt("contract_version") == 2) { "Unsupported auth contract" }
     return AuthSession(
         user = parseUser(json.getJSONObject("user")),
         accessToken = tokens.getString("access_token"),
         refreshToken = tokens.getString("refresh_token"),
+        serverSessionId = tokens.getString("session_id"),
+        generation = tokens.getInt("generation"),
+        accessExpiresAt = tokens.getString("access_expires_at"),
+        idleExpiresAt = tokens.getString("idle_expires_at"),
+        refreshExpiresAt = tokens.getString("refresh_expires_at"),
+        contractVersion = tokens.getInt("contract_version"),
     )
 }
+
+private fun parseAuthErrorField(body: String, key: String): String = runCatching {
+    JSONObject(body.ifBlank { "{}" }).optString(key)
+}.getOrDefault("")
+
+private fun parseAuthErrorBoolean(body: String, key: String, default: Boolean): Boolean = runCatching {
+    JSONObject(body.ifBlank { "{}" }).optBoolean(key, default)
+}.getOrDefault(default)
 
 internal fun parseUser(json: JSONObject): AuthUser {
     return AuthUser(

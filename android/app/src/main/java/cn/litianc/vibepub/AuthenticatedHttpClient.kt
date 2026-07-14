@@ -7,6 +7,8 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.net.HttpURLConnection
 import java.net.URL
+import java.time.Instant
+import org.json.JSONException
 
 data class AuthenticatedHttpResponse(
     val statusCode: Int,
@@ -26,6 +28,19 @@ class AuthenticatedRequestException(
 
 object AuthenticatedHttpClient {
     private val refreshMutex = Mutex()
+
+    suspend fun refreshIfNeeded(
+        preferences: AppPreferences,
+        nowMs: Long = System.currentTimeMillis(),
+        refreshThresholdMs: Long = 5 * 60 * 1000L,
+    ): Boolean = withContext(Dispatchers.IO) {
+        val session = requireRefreshableSession(preferences.currentAuthSessionSnapshot())
+        val accessExpiryMs = runCatching { Instant.parse(session.accessExpiresAt).toEpochMilli() }.getOrNull()
+        if (accessExpiryMs != null && accessExpiryMs - nowMs > refreshThresholdMs) {
+            return@withContext false
+        }
+        refreshAccessToken(preferences, failedSession = session) != null
+    }
 
     suspend fun request(
         preferences: AppPreferences,
@@ -194,12 +209,23 @@ object AuthenticatedHttpClient {
         if (currentSession.accessToken != failedSession.accessToken) {
             return@withLock currentSession
         }
+        val refreshRequestId = preferences.getOrCreateRefreshRequestId(currentSession)
 
         runCatching {
-            AuthApi.refresh(preferences.apiBaseUrl, currentSession.refreshToken)
+            AuthApi.refresh(preferences.apiBaseUrl, currentSession.refreshToken, refreshRequestId)
         }.fold(
             onSuccess = { session ->
-                if (session.accessToken.isBlank() || session.refreshToken.isBlank()) {
+                if (
+                    session.accessToken.isBlank() ||
+                    session.refreshToken.isBlank() ||
+                    session.serverSessionId.isBlank() ||
+                    session.generation != currentSession.generation + 1 ||
+                    session.accessExpiresAt.isBlank() ||
+                    session.idleExpiresAt.isBlank() ||
+                    session.refreshExpiresAt.isBlank() ||
+                    session.contractVersion != 2 ||
+                    (currentSession.serverSessionId.isNotBlank() && session.serverSessionId != currentSession.serverSessionId)
+                ) {
                     throw AuthenticatedRequestException(
                         message = "会话刷新返回不完整的登录信息，请稍后重试",
                         retryable = true,
@@ -216,7 +242,7 @@ object AuthenticatedHttpClient {
                 if (error is CancellationException) {
                     throw error
                 }
-                if (error is AuthApiException && error.statusCode in INVALID_REFRESH_TOKEN_STATUS_CODES) {
+                if (error is AuthApiException && error.clearSession) {
                     if (!preferences.clearAuthSessionIfMatches(failedSession)) {
                         throw sessionChangedException()
                     }
@@ -224,6 +250,20 @@ object AuthenticatedHttpClient {
                 }
                 if (error is AuthenticatedRequestException) {
                     throw error
+                }
+                if (error is JSONException || error is IllegalArgumentException) {
+                    throw AuthenticatedRequestException(
+                        message = "会话刷新返回不完整的登录信息，请稍后重试",
+                        retryable = true,
+                        cause = error,
+                    )
+                }
+                if (error is AuthApiException) {
+                    throw AuthenticatedRequestException(
+                        message = "会话刷新失败：${error.reason.ifBlank { "服务端拒绝请求" }}",
+                        retryable = error.retryable,
+                        cause = error,
+                    )
                 }
                 throw AuthenticatedRequestException(
                     message = "会话刷新暂时失败，请稍后重试",
@@ -247,9 +287,4 @@ object AuthenticatedHttpClient {
         )
     }
 
-    private val INVALID_REFRESH_TOKEN_STATUS_CODES = setOf(
-        HttpURLConnection.HTTP_BAD_REQUEST,
-        HttpURLConnection.HTTP_UNAUTHORIZED,
-        HttpURLConnection.HTTP_FORBIDDEN,
-    )
 }

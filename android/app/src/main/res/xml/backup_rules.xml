@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <full-backup-content>
     <exclude domain="file" path="recordings" />
+    <exclude domain="sharedpref" path="vibepub.xml" />
+    <exclude domain="sharedpref" path="vibepub_secure_auth.xml" />
 </full-backup-content>

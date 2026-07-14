@@ -1,40 +1,57 @@
 package cn.litianc.vibepub
 
 import android.content.Context
+import android.content.SharedPreferences
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.onStart
 import java.util.UUID
+import java.security.MessageDigest
 
 internal data class AuthSessionSnapshot(
     val sessionId: String,
     val userId: String,
     val accessToken: String,
     val refreshToken: String,
+    val serverSessionId: String,
+    val generation: Int,
+    val accessExpiresAt: String,
+    val idleExpiresAt: String,
+    val refreshExpiresAt: String,
+    val contractVersion: Int,
 )
 
-class AppPreferences(context: Context) {
+class AppPreferences internal constructor(
+    context: Context,
+    private val tokenStore: AuthTokenStore = AndroidKeystoreAuthTokenStore(context.applicationContext),
+    private val authMetadataCommit: (SharedPreferences.Editor) -> Boolean = { it.commit() },
+) {
     private val prefs = context.getSharedPreferences("vibepub", Context.MODE_PRIVATE)
+
+    init {
+        migratePlainAuthTokens()
+    }
 
     var apiBaseUrl: String
         get() = prefs.getString(KEY_API_BASE_URL, DEFAULT_API_BASE_URL) ?: DEFAULT_API_BASE_URL
         set(value) = prefs.edit().putString(KEY_API_BASE_URL, value.trim()).apply()
 
     var accessToken: String
-        get() = prefs.getString(KEY_ACCESS_TOKEN, "") ?: ""
+        get() = synchronized(authSessionLock) { readSecretsLocked().accessToken }
         set(value) {
             val normalized = value.trim()
-            prefs.edit()
-                .putString(KEY_ACCESS_TOKEN, normalized)
-                .putString(KEY_FILES_TOKEN, normalized)
-                .apply()
+            synchronized(authSessionLock) {
+                tokenStore.write(readSecretsLocked().copy(accessToken = normalized))
+            }
             authStateUpdates.tryEmit(authStateVersion)
         }
 
     var refreshToken: String
-        get() = prefs.getString(KEY_REFRESH_TOKEN, "") ?: ""
-        set(value) = prefs.edit().putString(KEY_REFRESH_TOKEN, value.trim()).apply()
+        get() = synchronized(authSessionLock) { readSecretsLocked().refreshToken }
+        set(value) = synchronized(authSessionLock) {
+            tokenStore.write(readSecretsLocked().copy(refreshToken = value.trim()))
+        }
 
     var userId: String
         get() = prefs.getString(KEY_USER_ID, "") ?: ""
@@ -56,7 +73,9 @@ class AppPreferences(context: Context) {
         get() = userId.ifBlank { DEFAULT_USER_ID }
 
     val isAuthenticated: Boolean
-        get() = accessToken.isNotBlank() && userId.isNotBlank()
+        get() = currentAuthSessionSnapshot().let {
+            it.accessToken.isNotBlank() && it.userId.isNotBlank() && it.sessionId.isNotBlank()
+        }
 
     val canUseCloudFeatures: Boolean
         get() = isAuthenticated && emailVerified
@@ -64,39 +83,77 @@ class AppPreferences(context: Context) {
     val authStateVersion: Long
         get() = prefs.getLong(KEY_AUTH_STATE_VERSION, 0L)
 
+    val lastAuthFailureReason: String
+        get() = prefs.getString(KEY_LAST_AUTH_FAILURE_REASON, "").orEmpty()
+
     /**
      * A login receives a stable local identity that survives token rotation but
      * changes on logout or a fresh login. It prevents cross-account retries.
      */
     internal fun currentAuthSessionSnapshot(): AuthSessionSnapshot = synchronized(authSessionLock) {
-        val accessToken = prefs.getString(KEY_ACCESS_TOKEN, "").orEmpty().trim()
-        val refreshToken = prefs.getString(KEY_REFRESH_TOKEN, "").orEmpty().trim()
-        val userId = prefs.getString(KEY_USER_ID, "").orEmpty().trim()
-        val storedSessionId = prefs.getString(KEY_AUTH_SESSION_ID, "").orEmpty().trim()
-        val sessionId = if (storedSessionId.isBlank() && accessToken.isNotBlank() && userId.isNotBlank()) {
-            UUID.randomUUID().toString().also {
-                prefs.edit().putString(KEY_AUTH_SESSION_ID, it).apply()
-            }
-        } else {
-            storedSessionId
+        val secrets = readSecretsLocked()
+        val accessToken = secrets.accessToken.trim()
+        val refreshToken = secrets.refreshToken.trim()
+        val metadataUserId = prefs.getString(KEY_USER_ID, "").orEmpty().trim()
+        val metadataSessionId = prefs.getString(KEY_AUTH_SESSION_ID, "").orEmpty().trim()
+        if (
+            secrets.userId.isNotBlank() &&
+            (secrets.userId != metadataUserId || secrets.localSessionId != metadataSessionId)
+        ) {
+            failClosedAuthLocked("secure_storage_unavailable")
+            return@synchronized emptyAuthSnapshot()
         }
         AuthSessionSnapshot(
-            sessionId = sessionId,
-            userId = userId,
+            sessionId = secrets.localSessionId,
+            userId = secrets.userId,
             accessToken = accessToken,
             refreshToken = refreshToken,
+            serverSessionId = secrets.serverSessionId,
+            generation = secrets.generation,
+            accessExpiresAt = secrets.accessExpiresAt,
+            idleExpiresAt = secrets.idleExpiresAt,
+            refreshExpiresAt = secrets.refreshExpiresAt,
+            contractVersion = secrets.contractVersion,
         )
     }
+
+    internal fun getOrCreateRefreshRequestId(expectedSession: AuthSessionSnapshot): String =
+        synchronized(authSessionLock) {
+            check(matchesSessionLocked(expectedSession)) { "Authentication session changed" }
+            val secrets = readSecretsLocked()
+            val tokenDigest = tokenDigest(expectedSession.refreshToken)
+            if (
+                secrets.pendingRefreshSessionId == expectedSession.sessionId &&
+                secrets.pendingRefreshTokenDigest == tokenDigest &&
+                secrets.pendingRefreshGeneration == expectedSession.generation &&
+                secrets.pendingRefreshRequestId.isNotBlank()
+            ) {
+                return@synchronized secrets.pendingRefreshRequestId
+            }
+            UUID.randomUUID().toString().also { requestId ->
+                tokenStore.write(secrets.copy(
+                    pendingRefreshRequestId = requestId,
+                    pendingRefreshSessionId = expectedSession.sessionId,
+                    pendingRefreshTokenDigest = tokenDigest,
+                    pendingRefreshGeneration = expectedSession.generation,
+                ))
+            }
+        }
 
     fun authStateFlow(): Flow<Long> = authStateUpdates
         .onStart { emit(authStateVersion) }
         .distinctUntilChanged()
 
     fun saveAuthSession(session: AuthSession) {
+        check(trySaveAuthSession(session)) { "Unable to persist authentication session" }
+    }
+
+    internal fun trySaveAuthSession(session: AuthSession): Boolean {
         val nextVersion = synchronized(authSessionLock) {
-            writeAuthSessionLocked(session, UUID.randomUUID().toString())
-        }
+            runCatching { writeAuthSessionLocked(session, UUID.randomUUID().toString()) }.getOrNull()
+        } ?: return false
         authStateUpdates.tryEmit(nextVersion)
+        return true
     }
 
     /** Returns false when logout or another login replaced the expected session. */
@@ -108,7 +165,7 @@ class AppPreferences(context: Context) {
             if (!matchesSessionLocked(expectedSession) || session.user.id.trim() != expectedSession.userId) {
                 return@synchronized null
             }
-            writeAuthSessionLocked(session, expectedSession.sessionId)
+            runCatching { writeAuthSessionLocked(session, expectedSession.sessionId) }.getOrNull()
         } ?: return false
         authStateUpdates.tryEmit(nextVersion)
         return true
@@ -157,23 +214,42 @@ class AppPreferences(context: Context) {
 
     private fun writeAuthSessionLocked(session: AuthSession, sessionId: String): Long {
         val nextVersion = nextAuthStateVersionLocked()
-        prefs.edit()
-            .putString(KEY_ACCESS_TOKEN, session.accessToken.trim())
-            .putString(KEY_REFRESH_TOKEN, session.refreshToken.trim())
-            .putString(KEY_FILES_TOKEN, session.accessToken.trim())
+        try {
+            tokenStore.write(StoredAuthSecrets(
+                accessToken = session.accessToken.trim(),
+                refreshToken = session.refreshToken.trim(),
+                userId = session.user.id.trim(),
+                localSessionId = sessionId,
+                serverSessionId = session.serverSessionId.trim(),
+                generation = session.generation,
+                accessExpiresAt = session.accessExpiresAt.trim(),
+                idleExpiresAt = session.idleExpiresAt.trim(),
+                refreshExpiresAt = session.refreshExpiresAt.trim(),
+                contractVersion = session.contractVersion,
+            ))
+        } catch (error: SecureStorageException) {
+            failClosedAuthLocked("secure_storage_unavailable")
+            throw error
+        }
+        val committed = authMetadataCommit(prefs.edit()
             .putString(KEY_USER_ID, session.user.id.trim())
             .putString(KEY_USER_EMAIL, session.user.email.trim())
             .putString(KEY_USER_ROLE, session.user.role.trim().ifBlank { "user" })
             .putBoolean(KEY_EMAIL_VERIFIED, session.user.emailVerified)
             .putString(KEY_AUTH_SESSION_ID, sessionId)
             .putLong(KEY_AUTH_STATE_VERSION, nextVersion)
-            .apply()
+            .remove(KEY_LAST_AUTH_FAILURE_REASON))
+        if (!committed) {
+            failClosedAuthLocked("secure_storage_unavailable")
+            throw SecureStorageException()
+        }
         return nextVersion
     }
 
     private fun clearAuthSessionLocked(): Long {
         val nextVersion = nextAuthStateVersionLocked()
-        prefs.edit()
+        runCatching { tokenStore.clear() }
+        val committed = prefs.edit()
             .remove(KEY_ACCESS_TOKEN)
             .remove(KEY_REFRESH_TOKEN)
             .remove(KEY_FILES_TOKEN)
@@ -183,20 +259,99 @@ class AppPreferences(context: Context) {
             .remove(KEY_EMAIL_VERIFIED)
             .remove(KEY_AUTH_SESSION_ID)
             .putLong(KEY_AUTH_STATE_VERSION, nextVersion)
-            .apply()
+            .commit()
+        if (!committed) throw SecureStorageException()
         return nextVersion
     }
 
     private fun matchesSessionLocked(expectedSession: AuthSessionSnapshot): Boolean {
         if (expectedSession.sessionId.isBlank() || expectedSession.userId.isBlank()) return false
-        return prefs.getString(KEY_AUTH_SESSION_ID, "").orEmpty().trim() == expectedSession.sessionId &&
-            prefs.getString(KEY_USER_ID, "").orEmpty().trim() == expectedSession.userId
+        val secrets = readSecretsLocked()
+        return secrets.localSessionId == expectedSession.sessionId &&
+            secrets.userId == expectedSession.userId &&
+            secrets.accessToken == expectedSession.accessToken &&
+            secrets.refreshToken == expectedSession.refreshToken &&
+            secrets.generation == expectedSession.generation
     }
 
     private fun nextAuthStateVersionLocked(): Long = maxOf(
         System.currentTimeMillis(),
         prefs.getLong(KEY_AUTH_STATE_VERSION, 0L) + 1L,
     )
+
+    private fun migratePlainAuthTokens() = synchronized(authSessionLock) {
+        val legacyAccess = prefs.getString(KEY_ACCESS_TOKEN, "").orEmpty().trim()
+            .ifBlank { prefs.getString(KEY_FILES_TOKEN, "").orEmpty().trim() }
+        val legacyRefresh = prefs.getString(KEY_REFRESH_TOKEN, "").orEmpty().trim()
+        val current = runCatching { tokenStore.read() }.getOrElse {
+            failClosedAuthLocked("secure_storage_unavailable")
+            return@synchronized
+        }
+        if ((legacyAccess.isNotBlank() || legacyRefresh.isNotBlank()) &&
+            current.accessToken.isBlank() && current.refreshToken.isBlank()
+        ) {
+            val legacyUserId = prefs.getString(KEY_USER_ID, "").orEmpty().trim()
+            val legacySessionId = prefs.getString(KEY_AUTH_SESSION_ID, "").orEmpty().trim()
+                .ifBlank { if (legacyUserId.isNotBlank()) UUID.randomUUID().toString() else "" }
+            try {
+                tokenStore.write(current.copy(
+                    accessToken = legacyAccess,
+                    refreshToken = legacyRefresh,
+                    userId = legacyUserId,
+                    localSessionId = legacySessionId,
+                ))
+                if (legacySessionId.isNotBlank() && !authMetadataCommit(
+                        prefs.edit().putString(KEY_AUTH_SESSION_ID, legacySessionId)
+                    )
+                ) {
+                    failClosedAuthLocked("secure_storage_unavailable")
+                    return@synchronized
+                }
+            } catch (_: SecureStorageException) {
+                failClosedAuthLocked("secure_storage_unavailable")
+                return@synchronized
+            }
+        }
+        if (!removePlainTokensLocked()) {
+            failClosedAuthLocked("secure_storage_unavailable")
+        }
+    }
+
+    private fun removePlainTokensLocked(): Boolean = authMetadataCommit(prefs.edit()
+            .remove(KEY_ACCESS_TOKEN)
+            .remove(KEY_REFRESH_TOKEN)
+            .remove(KEY_FILES_TOKEN))
+
+    private fun readSecretsLocked(): StoredAuthSecrets = try {
+        tokenStore.read()
+    } catch (_: SecureStorageException) {
+        failClosedAuthLocked("secure_storage_unavailable")
+        StoredAuthSecrets()
+    }
+
+    private fun failClosedAuthLocked(reason: String) {
+        runCatching { tokenStore.clear() }
+        val editor = prefs.edit()
+            .remove(KEY_USER_ID)
+            .remove(KEY_USER_EMAIL)
+            .remove(KEY_USER_ROLE)
+            .remove(KEY_EMAIL_VERIFIED)
+            .remove(KEY_AUTH_SESSION_ID)
+            .putString(KEY_LAST_AUTH_FAILURE_REASON, reason)
+            .putLong(KEY_AUTH_STATE_VERSION, nextAuthStateVersionLocked())
+        editor.remove(KEY_ACCESS_TOKEN).remove(KEY_REFRESH_TOKEN).remove(KEY_FILES_TOKEN)
+        editor.commit()
+    }
+
+    private fun emptyAuthSnapshot() = AuthSessionSnapshot("", "", "", "", "", 0, "", "", "", 0)
+
+    internal fun pendingRefreshRequestIdForTest(): String = synchronized(authSessionLock) {
+        readSecretsLocked().pendingRefreshRequestId
+    }
+
+    private fun tokenDigest(value: String): String = MessageDigest.getInstance("SHA-256")
+        .digest(value.toByteArray(Charsets.UTF_8))
+        .joinToString("") { byte -> "%02x".format(byte) }
 
     @Deprecated("Use accessToken. This remains only for old local preferences and tests.")
     var filesToken: String
@@ -345,6 +500,7 @@ class AppPreferences(context: Context) {
         private const val KEY_EMAIL_VERIFIED = "email_verified"
         private const val KEY_AUTH_STATE_VERSION = "auth_state_version"
         private const val KEY_AUTH_SESSION_ID = "auth_session_id"
+        private const val KEY_LAST_AUTH_FAILURE_REASON = "last_auth_failure_reason"
         private const val KEY_TRANSCRIBED_FILES = "transcribed_files"
         private const val KEY_LAST_SYNC_AT_MS = "last_sync_at_ms"
         private const val KEY_SELECTED_STYLE_PROFILE_ID = "selected_style_profile_id"

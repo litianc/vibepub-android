@@ -89,6 +89,36 @@ mining workflow. To roll back, restore the previous mining workflow ref first,
 then the previous Worker. The added D1 table is additive and can remain in place
 without affecting old code or recording data.
 
+### Persistent session migration (`0010`)
+
+Migration `0010` is additive and forward-only. Apply it before deploying the v2
+Worker. A legacy Worker may create a session with `family_id = NULL` in the short
+interval between migration and Worker rollout; the v2 refresh CAS lazily and
+atomically upgrades that row before it can be revoked.
+
+Do not down-migrate `0010`. If the v2 Worker must be backed out after it has
+served authentication traffic, first stop writes to login, invite acceptance,
+refresh, logout, password reset, and user-disable endpoints. Keep normal
+authenticated reads stopped as well if access-token consistency cannot be
+guaranteed. Deploy a forward fix against the additive schema, verify refresh
+recovery and revocation audit, then re-enable authentication writes. An old
+Worker can read the additive schema, but allowing it to rotate tokens would omit
+v2 history and recreate the response-loss gap.
+
+The previously observed roughly daily sign-out cadence cannot be assigned an
+exact timestamp-level cause without production client/server traces. The code
+path did have a concrete failure mode: refresh rotated the database token before
+the client durably received the response, and a later retry with the old token
+could only return invalid. Android also treated broad 4xx refresh failures as a
+logout. Normal foreground usage makes this appear tied to access-token renewal
+rather than to the 30-day legacy refresh TTL. V2 addresses both paths with an
+idempotent request ID/history record and an explicit `clear_session` contract.
+
+Residual release risks are D1 migration/Worker rollout ordering and Android
+Keystore behavior on real OEM devices. Keep migration and deployment as separate
+reviewed gates, and require a redacted physical-device login, response-loss,
+account-switch, and logout smoke before production rollout.
+
 Verify the public contract after deploy:
 
 ```bash

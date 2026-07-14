@@ -13,16 +13,22 @@ import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 
-class UploadWorker(
+class UploadWorker internal constructor(
     appContext: Context,
     params: WorkerParameters,
+    private val preferences: AppPreferences,
 ) : CoroutineWorker(appContext, params) {
+    constructor(appContext: Context, params: WorkerParameters) : this(
+        appContext,
+        params,
+        AppPreferences(appContext),
+    )
+
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
         val path = inputData.getString(KEY_FILE_PATH) ?: return@withContext Result.failure()
         val apiBaseUrl = inputData.getString(KEY_API_BASE_URL) ?: return@withContext Result.failure()
         val accessToken = inputData.getString(KEY_ACCESS_TOKEN).orEmpty()
         val userId = inputData.getString(KEY_USER_ID).orEmpty().ifBlank { AppPreferences.DEFAULT_USER_ID }
-        val preferences = AppPreferences(applicationContext)
         val styleProfileId = inputData.getString(KEY_STYLE_PROFILE_ID).orEmpty()
         val styleProfileVersion = inputData.getString(KEY_STYLE_PROFILE_VERSION).orEmpty()
         val styleProfileName = inputData.getString(KEY_STYLE_PROFILE_NAME).orEmpty()

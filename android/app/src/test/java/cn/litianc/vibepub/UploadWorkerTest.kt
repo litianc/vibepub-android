@@ -2,6 +2,8 @@ package cn.litianc.vibepub
 
 import android.content.Context
 import androidx.work.ListenableWorker
+import androidx.work.WorkerFactory
+import androidx.work.WorkerParameters
 import androidx.work.testing.TestListenableWorkerBuilder
 import androidx.work.workDataOf
 import cn.litianc.vibepub.data.AppDatabase
@@ -35,7 +37,7 @@ class UploadWorkerTest {
     @Before
     fun setUp() {
         context = RuntimeEnvironment.getApplication()
-        preferences = AppPreferences(context)
+        preferences = AppPreferences(context, TestAuthTokenStore())
         preferences.clearAuthSession()
     }
 
@@ -127,6 +129,13 @@ class UploadWorkerTest {
 
     private suspend fun runWorker(file: File, userId: String, apiBaseUrl: String): ListenableWorker.Result {
         val worker = TestListenableWorkerBuilder<UploadWorker>(context)
+            .setWorkerFactory(object : WorkerFactory() {
+                override fun createWorker(
+                    appContext: Context,
+                    workerClassName: String,
+                    workerParameters: WorkerParameters,
+                ): ListenableWorker = UploadWorker(appContext, workerParameters, preferences)
+            })
             .setInputData(
                 workDataOf(
                     UploadWorker.KEY_FILE_PATH to file.absolutePath,

@@ -7,6 +7,7 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
 import cn.litianc.vibepub.AppPreferences
+import cn.litianc.vibepub.TestAuthTokenStore
 import com.sun.net.httpserver.HttpServer
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -35,7 +36,7 @@ class AuthScreenTest {
     @Test
     fun loginSubmitButtonSavesSessionAndCallsAuthenticatedCallback() {
         val baseUrl = startLoginServer()
-        val preferences = AppPreferences(composeTestRule.activity)
+        val preferences = AppPreferences(composeTestRule.activity, TestAuthTokenStore())
         preferences.clearAuthSession()
         preferences.apiBaseUrl = baseUrl
         val authenticated = AtomicBoolean(false)
@@ -75,7 +76,13 @@ class AuthScreenTest {
                   },
                   "tokens": {
                     "access_token": "access-from-test",
-                    "refresh_token": "refresh-from-test"
+                    "refresh_token": "refresh-from-test",
+                    "session_id": "ses_login",
+                    "generation": 0,
+                    "access_expires_at": "2027-01-01T00:00:00.000Z",
+                    "idle_expires_at": "2027-06-01T00:00:00.000Z",
+                    "refresh_expires_at": "2027-06-01T00:00:00.000Z",
+                    "contract_version": 2
                   }
                 }
             """.trimIndent().toByteArray()

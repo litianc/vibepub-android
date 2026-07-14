@@ -32,6 +32,7 @@ import cn.litianc.vibepub.ui.screens.AuthScreen
 import cn.litianc.vibepub.ui.screens.AuthTokenPrefill
 import cn.litianc.vibepub.ui.theme.VibePubTheme
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -94,6 +95,20 @@ class MainActivity : ComponentActivity() {
         setIntent(intent)
         authTokenPrefillFromIntent(intent)?.let { pendingAuthTokenPrefill = it }
         handleIncomingStyleSourceShare(intent)
+    }
+
+    override fun onStart() {
+        super.onStart()
+        if (!preferences.isAuthenticated) return
+        lifecycleScope.launch {
+            try {
+                AuthenticatedHttpClient.refreshIfNeeded(preferences)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                // Temporary refresh failures retain the current session for the next foreground attempt.
+            }
+        }
     }
 
     private fun handleIncomingStyleSourceShare(intent: Intent?) {

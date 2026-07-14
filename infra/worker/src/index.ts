@@ -36,6 +36,7 @@ type AuthContext = {
   role: "admin" | "user";
   emailVerified: boolean;
   sessionId?: string;
+  familyId?: string;
   accessTokenHash?: string;
   legacy?: boolean;
 };
@@ -55,6 +56,17 @@ type StatusErrorUpdate = {
   value: string | null;
 };
 
+type SessionTokens = { accessToken: string; refreshToken: string };
+
+type RotationResponse = SessionTokens & {
+  sessionId: string;
+  generation: number;
+  accessExpiresAt: string;
+  idleExpiresAt: string;
+  refreshExpiresAt: string;
+  contractVersion: 2;
+};
+
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
@@ -65,7 +77,8 @@ const MAX_INLINE_STYLE_PROFILE_BODY_CHARS = 3_000;
 // Cloudflare Workers Web Crypto currently rejects PBKDF2 iteration counts above 100,000.
 const PASSWORD_ITERATIONS = 100_000;
 const ACCESS_TOKEN_TTL_MS = 60 * 60 * 1_000;
-const REFRESH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1_000;
+const REFRESH_TOKEN_IDLE_TTL_MS = 180 * 24 * 60 * 60 * 1_000;
+const REFRESH_ROTATION_GRACE_MS = 60 * 1_000;
 const INVITATION_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
 const PASSWORD_RESET_TTL_MS = 30 * 60 * 1_000;
 const EMAIL_VERIFY_TTL_MS = 24 * 60 * 60 * 1_000;
@@ -305,45 +318,274 @@ async function login(request: Request, env: Env): Promise<Response> {
 }
 
 async function refreshSession(request: Request, env: Env): Promise<Response> {
-  const body = await parseJson(request);
+  let body: any;
+  try {
+    body = await request.json();
+  } catch {
+    return authError("malformed_request", "malformed", true, false, 400, "invalid_json");
+  }
   const refreshToken = normalizeOptionalString(body?.refresh_token ?? body?.refreshToken);
+  const requestId = normalizeOptionalString(body?.refresh_request_id ?? body?.refreshRequestId);
+  const contractVersion = body?.contract_version ?? body?.contractVersion ?? null;
   if (!refreshToken) {
-    return json({ error: "missing_refresh_token" }, 400);
+    return authError("missing_refresh_token", "malformed", true, false, 400, "missing_refresh_token");
+  }
+  if (contractVersion === 2 && !requestId) {
+    return authError("missing_refresh_request_id", "malformed", true, false, 400, "contract_v2_requires_request_id");
+  }
+  if (contractVersion !== null && contractVersion !== 2) {
+    return authError("unsupported_contract_version", "malformed", true, false, 400, "unsupported_contract_version");
   }
   const refreshHash = await sha256Hex(refreshToken);
-  const session = await queryOne<any>(
+  const requestIdHash = requestId ? await sha256Hex(requestId) : null;
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const session = await loadCurrentRefreshSession(env, refreshHash);
+    if (!session) {
+      const history = await loadRefreshHistory(env, refreshHash);
+      if (!history) {
+        return authError("invalid_refresh_token", "revoked", false, true, 401, "unrecognized_token");
+      }
+      if (history.revoked_at) {
+        const storedReason = history.revocation_reason || "revoked";
+        return authError("invalid_refresh_token", publicRevocationReason(storedReason), false, true, 401, storedReason);
+      }
+      if (history.status === "disabled") {
+        await revokeSessionFamily(env, history, "user_disabled", requestIdHash);
+        return authError("invalid_refresh_token", "user_disabled", false, true, 401, "user_disabled");
+      }
+      const sameRequest = history.request_id_hash
+        ? history.request_id_hash === requestIdHash
+        : requestIdHash === null && contractVersion === null;
+      const latestConsumedGeneration = Number(history.current_generation) - 1;
+      if (
+        Number(history.generation) === latestConsumedGeneration &&
+        sameRequest &&
+        !isPast(history.valid_until) &&
+        history.rotation_ciphertext
+      ) {
+        const rotation = await decryptRotationResponse(refreshToken, history.rotation_ciphertext);
+        return sessionResponse(history, rotation);
+      }
+      const reason = Number(history.generation) !== latestConsumedGeneration
+        ? "superseded_generation"
+        : sameRequest ? "grace_expired" : "request_id_mismatch";
+      await revokeSessionFamily(env, history, "refresh_token_reuse", requestIdHash);
+      return authError("refresh_token_reuse", "replay_detected", false, true, 401, reason);
+    }
+    if (session.revoked_at) {
+      const storedReason = session.revocation_reason || "revoked";
+      return authError("invalid_refresh_token", publicRevocationReason(storedReason), false, true, 401, storedReason);
+    }
+    if (session.status === "disabled") {
+      await revokeSessionFamily(env, session, "user_disabled", requestIdHash);
+      return authError("invalid_refresh_token", "user_disabled", false, true, 401, "user_disabled");
+    }
+
+    const idleExpiry = session.idle_expires_at || session.refresh_expires_at;
+    if (isPast(idleExpiry)) {
+      await revokeSessionFamily(env, session, "idle_expired", requestIdHash);
+      return authError("invalid_refresh_token", "expired", false, true, 401, "idle_expired");
+    }
+
+    const tokens = sessionTokens();
+    const now = nowIso();
+    const nextGeneration = Number(session.generation || 0) + 1;
+    const accessExpiresAt = isoAfter(ACCESS_TOKEN_TTL_MS);
+    const refreshExpiresAt = isoAfter(REFRESH_TOKEN_IDLE_TTL_MS);
+    const rotation: RotationResponse = {
+      ...tokens,
+      sessionId: session.id,
+      generation: nextGeneration,
+      accessExpiresAt,
+      idleExpiresAt: refreshExpiresAt,
+      refreshExpiresAt,
+      contractVersion: 2,
+    };
+    const rotationCiphertext = await encryptRotationResponse(refreshToken, rotation);
+    const historyValidUntil = isoAfter(REFRESH_ROTATION_GRACE_MS);
+    const casStatement = env.DB.prepare(
+      `UPDATE sessions
+       SET access_token_hash = ?, refresh_token_hash = ?, access_expires_at = ?, refresh_expires_at = ?,
+           last_used_at = ?, idle_expires_at = ?, previous_refresh_token_hash = ?, previous_generation = ?,
+           previous_valid_until = ?, previous_request_id_hash = ?, previous_rotation_ciphertext = ?,
+           family_id = COALESCE(family_id, id), generation = ?, updated_at = ?
+       WHERE id = ? AND generation = ? AND refresh_token_hash = ? AND revoked_at IS NULL`,
+    )
+      .bind(
+        await sha256Hex(tokens.accessToken),
+        await sha256Hex(tokens.refreshToken),
+        accessExpiresAt,
+        refreshExpiresAt,
+        now,
+        refreshExpiresAt,
+        refreshHash,
+        Number(session.generation || 0),
+        historyValidUntil,
+        requestIdHash,
+        rotationCiphertext,
+        nextGeneration,
+        now,
+        session.id,
+        Number(session.generation || 0),
+        refreshHash,
+      );
+    const historyStatement = env.DB.prepare(
+      `INSERT INTO session_rotation_history
+          (id, session_id, family_id, generation, refresh_token_hash, request_id_hash,
+           valid_until, retain_until, rotation_ciphertext, created_at)
+       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+       WHERE changes() = 1`,
+    ).bind(
+        `srh_${crypto.randomUUID()}`,
+        session.id,
+        session.family_id || session.id,
+        Number(session.generation || 0),
+        refreshHash,
+        requestIdHash,
+        historyValidUntil,
+        refreshExpiresAt,
+        rotationCiphertext,
+        now,
+      );
+    let results: D1Result[];
+    try {
+      results = await env.DB.batch([casStatement, historyStatement]);
+    } catch {
+      console.error("Atomic refresh rotation failed");
+      return authError("refresh_persistence_failed", "retryable", true, false, 503, "atomic_rotation_failed");
+    }
+    const casChanged = results[0]?.meta?.changes || 0;
+    const historyChanged = results[1]?.meta?.changes || 0;
+    if (casChanged === 1 && historyChanged === 1) {
+      try {
+        await env.DB.prepare(
+        `UPDATE session_rotation_history
+         SET rotation_ciphertext = NULL
+         WHERE valid_until <= ? AND rotation_ciphertext IS NOT NULL`,
+        ).bind(now).run();
+      } catch {
+        console.warn("Unable to clear expired refresh recovery ciphertext");
+      }
+      return sessionResponse(session, rotation);
+    }
+    if (casChanged !== 0 || historyChanged !== 0) {
+      return authError("refresh_persistence_failed", "retryable", true, false, 503, "atomic_rotation_incomplete");
+    }
+  }
+
+  return authError("refresh_conflict", "retryable", true, false, 409, "cas_conflict");
+}
+
+async function loadCurrentRefreshSession(env: Env, refreshHash: string): Promise<any | null> {
+  return queryOne<any>(
     env,
-    `SELECT s.id, s.user_id, s.refresh_expires_at, s.revoked_at,
+    `SELECT s.id, s.user_id, COALESCE(s.family_id, s.id) AS family_id, s.generation,
+            s.refresh_token_hash, s.refresh_expires_at, s.last_used_at, s.idle_expires_at,
+            s.revoked_at, s.revocation_reason,
             u.email, u.role, u.workspace_id, u.status, u.email_verified_at
      FROM sessions s
      JOIN users u ON u.id = s.user_id
      WHERE s.refresh_token_hash = ? LIMIT 1`,
     [refreshHash],
   );
-  if (!session || session.revoked_at || isPast(session.refresh_expires_at) || session.status === "disabled") {
-    return json({ error: "invalid_refresh_token" }, 401);
-  }
+}
 
-  const tokens = sessionTokens();
+async function loadRefreshHistory(env: Env, refreshHash: string): Promise<any | null> {
+  return queryOne<any>(
+    env,
+    `SELECT h.session_id AS id, h.family_id, h.generation, h.request_id_hash, h.valid_until,
+            h.retain_until, h.rotation_ciphertext, s.user_id, s.generation AS current_generation,
+            s.revoked_at, s.revocation_reason,
+            u.email, u.role, u.workspace_id, u.status, u.email_verified_at
+     FROM session_rotation_history h
+     JOIN sessions s ON s.id = h.session_id
+     JOIN users u ON u.id = s.user_id
+     WHERE h.refresh_token_hash = ? AND h.retain_until > ? LIMIT 1`,
+    [refreshHash, nowIso()],
+  );
+}
+
+function sessionResponse(session: any, rotation: RotationResponse): Response {
+  return json({ user: publicUser(authFromUserRow(session)), tokens: publicTokens(rotation, rotation) });
+}
+
+type PublicAuthReason =
+  | "expired"
+  | "revoked"
+  | "replay_detected"
+  | "security_event"
+  | "user_disabled"
+  | "malformed"
+  | "retryable";
+
+function authError(
+  error: string,
+  reason: PublicAuthReason,
+  retryable: boolean,
+  clearSession: boolean,
+  status: number,
+  code?: string,
+): Response {
+  return json({ error, reason, ...(code ? { code } : {}), retryable, clear_session: clearSession }, status);
+}
+
+function publicRevocationReason(storedReason: string): PublicAuthReason {
+  if (storedReason === "idle_expired") return "expired";
+  if (storedReason === "refresh_token_reuse") return "replay_detected";
+  if (storedReason === "security_event") return "security_event";
+  if (storedReason === "user_disabled" || storedReason === "admin_disabled") return "user_disabled";
+  return "revoked";
+}
+
+async function revokeSessionFamily(
+  env: Env,
+  session: any,
+  reason: string,
+  requestIdHash: string | null,
+): Promise<void> {
+  const now = nowIso();
+  const familyId = session.family_id || session.id;
+  const result = await env.DB.prepare(
+    `UPDATE sessions
+     SET revoked_at = COALESCE(revoked_at, ?), revocation_reason = COALESCE(revocation_reason, ?), updated_at = ?
+     WHERE (family_id = ? OR (family_id IS NULL AND id = ?)) AND revoked_at IS NULL`,
+  ).bind(now, reason, now, familyId, session.id).run();
+  if ((result.meta?.changes || 0) > 0) {
+    await env.DB.prepare(
+      `INSERT INTO session_revocation_audit
+        (id, session_id, family_id, user_id, reason, request_id_hash, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(
+      `sra_${crypto.randomUUID()}`,
+      session.id,
+      familyId,
+      session.user_id,
+      reason,
+      requestIdHash,
+      now,
+    ).run();
+  }
+}
+
+async function revokeUserSessions(
+  env: Env,
+  userId: string,
+  reason: "logout_all" | "password_reset" | "admin_disabled",
+): Promise<void> {
+  const now = nowIso();
+  await env.DB.prepare(
+    `INSERT INTO session_revocation_audit
+      (id, session_id, family_id, user_id, reason, request_id_hash, created_at)
+     SELECT 'sra_' || lower(hex(randomblob(16))), id, COALESCE(family_id, id), user_id, ?, NULL, ?
+     FROM sessions
+     WHERE user_id = ? AND revoked_at IS NULL`,
+  ).bind(reason, now, userId).run();
   await env.DB.prepare(
     `UPDATE sessions
-     SET access_token_hash = ?, refresh_token_hash = ?, access_expires_at = ?, refresh_expires_at = ?, updated_at = ?
-     WHERE id = ?`,
-  )
-    .bind(
-      await sha256Hex(tokens.accessToken),
-      await sha256Hex(tokens.refreshToken),
-      isoAfter(ACCESS_TOKEN_TTL_MS),
-      isoAfter(REFRESH_TOKEN_TTL_MS),
-      nowIso(),
-      session.id,
-    )
-    .run();
-
-  return json({
-    user: publicUser(authFromUserRow(session)),
-    tokens: publicTokens(tokens),
-  });
+     SET revoked_at = COALESCE(revoked_at, ?), revocation_reason = COALESCE(revocation_reason, ?), updated_at = ?
+     WHERE user_id = ? AND revoked_at IS NULL`,
+  ).bind(now, reason, now, userId).run();
 }
 
 async function acceptInvite(request: Request, env: Env): Promise<Response> {
@@ -495,33 +737,31 @@ async function resetPassword(request: Request, env: Env): Promise<Response> {
   await env.DB.prepare(`UPDATE password_reset_tokens SET consumed_at = ? WHERE id = ?`)
     .bind(now, row.id)
     .run();
-  await env.DB.prepare(`UPDATE sessions SET revoked_at = COALESCE(revoked_at, ?), updated_at = ? WHERE user_id = ?`)
-    .bind(now, now, row.user_id)
-    .run();
+  await revokeUserSessions(env, row.user_id, "password_reset");
   return json({ ok: true });
 }
 
 async function logout(request: Request, env: Env, auth: AuthContext): Promise<Response> {
-  const now = nowIso();
-  let refreshHash: string | null = null;
+  let scope: "current" | "all" = "current";
   try {
     const body = await request.clone().json() as any;
-    const refreshToken = normalizeOptionalString(body?.refresh_token ?? body?.refreshToken);
-    refreshHash = refreshToken ? await sha256Hex(refreshToken) : null;
+    scope = body?.scope === "all" ? "all" : "current";
   } catch {
-    refreshHash = null;
+    scope = "current";
   }
 
-  if (auth.sessionId) {
-    await env.DB.prepare(`UPDATE sessions SET revoked_at = COALESCE(revoked_at, ?), updated_at = ? WHERE id = ?`)
-      .bind(now, now, auth.sessionId)
-      .run();
-  } else if (refreshHash) {
-    await env.DB.prepare(`UPDATE sessions SET revoked_at = COALESCE(revoked_at, ?), updated_at = ? WHERE refresh_token_hash = ?`)
-      .bind(now, now, refreshHash)
-      .run();
+  if (!auth.sessionId) return json({ ok: true, scope });
+  const session = {
+    id: auth.sessionId,
+    family_id: auth.familyId || auth.sessionId,
+    user_id: auth.userId,
+  };
+  if (scope === "current") {
+    await revokeSessionFamily(env, session, "logout_current", null);
+  } else {
+    await revokeUserSessions(env, auth.userId, "logout_all");
   }
-  return json({ ok: true });
+  return json({ ok: true, scope });
 }
 
 async function handleAdminRoute(request: Request, env: Env, url: URL, auth: AuthContext): Promise<Response> {
@@ -572,9 +812,7 @@ async function handleAdminRoute(request: Request, env: Env, url: URL, auth: Auth
     await env.DB.prepare(`UPDATE users SET status = 'disabled', updated_at = ? WHERE id = ?`)
       .bind(nowIso(), userId)
       .run();
-    await env.DB.prepare(`UPDATE sessions SET revoked_at = COALESCE(revoked_at, ?), updated_at = ? WHERE user_id = ?`)
-      .bind(nowIso(), nowIso(), userId)
-      .run();
+    await revokeUserSessions(env, userId, "admin_disabled");
     return json({ ok: true });
   }
 
@@ -595,7 +833,7 @@ async function authenticateRequest(request: Request, env: Env): Promise<AuthCont
   try {
     const row = await queryOne<any>(
       env,
-      `SELECT s.id AS session_id, s.access_expires_at, s.revoked_at,
+      `SELECT s.id AS session_id, COALESCE(s.family_id, s.id) AS family_id, s.access_expires_at, s.revoked_at,
               u.id, u.email, u.role, u.workspace_id, u.status, u.email_verified_at
        FROM sessions s
        JOIN users u ON u.id = s.user_id
@@ -605,6 +843,7 @@ async function authenticateRequest(request: Request, env: Env): Promise<AuthCont
     if (row && !row.revoked_at && !isPast(row.access_expires_at) && row.status !== "disabled") {
       const auth = authFromUserRow(row);
       auth.sessionId = row.session_id;
+      auth.familyId = row.family_id || row.session_id;
       auth.accessTokenHash = tokenHash;
       return auth;
     }
@@ -675,39 +914,94 @@ function publicUser(auth: AuthContext): Record<string, unknown> {
 async function createSession(env: Env, userId: string): Promise<Record<string, unknown>> {
   const tokens = sessionTokens();
   const now = nowIso();
+  const sessionId = `ses_${crypto.randomUUID()}`;
+  const accessExpiresAt = isoAfter(ACCESS_TOKEN_TTL_MS);
+  const refreshExpiresAt = isoAfter(REFRESH_TOKEN_IDLE_TTL_MS);
   await env.DB.prepare(
     `INSERT INTO sessions
-      (id, user_id, access_token_hash, refresh_token_hash, access_expires_at, refresh_expires_at, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      (id, user_id, access_token_hash, refresh_token_hash, access_expires_at, refresh_expires_at,
+       family_id, generation, last_used_at, idle_expires_at, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)`,
   )
     .bind(
-      `ses_${crypto.randomUUID()}`,
+      sessionId,
       userId,
       await sha256Hex(tokens.accessToken),
       await sha256Hex(tokens.refreshToken),
-      isoAfter(ACCESS_TOKEN_TTL_MS),
-      isoAfter(REFRESH_TOKEN_TTL_MS),
+      accessExpiresAt,
+      refreshExpiresAt,
+      sessionId,
+      now,
+      refreshExpiresAt,
       now,
       now,
     )
     .run();
-  return publicTokens(tokens);
+  return publicTokens(tokens, {
+    sessionId,
+    generation: 0,
+    accessExpiresAt,
+    idleExpiresAt: refreshExpiresAt,
+    refreshExpiresAt,
+    contractVersion: 2,
+  });
 }
 
-function sessionTokens(): { accessToken: string; refreshToken: string } {
+function sessionTokens(): SessionTokens {
   return {
     accessToken: randomToken(),
     refreshToken: randomToken(),
   };
 }
 
-function publicTokens(tokens: { accessToken: string; refreshToken: string }): Record<string, unknown> {
+function publicTokens(tokens: SessionTokens, metadata?: Omit<RotationResponse, keyof SessionTokens>): Record<string, unknown> {
   return {
     access_token: tokens.accessToken,
     refresh_token: tokens.refreshToken,
     token_type: "Bearer",
     expires_in: Math.floor(ACCESS_TOKEN_TTL_MS / 1000),
+    ...(metadata ? {
+      session_id: metadata.sessionId,
+      generation: metadata.generation,
+      access_expires_at: metadata.accessExpiresAt,
+      idle_expires_at: metadata.idleExpiresAt,
+      refresh_expires_at: metadata.refreshExpiresAt,
+      contract_version: metadata.contractVersion,
+    } : {}),
   };
+}
+
+async function encryptRotationResponse(
+  previousRefreshToken: string,
+  rotation: RotationResponse,
+): Promise<string> {
+  const key = await tokenDerivedKey(previousRefreshToken, ["encrypt"]);
+  const iv = randomBytes(12);
+  const plaintext = new TextEncoder().encode(JSON.stringify(rotation));
+  const cipher = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, plaintext);
+  return `v1:${base64UrlEncode(iv)}:${base64UrlEncode(new Uint8Array(cipher))}`;
+}
+
+async function decryptRotationResponse(
+  previousRefreshToken: string,
+  ciphertext: string,
+): Promise<RotationResponse> {
+  const [, ivEncoded, cipherEncoded] = ciphertext.split(":");
+  if (!ivEncoded || !cipherEncoded) throw new Error("Invalid rotation response ciphertext");
+  const key = await tokenDerivedKey(previousRefreshToken, ["decrypt"]);
+  const plaintext = await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv: base64UrlDecode(ivEncoded) },
+    key,
+    base64UrlDecode(cipherEncoded),
+  );
+  const parsed = JSON.parse(new TextDecoder().decode(plaintext));
+  if (!parsed.accessToken || !parsed.refreshToken || !parsed.sessionId) throw new Error("Invalid rotation response payload");
+  return parsed;
+}
+
+async function tokenDerivedKey(token: string, usage: Array<"encrypt" | "decrypt">): Promise<CryptoKey> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
+  return crypto.subtle.importKey("raw", digest, { name: "AES-GCM" }, false, usage);
 }
 
 async function proxyWritingAgent(
