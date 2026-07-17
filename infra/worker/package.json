@@ -7,7 +7,7 @@
     "deploy": "wrangler deploy",
     "migrate:remote": "wrangler d1 migrations apply vibepub-db --remote",
     "backfill:recordings": "node scripts/backfill-recording-metadata.mjs",
-    "test": "node test/worker-contract.test.mjs",
+    "test": "node --test test/*.test.mjs",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {

@@ -1,3 +1,5 @@
+import { handleEditorialRoute } from "./editorialPipeline";
+
 export interface Env {
   FILES_BUCKET: R2Bucket;
   DB: D1Database;
@@ -129,6 +131,14 @@ export default {
     const auth = await authenticateRequest(request, env);
     if (!auth) {
       return json({ error: "unauthorized" }, 401);
+    }
+
+    if (url.pathname.startsWith("/api/editorial/")) {
+      if (request.method !== "GET") {
+        const verified = requireVerifiedEmail(auth);
+        if (verified) return verified;
+      }
+      return handleEditorialRoute(request, env, url, auth);
     }
 
     if (request.method === "GET" && url.pathname === "/api/me") {
@@ -998,12 +1008,13 @@ async function upsertUploadedRecording(
     if ((updated.meta.changes ?? 0) === 0) {
       await env.DB.prepare(
         `
-        INSERT INTO recordings (user_id, filename, r2_key, status, processing_stage, duration_ms, style_profile_id, style_profile_version, layout_profile_id, layout_profile_version)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO recordings (user_id, workspace_id, filename, r2_key, status, processing_stage, duration_ms, style_profile_id, style_profile_version, layout_profile_id, layout_profile_version)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `,
       )
         .bind(
           auth.userId,
+          auth.workspaceId,
           input.filename,
           input.key,
           "UPLOADED",
@@ -1042,12 +1053,13 @@ async function upsertUploadedRecording(
     if ((updated.meta.changes ?? 0) === 0) {
       await env.DB.prepare(
         `
-        INSERT INTO recordings (user_id, filename, r2_key, status, processing_stage, style_profile_id, style_profile_version, layout_profile_id, layout_profile_version)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO recordings (user_id, workspace_id, filename, r2_key, status, processing_stage, style_profile_id, style_profile_version, layout_profile_id, layout_profile_version)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `,
       )
         .bind(
           auth.userId,
+          auth.workspaceId,
           input.filename,
           input.key,
           "UPLOADED",

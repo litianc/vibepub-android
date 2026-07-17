@@ -13,6 +13,7 @@
 
 | 时间 | 功能更新 |
 | --- | --- |
+| 2026-07-17 16:53 CST | 新增图文发布流水线 Phase 1 的不可变文章版本、独立审核 finding、按 block 绑定的 VisualPlan、统一状态机和认证用户幂等 API，为后续安全审核与视觉生成保留可追溯快照。 |
 | 2026-07-13 22:53 CST | WritingAgent 安全规范化支持完整 HTML5 命名字符引用及嵌套实体恢复，避免版权符号、标点和重音字符显示为实体字面量。 |
 | 2026-07-13 22:32 CST | WritingAgent 排版注册表升级为可替换的完整 Skill adapter，并修复合法 HTML 实体在安全规范化时被重复转义的问题。 |
 | 2026-07-13 16:12 CST | WritingAgent 默认使用版本化 `md_to_wechat@1.0.0` 排版 Skill，兼容旧 layout profile，并在改写和修文响应中返回可追溯的 Skill 版本。 |

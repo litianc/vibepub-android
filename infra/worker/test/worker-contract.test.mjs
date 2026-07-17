@@ -647,13 +647,14 @@ test("stores parsed duration on upload when duration column exists", async () =>
   ]);
   assert.deepEqual(valueCalls[1].slice(0, 6), [
     "default_user",
+    "vibepub-dogfood",
     "VibePub-2026-06-30-160000-0m18s-Tue-Afternoon.m4a",
     "users/default_user/inbox/VibePub-2026-06-30-160000-0m18s-Tue-Afternoon.m4a",
     "UPLOADED",
     "QUEUED",
-    18_000,
   ]);
-  assert.deepEqual(valueCalls[1].slice(6, 10), [
+  assert.equal(valueCalls[1][6], 18_000);
+  assert.deepEqual(valueCalls[1].slice(7, 11), [
     "style_product_review",
     "2026-07-05",
     "wechat_clean_article",
@@ -706,11 +707,12 @@ test("keeps upload stage when only duration column is not migrated yet", async (
   ]);
   assert.deepEqual(valueCalls[2].slice(0, 5), [
     "default_user",
+    "vibepub-dogfood",
     "VibePub-2026-06-30-160000-0m18s-Tue-Afternoon.m4a",
     "users/default_user/inbox/VibePub-2026-06-30-160000-0m18s-Tue-Afternoon.m4a",
     "UPLOADED",
-    "QUEUED",
   ]);
+  assert.equal(valueCalls[2][5], "QUEUED");
 });
 
 test("dispatches mining workflow for the uploaded filename", async () => {
@@ -1372,16 +1374,31 @@ test("returns a clear error when WritingAgent proxy is not configured", async ()
 
 async function loadWorker() {
   const sourcePath = resolve("src/index.ts");
-  const source = await readFile(sourcePath, "utf8");
+  const pipelinePath = resolve("src/editorialPipeline.ts");
+  const contractsPath = resolve("src/editorialContracts.ts");
+  const contracts = transpile(await readFile(contractsPath, "utf8"), contractsPath);
+  const contractsUrl = moduleDataUrl(contracts);
+  const pipeline = transpile(await readFile(pipelinePath, "utf8"), pipelinePath)
+    .replaceAll('from "./editorialContracts"', `from ${JSON.stringify(contractsUrl)}`);
+  const pipelineUrl = moduleDataUrl(pipeline);
+  const source = transpile(await readFile(sourcePath, "utf8"), sourcePath)
+    .replaceAll('from "./editorialPipeline"', `from ${JSON.stringify(pipelineUrl)}`);
+  return (await import(moduleDataUrl(source))).default;
+}
+
+function transpile(source, fileName) {
   const { outputText } = ts.transpileModule(source, {
     compilerOptions: {
       target: ts.ScriptTarget.ES2022,
       module: ts.ModuleKind.ES2022,
     },
-    fileName: sourcePath,
+    fileName,
   });
-  const moduleUrl = `data:text/javascript;base64,${Buffer.from(outputText).toString("base64")}`;
-  return (await import(moduleUrl)).default;
+  return outputText;
+}
+
+function moduleDataUrl(source) {
+  return `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`;
 }
 
 function authorizedRequest(url, init = {}) {
