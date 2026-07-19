@@ -53,7 +53,16 @@ beforeAll(async () => {
       UNIQUE (run_id, kind, payload_hash)
     )`),
     workerEnv.DB.prepare(`CREATE TRIGGER IF NOT EXISTS editorial_runs_append_only_update
-      BEFORE UPDATE ON editorial_runs BEGIN SELECT RAISE(ABORT, 'editorial_runs_append_only'); END`),
+      BEFORE UPDATE ON editorial_runs
+      WHEN NEW.run_id <> OLD.run_id OR NEW.user_id <> OLD.user_id OR NEW.workspace_id <> OLD.workspace_id
+        OR NEW.article_id <> OLD.article_id OR NEW.recording_id <> OLD.recording_id
+        OR NEW.schema_version <> OLD.schema_version OR NEW.workflow_version <> OLD.workflow_version
+        OR NEW.policy_version <> OLD.policy_version OR NEW.agent_versions_json <> OLD.agent_versions_json
+        OR NEW.skill_pins_json <> OLD.skill_pins_json OR NEW.idempotency_key <> OLD.idempotency_key
+        OR NEW.payload_hash <> OLD.payload_hash OR NEW.created_at <> OLD.created_at
+        OR NEW.updated_at <= OLD.updated_at
+        OR NOT (NEW.status = OLD.status OR (OLD.status IN ('planned', 'running') AND NEW.status IN ('completed', 'failed')))
+      BEGIN SELECT RAISE(ABORT, 'editorial_runs_projection_update_invalid'); END`),
     workerEnv.DB.prepare(`CREATE TRIGGER IF NOT EXISTS editorial_runs_append_only_delete
       BEFORE DELETE ON editorial_runs BEGIN SELECT RAISE(ABORT, 'editorial_runs_append_only'); END`),
     workerEnv.DB.prepare(`CREATE TRIGGER IF NOT EXISTS editorial_artifacts_append_only_update
@@ -140,10 +149,16 @@ describe("editorial Agent + Workflow runtime", () => {
     expect(replay.replayed).toBe(true);
     const approved = await waitForState(first, "runtime-happy", "approved_for_phase3");
     expect(approved.artifact_count).toBe(6);
+    const completedRun = await workerEnv.DB.prepare(
+      "SELECT status FROM editorial_runs WHERE run_id = ?",
+    ).bind("runtime-happy").first();
+    expect(completedRun).toEqual({ status: "completed" });
     const appendOnly = await runInDurableObject(first, (_instance, state) => {
       const artifactId = state.storage.sql.exec<{ artifact_id: string }>("SELECT artifact_id FROM editorial_phase2_artifacts LIMIT 1").one().artifact_id;
       const stepKey = state.storage.sql.exec<{ step_key: string }>("SELECT step_key FROM editorial_phase2_steps LIMIT 1").one().step_key;
       const actionId = state.storage.sql.exec<{ action_id: string }>("SELECT action_id FROM editorial_phase2_human_actions LIMIT 1").one().action_id;
+      const intentId = state.storage.sql.exec<{ intent_id: string }>("SELECT intent_id FROM editorial_phase2_terminal_intents LIMIT 1").one().intent_id;
+      const receiptId = state.storage.sql.exec<{ intent_id: string }>("SELECT intent_id FROM editorial_phase2_terminal_receipts LIMIT 1").one().intent_id;
       let updateRejected = false;
       let deleteRejected = false;
       try {
@@ -180,10 +195,34 @@ describe("editorial Agent + Workflow runtime", () => {
       } catch {
         actionDeleteRejected = true;
       }
-      const counts = state.storage.sql.exec<{ steps: number; actions: number }>(
-        "SELECT (SELECT count(*) FROM editorial_phase2_steps) AS steps, (SELECT count(*) FROM editorial_phase2_human_actions) AS actions",
+      let intentUpdateRejected = false;
+      let intentDeleteRejected = false;
+      try {
+        state.storage.sql.exec("UPDATE editorial_phase2_terminal_intents SET payload_hash = 'changed' WHERE intent_id = ?", intentId);
+      } catch {
+        intentUpdateRejected = true;
+      }
+      try {
+        state.storage.sql.exec("DELETE FROM editorial_phase2_terminal_intents WHERE intent_id = ?", intentId);
+      } catch {
+        intentDeleteRejected = true;
+      }
+      let receiptUpdateRejected = false;
+      let receiptDeleteRejected = false;
+      try {
+        state.storage.sql.exec("UPDATE editorial_phase2_terminal_receipts SET d1_status = 'failed' WHERE intent_id = ?", receiptId);
+      } catch {
+        receiptUpdateRejected = true;
+      }
+      try {
+        state.storage.sql.exec("DELETE FROM editorial_phase2_terminal_receipts WHERE intent_id = ?", receiptId);
+      } catch {
+        receiptDeleteRejected = true;
+      }
+      const counts = state.storage.sql.exec<{ steps: number; actions: number; intents: number; receipts: number }>(
+        "SELECT (SELECT count(*) FROM editorial_phase2_steps) AS steps, (SELECT count(*) FROM editorial_phase2_human_actions) AS actions, (SELECT count(*) FROM editorial_phase2_terminal_intents) AS intents, (SELECT count(*) FROM editorial_phase2_terminal_receipts) AS receipts",
       ).one();
-      return { updateRejected, deleteRejected, stepUpdateRejected, stepDeleteRejected, actionUpdateRejected, actionDeleteRejected, counts };
+      return { updateRejected, deleteRejected, stepUpdateRejected, stepDeleteRejected, actionUpdateRejected, actionDeleteRejected, intentUpdateRejected, intentDeleteRejected, receiptUpdateRejected, receiptDeleteRejected, counts };
     });
     expect(appendOnly).toEqual({
       updateRejected: true,
@@ -192,7 +231,11 @@ describe("editorial Agent + Workflow runtime", () => {
       stepDeleteRejected: true,
       actionUpdateRejected: true,
       actionDeleteRejected: true,
-      counts: { steps: 6, actions: 1 },
+      intentUpdateRejected: true,
+      intentDeleteRejected: true,
+      receiptUpdateRejected: true,
+      receiptDeleteRejected: true,
+      counts: { steps: 6, actions: 1, intents: 1, receipts: 1 },
     });
     const d1Run = await workerEnv.DB.prepare(
       "SELECT count(*) AS count FROM editorial_runs WHERE run_id = ? AND user_id = ? AND workspace_id = ?",
@@ -244,6 +287,7 @@ describe("editorial Agent + Workflow runtime", () => {
     expect(p0.state).toBe("queued");
     const p0Failed = await waitForState(coordinator, "runtime-p0", "failed");
     expect(p0Failed.approval_state).toBe("human_action_required");
+    expect(await workerEnv.DB.prepare("SELECT status FROM editorial_runs WHERE run_id = ?").bind("runtime-p0").first()).toEqual({ status: "failed" });
 
     const p1 = await start(coordinator, "runtime-p1", "p1_once");
     expect(p1.state).toBe("queued");
@@ -301,6 +345,7 @@ describe("editorial Agent + Workflow runtime", () => {
     expect(secondFailure.state).toBe("queued");
     const failed = await waitForState(coordinator, "runtime-p1-second-failure", "failed");
     expect(failed.approval_state).toBe("human_action_required");
+    expect(await workerEnv.DB.prepare("SELECT status FROM editorial_runs WHERE run_id = ?").bind("runtime-p1-second-failure").first()).toEqual({ status: "failed" });
   });
 
   it("rejects human actions outside the durable confirmation state", async () => {
@@ -505,6 +550,334 @@ describe("editorial Agent + Workflow runtime", () => {
       "SELECT (SELECT count(*) FROM editorial_runs WHERE run_id = ?) AS runs, (SELECT count(*) FROM editorial_artifacts WHERE run_id = ?) AS artifacts",
     ).bind(runId, runId).first();
     expect(d1Counts).toEqual({ runs: 1, artifacts: 1 });
+  });
+
+  it("recovers a terminal D1 status after the DO receipt/CAS is interrupted", async () => {
+    const coordinator = workerEnv.EDITORIAL_COORDINATOR.getByName("runtime-terminal-recovery");
+    const runId = "runtime-terminal-recovery";
+    await runInDurableObject(coordinator, async instance => {
+      try {
+        await instance.getRun(runId);
+      } catch {
+        // getRun initializes the fresh DO schema.
+      }
+    });
+    const manifest = JSON.stringify({
+      schema_version: "editorial-orchestration.v2",
+      agent_versions: { editorial_coordinator: "editorial-coordinator.agent.v2" },
+      skill_pins: { formatting: { id: "md_to_wechat", version: "1.0.0" } },
+    });
+    await runInDurableObject(coordinator, async (_instance, state) => {
+      state.storage.sql.exec(
+        `INSERT INTO editorial_phase2_runs
+          (run_id, article_id, recording_id, user_id, workspace_id, scenario, payload_hash, manifest_json,
+           workflow_id, state, state_revision, approval_state, revision_count, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 'queued', 0, 'human_action_required', 0, ?, ?)`,
+        runId,
+        "article_terminal_recovery",
+        92,
+        "user_runtime_a",
+        "workspace_runtime_a",
+        "happy",
+        "sha256:terminal-recovery",
+        manifest,
+        new Date().toISOString(),
+        new Date().toISOString(),
+      );
+    });
+    const failed = await runInDurableObject(coordinator, async (instance, state) => {
+      (instance as any).failAfterTerminalMirrorOnce = true;
+      try {
+        await instance.commitWorkflowStep({
+          run_id: runId,
+          step_name: "terminal-failure",
+          step_key: `${runId}:terminal-failure`,
+          expected_state: "queued",
+          next_state: "failed",
+          approval_state: "human_action_required",
+          terminal_status: "failed",
+          artifacts: [],
+        });
+        return { code: "unexpected_success" };
+      } catch (error) {
+        return {
+          code: (error as { code?: string }).code,
+          state: state.storage.sql.exec<{ state: string }>("SELECT state FROM editorial_phase2_runs WHERE run_id = ?", runId).one().state,
+          intents: state.storage.sql.exec<{ count: number }>("SELECT count(*) AS count FROM editorial_phase2_terminal_intents WHERE run_id = ?", runId).one().count,
+          receipts: state.storage.sql.exec<{ count: number }>("SELECT count(*) AS count FROM editorial_phase2_terminal_receipts WHERE intent_id IN (SELECT intent_id FROM editorial_phase2_terminal_intents WHERE run_id = ?)", runId).one().count,
+          events: state.storage.sql.exec<{ count: number }>("SELECT count(*) AS count FROM editorial_phase2_events WHERE run_id = ?", runId).one().count,
+        };
+      }
+    });
+    expect(failed).toEqual({ code: "editorial_terminal_receipt_unavailable", state: "queued", intents: 1, receipts: 0, events: 0 });
+    expect(await workerEnv.DB.prepare("SELECT status FROM editorial_runs WHERE run_id = ?").bind(runId).first()).toEqual({ status: "failed" });
+
+    const recovered = await runInDurableObject(coordinator, async instance => instance.commitWorkflowStep({
+      run_id: runId,
+      step_name: "terminal-failure",
+      step_key: `${runId}:terminal-failure`,
+      expected_state: "queued",
+      next_state: "failed",
+      approval_state: "human_action_required",
+      terminal_status: "failed",
+      artifacts: [],
+    }));
+    expect(recovered).toMatchObject({ state: "failed", replayed: false, terminal_status: "failed" });
+    const terminalCounts = await runInDurableObject(coordinator, (_instance, state) => state.storage.sql.exec<{ intents: number; receipts: number; events: number; state: string }>(
+      `SELECT
+         (SELECT count(*) FROM editorial_phase2_terminal_intents WHERE run_id = ?) AS intents,
+         (SELECT count(*) FROM editorial_phase2_terminal_receipts WHERE intent_id IN (SELECT intent_id FROM editorial_phase2_terminal_intents WHERE run_id = ?)) AS receipts,
+         (SELECT count(*) FROM editorial_phase2_events WHERE run_id = ?) AS events,
+         (SELECT state FROM editorial_phase2_runs WHERE run_id = ?) AS state`,
+      runId,
+      runId,
+      runId,
+      runId,
+    ).one());
+    expect(terminalCounts).toEqual({ intents: 1, receipts: 1, events: 1, state: "failed" });
+    expect(await workerEnv.DB.prepare("SELECT status FROM editorial_runs WHERE run_id = ?").bind(runId).first()).toEqual({ status: "failed" });
+  });
+
+  it("replays reject signals and mirrors reject/timeout as failed terminals", async () => {
+    const coordinator = workerEnv.EDITORIAL_COORDINATOR.getByName("runtime-human-terminals");
+    await start(coordinator, "runtime-human-reject", "happy");
+    const rejectWaiting = await waitForState(coordinator, "runtime-human-reject", "awaiting_human_confirmation");
+    const rejectPayload = { action: "reject", reason: null };
+    const signalFailed = await runInDurableObject(coordinator, async instance => {
+      const original = (instance as any).rejectWorkflow;
+      (instance as any).rejectWorkflow = async () => { throw new Error("synthetic signal failure"); };
+      try {
+        await instance.recordHumanAction({
+          run_id: "runtime-human-reject",
+          action: "reject",
+          idempotency_key: "runtime-human-reject-1",
+          payload_hash: await payloadHash(rejectPayload),
+          workflow_id: rejectWaiting.workflow_id,
+        });
+        return false;
+      } catch {
+        return true;
+      } finally {
+        (instance as any).rejectWorkflow = original;
+      }
+    });
+    expect(signalFailed).toBe(true);
+    const persistedAction = await runInDurableObject(coordinator, (_instance, state) => state.storage.sql.exec<{ actions: number; state: string; approval_state: string }>(
+      `SELECT
+         (SELECT count(*) FROM editorial_phase2_human_actions WHERE run_id = ?) AS actions,
+         (SELECT state FROM editorial_phase2_runs WHERE run_id = ?) AS state,
+         (SELECT approval_state FROM editorial_phase2_runs WHERE run_id = ?) AS approval_state`,
+      "runtime-human-reject",
+      "runtime-human-reject",
+      "runtime-human-reject",
+    ).one());
+    expect(persistedAction).toEqual({ actions: 1, state: "awaiting_human_confirmation", approval_state: "rejected" });
+    const replay = await coordinator.recordHumanAction({
+      run_id: "runtime-human-reject",
+      action: "reject",
+      idempotency_key: "runtime-human-reject-1",
+      payload_hash: await payloadHash(rejectPayload),
+      workflow_id: rejectWaiting.workflow_id,
+    });
+    expect(replay.replayed).toBe(true);
+    await waitForState(coordinator, "runtime-human-reject", "failed");
+    expect(await workerEnv.DB.prepare("SELECT status FROM editorial_runs WHERE run_id = ?").bind("runtime-human-reject").first()).toEqual({ status: "failed" });
+
+    await start(coordinator, "runtime-human-timeout", "happy");
+    const timeoutWaiting = await waitForState(coordinator, "runtime-human-timeout", "awaiting_human_confirmation");
+    const timeout = await coordinator.recordHumanAction({
+      run_id: "runtime-human-timeout",
+      action: "timeout",
+      idempotency_key: "runtime-human-timeout-1",
+      payload_hash: await payloadHash({ action: "timeout", reason: null }),
+      workflow_id: timeoutWaiting.workflow_id,
+    });
+    expect(timeout.approval_state).toBe("timed_out");
+    await waitForState(coordinator, "runtime-human-timeout", "failed");
+    expect(await workerEnv.DB.prepare("SELECT status FROM editorial_runs WHERE run_id = ?").bind("runtime-human-timeout").first()).toEqual({ status: "failed" });
+  });
+
+  it("allows only one terminal outcome when competing terminal commits race", async () => {
+    const coordinator = workerEnv.EDITORIAL_COORDINATOR.getByName("runtime-terminal-race");
+    const runId = "runtime-terminal-race";
+    await runInDurableObject(coordinator, async instance => {
+      try {
+        await instance.getRun(runId);
+      } catch {
+        // getRun initializes the fresh DO schema.
+      }
+    });
+    const manifest = JSON.stringify({
+      schema_version: "editorial-orchestration.v2",
+      agent_versions: { editorial_coordinator: "editorial-coordinator.agent.v2" },
+      skill_pins: { formatting: { id: "md_to_wechat", version: "1.0.0" } },
+    });
+    await runInDurableObject(coordinator, async (_instance, state) => {
+      state.storage.sql.exec(
+        `INSERT INTO editorial_phase2_runs
+          (run_id, article_id, recording_id, user_id, workspace_id, scenario, payload_hash, manifest_json,
+           workflow_id, state, state_revision, approval_state, revision_count, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 'queued', 0, 'human_action_required', 0, ?, ?)`,
+        runId,
+        "article_terminal_race",
+        92,
+        "user_runtime_a",
+        "workspace_runtime_a",
+        "happy",
+        "sha256:terminal-race",
+        manifest,
+        new Date().toISOString(),
+        new Date().toISOString(),
+      );
+    });
+    const failedAttempt = runInDurableObject(coordinator, async instance => {
+      try {
+        return { ok: true, result: await instance.commitWorkflowStep({
+          run_id: runId,
+          step_name: "terminal-failed",
+          step_key: `${runId}:terminal-failed`,
+          expected_state: "queued",
+          next_state: "failed",
+          approval_state: "human_action_required",
+          terminal_status: "failed",
+          artifacts: [],
+        }) };
+      } catch (error) {
+        return { ok: false, code: (error as { code?: string }).code || "unknown_error" };
+      }
+    });
+    const completedAttempt = runInDurableObject(coordinator, async instance => {
+      try {
+        return { ok: true, result: await instance.commitWorkflowStep({
+          run_id: runId,
+          step_name: "terminal-completed",
+          step_key: `${runId}:terminal-completed`,
+          expected_state: "queued",
+          next_state: "approved_for_phase3",
+          approval_state: "approved",
+          terminal_status: "completed",
+          artifacts: [],
+        }) };
+      } catch (error) {
+        return { ok: false, code: (error as { code?: string }).code || "unknown_error" };
+      }
+    });
+    const attempts = await Promise.all([failedAttempt, completedAttempt]);
+    expect(attempts.filter(attempt => attempt.ok)).toHaveLength(1);
+    expect(attempts.filter(attempt => !attempt.ok)).toHaveLength(1);
+    expect(["stale_workflow_step", "terminal_conflict"]).toContain(attempts.find(attempt => !attempt.ok)?.code);
+    const terminalState = await runInDurableObject(coordinator, (_instance, state) => state.storage.sql.exec<{
+      state: string;
+      steps: number;
+      intents: number;
+      receipts: number;
+      events: number;
+    }>(
+      `SELECT
+         (SELECT state FROM editorial_phase2_runs WHERE run_id = ?) AS state,
+         (SELECT count(*) FROM editorial_phase2_steps WHERE run_id = ? AND step_key LIKE ?) AS steps,
+         (SELECT count(*) FROM editorial_phase2_terminal_intents WHERE run_id = ?) AS intents,
+         (SELECT count(*) FROM editorial_phase2_terminal_receipts WHERE intent_id IN (SELECT intent_id FROM editorial_phase2_terminal_intents WHERE run_id = ?)) AS receipts,
+         (SELECT count(*) FROM editorial_phase2_events WHERE run_id = ? AND event_type = 'workflow_step') AS events`,
+      runId,
+      runId,
+      `${runId}:terminal-%`,
+      runId,
+      runId,
+      runId,
+    ).one());
+    expect(terminalState).toEqual({ state: "failed", steps: 1, intents: 1, receipts: 1, events: 1 });
+    expect(await workerEnv.DB.prepare("SELECT status FROM editorial_runs WHERE run_id = ?").bind(runId).first()).toEqual({ status: "failed" });
+  });
+
+  it("fails closed on existing D1 pin or input identity conflicts", async () => {
+    const coordinator = workerEnv.EDITORIAL_COORDINATOR.getByName("runtime-pin-conflict");
+    const runId = "runtime-pin-conflict";
+    const artifactId = `${runId}:article_draft:${runId}:draft:v1`;
+    const agentVersions = JSON.stringify({
+      cover: "cover.agent.v2",
+      editorial_coordinator: "editorial-coordinator.agent.v2",
+      editorial_review: "editorial-review.agent.v2",
+      illustration: "illustration.agent.v2",
+      writing: "writing.agent.v2",
+    });
+    const skillPins = JSON.stringify({ formatting: { id: "md_to_wechat", version: "1.0.0" } });
+    await workerEnv.DB.batch([
+      workerEnv.DB.prepare(`INSERT INTO editorial_runs
+        (run_id, user_id, workspace_id, article_id, recording_id, schema_version,
+         workflow_version, policy_version, agent_versions_json, skill_pins_json,
+         status, idempotency_key, payload_hash, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?)`)
+        .bind(runId, "user_runtime_a", "workspace_runtime_a", "article_pin_conflict", 92, "editorial-orchestration.v2", "editorial-workflow.v2", "editorial-policy.v2", agentVersions, skillPins, `run:${runId}`, "sha256:pin-conflict", "2026-07-19T00:00:00.000Z", "2026-07-19T00:00:00.000Z"),
+      workerEnv.DB.prepare(`INSERT INTO editorial_artifacts
+        (artifact_id, run_id, user_id, workspace_id, article_id, recording_id,
+         schema_version, kind, producer_agent_role, producer_agent_version,
+         skill_id, skill_version, workflow_version, policy_version,
+         input_artifact_ids_json, payload_hash, storage_ref, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .bind(artifactId, runId, "user_runtime_a", "workspace_runtime_a", "article_pin_conflict", 92, "editorial-orchestration.v2", "article_draft", "writing", "writing.agent.v2", "md_to_wechat", "1.0.0", "editorial-workflow.v2", "editorial-policy.v2", JSON.stringify(["wrong-parent"]), "sha256:wrong-artifact", `do://editorial-phase2/${runId}/${artifactId}`, "2026-07-19T00:00:00.000Z"),
+    ]);
+    await runInDurableObject(coordinator, async (_instance, state) => {
+      try {
+        await _instance.getRun(runId);
+      } catch {
+        // getRun initializes the fresh DO schema.
+      }
+      state.storage.sql.exec(
+        `INSERT INTO editorial_phase2_runs
+          (run_id, article_id, recording_id, user_id, workspace_id, scenario, payload_hash, manifest_json,
+           workflow_id, state, state_revision, approval_state, revision_count, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 'queued', 0, 'not_required', 0, ?, ?)`,
+        runId,
+        "article_pin_conflict",
+        92,
+        "user_runtime_a",
+        "workspace_runtime_a",
+        "happy",
+        "sha256:pin-conflict",
+        JSON.stringify({
+          schema_version: "editorial-orchestration.v2",
+          agent_versions: {
+            editorial_coordinator: "editorial-coordinator.agent.v2",
+            writing: "writing.agent.v2",
+            editorial_review: "editorial-review.agent.v2",
+            illustration: "illustration.agent.v2",
+            cover: "cover.agent.v2",
+          },
+          skill_pins: { formatting: { id: "md_to_wechat", version: "1.0.0" } },
+        }),
+        "2026-07-19T00:00:00.000Z",
+        "2026-07-19T00:00:00.000Z",
+      );
+    });
+    const result = await runInDurableObject(coordinator, async (instance, state) => {
+      try {
+        await instance.commitWorkflowStep({
+          run_id: runId,
+          step_name: "draft-v1",
+          step_key: `${runId}:draft-v1`,
+          expected_state: "queued",
+          next_state: "draft_generated",
+          artifacts: [{
+            kind: "article_draft",
+            idempotency_key: `${runId}:draft:v1`,
+            producer_role: "writing",
+            producer_version: "writing.agent.v2",
+            summary: { source: "synthetic", version_no: 1 },
+          }],
+        });
+        return { code: "unexpected_success" };
+      } catch (error) {
+        return {
+          code: (error as { code?: string }).code,
+          state: state.storage.sql.exec<{ state: string }>("SELECT state FROM editorial_phase2_runs WHERE run_id = ?", runId).one().state,
+          outbox: state.storage.sql.exec<{ count: number }>("SELECT count(*) AS count FROM editorial_phase2_outbox WHERE run_id = ?", runId).one().count,
+        };
+      }
+    });
+    expect(result).toEqual({ code: "editorial_d1_mirror_conflict", state: "queued", outbox: 1 });
+    expect(await workerEnv.DB.prepare("SELECT count(*) AS count FROM editorial_artifacts WHERE run_id = ?").bind(runId).first()).toEqual({ count: 1 });
+    expect(await workerEnv.DB.prepare("SELECT status FROM editorial_runs WHERE run_id = ?").bind(runId).first()).toEqual({ status: "running" });
   });
 
   it("does not resolve a DO or create orchestration state when the server flag is off", async () => {

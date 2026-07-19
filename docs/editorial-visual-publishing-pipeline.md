@@ -99,6 +99,26 @@ the next state. Frozen/visual plans therefore cannot reach the human wait or
 approval state without a reconciled D1 mirror. No new D1 table or migration is
 introduced by Phase 2.
 
+The D1 `editorial_runs` row is a mutable projection with an immutable identity:
+only `status` and a strictly increasing `updated_at` may change. Its trigger
+allows a compare-and-swap transition from `planned`/`running` to `completed` or
+`failed` (and same-status timestamp refresh), but rejects terminal rollback,
+completed/failed swaps, pin changes, ownership changes, payload changes, and
+idempotency changes. Migration `0010` drops and recreates the old full
+append-only update trigger so reapply forward-fixes an existing local database;
+the canonical schema contains the same trigger contract for fresh installs.
+
+Approval, rejection, timeout, P0, second-P1, and workflow-error terminals all
+use the same durable terminal step and intent: DO append, D1 artifact/hash and
+run-status CAS, DO terminal receipt, then DO state/event CAS. If D1 succeeds
+but the receipt or final CAS is interrupted, the pending intent replays against
+the already-target terminal D1 status and creates no duplicate artifact,
+receipt, or event. Existing D1 rows are fail-closed unless every ownership,
+producer, input-artifact, schema/workflow/policy/skill pin, kind, hash,
+storage-ref, and stable artifact identity matches.
+Each run has one unique terminal intent; competing completed/failed attempts
+therefore yield one legal terminal outcome and a stale/conflict response.
+
 The server-owned state path is:
 
 `queued -> draft_generated -> review_pending/revision_pending -> reviewed -> content_frozen -> awaiting_human_confirmation -> approved_for_phase3`

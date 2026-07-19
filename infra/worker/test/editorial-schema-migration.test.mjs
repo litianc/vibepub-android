@@ -102,6 +102,36 @@ test("legacy migration has the same append-only trigger contract", () => {
   assert.deepEqual(triggerNames(`${legacy}\n${migration}\n${migration}`), expectedEditorialTriggers);
 });
 
+test("editorial run projection permits only CAS terminal updates and forward-fixes the old trigger", () => {
+  const setup = `
+    INSERT INTO users (id, email, password_hash, password_salt, password_iterations, workspace_id)
+    VALUES ('usr_run', 'run@example.test', 'hash', 'salt', 1, 'ws_run');
+    INSERT INTO editorial_recording_scopes (recording_id, user_id, workspace_id)
+    VALUES (77, 'usr_run', 'ws_run');
+    INSERT INTO editorial_runs
+      (run_id, user_id, workspace_id, article_id, recording_id, schema_version,
+       workflow_version, policy_version, agent_versions_json, skill_pins_json,
+       status, idempotency_key, payload_hash, created_at, updated_at)
+    VALUES ('run_projection', 'usr_run', 'ws_run', 'article_run', 77, 'editorial-orchestration.v2',
+       'editorial-workflow.v2', 'editorial-policy.v2', '{}', '{}', 'running',
+       'run:run_projection', 'sha256:run', '2026-07-19T00:00:00.000Z', '2026-07-19T00:00:00.000Z');`;
+  const oldTrigger = `
+    DROP TRIGGER editorial_runs_append_only_update;
+    CREATE TRIGGER editorial_runs_append_only_update
+    BEFORE UPDATE ON editorial_runs
+    BEGIN SELECT RAISE(ABORT, 'old_append_only_trigger'); END;`;
+  const completed = `${schema}\n${oldTrigger}\n${migration}\n${setup}
+    UPDATE editorial_runs SET status = 'completed', updated_at = '2026-07-19T00:00:01.000Z' WHERE run_id = 'run_projection';
+    SELECT status || ':' || updated_at FROM editorial_runs WHERE run_id = 'run_projection';`;
+  assert.equal(runSql(completed).trim(), "completed:2026-07-19T00:00:01.000Z");
+
+  assert.throws(() => runSql(`${schema}\n${migration}\n${setup}
+    UPDATE editorial_runs SET status = 'completed', updated_at = '2026-07-19T00:00:01.000Z' WHERE run_id = 'run_projection';
+    UPDATE editorial_runs SET status = 'failed', updated_at = '2026-07-19T00:00:02.000Z' WHERE run_id = 'run_projection';`));
+  assert.throws(() => runSql(`${schema}\n${migration}\n${setup}
+    UPDATE editorial_runs SET agent_versions_json = '{"changed":true}', updated_at = '2026-07-19T00:00:01.000Z' WHERE run_id = 'run_projection';`));
+});
+
 const expectedEditorialTriggers = [
   "article_versions_append_only_delete",
   "article_versions_append_only_update",

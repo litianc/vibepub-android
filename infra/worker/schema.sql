@@ -314,8 +314,27 @@ END;
 
 CREATE TRIGGER editorial_runs_append_only_update
 BEFORE UPDATE ON editorial_runs
+WHEN
+    NEW.run_id <> OLD.run_id OR
+    NEW.user_id <> OLD.user_id OR
+    NEW.workspace_id <> OLD.workspace_id OR
+    NEW.article_id <> OLD.article_id OR
+    NEW.recording_id <> OLD.recording_id OR
+    NEW.schema_version <> OLD.schema_version OR
+    NEW.workflow_version <> OLD.workflow_version OR
+    NEW.policy_version <> OLD.policy_version OR
+    NEW.agent_versions_json <> OLD.agent_versions_json OR
+    NEW.skill_pins_json <> OLD.skill_pins_json OR
+    NEW.idempotency_key <> OLD.idempotency_key OR
+    NEW.payload_hash <> OLD.payload_hash OR
+    NEW.created_at <> OLD.created_at OR
+    NEW.updated_at <= OLD.updated_at OR
+    NOT (
+        NEW.status = OLD.status OR
+        (OLD.status IN ('planned', 'running') AND NEW.status IN ('completed', 'failed'))
+    )
 BEGIN
-    SELECT RAISE(ABORT, 'editorial_runs_append_only');
+    SELECT RAISE(ABORT, 'editorial_runs_projection_update_invalid');
 END;
 
 CREATE TRIGGER editorial_runs_append_only_delete

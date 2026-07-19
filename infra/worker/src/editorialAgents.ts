@@ -112,8 +112,15 @@ type D1RunRow = {
   workspace_id: string;
   article_id: string;
   recording_id: number;
+  schema_version: string;
+  workflow_version: string;
+  policy_version: string;
+  agent_versions_json: string;
+  skill_pins_json: string;
+  status: "planned" | "running" | "completed" | "failed";
   payload_hash: string;
   idempotency_key: string;
+  updated_at: string;
 };
 
 type D1ArtifactRow = {
@@ -124,8 +131,27 @@ type D1ArtifactRow = {
   article_id: string;
   recording_id: number;
   kind: string;
+  producer_agent_role: string;
+  producer_agent_version: string;
+  skill_id: string | null;
+  skill_version: string | null;
+  workflow_version: string;
+  policy_version: string;
+  input_artifact_ids_json: string;
   payload_hash: string;
   storage_ref: string;
+};
+
+type TerminalStatus = "completed" | "failed";
+
+type TerminalIntentRow = {
+  intent_id: string;
+  run_id: string;
+  step_key: string;
+  terminal_status: TerminalStatus;
+  idempotency_key: string;
+  payload_hash: string;
+  created_at: string;
 };
 
 type StepRow = {
@@ -153,6 +179,7 @@ type WorkflowStepInput = {
   artifacts: ArtifactInput[];
   approval_state?: EditorialAgentState["approval_state"];
   revision_count?: number;
+  terminal_status?: TerminalStatus;
 };
 
 type WorkflowStepResult = {
@@ -163,6 +190,7 @@ type WorkflowStepResult = {
   approval_state?: EditorialAgentState["approval_state"];
   revision_count?: number;
   payload_hash?: string;
+  terminal_status?: TerminalStatus;
 };
 
 type HumanActionInput = {
@@ -238,17 +266,44 @@ function safeJson(value: unknown): string {
   return canonicalJson(value);
 }
 
+function runManifestPins(run: RunRow): {
+  agentVersionsJson: string;
+  skillPinsJson: string;
+  formattingSkillId: string | null;
+  formattingSkillVersion: string | null;
+} {
+  const manifest = parseJson<Record<string, unknown>>(run.manifest_json);
+  const skillPins = (manifest.skill_pins || {}) as Record<string, unknown>;
+  const formattingPin = (skillPins.formatting || {}) as Record<string, unknown>;
+  return {
+    agentVersionsJson: safeJson(manifest.agent_versions || {}),
+    skillPinsJson: safeJson(skillPins),
+    formattingSkillId: typeof formattingPin.id === "string" ? formattingPin.id : null,
+    formattingSkillVersion: typeof formattingPin.version === "string" ? formattingPin.version : null,
+  };
+}
+
 function d1IdentityMatchesRun(existing: D1RunRow, run: RunRow): boolean {
+  const pins = runManifestPins(run);
   return existing.run_id === run.run_id
     && existing.user_id === run.user_id
     && existing.workspace_id === run.workspace_id
     && existing.article_id === run.article_id
     && existing.recording_id === run.recording_id
+    && existing.schema_version === EDITORIAL_SCHEMA_VERSION
+    && existing.workflow_version === EDITORIAL_WORKFLOW_VERSION
+    && existing.policy_version === EDITORIAL_POLICY_VERSION
+    && existing.agent_versions_json === pins.agentVersionsJson
+    && existing.skill_pins_json === pins.skillPinsJson
     && existing.payload_hash === run.payload_hash
     && existing.idempotency_key === `run:${run.run_id}`;
 }
 
-function d1IdentityMatchesArtifact(existing: D1ArtifactRow, artifact: OutboxRow): boolean {
+function d1IdentityMatchesArtifact(existing: D1ArtifactRow, artifact: OutboxRow, run: RunRow): boolean {
+  const pins = runManifestPins(run);
+  // Phase 1's D1 schema has no artifact idempotency column. The immutable
+  // artifact_id is derived from the DO artifact idempotency key, so comparing
+  // it here preserves that identity without adding a new production column.
   return existing.artifact_id === artifact.artifact_id
     && existing.run_id === artifact.run_id
     && existing.user_id === artifact.user_id
@@ -256,8 +311,42 @@ function d1IdentityMatchesArtifact(existing: D1ArtifactRow, artifact: OutboxRow)
     && existing.article_id === artifact.article_id
     && existing.recording_id === artifact.recording_id
     && existing.kind === artifact.kind
+    && existing.producer_agent_role === artifact.producer_role
+    && existing.producer_agent_version === artifact.producer_version
+    && existing.skill_id === pins.formattingSkillId
+    && existing.skill_version === pins.formattingSkillVersion
+    && existing.workflow_version === EDITORIAL_WORKFLOW_VERSION
+    && existing.policy_version === EDITORIAL_POLICY_VERSION
+    && existing.input_artifact_ids_json === artifact.input_artifact_ids_json
     && existing.payload_hash === artifact.payload_hash
     && existing.storage_ref === artifact.storage_ref;
+}
+
+async function verifyD1Artifacts(
+  db: D1Database,
+  run: RunRow,
+  artifacts: readonly OutboxRow[],
+): Promise<void> {
+  for (const artifact of artifacts) {
+    const existingArtifact = await db.prepare(
+      `SELECT artifact_id, run_id, user_id, workspace_id, article_id, recording_id,
+              kind, producer_agent_role, producer_agent_version, skill_id, skill_version,
+              workflow_version, policy_version, input_artifact_ids_json, payload_hash, storage_ref
+       FROM editorial_artifacts
+       WHERE artifact_id = ? OR (run_id = ? AND kind = ? AND payload_hash = ?)
+       LIMIT 1`,
+    ).bind(artifact.artifact_id, artifact.run_id, artifact.kind, artifact.payload_hash).first<D1ArtifactRow>();
+    if (!existingArtifact || !d1IdentityMatchesArtifact(existingArtifact, artifact, run)) {
+      throw new EditorialRuntimeError("editorial_d1_mirror_conflict", "D1 artifact replay identity conflicts", 409);
+    }
+  }
+}
+
+function laterTimestamp(previous: string): string {
+  const candidate = now();
+  if (candidate > previous) return candidate;
+  const parsed = Date.parse(previous);
+  return Number.isFinite(parsed) ? new Date(parsed + 1).toISOString() : candidate;
 }
 
 /**
@@ -272,15 +361,20 @@ export async function mirrorEditorialOutboxToD1(
 ): Promise<void> {
   try {
     const existingRun = await db.prepare(
-      "SELECT run_id, user_id, workspace_id, article_id, recording_id, payload_hash, idempotency_key FROM editorial_runs WHERE run_id = ? LIMIT 1",
+      `SELECT run_id, user_id, workspace_id, article_id, recording_id, schema_version,
+              workflow_version, policy_version, agent_versions_json, skill_pins_json,
+              status, payload_hash, idempotency_key, updated_at
+       FROM editorial_runs WHERE run_id = ? LIMIT 1`,
     ).bind(run.run_id).first<D1RunRow>();
     if (existingRun && !d1IdentityMatchesRun(existingRun, run)) {
       throw new EditorialRuntimeError("editorial_d1_mirror_conflict", "D1 run ownership or payload conflicts", 409);
     }
+    if (existingRun && (existingRun.status === "completed" || existingRun.status === "failed")) {
+      await verifyD1Artifacts(db, run, artifacts);
+      return;
+    }
 
-    const manifest = parseJson<Record<string, unknown>>(run.manifest_json);
-    const skillPins = (manifest.skill_pins || {}) as Record<string, unknown>;
-    const formattingPin = (skillPins.formatting || {}) as Record<string, unknown>;
+    const pins = runManifestPins(run);
     const statements: D1PreparedStatement[] = [];
     if (!existingRun) {
       statements.push(db.prepare(
@@ -298,8 +392,8 @@ export async function mirrorEditorialOutboxToD1(
         EDITORIAL_SCHEMA_VERSION,
         EDITORIAL_WORKFLOW_VERSION,
         EDITORIAL_POLICY_VERSION,
-        safeJson(manifest.agent_versions || {}),
-        safeJson(skillPins),
+        pins.agentVersionsJson,
+        pins.skillPinsJson,
         `run:${run.run_id}`,
         run.payload_hash,
         run.created_at,
@@ -310,13 +404,14 @@ export async function mirrorEditorialOutboxToD1(
     for (const artifact of artifacts) {
       const existingArtifact = await db.prepare(
         `SELECT artifact_id, run_id, user_id, workspace_id, article_id, recording_id,
-                kind, payload_hash, storage_ref
+                kind, producer_agent_role, producer_agent_version, skill_id, skill_version,
+                workflow_version, policy_version, input_artifact_ids_json, payload_hash, storage_ref
          FROM editorial_artifacts
          WHERE artifact_id = ? OR (run_id = ? AND kind = ? AND payload_hash = ?)
          LIMIT 1`,
       ).bind(artifact.artifact_id, artifact.run_id, artifact.kind, artifact.payload_hash).first<D1ArtifactRow>();
       if (existingArtifact) {
-        if (!d1IdentityMatchesArtifact(existingArtifact, artifact)) {
+        if (!d1IdentityMatchesArtifact(existingArtifact, artifact, run)) {
           throw new EditorialRuntimeError("editorial_d1_mirror_conflict", "D1 artifact ownership or payload conflicts", 409);
         }
         continue;
@@ -339,8 +434,8 @@ export async function mirrorEditorialOutboxToD1(
         artifact.kind,
         artifact.producer_role,
         artifact.producer_version,
-        typeof formattingPin.id === "string" ? formattingPin.id : null,
-        typeof formattingPin.version === "string" ? formattingPin.version : null,
+        pins.formattingSkillId,
+        pins.formattingSkillVersion,
         EDITORIAL_WORKFLOW_VERSION,
         EDITORIAL_POLICY_VERSION,
         artifact.input_artifact_ids_json,
@@ -353,6 +448,52 @@ export async function mirrorEditorialOutboxToD1(
   } catch (error) {
     if (error instanceof EditorialRuntimeError) throw error;
     throw new EditorialRuntimeError("editorial_d1_mirror_unavailable", "D1 artifact mirror is temporarily unavailable", 503);
+  }
+}
+
+/**
+ * Completes the existing D1 run projection only after all outbox artifacts
+ * reconcile. A terminal status already present in D1 is treated as a lost DO
+ * receipt and is safely replayed; the opposite terminal status is a conflict.
+ */
+export async function mirrorEditorialTerminalToD1(
+  db: D1Database,
+  run: RunRow,
+  artifacts: readonly OutboxRow[],
+  terminalStatus: TerminalStatus,
+): Promise<void> {
+  await mirrorEditorialOutboxToD1(db, run, artifacts);
+  try {
+    const existing = await db.prepare(
+      `SELECT run_id, user_id, workspace_id, article_id, recording_id, schema_version,
+              workflow_version, policy_version, agent_versions_json, skill_pins_json,
+              status, payload_hash, idempotency_key, updated_at
+       FROM editorial_runs WHERE run_id = ? LIMIT 1`,
+    ).bind(run.run_id).first<D1RunRow>();
+    if (!existing || !d1IdentityMatchesRun(existing, run)) {
+      throw new EditorialRuntimeError("editorial_d1_mirror_conflict", "D1 terminal run identity conflicts", 409);
+    }
+    if (existing.status === terminalStatus) {
+      await verifyD1Artifacts(db, run, artifacts);
+      return;
+    }
+    if (existing.status !== "planned" && existing.status !== "running") {
+      throw new EditorialRuntimeError("editorial_d1_terminal_conflict", "D1 run already has another terminal status", 409);
+    }
+    const updatedAt = laterTimestamp(existing.updated_at);
+    const result = await db.prepare(
+      `UPDATE editorial_runs SET status = ?, updated_at = ?
+       WHERE run_id = ? AND status IN ('planned', 'running')`,
+    ).bind(terminalStatus, updatedAt, run.run_id).run();
+    if ((result.meta.changes || 0) === 1) return;
+    const raced = await db.prepare(
+      "SELECT status FROM editorial_runs WHERE run_id = ? LIMIT 1",
+    ).bind(run.run_id).first<{ status: D1RunRow["status"] }>();
+    if (raced?.status === terminalStatus) return;
+    throw new EditorialRuntimeError("editorial_d1_terminal_conflict", "D1 terminal status CAS failed", 409);
+  } catch (error) {
+    if (error instanceof EditorialRuntimeError) throw error;
+    throw new EditorialRuntimeError("editorial_d1_mirror_unavailable", "D1 terminal mirror is temporarily unavailable", 503);
   }
 }
 
@@ -424,6 +565,7 @@ export class EditorialCoverAgent extends EditorialSpecialistAgent {}
 
 export class EditorialCoordinatorAgent extends Agent<EditorialRuntimeEnv, EditorialAgentState> {
   initialState = coordinatorInitialState();
+  private failAfterTerminalMirrorOnce = false;
 
   async onStart(): Promise<void> {
     this.ensureSchema();
@@ -525,6 +667,30 @@ export class EditorialCoordinatorAgent extends Agent<EditorialRuntimeEnv, Editor
       mirrored_at TEXT NOT NULL,
       FOREIGN KEY(outbox_id) REFERENCES editorial_phase2_outbox(outbox_id)
     )`;
+    this.sql`CREATE TABLE IF NOT EXISTS editorial_phase2_terminal_intents (
+      intent_id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      step_key TEXT NOT NULL,
+      terminal_status TEXT NOT NULL CHECK (terminal_status IN ('completed', 'failed')),
+      idempotency_key TEXT NOT NULL,
+      payload_hash TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      UNIQUE(run_id),
+      UNIQUE(run_id, idempotency_key),
+      UNIQUE(run_id, step_key),
+      FOREIGN KEY(run_id, step_key) REFERENCES editorial_phase2_steps(run_id, step_key)
+    )`;
+    this.sql`CREATE TABLE IF NOT EXISTS editorial_phase2_terminal_receipts (
+      intent_id TEXT PRIMARY KEY,
+      d1_status TEXT NOT NULL CHECK (d1_status IN ('completed', 'failed')),
+      mirrored_at TEXT NOT NULL,
+      FOREIGN KEY(intent_id) REFERENCES editorial_phase2_terminal_intents(intent_id)
+    )`;
+    // CREATE TABLE IF NOT EXISTS does not retrofit constraints on an older
+    // DO instance. The unique index keeps one terminal intent per run across
+    // eviction/restart while preserving the append-only table contract.
+    this.sql`CREATE UNIQUE INDEX IF NOT EXISTS editorial_phase2_terminal_intents_one_per_run
+      ON editorial_phase2_terminal_intents(run_id)`;
     this.sql`CREATE TRIGGER IF NOT EXISTS editorial_phase2_artifacts_append_only_update
       BEFORE UPDATE ON editorial_phase2_artifacts BEGIN SELECT RAISE(ABORT, 'editorial_phase2_artifacts_are_append_only'); END`;
     this.sql`CREATE TRIGGER IF NOT EXISTS editorial_phase2_artifacts_append_only_delete
@@ -549,6 +715,14 @@ export class EditorialCoordinatorAgent extends Agent<EditorialRuntimeEnv, Editor
       BEFORE UPDATE ON editorial_phase2_outbox_receipts BEGIN SELECT RAISE(ABORT, 'editorial_phase2_outbox_receipts_are_append_only'); END`;
     this.sql`CREATE TRIGGER IF NOT EXISTS editorial_phase2_outbox_receipts_append_only_delete
       BEFORE DELETE ON editorial_phase2_outbox_receipts BEGIN SELECT RAISE(ABORT, 'editorial_phase2_outbox_receipts_are_append_only'); END`;
+    this.sql`CREATE TRIGGER IF NOT EXISTS editorial_phase2_terminal_intents_append_only_update
+      BEFORE UPDATE ON editorial_phase2_terminal_intents BEGIN SELECT RAISE(ABORT, 'editorial_phase2_terminal_intents_are_append_only'); END`;
+    this.sql`CREATE TRIGGER IF NOT EXISTS editorial_phase2_terminal_intents_append_only_delete
+      BEFORE DELETE ON editorial_phase2_terminal_intents BEGIN SELECT RAISE(ABORT, 'editorial_phase2_terminal_intents_are_append_only'); END`;
+    this.sql`CREATE TRIGGER IF NOT EXISTS editorial_phase2_terminal_receipts_append_only_update
+      BEFORE UPDATE ON editorial_phase2_terminal_receipts BEGIN SELECT RAISE(ABORT, 'editorial_phase2_terminal_receipts_are_append_only'); END`;
+    this.sql`CREATE TRIGGER IF NOT EXISTS editorial_phase2_terminal_receipts_append_only_delete
+      BEFORE DELETE ON editorial_phase2_terminal_receipts BEGIN SELECT RAISE(ABORT, 'editorial_phase2_terminal_receipts_are_append_only'); END`;
   }
 
   private transactionSync<T>(callback: () => T): T {
@@ -577,6 +751,38 @@ export class EditorialCoordinatorAgent extends Agent<EditorialRuntimeEnv, Editor
           (outbox_id, d1_payload_hash, mirrored_at)
           VALUES (${row.outbox_id}, ${row.payload_hash}, ${now()})`;
       }
+    });
+  }
+
+  private async flushTerminalIntent(runId: string): Promise<void> {
+    const intent = this.sql<TerminalIntentRow>`
+      SELECT i.intent_id, i.run_id, i.step_key, i.terminal_status,
+             i.idempotency_key, i.payload_hash, i.created_at
+      FROM editorial_phase2_terminal_intents i
+      LEFT JOIN editorial_phase2_terminal_receipts r ON r.intent_id = i.intent_id
+      WHERE i.run_id = ${runId} AND r.intent_id IS NULL
+      ORDER BY i.created_at, i.intent_id LIMIT 1
+    `[0];
+    if (!intent) return;
+    const run = this.runRow(runId);
+    if (!run) throw new EditorialRuntimeError("run_not_found", "editorial run not found", 404);
+    const db = (this.env as EditorialRuntimeEnv & { DB?: D1Database }).DB;
+    if (!db) throw new EditorialRuntimeError("editorial_d1_mirror_unavailable", "D1 artifact mirror is not configured", 503);
+    const artifacts = this.sql<OutboxRow>`
+      SELECT outbox_id, run_id, artifact_id, user_id, workspace_id, article_id,
+             recording_id, kind, payload_hash, producer_role, producer_version,
+             input_artifact_ids_json, summary_json, storage_ref, created_at
+      FROM editorial_phase2_outbox WHERE run_id = ${runId} ORDER BY created_at, outbox_id
+    `;
+    await mirrorEditorialTerminalToD1(db, run, artifacts, intent.terminal_status);
+    if (this.failAfterTerminalMirrorOnce) {
+      this.failAfterTerminalMirrorOnce = false;
+      throw new EditorialRuntimeError("editorial_terminal_receipt_unavailable", "terminal receipt persistence was interrupted", 503);
+    }
+    this.transactionSync(() => {
+      this.sql`INSERT OR IGNORE INTO editorial_phase2_terminal_receipts
+        (intent_id, d1_status, mirrored_at)
+        VALUES (${intent.intent_id}, ${intent.terminal_status}, ${now()})`;
     });
   }
 
@@ -691,6 +897,7 @@ export class EditorialCoordinatorAgent extends Agent<EditorialRuntimeEnv, Editor
       if (existingStep.payload_hash !== payloadHash) throw new EditorialRuntimeError("idempotency_conflict", "workflow step key has another payload", 409);
       const preparedResult = parseJson<WorkflowStepResult>(existingStep.result_json);
       await this.flushOutbox(runId);
+      if (preparedResult.terminal_status) await this.flushTerminalIntent(runId);
       const finalized = this.finalizeWorkflowStep(input, preparedResult);
       this.setState({
         schema_version: EDITORIAL_SCHEMA_VERSION,
@@ -709,6 +916,17 @@ export class EditorialCoordinatorAgent extends Agent<EditorialRuntimeEnv, Editor
     if (row.state !== input.expected_state) throw new EditorialRuntimeError("stale_workflow_step", "workflow step expected a different state", 409);
     if (!isAllowedPhase2State(input.next_state)) throw new EditorialRuntimeError("state_not_allowed", "workflow selected an unknown state", 409);
     if (!canAdvancePhase2(row.state, input.next_state)) throw new EditorialRuntimeError("invalid_state_transition", "workflow cannot skip editorial states", 409);
+    if (input.terminal_status && ((input.terminal_status === "completed" && input.next_state !== "approved_for_phase3") || (input.terminal_status === "failed" && input.next_state !== "failed"))) {
+      throw new EditorialRuntimeError("terminal_state_mismatch", "terminal status does not match workflow state", 409);
+    }
+    if (input.terminal_status) {
+      const existingTerminal = this.sql<{ step_key: string; payload_hash: string }>`
+        SELECT step_key, payload_hash FROM editorial_phase2_terminal_intents WHERE run_id = ${runId} LIMIT 1
+      `[0];
+      if (existingTerminal && (existingTerminal.step_key !== input.step_key || existingTerminal.payload_hash !== payloadHash)) {
+        throw new EditorialRuntimeError("terminal_conflict", "run already has a different terminal intent", 409);
+      }
+    }
     if (row.state === "content_frozen" && input.next_state !== "content_frozen" && input.next_state !== "awaiting_human_confirmation") {
       throw new EditorialRuntimeError("frozen_content_immutable", "frozen content cannot return to a draft state", 409);
     }
@@ -737,7 +955,9 @@ export class EditorialCoordinatorAgent extends Agent<EditorialRuntimeEnv, Editor
     }
     const timestamp = now();
     const artifactIds: string[] = [];
-    const result: WorkflowStepResult = this.transactionSync(() => {
+    let result: WorkflowStepResult;
+    try {
+      result = this.transactionSync(() => {
       for (const artifact of input.artifacts) {
         const prepared = preparedArtifacts.find(item => item.artifact === artifact)!;
         const artifactId = prepared.artifactId;
@@ -769,13 +989,27 @@ export class EditorialCoordinatorAgent extends Agent<EditorialRuntimeEnv, Editor
         approval_state: input.approval_state || row.approval_state,
         revision_count: input.revision_count ?? row.revision_count,
         payload_hash: payloadHash,
+        terminal_status: input.terminal_status,
       };
       this.sql`INSERT INTO editorial_phase2_steps
         (run_id, step_name, step_key, payload_hash, result_json, created_at)
         VALUES (${runId}, ${input.step_name}, ${input.step_key}, ${payloadHash}, ${safeJson(stepResult)}, ${timestamp})`;
-      return stepResult;
-    });
+      if (input.terminal_status) {
+        this.sql`INSERT INTO editorial_phase2_terminal_intents
+          (intent_id, run_id, step_key, terminal_status, idempotency_key, payload_hash, created_at)
+          VALUES (${`${runId}:terminal:${input.step_key}`}, ${runId}, ${input.step_key}, ${input.terminal_status},
+            ${input.step_key}, ${payloadHash}, ${timestamp})`;
+      }
+        return stepResult;
+      });
+    } catch (error) {
+      if (input.terminal_status && /unique|constraint/i.test(String(error))) {
+        throw new EditorialRuntimeError("terminal_conflict", "concurrent terminal intent won the CAS", 409);
+      }
+      throw error;
+    }
     await this.flushOutbox(runId);
+    if (input.terminal_status) await this.flushTerminalIntent(runId);
     const finalized = this.finalizeWorkflowStep({ ...input, run_id: runId }, result);
     this.setState({
       schema_version: EDITORIAL_SCHEMA_VERSION,
@@ -801,6 +1035,9 @@ export class EditorialCoordinatorAgent extends Agent<EditorialRuntimeEnv, Editor
       }
       const replay = parseJson<Record<string, unknown>>(existing.result_json);
       if (input.action === "approve" && input.workflow_id) await this.approveWorkflow(input.workflow_id, { reason: "replayed", metadata: { approved: true } });
+      if ((input.action === "reject" || input.action === "timeout") && input.workflow_id) {
+        await this.rejectWorkflow(input.workflow_id, { reason: input.action });
+      }
       return { ...replay, replayed: true };
     }
     const row = this.runRow(runId);
@@ -816,10 +1053,10 @@ export class EditorialCoordinatorAgent extends Agent<EditorialRuntimeEnv, Editor
       throw new EditorialRuntimeError("human_action_not_ready", "run is not waiting for human confirmation", 409);
     }
     const nextApproval = input.action === "approve" ? "approved" : input.action === "reject" ? "rejected" : input.action === "timeout" ? "timed_out" : "awaiting";
-    // Approval is recorded before the Workflow resumes. The Workflow owns the
-    // final state transition, so it can replay its durable record-approval step
-    // without racing a state change performed by this RPC.
-    const nextState = input.action === "approve" || input.action === "wait" ? "awaiting_human_confirmation" : "failed";
+    // Every user decision is recorded while the run remains in the durable
+    // confirmation state. The Workflow owns the terminal state transition and
+    // its D1 mirror, so a lost signal can be retried without a second action.
+    const nextState = "awaiting_human_confirmation";
     const result = { run_id: runId, action: input.action, approval_state: nextApproval, state: nextState, reason: input.reason ? "provided" : null };
     const timestamp = now();
     this.transactionSync(() => {
@@ -828,7 +1065,7 @@ export class EditorialCoordinatorAgent extends Agent<EditorialRuntimeEnv, Editor
         VALUES (${`${runId}:human:${input.idempotency_key}`}, ${runId}, ${input.action}, ${input.idempotency_key}, ${input.payload_hash}, ${safeJson(result)}, ${timestamp})`;
       const updated = this.sql<{ run_id: string }>`UPDATE editorial_phase2_runs SET state = ${nextState}, approval_state = ${nextApproval},
         state_revision = state_revision + 1, updated_at = ${timestamp}
-        WHERE run_id = ${runId} AND state = ${input.action === "wait" ? row.state : "awaiting_human_confirmation"}
+        WHERE run_id = ${runId} AND state = 'awaiting_human_confirmation'
           AND state_revision = ${row.state_revision} RETURNING run_id`;
       if (updated.length !== 1) throw new EditorialRuntimeError("stale_human_action", "human action state CAS failed", 409);
       this.sql`INSERT INTO editorial_phase2_events
@@ -848,18 +1085,17 @@ export class EditorialCoordinatorAgent extends Agent<EditorialRuntimeEnv, Editor
   }
 
   public async onWorkflowError(_workflowName: string, workflowId: string, _error: string): Promise<void> {
-    const row = this.sql<{ run_id: string; state_revision: number }>`SELECT run_id, state_revision FROM editorial_phase2_runs WHERE workflow_id = ${workflowId} LIMIT 1`[0];
-    if (!row) return;
-    this.transactionSync(() => {
-      const updated = this.sql<{ run_id: string }>`UPDATE editorial_phase2_runs SET state = 'failed', approval_state = 'human_action_required',
-        state_revision = state_revision + 1, updated_at = ${now()}
-        WHERE run_id = ${row.run_id} AND state != 'approved_for_phase3' RETURNING run_id`;
-      if (updated.length === 1) {
-        this.sql`INSERT OR IGNORE INTO editorial_phase2_events
-          (run_id, event_type, idempotency_key, payload_hash, summary_json, created_at)
-          VALUES (${row.run_id}, 'workflow_error', ${`workflow-error:${workflowId}`}, 'sha256:workflow-error',
-            ${safeJson({ reason: "workflow_error" })}, ${now()})`;
-      }
+    const row = this.runRow(this.sql<{ run_id: string }>`SELECT run_id FROM editorial_phase2_runs WHERE workflow_id = ${workflowId} LIMIT 1`[0]?.run_id || "");
+    if (!row || row.state === "approved_for_phase3" || row.state === "failed") return;
+    await this.commitWorkflowStep({
+      run_id: row.run_id,
+      step_name: "workflow-error",
+      step_key: `${row.run_id}:workflow-error`,
+      expected_state: row.state,
+      next_state: "failed",
+      approval_state: "human_action_required",
+      terminal_status: "failed",
+      artifacts: [],
     });
   }
 
@@ -927,6 +1163,7 @@ export class EditorialWorkflow extends AgentWorkflow<EditorialCoordinatorAgent, 
       expected_state: "draft_generated",
       next_state: reviewDecision === "block" ? "failed" : reviewDecision === "revise" ? "revision_pending" : "reviewed",
       approval_state: reviewDecision === "block" ? "human_action_required" : "not_required",
+      terminal_status: reviewDecision === "block" ? "failed" : undefined,
       artifacts: [{ kind: "review_report", idempotency_key: `${params.run_id}:review:v1`, producer_role: "editorial_review", producer_version: EDITORIAL_AGENT_VERSIONS.editorial_review, input_artifact_ids: draft.artifact_ids, summary: { decision: reviewDecision, finding_codes: reviewDecision === "pass" ? [] : [reviewDecision === "block" ? "P0_SYNTHETIC_BLOCK" : "P1_SYNTHETIC_REVISE"], changed_block_ids: reviewDecision === "revise" ? ["block_2"] : [] } }],
     }));
     if (reviewDecision === "block") return { state: "failed", approval_state: "human_action_required", artifact_ids: review.artifact_ids };
@@ -947,6 +1184,7 @@ export class EditorialWorkflow extends AgentWorkflow<EditorialCoordinatorAgent, 
         expected_state: "draft_generated",
         next_state: secondDecision === "block" ? "failed" : "reviewed",
         approval_state: secondDecision === "block" ? "human_action_required" : "not_required",
+        terminal_status: secondDecision === "block" ? "failed" : undefined,
         artifacts: [{ kind: "review_report", idempotency_key: `${params.run_id}:review:v2`, producer_role: "editorial_review", producer_version: EDITORIAL_AGENT_VERSIONS.editorial_review, input_artifact_ids: revision.artifact_ids, summary: { decision: secondDecision, finding_codes: secondDecision === "pass" ? [] : ["P1_SECOND_FAILURE"], changed_block_ids: ["block_2"] } }],
       }));
       if (secondDecision === "block") return { state: "failed", approval_state: "human_action_required", artifact_ids: current.artifact_ids };
@@ -969,9 +1207,22 @@ export class EditorialWorkflow extends AgentWorkflow<EditorialCoordinatorAgent, 
       ],
     }));
     await step.do("await-human-confirmation", retry, () => commit({ step_name: "await-human-confirmation", step_key: `${params.run_id}:human-wait`, expected_state: "content_frozen", next_state: "awaiting_human_confirmation", approval_state: "awaiting", artifacts: [] }));
-    const approval = await this.waitForApproval<{ approved: boolean }>(step, { stepName: "human-confirmation", timeout: "7 days" });
-    const approved = await step.do("record-approval", retry, () => coordinator.commitWorkflowStep({ run_id: params.run_id, step_name: "record-approval", step_key: `${params.run_id}:approval`, expected_state: "awaiting_human_confirmation", next_state: approval.approved ? "approved_for_phase3" : "failed", approval_state: approval.approved ? "approved" : "rejected", artifacts: [] }));
-    return { state: approved.state, approval_state: approval.approved ? "approved" : "rejected", artifact_ids: [...plans.artifact_ids, ...approved.artifact_ids] };
+    let approval: { approved: boolean; reason?: string };
+    try {
+      const approvalEvent = await step.waitForEvent("human-confirmation", { type: "approval", timeout: "7 days" });
+      approval = approvalEvent.payload as { approved: boolean; reason?: string };
+    } catch (error) {
+      const reason: "timed_out" | "rejected" = String(error).toLowerCase().includes("timeout") ? "timed_out" : "rejected";
+      const rejected = await step.do("record-rejection", retry, () => coordinator.commitWorkflowStep({ run_id: params.run_id, step_name: "record-approval", step_key: `${params.run_id}:approval`, expected_state: "awaiting_human_confirmation", next_state: "failed", approval_state: reason, terminal_status: "failed", artifacts: [] }));
+      return { state: rejected.state, approval_state: reason, artifact_ids: [...plans.artifact_ids, ...rejected.artifact_ids] };
+    }
+    if (!approval.approved) {
+      const reason: "timed_out" | "rejected" = approval.reason?.toLowerCase().includes("timeout") ? "timed_out" : "rejected";
+      const rejected = await step.do("record-rejection", retry, () => coordinator.commitWorkflowStep({ run_id: params.run_id, step_name: "record-approval", step_key: `${params.run_id}:approval`, expected_state: "awaiting_human_confirmation", next_state: "failed", approval_state: reason, terminal_status: "failed", artifacts: [] }));
+      return { state: rejected.state, approval_state: reason, artifact_ids: [...plans.artifact_ids, ...rejected.artifact_ids] };
+    }
+    const approved = await step.do("record-approval", retry, () => coordinator.commitWorkflowStep({ run_id: params.run_id, step_name: "record-approval", step_key: `${params.run_id}:approval`, expected_state: "awaiting_human_confirmation", next_state: "approved_for_phase3", approval_state: "approved", terminal_status: "completed", artifacts: [] }));
+    return { state: approved.state, approval_state: "approved", artifact_ids: [...plans.artifact_ids, ...approved.artifact_ids] };
   }
 }
 
