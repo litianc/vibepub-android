@@ -104,6 +104,23 @@ test("system retry and cancel fail closed while external side effects need recon
   }
 });
 
+test("unknown database failures are not normalized as publication conflicts", async () => {
+  const source = sourceRow();
+  const current = projectionRow({ state: "failed", run_status: "failed", next_action: "retry", state_revision: 4 });
+  current.source_manifest_hash = await sourceHash(source);
+  const db = actionDb({ source, current });
+  db.batch = async () => {
+    throw new Error("D1_ERROR: storage unavailable");
+  };
+
+  await assert.rejects(
+    projection.applyPublicationAction(db, auth, "run-v3", "retry", "outage-1", "sha256:outage", 4),
+    (error) => error.message === "D1_ERROR: storage unavailable",
+  );
+  assert.equal(db.actions.size, 0);
+  assert.equal(db.events.length, 0);
+});
+
 test("retrying cancel is durable, idempotent, and competes with internal resume by revision", async () => {
   const source = sourceRow();
   const current = projectionRow({

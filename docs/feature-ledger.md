@@ -13,6 +13,7 @@
 
 | 时间 | 功能更新 |
 | --- | --- |
+| 2026-07-20 00:52 CST | Wave 1 将真实 D1 投影竞态的事件触发冲突归一化为可重试的 revision/action 冲突，同时保留未知存储故障并验证无孤儿账本。 |
 | 2026-07-20 00:30 CST | Wave 1 矫正 retrying 状态矩阵，支持受控恢复或取消并保持进度、事件和动作账本的 CAS 幂等。 |
 | 2026-07-20 00:09 CST | Wave 1 follow-up 为未知外部副作用增加受控对账停写态，系统重试与取消在函数和数据库层均 fail-closed。 |
 | 2026-07-19 23:57 CST | Wave 1 follow-up 将发布投影收敛为单一服务端 CAS 写入合同，补齐 v3 source/事件身份保护、人工动作 revision 幂等和 flag-off 零读取，同时保留旧 Illustration/Cover 命名空间兼容。 |

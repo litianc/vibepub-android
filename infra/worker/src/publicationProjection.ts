@@ -710,6 +710,12 @@ async function existingAction(
   return { ...parseJson<Record<string, unknown>>(action.result_json, {}), replayed: true };
 }
 
+function isKnownPublicationActionConflict(error: unknown): boolean {
+  const message = String((error as { message?: unknown })?.message || error);
+  return /UNIQUE constraint failed: publication_run_(actions|events)/i.test(message) ||
+    /publication_run_(action|event)_projection_mismatch/i.test(message);
+}
+
 export async function applyPublicationAction(
   db: D1Database,
   auth: PublicationAuthContext,
@@ -808,7 +814,7 @@ export async function applyPublicationAction(
           runId, auth.userId, auth.workspaceId, revision),
     ]);
   } catch (error) {
-    if (!/unique|constraint/i.test(String((error as { message?: unknown })?.message || error))) throw error;
+    if (!isKnownPublicationActionConflict(error)) throw error;
     const replay = await existingAction(db, { runId, ...auth, idempotencyKey, payloadHash });
     if (replay) return replay;
     const latest = await first<PublicationRunRow>(db, `SELECT * FROM publication_runs WHERE run_id = ? AND user_id = ? AND workspace_id = ? LIMIT 1`, [runId, auth.userId, auth.workspaceId]);
