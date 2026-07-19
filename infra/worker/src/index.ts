@@ -887,29 +887,40 @@ async function upsertTextRecording(
     .run();
 
   if ((updated.meta.changes ?? 0) === 0) {
-    await env.DB.prepare(
-      `
-      INSERT INTO recordings (user_id, filename, r2_key, status, processing_stage, duration_ms, raw_text, article_title, source_type, style_profile_id, style_profile_version, layout_profile_id, layout_profile_version)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `,
-    )
-      .bind(
-        auth.userId,
-        input.filename,
-        input.key,
-        "PROCESSING",
-        "REWRITING",
-        0,
-        input.text,
-        input.titleHint || null,
-        "TEXT",
-        input.profileSelection?.styleProfileId || null,
-        input.profileSelection?.styleProfileVersion || null,
-        input.profileSelection?.layoutProfileId || null,
-        input.profileSelection?.layoutProfileVersion || null,
-      )
-      .run();
+    const values = [
+      auth.userId,
+      auth.workspaceId,
+      input.filename,
+      input.key,
+      "PROCESSING",
+      "REWRITING",
+      0,
+      input.text,
+      input.titleHint || null,
+      "TEXT",
+      input.profileSelection?.styleProfileId || null,
+      input.profileSelection?.styleProfileVersion || null,
+      input.profileSelection?.layoutProfileId || null,
+      input.profileSelection?.layoutProfileVersion || null,
+    ];
+    try {
+      await env.DB.prepare(
+        `
+        INSERT INTO recordings (user_id, workspace_id, filename, r2_key, status, processing_stage, duration_ms, raw_text, article_title, source_type, style_profile_id, style_profile_version, layout_profile_id, layout_profile_version)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `,
+      ).bind(...values).run();
+    } catch (error) {
+      if (!String((error as any)?.message || error).includes("workspace_id")) throw error;
+      await env.DB.prepare(
+        `
+        INSERT INTO recordings (user_id, filename, r2_key, status, processing_stage, duration_ms, raw_text, article_title, source_type, style_profile_id, style_profile_version, layout_profile_id, layout_profile_version)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `,
+      ).bind(...values.filter((_, index) => index !== 1)).run();
+    }
   }
+  await ensureEditorialRecordingScope(env, auth, input.filename);
 }
 
 async function uploadAudio(request: Request, env: Env, ctx: ExecutionContext, auth: AuthContext): Promise<Response> {

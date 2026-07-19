@@ -25,6 +25,32 @@ test("legacy recordings get a deterministic workspace scope and migration can be
   assert.equal(output.trim(), "7:usr_legacy:ws_legacy");
 });
 
+test("text submission scope backfill supports canonical fresh and legacy existing schemas", () => {
+  const canonical = `
+    INSERT INTO users (id, email, password_hash, password_salt, password_iterations, workspace_id)
+    VALUES ('usr_text', 'text@example.test', 'hash', 'salt', 1, 'ws_text');
+    INSERT INTO recordings (id, user_id, workspace_id, filename, r2_key, source_type, status, processing_stage, raw_text)
+    VALUES (42, 'usr_text', 'ws_text', 'text-submit.txt', 'users/usr_text/text-submissions/text-submit.txt', 'TEXT', 'PROCESSING', 'REWRITING', 'Synthetic text');
+    INSERT OR IGNORE INTO editorial_recording_scopes (recording_id, user_id, workspace_id)
+    SELECT id, 'usr_text', 'ws_text' FROM recordings WHERE user_id = 'usr_text' AND filename = 'text-submit.txt';
+    ${versionInsert({ id: "av_text_canonical", userId: "usr_text", workspaceId: "ws_text", recordingId: 42, parentId: null })}
+    SELECT recording_id || ':' || user_id || ':' || workspace_id || ':' ||
+           (SELECT count(*) FROM article_versions WHERE id = 'av_text_canonical')
+    FROM editorial_recording_scopes WHERE recording_id = 42;`;
+  assert.equal(runSql(`${schema}\n${migration}\n${canonical}`).trim(), "42:usr_text:ws_text:1");
+
+  const legacyExisting = `
+    INSERT INTO recordings (id, user_id, filename, r2_key, status)
+    VALUES (8, 'usr_legacy', 'text-submit.txt', 'text/legacy.txt', 'PROCESSING');
+    INSERT OR IGNORE INTO editorial_recording_scopes (recording_id, user_id, workspace_id)
+    SELECT id, 'usr_legacy', 'ws_legacy' FROM recordings WHERE user_id = 'usr_legacy' AND filename = 'text-submit.txt';
+    ${versionInsert({ id: "av_text_legacy", userId: "usr_legacy", workspaceId: "ws_legacy", recordingId: 8, parentId: null })}
+    SELECT recording_id || ':' || user_id || ':' || workspace_id || ':' ||
+           (SELECT count(*) FROM article_versions WHERE id = 'av_text_legacy')
+    FROM editorial_recording_scopes WHERE recording_id = 8;`;
+  assert.equal(runSql(`${legacy}\n${migration}\n${legacyExisting}`).trim(), "8:usr_legacy:ws_legacy:1");
+});
+
 test("old schema without workspace_id remains upload-compatible by contract", () => {
   assert.match(migration, /workspace_id TEXT NOT NULL DEFAULT 'vibepub-dogfood'/);
   const indexSource = execFileSync("rg", ["-n", "insertUploadedRecording|workspace_id", "src/index.ts"], { encoding: "utf8" });
@@ -104,7 +130,7 @@ function runSql(sql) {
   });
 }
 
-function versionInsert({ id, userId, workspaceId, parentId }) {
+function versionInsert({ id, userId, workspaceId, recordingId = 7, parentId }) {
   const quote = value => value === null ? "NULL" : `'${value}'`;
   return `INSERT INTO article_versions
     (id, user_id, workspace_id, article_id, recording_id, version_no, parent_version_id, source,
@@ -112,7 +138,7 @@ function versionInsert({ id, userId, workspaceId, parentId }) {
      selected_title, cover_title_json, claim_ledger_json, visual_plan_json, formatting_skill_id,
      formatting_skill_version, content_html_hash, html_warnings_json, generation_status,
      idempotency_key, payload_hash, created_at)
-    VALUES (${quote(id)}, ${quote(userId)}, ${quote(workspaceId)}, 'article_1', 7, ${parentId ? 2 : 1},
+    VALUES (${quote(id)}, ${quote(userId)}, ${quote(workspaceId)}, 'article_1', ${recordingId}, ${parentId ? 2 : 1},
       ${quote(parentId)}, 'initial', NULL, NULL, 'Synthetic', 'Synthetic body', '{}', '[]', '[]',
       'Synthetic', '[]', '[]', '[]', NULL, NULL, NULL, '[]', 'generated', ${quote(id + '_key')},
       'sha256:synthetic', '2026-07-19T00:00:00Z');`;

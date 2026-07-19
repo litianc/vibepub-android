@@ -866,10 +866,12 @@ test("creates text submission and dispatches mining workflow", async () => {
     assert.equal(putCalls[0].options.customMetadata.layoutProfileId, "wechat_clean_article");
     assert.match(sqlCalls[0], /source_type/);
     assert.match(sqlCalls[1], /source_type/);
-    assert.deepEqual(valueCalls[1].slice(0, 9), [
+    assert.match(sqlCalls[2], /editorial_recording_scopes/);
+    assert.deepEqual(valueCalls[1].slice(0, 10), [
       "default_user",
+      "vibepub-dogfood",
       body.filename,
-    `users/default_user/text-submissions/${body.filename}`,
+      `users/default_user/text-submissions/${body.filename}`,
       "PROCESSING",
       "REWRITING",
       0,
@@ -877,11 +879,17 @@ test("creates text submission and dispatches mining workflow", async () => {
       "文字输入测试",
       "TEXT",
     ]);
-    assert.deepEqual(valueCalls[1].slice(9, 13), [
+    assert.deepEqual(valueCalls[1].slice(10, 14), [
       "style_product_review",
       "2026-07-05",
       "wechat_clean_article",
       "2026-07-05",
+    ]);
+    assert.deepEqual(valueCalls[2], [
+      "default_user",
+      "vibepub-dogfood",
+      "default_user",
+      body.filename,
     ]);
     assert.equal(waitUntilPromises.length, 1);
     await Promise.all(waitUntilPromises);
@@ -895,6 +903,35 @@ test("creates text submission and dispatches mining workflow", async () => {
     target_key: putCalls[0].key,
     user_id: "default_user",
   });
+});
+
+test("keeps text submission compatible before the editorial scope migration", async () => {
+  const sqlCalls = [];
+  const bucket = { async put() {} };
+  const db = {
+    prepare(sql) {
+      sqlCalls.push(sql);
+      return statement({
+        run: async () => {
+          if (sql.includes("editorial_recording_scopes")) throw new Error("no such table: editorial_recording_scopes");
+          return { meta: { changes: sql.includes("UPDATE recordings") ? 0 : 1 } };
+        },
+      });
+    },
+  };
+
+  const response = await worker.fetch(
+    authorizedRequest("https://example.test/api/text-submissions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: "这是一条迁移前仍应接受的合成文字提交。" }),
+    }),
+    createEnv({ DB: db, FILES_BUCKET: bucket }),
+    createExecutionContext(),
+  );
+
+  assert.equal(response.status, 202);
+  assert.match(sqlCalls.at(-1), /editorial_recording_scopes/);
 });
 
 test("creates voice article revision request and dispatches mining workflow with revision key", async () => {
