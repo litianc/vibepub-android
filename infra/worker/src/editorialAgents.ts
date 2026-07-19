@@ -88,6 +88,46 @@ type ArtifactRow = {
   created_at: string;
 };
 
+type OutboxRow = {
+  outbox_id: string;
+  run_id: string;
+  artifact_id: string;
+  user_id: string;
+  workspace_id: string;
+  article_id: string;
+  recording_id: number;
+  kind: EditorialArtifactKind;
+  payload_hash: string;
+  producer_role: EditorialAgentId;
+  producer_version: string;
+  input_artifact_ids_json: string;
+  summary_json: string;
+  storage_ref: string;
+  created_at: string;
+};
+
+type D1RunRow = {
+  run_id: string;
+  user_id: string;
+  workspace_id: string;
+  article_id: string;
+  recording_id: number;
+  payload_hash: string;
+  idempotency_key: string;
+};
+
+type D1ArtifactRow = {
+  artifact_id: string;
+  run_id: string;
+  user_id: string;
+  workspace_id: string;
+  article_id: string;
+  recording_id: number;
+  kind: string;
+  payload_hash: string;
+  storage_ref: string;
+};
+
 type StepRow = {
   step_name: string;
   step_key: string;
@@ -120,6 +160,9 @@ type WorkflowStepResult = {
   state_revision: number;
   artifact_ids: string[];
   replayed: boolean;
+  approval_state?: EditorialAgentState["approval_state"];
+  revision_count?: number;
+  payload_hash?: string;
 };
 
 type HumanActionInput = {
@@ -193,6 +236,124 @@ function parseJson<T>(value: string): T {
 
 function safeJson(value: unknown): string {
   return canonicalJson(value);
+}
+
+function d1IdentityMatchesRun(existing: D1RunRow, run: RunRow): boolean {
+  return existing.run_id === run.run_id
+    && existing.user_id === run.user_id
+    && existing.workspace_id === run.workspace_id
+    && existing.article_id === run.article_id
+    && existing.recording_id === run.recording_id
+    && existing.payload_hash === run.payload_hash
+    && existing.idempotency_key === `run:${run.run_id}`;
+}
+
+function d1IdentityMatchesArtifact(existing: D1ArtifactRow, artifact: OutboxRow): boolean {
+  return existing.artifact_id === artifact.artifact_id
+    && existing.run_id === artifact.run_id
+    && existing.user_id === artifact.user_id
+    && existing.workspace_id === artifact.workspace_id
+    && existing.article_id === artifact.article_id
+    && existing.recording_id === artifact.recording_id
+    && existing.kind === artifact.kind
+    && existing.payload_hash === artifact.payload_hash
+    && existing.storage_ref === artifact.storage_ref;
+}
+
+/**
+ * Mirrors only redacted outbox metadata into the existing Phase 1 D1 tables.
+ * The caller records a DO receipt only after this batch resolves, so a lost
+ * response or D1 failure leaves the same outbox row available for replay.
+ */
+export async function mirrorEditorialOutboxToD1(
+  db: D1Database,
+  run: RunRow,
+  artifacts: readonly OutboxRow[],
+): Promise<void> {
+  try {
+    const existingRun = await db.prepare(
+      "SELECT run_id, user_id, workspace_id, article_id, recording_id, payload_hash, idempotency_key FROM editorial_runs WHERE run_id = ? LIMIT 1",
+    ).bind(run.run_id).first<D1RunRow>();
+    if (existingRun && !d1IdentityMatchesRun(existingRun, run)) {
+      throw new EditorialRuntimeError("editorial_d1_mirror_conflict", "D1 run ownership or payload conflicts", 409);
+    }
+
+    const manifest = parseJson<Record<string, unknown>>(run.manifest_json);
+    const skillPins = (manifest.skill_pins || {}) as Record<string, unknown>;
+    const formattingPin = (skillPins.formatting || {}) as Record<string, unknown>;
+    const statements: D1PreparedStatement[] = [];
+    if (!existingRun) {
+      statements.push(db.prepare(
+        `INSERT INTO editorial_runs
+          (run_id, user_id, workspace_id, article_id, recording_id, schema_version,
+           workflow_version, policy_version, agent_versions_json, skill_pins_json,
+           status, idempotency_key, payload_hash, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?)`,
+      ).bind(
+        run.run_id,
+        run.user_id,
+        run.workspace_id,
+        run.article_id,
+        run.recording_id,
+        EDITORIAL_SCHEMA_VERSION,
+        EDITORIAL_WORKFLOW_VERSION,
+        EDITORIAL_POLICY_VERSION,
+        safeJson(manifest.agent_versions || {}),
+        safeJson(skillPins),
+        `run:${run.run_id}`,
+        run.payload_hash,
+        run.created_at,
+        run.updated_at,
+      ));
+    }
+
+    for (const artifact of artifacts) {
+      const existingArtifact = await db.prepare(
+        `SELECT artifact_id, run_id, user_id, workspace_id, article_id, recording_id,
+                kind, payload_hash, storage_ref
+         FROM editorial_artifacts
+         WHERE artifact_id = ? OR (run_id = ? AND kind = ? AND payload_hash = ?)
+         LIMIT 1`,
+      ).bind(artifact.artifact_id, artifact.run_id, artifact.kind, artifact.payload_hash).first<D1ArtifactRow>();
+      if (existingArtifact) {
+        if (!d1IdentityMatchesArtifact(existingArtifact, artifact)) {
+          throw new EditorialRuntimeError("editorial_d1_mirror_conflict", "D1 artifact ownership or payload conflicts", 409);
+        }
+        continue;
+      }
+      statements.push(db.prepare(
+        `INSERT INTO editorial_artifacts
+          (artifact_id, run_id, user_id, workspace_id, article_id, recording_id,
+           schema_version, kind, producer_agent_role, producer_agent_version,
+           skill_id, skill_version, workflow_version, policy_version,
+           input_artifact_ids_json, payload_hash, storage_ref, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).bind(
+        artifact.artifact_id,
+        artifact.run_id,
+        artifact.user_id,
+        artifact.workspace_id,
+        artifact.article_id,
+        artifact.recording_id,
+        EDITORIAL_SCHEMA_VERSION,
+        artifact.kind,
+        artifact.producer_role,
+        artifact.producer_version,
+        typeof formattingPin.id === "string" ? formattingPin.id : null,
+        typeof formattingPin.version === "string" ? formattingPin.version : null,
+        EDITORIAL_WORKFLOW_VERSION,
+        EDITORIAL_POLICY_VERSION,
+        artifact.input_artifact_ids_json,
+        artifact.payload_hash,
+        artifact.storage_ref,
+        artifact.created_at,
+      ));
+    }
+    if (statements.length > 0) await db.batch(statements);
+  } catch (error) {
+    if (error instanceof EditorialRuntimeError) throw error;
+    throw new EditorialRuntimeError("editorial_d1_mirror_unavailable", "D1 artifact mirror is temporarily unavailable", 503);
+  }
 }
 
 /**
@@ -339,6 +500,31 @@ export class EditorialCoordinatorAgent extends Agent<EditorialRuntimeEnv, Editor
       UNIQUE(run_id, idempotency_key),
       FOREIGN KEY(run_id) REFERENCES editorial_phase2_runs(run_id)
     )`;
+    this.sql`CREATE TABLE IF NOT EXISTS editorial_phase2_outbox (
+      outbox_id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      artifact_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      workspace_id TEXT NOT NULL,
+      article_id TEXT NOT NULL,
+      recording_id INTEGER NOT NULL,
+      kind TEXT NOT NULL,
+      payload_hash TEXT NOT NULL,
+      producer_role TEXT NOT NULL,
+      producer_version TEXT NOT NULL,
+      input_artifact_ids_json TEXT NOT NULL,
+      summary_json TEXT NOT NULL,
+      storage_ref TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      UNIQUE(run_id, artifact_id),
+      FOREIGN KEY(run_id) REFERENCES editorial_phase2_runs(run_id)
+    )`;
+    this.sql`CREATE TABLE IF NOT EXISTS editorial_phase2_outbox_receipts (
+      outbox_id TEXT PRIMARY KEY,
+      d1_payload_hash TEXT NOT NULL,
+      mirrored_at TEXT NOT NULL,
+      FOREIGN KEY(outbox_id) REFERENCES editorial_phase2_outbox(outbox_id)
+    )`;
     this.sql`CREATE TRIGGER IF NOT EXISTS editorial_phase2_artifacts_append_only_update
       BEFORE UPDATE ON editorial_phase2_artifacts BEGIN SELECT RAISE(ABORT, 'editorial_phase2_artifacts_are_append_only'); END`;
     this.sql`CREATE TRIGGER IF NOT EXISTS editorial_phase2_artifacts_append_only_delete
@@ -347,10 +533,62 @@ export class EditorialCoordinatorAgent extends Agent<EditorialRuntimeEnv, Editor
       BEFORE UPDATE ON editorial_phase2_events BEGIN SELECT RAISE(ABORT, 'editorial_phase2_events_are_append_only'); END`;
     this.sql`CREATE TRIGGER IF NOT EXISTS editorial_phase2_events_append_only_delete
       BEFORE DELETE ON editorial_phase2_events BEGIN SELECT RAISE(ABORT, 'editorial_phase2_events_are_append_only'); END`;
+    this.sql`CREATE TRIGGER IF NOT EXISTS editorial_phase2_steps_append_only_update
+      BEFORE UPDATE ON editorial_phase2_steps BEGIN SELECT RAISE(ABORT, 'editorial_phase2_steps_are_append_only'); END`;
+    this.sql`CREATE TRIGGER IF NOT EXISTS editorial_phase2_steps_append_only_delete
+      BEFORE DELETE ON editorial_phase2_steps BEGIN SELECT RAISE(ABORT, 'editorial_phase2_steps_are_append_only'); END`;
+    this.sql`CREATE TRIGGER IF NOT EXISTS editorial_phase2_human_actions_append_only_update
+      BEFORE UPDATE ON editorial_phase2_human_actions BEGIN SELECT RAISE(ABORT, 'editorial_phase2_human_actions_are_append_only'); END`;
+    this.sql`CREATE TRIGGER IF NOT EXISTS editorial_phase2_human_actions_append_only_delete
+      BEFORE DELETE ON editorial_phase2_human_actions BEGIN SELECT RAISE(ABORT, 'editorial_phase2_human_actions_are_append_only'); END`;
+    this.sql`CREATE TRIGGER IF NOT EXISTS editorial_phase2_outbox_append_only_update
+      BEFORE UPDATE ON editorial_phase2_outbox BEGIN SELECT RAISE(ABORT, 'editorial_phase2_outbox_is_append_only'); END`;
+    this.sql`CREATE TRIGGER IF NOT EXISTS editorial_phase2_outbox_append_only_delete
+      BEFORE DELETE ON editorial_phase2_outbox BEGIN SELECT RAISE(ABORT, 'editorial_phase2_outbox_is_append_only'); END`;
+    this.sql`CREATE TRIGGER IF NOT EXISTS editorial_phase2_outbox_receipts_append_only_update
+      BEFORE UPDATE ON editorial_phase2_outbox_receipts BEGIN SELECT RAISE(ABORT, 'editorial_phase2_outbox_receipts_are_append_only'); END`;
+    this.sql`CREATE TRIGGER IF NOT EXISTS editorial_phase2_outbox_receipts_append_only_delete
+      BEFORE DELETE ON editorial_phase2_outbox_receipts BEGIN SELECT RAISE(ABORT, 'editorial_phase2_outbox_receipts_are_append_only'); END`;
   }
 
   private transactionSync<T>(callback: () => T): T {
     return (this as any).ctx.storage.transactionSync(callback);
+  }
+
+  private async flushOutbox(runId: string): Promise<void> {
+    const rows = this.sql<OutboxRow>`
+      SELECT o.outbox_id, o.run_id, o.artifact_id, o.user_id, o.workspace_id, o.article_id,
+             o.recording_id, o.kind, o.payload_hash, o.producer_role, o.producer_version,
+             o.input_artifact_ids_json, o.summary_json, o.storage_ref, o.created_at
+      FROM editorial_phase2_outbox o
+      LEFT JOIN editorial_phase2_outbox_receipts r ON r.outbox_id = o.outbox_id
+      WHERE o.run_id = ${runId} AND r.outbox_id IS NULL
+      ORDER BY o.created_at, o.outbox_id
+    `;
+    if (rows.length === 0) return;
+    const run = this.runRow(runId);
+    if (!run) throw new EditorialRuntimeError("run_not_found", "editorial run not found", 404);
+    const db = (this.env as EditorialRuntimeEnv & { DB?: D1Database }).DB;
+    if (!db) throw new EditorialRuntimeError("editorial_d1_mirror_unavailable", "D1 artifact mirror is not configured", 503);
+    await mirrorEditorialOutboxToD1(db, run, rows);
+    this.transactionSync(() => {
+      for (const row of rows) {
+        this.sql`INSERT OR IGNORE INTO editorial_phase2_outbox_receipts
+          (outbox_id, d1_payload_hash, mirrored_at)
+          VALUES (${row.outbox_id}, ${row.payload_hash}, ${now()})`;
+      }
+    });
+  }
+
+  private d1MirroredArtifactCount(runId: string): number {
+    return Number(this.sql<{ count: number }>`SELECT count(*) AS count FROM editorial_phase2_outbox_receipts r
+      JOIN editorial_phase2_outbox o ON o.outbox_id = r.outbox_id WHERE o.run_id = ${runId}`[0]?.count || 0);
+  }
+
+  private outboxPendingCount(runId: string): number {
+    return Number(this.sql<{ count: number }>`SELECT count(*) AS count FROM editorial_phase2_outbox o
+      LEFT JOIN editorial_phase2_outbox_receipts r ON r.outbox_id = o.outbox_id
+      WHERE o.run_id = ${runId} AND r.outbox_id IS NULL`[0]?.count || 0);
   }
 
   public async startRun(input: EditorialWorkflowParams): Promise<Record<string, unknown>> {
@@ -417,6 +655,32 @@ export class EditorialCoordinatorAgent extends Agent<EditorialRuntimeEnv, Editor
     return this.publicRun(row, false);
   }
 
+  private finalizeWorkflowStep(input: WorkflowStepInput, result: WorkflowStepResult): WorkflowStepResult {
+    const current = this.runRow(input.run_id);
+    if (!current) throw new EditorialRuntimeError("run_not_found", "editorial run not found", 404);
+    if (current.state === result.state && current.state_revision >= result.state_revision) {
+      return { ...result, replayed: true };
+    }
+    if (current.state !== input.expected_state || current.state_revision !== result.state_revision - 1) {
+      throw new EditorialRuntimeError("stale_workflow_step", "workflow state CAS failed", 409);
+    }
+    const timestamp = now();
+    this.transactionSync(() => {
+      const updated = this.sql<{ run_id: string }>`UPDATE editorial_phase2_runs
+        SET state = ${result.state}, state_revision = state_revision + 1,
+            approval_state = ${result.approval_state || current.approval_state},
+            revision_count = ${result.revision_count ?? current.revision_count}, updated_at = ${timestamp}
+        WHERE run_id = ${input.run_id} AND state = ${input.expected_state} AND state_revision = ${current.state_revision}
+        RETURNING run_id`;
+      if (updated.length !== 1) throw new EditorialRuntimeError("stale_workflow_step", "workflow state CAS failed", 409);
+      this.sql`INSERT INTO editorial_phase2_events
+        (run_id, event_type, idempotency_key, payload_hash, summary_json, created_at)
+        VALUES (${input.run_id}, 'workflow_step', ${`step:${input.step_key}`}, ${result.payload_hash || "sha256:editorial-step"},
+          ${safeJson({ step_name: input.step_name, next_state: result.state, artifact_count: result.artifact_ids.length })}, ${timestamp})`;
+    });
+    return result;
+  }
+
   public async commitWorkflowStep(input: WorkflowStepInput): Promise<WorkflowStepResult> {
     this.ensureSchema();
     const runId = validateOpaque(input.run_id, "run_id");
@@ -425,7 +689,20 @@ export class EditorialCoordinatorAgent extends Agent<EditorialRuntimeEnv, Editor
       FROM editorial_phase2_steps WHERE run_id = ${runId} AND step_key = ${input.step_key} LIMIT 1`[0];
     if (existingStep) {
       if (existingStep.payload_hash !== payloadHash) throw new EditorialRuntimeError("idempotency_conflict", "workflow step key has another payload", 409);
-      return { ...parseJson<WorkflowStepResult>(existingStep.result_json), replayed: true };
+      const preparedResult = parseJson<WorkflowStepResult>(existingStep.result_json);
+      await this.flushOutbox(runId);
+      const finalized = this.finalizeWorkflowStep(input, preparedResult);
+      this.setState({
+        schema_version: EDITORIAL_SCHEMA_VERSION,
+        run_id: runId,
+        state: finalized.state,
+        state_revision: finalized.state_revision,
+        approval_state: finalized.approval_state || this.runRow(runId)?.approval_state || "not_required",
+        revision_count: finalized.revision_count ?? (this.runRow(runId)?.revision_count || 0),
+        workflow_id: this.runRow(runId)?.workflow_id || undefined,
+        artifact_count: this.artifactCount(runId),
+      });
+      return finalized;
     }
     const row = this.runRow(runId);
     if (!row) throw new EditorialRuntimeError("run_not_found", "editorial run not found", 404);
@@ -460,19 +737,27 @@ export class EditorialCoordinatorAgent extends Agent<EditorialRuntimeEnv, Editor
     }
     const timestamp = now();
     const artifactIds: string[] = [];
-    const result = this.transactionSync(() => {
+    const result: WorkflowStepResult = this.transactionSync(() => {
       for (const artifact of input.artifacts) {
         const prepared = preparedArtifacts.find(item => item.artifact === artifact)!;
         const artifactId = prepared.artifactId;
         const existingArtifact = this.sql<{ artifact_id: string }>`SELECT artifact_id FROM editorial_phase2_artifacts
           WHERE run_id = ${runId} AND idempotency_key = ${artifact.idempotency_key} LIMIT 1`[0];
         if (!existingArtifact) {
+          const summaryJson = safeJson(redactArtifactSummary(artifact.summary));
           this.sql`INSERT INTO editorial_phase2_artifacts
             (artifact_id, run_id, kind, idempotency_key, payload_hash, producer_role, producer_version,
              input_artifact_ids_json, summary_json, created_at)
             VALUES (${artifactId}, ${runId}, ${artifact.kind}, ${artifact.idempotency_key}, ${prepared.payloadHash},
               ${artifact.producer_role}, ${artifact.producer_version}, ${safeJson(artifact.input_artifact_ids || [])},
-              ${safeJson(redactArtifactSummary(artifact.summary))}, ${timestamp})`;
+              ${summaryJson}, ${timestamp})`;
+          this.sql`INSERT INTO editorial_phase2_outbox
+            (outbox_id, run_id, artifact_id, user_id, workspace_id, article_id, recording_id, kind,
+             payload_hash, producer_role, producer_version, input_artifact_ids_json, summary_json, storage_ref, created_at)
+            VALUES (${`${runId}:outbox:${artifactId}`}, ${runId}, ${artifactId}, ${row.user_id}, ${row.workspace_id},
+              ${row.article_id}, ${row.recording_id}, ${artifact.kind}, ${prepared.payloadHash}, ${artifact.producer_role},
+              ${artifact.producer_version}, ${safeJson(artifact.input_artifact_ids || [])}, ${summaryJson},
+              ${`do://editorial-phase2/${runId}/${artifactId}`}, ${timestamp})`;
         }
         artifactIds.push(artifactId);
       }
@@ -481,36 +766,28 @@ export class EditorialCoordinatorAgent extends Agent<EditorialRuntimeEnv, Editor
         state_revision: row.state_revision + 1,
         artifact_ids: artifactIds,
         replayed: false,
+        approval_state: input.approval_state || row.approval_state,
+        revision_count: input.revision_count ?? row.revision_count,
+        payload_hash: payloadHash,
       };
       this.sql`INSERT INTO editorial_phase2_steps
         (run_id, step_name, step_key, payload_hash, result_json, created_at)
         VALUES (${runId}, ${input.step_name}, ${input.step_key}, ${payloadHash}, ${safeJson(stepResult)}, ${timestamp})`;
-      const updated = this.sql<{ run_id: string }>`UPDATE editorial_phase2_runs
-        SET state = ${input.next_state}, state_revision = state_revision + 1,
-            approval_state = ${input.approval_state || row.approval_state},
-            revision_count = ${input.revision_count ?? row.revision_count}, updated_at = ${timestamp}
-        WHERE run_id = ${runId} AND state = ${input.expected_state} AND state_revision = ${row.state_revision}
-        RETURNING run_id`;
-      if (updated.length !== 1) throw new EditorialRuntimeError("stale_workflow_step", "workflow state CAS failed", 409);
-      this.sql`INSERT INTO editorial_phase2_events
-        (run_id, event_type, idempotency_key, payload_hash, summary_json, created_at)
-        VALUES (${runId}, 'workflow_step', ${`step:${input.step_key}`}, ${payloadHash},
-          ${safeJson({ step_name: input.step_name, next_state: input.next_state, artifact_count: artifactIds.length })}, ${timestamp})`;
       return stepResult;
     });
-    {
-      this.setState({
-        schema_version: EDITORIAL_SCHEMA_VERSION,
-        run_id: runId,
-        state: input.next_state,
-        state_revision: row.state_revision + 1,
-        approval_state: input.approval_state || row.approval_state,
-        revision_count: input.revision_count ?? row.revision_count,
-        workflow_id: this.runRow(runId)?.workflow_id || undefined,
-        artifact_count: this.artifactCount(runId),
-      });
-      return result;
-    }
+    await this.flushOutbox(runId);
+    const finalized = this.finalizeWorkflowStep({ ...input, run_id: runId }, result);
+    this.setState({
+      schema_version: EDITORIAL_SCHEMA_VERSION,
+      run_id: runId,
+      state: finalized.state,
+      state_revision: finalized.state_revision,
+      approval_state: finalized.approval_state || row.approval_state,
+      revision_count: finalized.revision_count ?? row.revision_count,
+      workflow_id: this.runRow(runId)?.workflow_id || undefined,
+      artifact_count: this.artifactCount(runId),
+    });
+    return finalized;
   }
 
   public async recordHumanAction(input: HumanActionInput): Promise<Record<string, unknown>> {
@@ -528,14 +805,15 @@ export class EditorialCoordinatorAgent extends Agent<EditorialRuntimeEnv, Editor
     }
     const row = this.runRow(runId);
     if (!row) throw new EditorialRuntimeError("run_not_found", "editorial run not found", 404);
-    if (input.action !== "wait" && row.state !== "awaiting_human_confirmation") {
-      if (row.approval_state === "approved" || row.approval_state === "rejected" || row.approval_state === "timed_out") {
+    if (row.state !== "awaiting_human_confirmation") {
+      if (input.action !== "wait" && (row.approval_state === "approved" || row.approval_state === "rejected" || row.approval_state === "timed_out")) {
         return { run_id: runId, action: input.action, ignored: true, replayed: true };
       }
       throw new EditorialRuntimeError("human_action_not_ready", "run is not waiting for human confirmation", 409);
     }
-    if (input.action !== "wait" && row.approval_state !== "awaiting") {
-      return { run_id: runId, action: input.action, ignored: true, replayed: true };
+    if (row.approval_state !== "awaiting") {
+      if (input.action !== "wait") return { run_id: runId, action: input.action, ignored: true, replayed: true };
+      throw new EditorialRuntimeError("human_action_not_ready", "run is not waiting for human confirmation", 409);
     }
     const nextApproval = input.action === "approve" ? "approved" : input.action === "reject" ? "rejected" : input.action === "timeout" ? "timed_out" : "awaiting";
     // Approval is recorded before the Workflow resumes. The Workflow owns the
@@ -608,6 +886,8 @@ export class EditorialCoordinatorAgent extends Agent<EditorialRuntimeEnv, Editor
       workflow_version: EDITORIAL_WORKFLOW_VERSION,
       policy_version: EDITORIAL_POLICY_VERSION,
       artifact_count: this.artifactCount(row.run_id),
+      d1_mirrored_artifact_count: this.d1MirroredArtifactCount(row.run_id),
+      outbox_pending_count: this.outboxPendingCount(row.run_id),
       pins: parseJson<Record<string, unknown>>(row.manifest_json),
       replayed,
     };

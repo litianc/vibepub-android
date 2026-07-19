@@ -82,8 +82,22 @@ finite exponential retries. It writes synthetic `ArticleBrief`, `ArticleDraft`,
 `ReviewReport`, `FrozenArticleVersion`, `IllustrationPlan`, and `CoverPlan`
 envelopes. Duplicate step/artifact keys replay the original result; a different
 payload returns an idempotency conflict. Artifact parents must already exist or
-be created in the same step. `transactionSync()` keeps state CAS, step, event,
-and artifact writes atomic, and append-only triggers protect artifacts/events.
+be created in the same step. `transactionSync()` first atomically prepares the
+DO artifact, durable outbox, and immutable step. The stable Workflow step then
+mirrors the outbox to the existing Phase 1 `editorial_runs`/`editorial_artifacts`
+D1 tables and only after that succeeds performs the state CAS and event append.
+Append-only triggers protect artifacts, steps, events, human-action history,
+outbox rows, and D1 receipt metadata. A step or human confirmation is never
+edited in place; retries create no replacement row.
+
+The D1 mirror stores only ownership, version pins, hashes, and `storage_ref`;
+it never stores article text, prompts, tokens, or image bytes. A D1 batch
+failure leaves the DO state at its prior revision and keeps the outbox row
+pending. A later stable-step retry rechecks the same run/artifact hash and
+ownership, inserts at most one D1 row, records one DO receipt, and then permits
+the next state. Frozen/visual plans therefore cannot reach the human wait or
+approval state without a reconciled D1 mirror. No new D1 table or migration is
+introduced by Phase 2.
 
 The server-owned state path is:
 
@@ -93,7 +107,10 @@ P0 and a second failed P1 review end in `failed` with
 `human_action_required`; a single P1 revision creates a new draft artifact and
 re-enters review. Human approval is durable and concurrent confirmation is
 accepted once. Approval only authorizes a later phase and has no publication
-side effect. Eviction/restart resumes from the stored run/step ledger.
+side effect. User human actions are valid only while the server-owned state is
+`awaiting_human_confirmation`; the Workflow's internal await step is the only
+path that establishes that state. Eviction/restart resumes from the stored
+run/step/outbox ledger.
 
 The `EDITORIAL_WORKFLOW_V2` flag defaults to `false`. Even when enabled, a run
 must match the server-side `EDITORIAL_WORKFLOW_V2_ALLOWLIST` pair
