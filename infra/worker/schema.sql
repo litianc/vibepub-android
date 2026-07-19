@@ -121,7 +121,8 @@ CREATE TABLE editorial_recording_scopes (
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (recording_id, user_id, workspace_id),
     UNIQUE (recording_id, user_id),
-    FOREIGN KEY (recording_id) REFERENCES recordings(id),
+    -- This row is retained as an editorial audit tombstone after the recording
+    -- projection is deleted, so it must not depend on recordings existing.
     FOREIGN KEY (user_id) REFERENCES users(id)
 );
 
@@ -217,6 +218,7 @@ CREATE TABLE editorial_version_states (
     recording_id INTEGER NOT NULL,
     state TEXT NOT NULL CHECK (state IN ('draft_generated', 'review_pending', 'reviewed', 'revision_pending', 'content_frozen', 'visuals_generating', 'rendering', 'visual_qa', 'draft_sync', 'completed', 'failed')),
     state_revision INTEGER NOT NULL DEFAULT 0 CHECK (state_revision >= 0),
+    transition_request_id TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(version_id, user_id, workspace_id, article_id, recording_id),

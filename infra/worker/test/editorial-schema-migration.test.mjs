@@ -17,6 +17,7 @@ test("canonical schema plus migration is fresh-safe and re-applicable", () => {
     "editorial_version_states",
   ]);
   assert.doesNotMatch(migration, /ALTER\s+TABLE\s+recordings\s+ADD\s+COLUMN\s+workspace_id/i);
+  assert.deepEqual(triggerNames(`${schema}\n${migration}\n${migration}`), expectedEditorialTriggers);
 });
 
 test("legacy recordings get a deterministic workspace scope and migration can be retried", () => {
@@ -41,6 +42,59 @@ test("SQLite composite ownership and append-only triggers reject cross-scope and
     ${versionInsert({ id: "av_child", userId: "usr_other", workspaceId: "ws_other", parentId: "av_parent" })}`));
   assert.throws(() => runSql(`${legacy}\n${migration}\n${valid}\nUPDATE article_versions SET body = 'changed' WHERE id = 'av_parent';`));
 });
+
+test("recording deletion keeps the editorial audit tombstone and immutable history", () => {
+  const version = versionInsert({ id: "av_delete", userId: "usr_legacy", workspaceId: "ws_legacy", parentId: null });
+  const auditRows = `
+    INSERT INTO editorial_reviews
+      (id, user_id, workspace_id, article_id, recording_id, input_version_id, findings_json, decision,
+       producer_role, producer_version, idempotency_key, payload_hash)
+    VALUES ('review_delete', 'usr_legacy', 'ws_legacy', 'article_1', 7, 'av_delete', '[]', 'pass',
+            'editorial_review', 'editorial-review.worker.v1', 'review_delete_key', 'sha256:review');
+    INSERT INTO visual_plans
+      (id, user_id, workspace_id, article_id, recording_id, version_id, items_json, idempotency_key, payload_hash)
+    VALUES ('visual_delete', 'usr_legacy', 'ws_legacy', 'article_1', 7, 'av_delete', '[]', 'visual_delete_key', 'sha256:visual');
+    INSERT INTO editorial_version_states
+      (version_id, user_id, workspace_id, article_id, recording_id, state, state_revision)
+    VALUES ('av_delete', 'usr_legacy', 'ws_legacy', 'article_1', 7, 'draft_generated', 0);
+    INSERT INTO editorial_state_transition_requests
+      (id, version_id, user_id, workspace_id, article_id, recording_id, from_state, to_state,
+       expected_revision, result_revision, idempotency_key, payload_hash)
+    VALUES ('transition_delete', 'av_delete', 'usr_legacy', 'ws_legacy', 'article_1', 7,
+            'draft_generated', 'review_pending', 0, 1, 'transition_delete_key', 'sha256:transition');
+    DELETE FROM recordings WHERE id = 7;
+    SELECT (SELECT count(*) FROM recordings) || ':' ||
+           (SELECT count(*) FROM editorial_recording_scopes WHERE recording_id = 7) || ':' ||
+           (SELECT count(*) FROM article_versions WHERE id = 'av_delete') || ':' ||
+           (SELECT count(*) FROM editorial_reviews WHERE id = 'review_delete') || ':' ||
+           (SELECT count(*) FROM visual_plans WHERE id = 'visual_delete') || ':' ||
+           (SELECT count(*) FROM editorial_state_transition_requests WHERE id = 'transition_delete');`;
+  assert.equal(runSql(`${legacy}\n${migration}\n${version}\n${auditRows}`).trim(), "0:1:1:1:1:1");
+});
+
+test("legacy migration has the same append-only trigger contract", () => {
+  assert.deepEqual(triggerNames(`${legacy}\n${migration}\n${migration}`), expectedEditorialTriggers);
+});
+
+const expectedEditorialTriggers = [
+  "article_versions_append_only_delete",
+  "article_versions_append_only_update",
+  "editorial_artifacts_append_only_delete",
+  "editorial_artifacts_append_only_update",
+  "editorial_reviews_append_only_delete",
+  "editorial_reviews_append_only_update",
+  "editorial_runs_append_only_delete",
+  "editorial_runs_append_only_update",
+  "editorial_state_transition_requests_append_only_delete",
+  "editorial_state_transition_requests_append_only_update",
+  "editorial_version_states_immutable_snapshot",
+  "visual_plans_append_only_delete",
+  "visual_plans_append_only_update",
+];
+
+function triggerNames(sql) {
+  return runSql(`${sql}\nSELECT name FROM sqlite_master WHERE type = 'trigger' AND (name LIKE 'article_versions_%' OR name LIKE 'editorial_%' OR name LIKE 'visual_plans_%') ORDER BY name;`).split("\n").filter(Boolean);
+}
 
 function runSql(sql) {
   return execFileSync("sqlite3", [":memory:"], {

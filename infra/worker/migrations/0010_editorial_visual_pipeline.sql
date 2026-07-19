@@ -1,6 +1,8 @@
 -- This migration is intentionally additive and re-runnable.
 -- Existing databases may not have recordings.workspace_id; the scope table is the
 -- compatibility source for the editorial contract and avoids conditional ALTER TABLE.
+-- It deliberately has no FK back to recordings: deleting a recording removes the
+-- latest-result projection while this row remains as the editorial audit tombstone.
 
 CREATE TABLE IF NOT EXISTS editorial_recording_scopes (
   recording_id INTEGER NOT NULL,
@@ -9,7 +11,6 @@ CREATE TABLE IF NOT EXISTS editorial_recording_scopes (
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (recording_id, user_id, workspace_id),
   UNIQUE (recording_id, user_id),
-  FOREIGN KEY (recording_id) REFERENCES recordings(id),
   FOREIGN KEY (user_id) REFERENCES users(id)
 );
 
@@ -106,6 +107,7 @@ CREATE TABLE IF NOT EXISTS editorial_version_states (
   recording_id INTEGER NOT NULL,
   state TEXT NOT NULL CHECK (state IN ('draft_generated', 'review_pending', 'reviewed', 'revision_pending', 'content_frozen', 'visuals_generating', 'rendering', 'visual_qa', 'draft_sync', 'completed', 'failed')),
   state_revision INTEGER NOT NULL DEFAULT 0 CHECK (state_revision >= 0),
+  transition_request_id TEXT,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   UNIQUE(version_id, user_id, workspace_id, article_id, recording_id),
@@ -241,4 +243,22 @@ CREATE TRIGGER IF NOT EXISTS editorial_artifacts_append_only_delete
 BEFORE DELETE ON editorial_artifacts
 BEGIN
   SELECT RAISE(ABORT, 'editorial_artifacts_append_only');
+END;
+
+CREATE TRIGGER IF NOT EXISTS editorial_version_states_immutable_snapshot
+BEFORE UPDATE OF version_id, user_id, workspace_id, article_id, recording_id ON editorial_version_states
+BEGIN
+  SELECT RAISE(ABORT, 'editorial_version_state_identity_immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS editorial_state_transition_requests_append_only_update
+BEFORE UPDATE ON editorial_state_transition_requests
+BEGIN
+  SELECT RAISE(ABORT, 'editorial_state_transition_requests_append_only');
+END;
+
+CREATE TRIGGER IF NOT EXISTS editorial_state_transition_requests_append_only_delete
+BEFORE DELETE ON editorial_state_transition_requests
+BEGIN
+  SELECT RAISE(ABORT, 'editorial_state_transition_requests_append_only');
 END;

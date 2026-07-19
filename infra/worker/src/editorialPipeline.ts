@@ -355,23 +355,33 @@ async function transitionVersionState(
   try {
     const update = env.DB.prepare(
       `UPDATE editorial_version_states
-       SET state = ?, state_revision = state_revision + 1, updated_at = ?
-       WHERE version_id = ? AND user_id = ? AND workspace_id = ? AND state = ? AND state_revision = ?`,
-    ).bind(normalizedToState, now, version.id, auth.userId, auth.workspaceId, current.state, expectedRevision);
+       SET state = ?, state_revision = state_revision + 1, transition_request_id = ?, updated_at = ?
+       WHERE version_id = ? AND user_id = ? AND workspace_id = ? AND state = ? AND state_revision = ?
+         AND transition_request_id IS NULL`,
+    ).bind(normalizedToState, requestId, now, version.id, auth.userId, auth.workspaceId, current.state, expectedRevision);
     const insert = env.DB.prepare(
       `INSERT INTO editorial_state_transition_requests
        (id, version_id, user_id, workspace_id, article_id, recording_id, from_state, to_state,
         expected_revision, result_revision, idempotency_key, payload_hash, created_at)
        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
        WHERE EXISTS (SELECT 1 FROM editorial_version_states
-         WHERE version_id = ? AND user_id = ? AND workspace_id = ? AND state = ? AND state_revision = ?)`,
+         WHERE version_id = ? AND user_id = ? AND workspace_id = ? AND state = ? AND state_revision = ?
+           AND transition_request_id = ?)`,
     ).bind(
       requestId, version.id, auth.userId, auth.workspaceId, version.article_id, version.recording_id,
       current.state, normalizedToState, expectedRevision, resultRevision, payload.idempotency_key, payloadHash, now,
-      version.id, auth.userId, auth.workspaceId, normalizedToState, resultRevision,
+      version.id, auth.userId, auth.workspaceId, normalizedToState, resultRevision, requestId,
     );
-    const results = await env.DB.batch([update, insert]);
-    if ((results[0]?.meta?.changes ?? 0) !== 1 || (results[1]?.meta?.changes ?? 0) !== 1) {
+    const clearMarker = env.DB.prepare(
+      `UPDATE editorial_version_states
+       SET transition_request_id = NULL
+       WHERE version_id = ? AND user_id = ? AND workspace_id = ? AND state = ? AND state_revision = ?
+         AND transition_request_id = ?`,
+    ).bind(version.id, auth.userId, auth.workspaceId, normalizedToState, resultRevision, requestId);
+    const results = await env.DB.batch([update, insert, clearMarker]);
+    if ((results[0]?.meta?.changes ?? 0) !== 1 ||
+      (results[1]?.meta?.changes ?? 0) !== 1 ||
+      (results[2]?.meta?.changes ?? 0) !== 1) {
       return editorialJson({ error: "state_revision_conflict" }, 409);
     }
   } catch (error) {

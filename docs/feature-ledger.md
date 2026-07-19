@@ -14,6 +14,8 @@
 | 时间 | 功能更新 |
 | --- | --- |
 | 2026-07-19 13:27 CST | 图文发布流水线 Phase 1 follow-up 将版本/审核写入收敛到受信 Agent 内部路由，新增不可伪造的 RunManifest/ArtifactEnvelope、状态 CAS 与可重跑的旧录音 scope 迁移兼容。 |
+| 2026-07-19 13:47 CST | 图文发布流水线 Phase 1 follow-up-v2 为状态 CAS 写入增加事务内 transition marker，阻止陈旧并发请求留下孤儿 transition。 |
+| 2026-07-19 13:55 CST | 图文发布流水线 Phase 1 follow-up-v2 补齐录音删除后的审计墓碑策略、0010/canonical trigger parity 与状态 CAS 三语句完整性校验。 |
 | 2026-07-17 16:53 CST | 新增图文发布流水线 Phase 1 的不可变文章版本、独立审核 finding、按 block 绑定的 VisualPlan、统一状态机和认证用户幂等 API，为后续安全审核与视觉生成保留可追溯快照。 |
 | 2026-07-13 22:53 CST | WritingAgent 安全规范化支持完整 HTML5 命名字符引用及嵌套实体恢复，避免版权符号、标点和重音字符显示为实体字面量。 |
 | 2026-07-13 22:32 CST | WritingAgent 排版注册表升级为可替换的完整 Skill adapter，并修复合法 HTML 实体在安全规范化时被重复转义的问题。 |

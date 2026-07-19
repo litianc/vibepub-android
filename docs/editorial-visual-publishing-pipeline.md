@@ -12,6 +12,8 @@ Phase 1 establishes the durable content contract for the review and visual publi
 
 All three tables have composite ownership foreign keys and append-only update/delete triggers. The existing `recordings` row remains the latest-result projection and now carries `workspace_id` for new uploads and version ownership checks.
 
+Deleting a recording keeps the Android/Worker delete contract: the `recordings` projection and associated R2 objects are removed, so the item disappears from the user's list. `editorial_recording_scopes` deliberately has no FK back to `recordings`; its retained row is the recording audit tombstone that keeps ArticleVersion, Review, VisualPlan, run, and transition ownership valid after deletion. Those editorial rows remain append-only and are never deleted as a side effect of recording cleanup.
+
 ## State Machine
 
 The fast path is:
@@ -48,7 +50,7 @@ Version creation assigns the next version number from the scoped append-only his
 
 The initial request must include `article_id`, `recording_id`, `source=initial`, title, body, and a complete snapshot payload. Revisions must include `source=revision` and the parent version ID. A chart visual must include stable `block_id`, `aspect_ratio`, `alt`, and `data_provenance`.
 
-`generation_status` is server-owned and starts at `generated`; it cannot be supplied by a caller. The durable state row starts at `draft_generated`. Coordinator transitions require the current `state_revision`, validate the allowlisted state machine, and use a D1 batch CAS. Replaying the same transition key/payload returns the original result; changing the payload returns `409 idempotency_conflict`. Frozen content cannot transition back to a draft state.
+`generation_status` is server-owned and starts at `generated`; it cannot be supplied by a caller. The durable state row starts at `draft_generated`. Coordinator transitions require the current `state_revision`, validate the allowlisted state machine, and use a D1 batch CAS. The CAS update writes an opaque `transition_request_id` marker into the state row; the transition insert is conditional on that exact marker and the final batch statement clears it. A stale update therefore cannot insert a transition merely because another request already reached the target state, and the D1 batch keeps the state and transition write atomic. Replaying the same transition key/payload returns the original result; changing the payload returns `409 idempotency_conflict`. Frozen content cannot transition back to a draft state.
 
 The minimal `RunManifest` and `ArtifactEnvelope` contracts pin workflow, policy, agent, and skill versions. They are schema/types only in this phase; no arbitrary scripts or dynamic agents are executed.
 

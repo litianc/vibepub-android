@@ -241,11 +241,56 @@ test("state transitions use CAS, are idempotent, and cannot rewrite a frozen ver
   assert.equal((await transition({ to_state: "reviewed", expected_revision: 0, idempotency_key: "t-race" })).status, 409);
   assert.equal((await transition({ to_state: "reviewed", expected_revision: 1, idempotency_key: "t-2" })).status, 201);
   assert.equal((await transition({ to_state: "content_frozen", expected_revision: 2, idempotency_key: "t-3" })).status, 201);
+  const beforeStaleReplay = {
+    state: db.stateRows[0].state,
+    revision: db.stateRows[0].state_revision,
+    transitions: db.transitionRows.length,
+  };
+  const staleAfterTargetExists = await transition({ to_state: "content_frozen", expected_revision: 2, idempotency_key: "t-stale-after-target" });
+  assert.equal(staleAfterTargetExists.status, 409);
+  assert.deepEqual(
+    { state: db.stateRows[0].state, revision: db.stateRows[0].state_revision, transitions: db.transitionRows.length },
+    beforeStaleReplay,
+  );
+  assert.equal(db.transitionRows.some(row => row.idempotency_key === "t-stale-after-target"), false);
   const invalid = await transition({ to_state: "draft_generated", expected_revision: 3, idempotency_key: "t-4" });
   assert.equal(invalid.status, 409);
   assert.equal(db.stateRows[0].state, "content_frozen");
   assert.equal(db.stateRows[0].state_revision, 3);
   assert.equal(db.transitionRows.length, 3);
+});
+
+test("a stale CAS cannot insert a transition after a concurrent winner reaches the target", async () => {
+  const db = editorialDb();
+  const env = { DB: db };
+  const create = await pipeline.handleEditorialInternalRoute(
+    internalRequest("/api/internal/editorial/versions", fixture.version), env,
+    new URL("https://example.test/api/internal/editorial/versions"),
+  );
+  assert.equal(create.status, 201);
+  const versionId = (await create.json()).version.id;
+  const transitionUrl = `/api/internal/editorial/versions/${versionId}/transition`;
+  async function transition(body) {
+    return pipeline.handleEditorialInternalRoute(
+      internalRequest(transitionUrl, body), env,
+      new URL(`https://example.test${transitionUrl}`),
+    );
+  }
+  assert.equal((await transition({ to_state: "review_pending", expected_revision: 0, idempotency_key: "race-1" })).status, 201);
+  assert.equal((await transition({ to_state: "reviewed", expected_revision: 1, idempotency_key: "race-2" })).status, 201);
+  const transitionCount = db.transitionRows.length;
+  db.beforeBatch = () => {
+    const state = db.stateRows[0];
+    state.state = "content_frozen";
+    state.state_revision = 3;
+  };
+  const stale = await transition({ to_state: "content_frozen", expected_revision: 2, idempotency_key: "race-stale" });
+  assert.equal(stale.status, 409);
+  assert.deepEqual(
+    { state: db.stateRows[0].state, revision: db.stateRows[0].state_revision, transitions: db.transitionRows.length, marker: db.stateRows[0].transition_request_id },
+    { state: "content_frozen", revision: 3, transitions: transitionCount, marker: null },
+  );
+  assert.equal(db.transitionRows.some(row => row.idempotency_key === "race-stale"), false);
 });
 
 test("migration contains composite ownership references and append-only guards", async () => {
@@ -256,6 +301,8 @@ test("migration contains composite ownership references and append-only guards",
   assert.match(migration, /article_versions_append_only_update/);
   assert.match(migration, /editorial_reviews_append_only_delete/);
   assert.match(migration, /UNIQUE\(user_id, workspace_id, article_id, version_no\)/);
+  assert.match(migration, /transition_request_id TEXT/);
+  assert.doesNotMatch(migration, /FOREIGN KEY \(recording_id\) REFERENCES recordings\(id\)/);
 });
 
 function request(url, body) {
@@ -309,6 +356,7 @@ function editorialDb() {
     versionRows: [],
     stateRows: [],
     transitionRows: [],
+    beforeBatch: null,
     reviewRows: [],
     visualRows: [],
     prepare(sql) {
@@ -324,6 +372,9 @@ function editorialDb() {
       };
     },
     batch(statements) {
+      const beforeBatch = db.beforeBatch;
+      db.beforeBatch = null;
+      beforeBatch?.();
       const results = statements.map(statement => {
         try { return runBatchStatement(db, statement.sql, statement.values); }
             catch (error) { throw error; }
@@ -385,7 +436,8 @@ function allRows(db, sql, values) {
   }
   if (sql.includes("FROM editorial_version_states")) {
     const [versionId, userId, workspaceId] = values;
-    return db.stateRows.filter(row => row.version_id === versionId && row.user_id === userId && row.workspace_id === workspaceId);
+    return db.stateRows.filter(row => row.version_id === versionId && row.user_id === userId && row.workspace_id === workspaceId)
+      .map(row => ({ ...row }));
   }
   if (sql.includes("FROM editorial_state_transition_requests")) {
     const [versionId, userId, workspaceId, key] = values;
@@ -429,7 +481,7 @@ function insertRow(db, sql, values) {
   if (sql.includes("INSERT INTO editorial_version_states")) {
     const row = {
       version_id: values[0], user_id: values[1], workspace_id: values[2], article_id: values[3], recording_id: values[4],
-      state: values[5], state_revision: 0, created_at: values[6], updated_at: values[7],
+      state: values[5], state_revision: 0, transition_request_id: null, created_at: values[6], updated_at: values[7],
     };
     if (db.stateRows.some(existing => existing.version_id === row.version_id)) throw new Error("UNIQUE");
     db.stateRows.push(row);
@@ -442,16 +494,26 @@ function runBatchStatement(db, sql, values) {
   if (sql.includes("INSERT INTO article_versions") || sql.includes("INSERT INTO editorial_version_states")) {
     return { meta: { changes: insertRow(db, sql, values) } };
   }
-  if (sql.includes("UPDATE editorial_version_states")) {
-    const [state, , versionId, userId, workspaceId, fromState, expectedRevision] = values;
-    const row = db.stateRows.find(item => item.version_id === versionId && item.user_id === userId && item.workspace_id === workspaceId && item.state === fromState && item.state_revision === expectedRevision);
+  if (sql.includes("SET transition_request_id = NULL")) {
+    const [versionId, userId, workspaceId, state, revision, requestId] = values;
+    const row = db.stateRows.find(item => item.version_id === versionId && item.user_id === userId && item.workspace_id === workspaceId &&
+      item.state === state && item.state_revision === revision && item.transition_request_id === requestId);
     if (!row) return { meta: { changes: 0 } };
+    row.transition_request_id = null;
+    return { meta: { changes: 1 } };
+  }
+  if (sql.includes("UPDATE editorial_version_states")) {
+    const [state, requestId, , versionId, userId, workspaceId, fromState, expectedRevision] = values;
+    const row = db.stateRows.find(item => item.version_id === versionId && item.user_id === userId && item.workspace_id === workspaceId && item.state === fromState && item.state_revision === expectedRevision);
+    if (!row || row.transition_request_id !== null) return { meta: { changes: 0 } };
     row.state = state;
     row.state_revision += 1;
+    row.transition_request_id = requestId;
     return { meta: { changes: 1 } };
   }
   if (sql.includes("INSERT INTO editorial_state_transition_requests")) {
-    const row = db.stateRows.find(item => item.version_id === values[13] && item.user_id === values[14] && item.workspace_id === values[15] && item.state === values[16] && item.state_revision === values[17]);
+    const row = db.stateRows.find(item => item.version_id === values[13] && item.user_id === values[14] && item.workspace_id === values[15] &&
+      item.state === values[16] && item.state_revision === values[17] && item.transition_request_id === values[18]);
     if (!row) return { meta: { changes: 0 } };
     const transition = {
       id: values[0], version_id: values[1], user_id: values[2], workspace_id: values[3], article_id: values[4], recording_id: values[5],
