@@ -16,6 +16,17 @@ test("rejects unauthorized API requests", async () => {
   assert.equal(response.status, 401);
 });
 
+test("editorial producer writes are behind the internal service boundary", async () => {
+  const response = await worker.fetch(
+    new Request("https://example.test/api/internal/editorial/versions", { method: "POST" }),
+    createEnv(),
+    createExecutionContext(),
+  );
+
+  assert.equal(response.status, 401);
+  assert.equal((await response.json()).error, "unauthorized");
+});
+
 test("health check exposes deploy version metadata", async () => {
   const response = await worker.fetch(
     new Request("https://example.test/health"),

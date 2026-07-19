@@ -1,4 +1,4 @@
-import { handleEditorialRoute } from "./editorialPipeline";
+import { handleEditorialInternalRoute, handleEditorialRoute } from "./editorialPipeline";
 
 export interface Env {
   FILES_BUCKET: R2Bucket;
@@ -122,6 +122,13 @@ export default {
         return json({ error: "unauthorized" }, 401);
       }
       return handleMiningClaim(request, env);
+    }
+
+    if (url.pathname.startsWith("/api/internal/editorial/")) {
+      if (!(await isInternalAuthorized(request, env))) {
+        return json({ error: "unauthorized" }, 401);
+      }
+      return handleEditorialInternalRoute(request, env, url);
     }
 
     if (!url.pathname.startsWith("/api/")) {
@@ -1006,26 +1013,7 @@ async function upsertUploadedRecording(
       .run();
 
     if ((updated.meta.changes ?? 0) === 0) {
-      await env.DB.prepare(
-        `
-        INSERT INTO recordings (user_id, workspace_id, filename, r2_key, status, processing_stage, duration_ms, style_profile_id, style_profile_version, layout_profile_id, layout_profile_version)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `,
-      )
-        .bind(
-          auth.userId,
-          auth.workspaceId,
-          input.filename,
-          input.key,
-          "UPLOADED",
-          "QUEUED",
-          input.durationMs,
-          input.profileSelection.styleProfileId || null,
-          input.profileSelection.styleProfileVersion || null,
-          input.profileSelection.layoutProfileId || null,
-          input.profileSelection.layoutProfileVersion || null,
-        )
-        .run();
+      await insertUploadedRecording(env, auth, input, true);
     }
   } catch (dbErr: any) {
     const message = String(dbErr?.message || "");
@@ -1051,26 +1039,71 @@ async function upsertUploadedRecording(
       .run();
 
     if ((updated.meta.changes ?? 0) === 0) {
-      await env.DB.prepare(
-        `
-        INSERT INTO recordings (user_id, workspace_id, filename, r2_key, status, processing_stage, style_profile_id, style_profile_version, layout_profile_id, layout_profile_version)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `,
-      )
-        .bind(
-          auth.userId,
-          auth.workspaceId,
-          input.filename,
-          input.key,
-          "UPLOADED",
-          "QUEUED",
-          input.profileSelection.styleProfileId || null,
-          input.profileSelection.styleProfileVersion || null,
-          input.profileSelection.layoutProfileId || null,
-          input.profileSelection.layoutProfileVersion || null,
-        )
-        .run();
+      await insertUploadedRecording(env, auth, input, false);
     }
+  }
+  await ensureEditorialRecordingScope(env, auth, input.filename);
+}
+
+async function insertUploadedRecording(
+  env: Env,
+  auth: AuthContext,
+  input: {
+    filename: string;
+    key: string;
+    durationMs: number | null;
+    profileSelection: WritingProfileSelection;
+  },
+  includeDuration: boolean,
+): Promise<void> {
+  const durationColumns = includeDuration ? ", duration_ms" : "";
+  const durationValues = includeDuration ? ", ?" : "";
+  const values: unknown[] = [
+    auth.userId,
+    auth.workspaceId,
+    input.filename,
+    input.key,
+    "UPLOADED",
+    "QUEUED",
+  ];
+  if (includeDuration) values.push(input.durationMs);
+  values.push(
+    input.profileSelection.styleProfileId || null,
+    input.profileSelection.styleProfileVersion || null,
+    input.profileSelection.layoutProfileId || null,
+    input.profileSelection.layoutProfileVersion || null,
+  );
+  try {
+    await env.DB.prepare(
+      `INSERT INTO recordings (user_id, workspace_id, filename, r2_key, status, processing_stage${durationColumns}, style_profile_id, style_profile_version, layout_profile_id, layout_profile_version)
+       VALUES (?, ?, ?, ?, ?, ?${durationValues}, ?, ?, ?, ?)`,
+    ).bind(...values).run();
+  } catch (error) {
+    if (!String((error as any)?.message || error).includes("workspace_id")) throw error;
+    const legacyValues: unknown[] = [auth.userId, input.filename, input.key, "UPLOADED", "QUEUED"];
+    if (includeDuration) legacyValues.push(input.durationMs);
+    legacyValues.push(
+      input.profileSelection.styleProfileId || null,
+      input.profileSelection.styleProfileVersion || null,
+      input.profileSelection.layoutProfileId || null,
+      input.profileSelection.layoutProfileVersion || null,
+    );
+    await env.DB.prepare(
+      `INSERT INTO recordings (user_id, filename, r2_key, status, processing_stage${durationColumns}, style_profile_id, style_profile_version, layout_profile_id, layout_profile_version)
+       VALUES (?, ?, ?, ?, ?${includeDuration ? ", ?" : ""}, ?, ?, ?, ?)`,
+    ).bind(...legacyValues).run();
+  }
+}
+
+async function ensureEditorialRecordingScope(env: Env, auth: AuthContext, filename: string): Promise<void> {
+  try {
+    await env.DB.prepare(
+      `INSERT OR IGNORE INTO editorial_recording_scopes (recording_id, user_id, workspace_id)
+       SELECT id, ?, ? FROM recordings WHERE user_id = ? AND filename = ?`,
+    ).bind(auth.userId, auth.workspaceId, auth.userId, filename).run();
+  } catch (error) {
+    // Old Worker databases can accept uploads before the additive editorial migration is applied.
+    console.warn("Editorial recording scope backfill deferred:", error instanceof Error ? error.message : String(error));
   }
 }
 

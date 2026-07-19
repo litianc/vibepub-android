@@ -23,7 +23,6 @@
     "cover_title": ["A small systems note"],
     "formatting_skill_id": "md_to_wechat",
     "formatting_skill_version": "1.0.0",
-    "generation_status": "frozen",
     "idempotency_key": "synthetic-v1"
   },
   "p1_review": {
@@ -37,7 +36,6 @@
       }
     ],
     "decision": "revise",
-    "reviewer_version": "reviewer.synthetic.1",
     "idempotency_key": "synthetic-review-v1"
   },
   "p0_review": {
@@ -51,7 +49,6 @@
       }
     ],
     "decision": "block",
-    "reviewer_version": "reviewer.synthetic.1",
     "idempotency_key": "synthetic-review-p0"
   },
   "visual_plan": {

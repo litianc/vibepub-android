@@ -24,11 +24,61 @@ export const PIPELINE_STAGES = [
   "completed",
   "failed",
 ] as const;
+export const EDITORIAL_AGENT_IDS = [
+  "editorial_coordinator",
+  "writing",
+  "editorial_review",
+  "illustration",
+  "cover",
+] as const;
 
 export type VersionSource = (typeof VERSION_SOURCES)[number];
 export type ReviewDecision = (typeof REVIEW_DECISIONS)[number];
 export type FindingSeverity = (typeof FINDING_SEVERITIES)[number];
 export type PipelineStage = (typeof PIPELINE_STAGES)[number];
+export type EditorialAgentId = (typeof EDITORIAL_AGENT_IDS)[number];
+
+export type TrustedProducerContext = {
+  role: EditorialAgentId;
+  version: string;
+};
+
+export type SkillPin = {
+  id: string;
+  version: string;
+};
+
+export type RunManifest = {
+  schema_version: string;
+  run_id: string;
+  article_id: string;
+  recording_id: number;
+  user_id: string;
+  workspace_id: string;
+  workflow_version: string;
+  policy_version: string;
+  agent_versions: Record<EditorialAgentId, string>;
+  skill_pins: Record<string, SkillPin>;
+  idempotency_key: string;
+};
+
+export type ArtifactEnvelope = {
+  schema_version: string;
+  artifact_id: string;
+  run_id: string;
+  article_id: string;
+  recording_id: number;
+  user_id: string;
+  workspace_id: string;
+  kind: string;
+  producer_agent: TrustedProducerContext;
+  skill_pin?: SkillPin;
+  workflow_version: string;
+  policy_version: string;
+  input_artifact_ids: string[];
+  payload_hash: string;
+  storage_ref: string;
+};
 
 const PIPELINE_TRANSITIONS: Record<PipelineStage, readonly PipelineStage[]> = {
   queued: ["asr", "draft_generated", "failed"],
@@ -111,7 +161,6 @@ export type NormalizedVersionInput = {
 export type NormalizedReviewInput = {
   findings: ReviewFinding[];
   decision: ReviewDecision;
-  reviewer_version: string;
   idempotency_key: string;
 };
 
@@ -141,8 +190,79 @@ export function assertPipelineStageTransition(from: PipelineStage, to: PipelineS
   }
 }
 
+export function normalizeRunManifest(body: unknown): RunManifest {
+  const record = objectValue(body, "run manifest");
+  const agentVersions = objectValue(record.agent_versions ?? record.agentVersions, "agent_versions") as Record<string, unknown>;
+  for (const agentId of Object.keys(agentVersions)) {
+    if (!EDITORIAL_AGENT_IDS.includes(agentId as EditorialAgentId)) {
+      throw new EditorialContractError("agent_not_allowed", `agent is not part of the editorial runtime: ${agentId}`);
+    }
+  }
+  const normalizedAgentVersions = Object.fromEntries(EDITORIAL_AGENT_IDS.map(agentId => [
+    agentId,
+    requiredText(agentVersions[agentId], `agent_versions.${agentId}`, 120),
+  ])) as Record<EditorialAgentId, string>;
+  const skillPins = objectValue(record.skill_pins ?? record.skillPins ?? {}, "skill_pins");
+  const normalizedSkillPins: Record<string, SkillPin> = {};
+  for (const [skillId, value] of Object.entries(skillPins)) {
+    const pin = objectValue(value, `skill_pins.${skillId}`);
+    normalizedSkillPins[requiredId(skillId, "skill_id")] = {
+      id: requiredId(pin.id, `skill_pins.${skillId}.id`),
+      version: requiredText(pin.version, `skill_pins.${skillId}.version`, 120),
+    };
+  }
+  return {
+    schema_version: requiredText(record.schema_version ?? record.schemaVersion, "schema_version", 80),
+    run_id: requiredId(record.run_id ?? record.runId, "run_id"),
+    article_id: requiredId(record.article_id ?? record.articleId, "article_id"),
+    recording_id: positiveInteger(record.recording_id ?? record.recordingId, "recording_id"),
+    user_id: requiredId(record.user_id ?? record.userId, "user_id"),
+    workspace_id: requiredId(record.workspace_id ?? record.workspaceId, "workspace_id"),
+    workflow_version: requiredText(record.workflow_version ?? record.workflowVersion, "workflow_version", 120),
+    policy_version: requiredText(record.policy_version ?? record.policyVersion, "policy_version", 120),
+    agent_versions: normalizedAgentVersions,
+    skill_pins: normalizedSkillPins,
+    idempotency_key: requiredKey(record.idempotency_key ?? record.idempotencyKey, "idempotency_key"),
+  };
+}
+
+export function normalizeArtifactEnvelope(body: unknown): ArtifactEnvelope {
+  const record = objectValue(body, "artifact envelope");
+  const producer = objectValue(record.producer_agent ?? record.producerAgent, "producer_agent");
+  const agent = enumValue(producer.role, EDITORIAL_AGENT_IDS, "producer_agent.role");
+  const inputArtifactIds = stringArray(record.input_artifact_ids ?? record.inputArtifactIds, "input_artifact_ids", 64, 160);
+  const skillValue = record.skill_pin ?? record.skillPin;
+  const skillPin = skillValue === undefined ? undefined : (() => {
+    const pin = objectValue(skillValue, "skill_pin");
+    return { id: requiredId(pin.id, "skill_pin.id"), version: requiredText(pin.version, "skill_pin.version", 120) };
+  })();
+  return {
+    schema_version: requiredText(record.schema_version ?? record.schemaVersion, "schema_version", 80),
+    artifact_id: requiredId(record.artifact_id ?? record.artifactId, "artifact_id"),
+    run_id: requiredId(record.run_id ?? record.runId, "run_id"),
+    article_id: requiredId(record.article_id ?? record.articleId, "article_id"),
+    recording_id: positiveInteger(record.recording_id ?? record.recordingId, "recording_id"),
+    user_id: requiredId(record.user_id ?? record.userId, "user_id"),
+    workspace_id: requiredId(record.workspace_id ?? record.workspaceId, "workspace_id"),
+    kind: requiredId(record.kind, "kind"),
+    producer_agent: {
+      role: agent,
+      version: requiredText(producer.version, "producer_agent.version", 120),
+    },
+    skill_pin: skillPin,
+    workflow_version: requiredText(record.workflow_version ?? record.workflowVersion, "workflow_version", 120),
+    policy_version: requiredText(record.policy_version ?? record.policyVersion, "policy_version", 120),
+    input_artifact_ids: inputArtifactIds,
+    payload_hash: requiredText(record.payload_hash ?? record.payloadHash, "payload_hash", 200),
+    storage_ref: requiredText(record.storage_ref ?? record.storageRef, "storage_ref", 500),
+  };
+}
+
 export function normalizeVersionInput(body: unknown): NormalizedVersionInput {
   const record = objectValue(body, "version payload");
+  if (record.generation_status !== undefined || record.generationStatus !== undefined) {
+    throw new EditorialContractError("generation_status_server_owned", "generation_status is assigned by the workflow");
+  }
   const articleId = requiredId(record.article_id ?? record.articleId, "article_id");
   const recordingId = positiveInteger(record.recording_id ?? record.recordingId, "recording_id");
   const source = enumValue(record.source, VERSION_SOURCES, "source");
@@ -190,17 +310,18 @@ export function normalizeVersionInput(body: unknown): NormalizedVersionInput {
     formatting_skill_version: optionalText(record.formatting_skill_version ?? record.formattingSkillVersion, 80),
     content_html_hash: optionalText(record.content_html_hash ?? record.contentHtmlHash, 200),
     html_warnings: htmlWarnings,
-    generation_status: enumValue(
-      record.generation_status ?? record.generationStatus ?? "frozen",
-      ["generated", "review_pending", "reviewed", "frozen"] as const,
-      "generation_status",
-    ),
+    generation_status: "generated",
     idempotency_key: idempotencyKey,
   };
 }
 
 export function normalizeReviewInput(body: unknown): NormalizedReviewInput {
   const record = objectValue(body, "review payload");
+  if (record.reviewer_version !== undefined || record.reviewerVersion !== undefined ||
+    record.producer_role !== undefined || record.producerRole !== undefined ||
+    record.producer_version !== undefined || record.producerVersion !== undefined) {
+    throw new EditorialContractError("review_producer_context_server_owned", "review producer context is assigned by the trusted runtime");
+  }
   const findingsValue = record.findings;
   if (!Array.isArray(findingsValue)) {
     throw new EditorialContractError("findings_required", "findings must be an array");
@@ -216,7 +337,6 @@ export function normalizeReviewInput(body: unknown): NormalizedReviewInput {
   return {
     findings,
     decision,
-    reviewer_version: requiredText(record.reviewer_version ?? record.reviewerVersion, "reviewer_version", 120),
     idempotency_key: requiredKey(record.idempotency_key ?? record.idempotencyKey, "idempotency_key"),
   };
 }

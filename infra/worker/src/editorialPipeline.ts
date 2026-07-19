@@ -5,6 +5,9 @@ import {
   normalizeReviewInput,
   normalizeVersionInput,
   normalizeVisualPlanInput,
+  assertPipelineStageTransition,
+  type PipelineStage,
+  type TrustedProducerContext,
   type ArticleBlock,
 } from "./editorialContracts";
 
@@ -44,6 +47,26 @@ type VersionRow = {
   created_at: string;
 };
 
+type VersionStateRow = {
+  version_id: string;
+  user_id: string;
+  workspace_id: string;
+  article_id: string;
+  recording_id: number;
+  state: PipelineStage;
+  state_revision: number;
+};
+
+const TRUSTED_PRODUCERS = {
+  writing: { role: "writing", version: "writing.worker.v1" },
+  review: { role: "editorial_review", version: "editorial-review.worker.v1" },
+  coordinator: { role: "editorial_coordinator", version: "editorial-coordinator.worker.v1" },
+} as const satisfies Record<string, TrustedProducerContext>;
+const PIPELINE_STAGE_VALUES = new Set<string>([
+  "queued", "asr", "draft_generated", "review_pending", "reviewed", "revision_pending",
+  "content_frozen", "visuals_generating", "rendering", "visual_qa", "draft_sync", "completed", "failed",
+]);
+
 export async function handleEditorialRoute(
   request: Request,
   env: Env,
@@ -55,7 +78,7 @@ export async function handleEditorialRoute(
 
   try {
     if (request.method === "POST" && parts.length === 3 && parts[2] === "versions") {
-      return await createVersion(request, env, auth);
+      return editorialJson({ error: "writing_agent_only" }, 403);
     }
     if (request.method === "GET" && parts.length === 5 && parts[2] === "articles" && parts[4] === "versions") {
       return await listVersions(env, auth, parts[3]);
@@ -64,7 +87,7 @@ export async function handleEditorialRoute(
       const versionId = parts[3];
       if (request.method === "GET" && parts.length === 4) return getVersion(env, auth, versionId);
       if (request.method === "POST" && parts.length === 5 && parts[4] === "reviews") {
-        return await createReview(request, env, auth, versionId);
+        return editorialJson({ error: "editorial_review_agent_only" }, 403);
       }
       if (request.method === "POST" && parts.length === 5 && parts[4] === "visual-plan") {
         return await createVisualPlan(request, env, auth, versionId);
@@ -83,8 +106,61 @@ export async function handleEditorialRoute(
   }
 }
 
-async function createVersion(request: Request, env: Env, auth: EditorialAuth): Promise<Response> {
+export async function handleEditorialInternalRoute(
+  request: Request,
+  env: Env,
+  url: URL,
+): Promise<Response> {
+  const parts = url.pathname.split("/").filter(Boolean).map(decodePathPart);
+  if (parts[0] !== "api" || parts[1] !== "internal" || parts[2] !== "editorial") {
+    return editorialJson({ error: "not_found" }, 404);
+  }
+  const userId = request.headers.get("X-VibePub-User-Id")?.trim();
+  const workspaceId = request.headers.get("X-VibePub-Workspace-Id")?.trim();
+  if (!userId || !workspaceId) return editorialJson({ error: "producer_scope_required" }, 400);
+  const auth: EditorialAuth = { userId, workspaceId, emailVerified: true };
+
+  try {
+    if (request.method === "POST" && parts.length === 4 && parts[3] === "versions") {
+      return await createVersion(request, env, auth, TRUSTED_PRODUCERS.writing);
+    }
+    if (request.method === "POST" && parts.length === 6 && parts[3] === "versions" && parts[5] === "reviews") {
+      const version = await queryOne<VersionRow>(env, "SELECT * FROM article_versions WHERE id = ? LIMIT 1", [parts[4]]);
+      if (!version) return editorialJson({ error: "version_not_found" }, 404);
+      if (version.user_id !== userId || version.workspace_id !== workspaceId) {
+        return editorialJson({ error: "version_not_found" }, 404);
+      }
+      return await createReview(request, env, auth, version.id, TRUSTED_PRODUCERS.review);
+    }
+    if (request.method === "POST" && parts.length === 6 && parts[3] === "versions" && parts[5] === "transition") {
+      const version = await queryOne<VersionRow>(env, "SELECT * FROM article_versions WHERE id = ? LIMIT 1", [parts[4]]);
+      if (!version) return editorialJson({ error: "version_not_found" }, 404);
+      if (version.user_id !== userId || version.workspace_id !== workspaceId) {
+        return editorialJson({ error: "version_not_found" }, 404);
+      }
+      return await transitionVersionState(request, env, auth, version, TRUSTED_PRODUCERS.coordinator);
+    }
+    return editorialJson({ error: "not_found" }, 404);
+  } catch (error) {
+    if (error instanceof EditorialContractError) {
+      return editorialJson({ error: error.code, message: error.message }, error.status);
+    }
+    console.error("Editorial internal request failed:", safeErrorMessage(error));
+    return editorialJson({ error: "editorial_database_error" }, 500);
+  }
+}
+
+async function createVersion(
+  request: Request,
+  env: Env,
+  auth: EditorialAuth,
+  producer: TrustedProducerContext,
+): Promise<Response> {
+  if (producer.role !== TRUSTED_PRODUCERS.writing.role) return editorialJson({ error: "writing_agent_only" }, 403);
   const input = normalizeVersionInput(await parseJsonWithIdempotency(request));
+  if (input.source !== "initial" && input.source !== "revision") {
+    return editorialJson({ error: "writing_source_not_allowed" }, 403);
+  }
   const payloadHash = await sha256Hex(canonicalJson(input));
   const existing = await queryOne<VersionRow>(env,
     `SELECT * FROM article_versions
@@ -92,8 +168,9 @@ async function createVersion(request: Request, env: Env, auth: EditorialAuth): P
     [auth.userId, auth.workspaceId, input.article_id, input.idempotency_key]);
   if (existing) return idempotentVersionResponse(existing, payloadHash);
 
-  const recording = await queryOne<{ id: number }>(env,
-    `SELECT id FROM recordings WHERE id = ? AND user_id = ? AND workspace_id = ? LIMIT 1`,
+  const recording = await queryOne<{ recording_id: number }>(env,
+    `SELECT recording_id FROM editorial_recording_scopes
+     WHERE recording_id = ? AND user_id = ? AND workspace_id = ? LIMIT 1`,
     [input.recording_id, auth.userId, auth.workspaceId]);
   if (!recording) return editorialJson({ error: "recording_not_found" }, 404);
 
@@ -120,7 +197,7 @@ async function createVersion(request: Request, env: Env, auth: EditorialAuth): P
   const versionId = `av_${crypto.randomUUID()}`;
   const now = new Date().toISOString();
   try {
-    await env.DB.prepare(
+    const versionStatement = env.DB.prepare(
       `INSERT INTO article_versions
        (id, user_id, workspace_id, article_id, recording_id, version_no, parent_version_id,
         source, source_job_id, source_hash, title, body, cover_json, blocks_json,
@@ -128,7 +205,13 @@ async function createVersion(request: Request, env: Env, auth: EditorialAuth): P
         visual_plan_json, formatting_skill_id, formatting_skill_version, content_html_hash,
         html_warnings_json, generation_status, idempotency_key, payload_hash, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).bind(
+    );
+    const stateStatement = env.DB.prepare(
+      `INSERT INTO editorial_version_states
+       (version_id, user_id, workspace_id, article_id, recording_id, state, state_revision, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+    ).bind(versionId, auth.userId, auth.workspaceId, input.article_id, input.recording_id, "draft_generated", now, now);
+    await env.DB.batch([versionStatement.bind(
       versionId,
       auth.userId,
       auth.workspaceId,
@@ -152,11 +235,11 @@ async function createVersion(request: Request, env: Env, auth: EditorialAuth): P
       input.formatting_skill_version,
       input.content_html_hash,
       canonicalJson(input.html_warnings),
-      input.generation_status,
+      "generated",
       input.idempotency_key,
       payloadHash,
       now,
-    ).run();
+    ), stateStatement]);
   } catch (error) {
     const raced = await queryOne<VersionRow>(env,
       `SELECT * FROM article_versions
@@ -170,7 +253,14 @@ async function createVersion(request: Request, env: Env, auth: EditorialAuth): P
   return editorialJson({ version: publicVersion(row!), replayed: false }, 201);
 }
 
-async function createReview(request: Request, env: Env, auth: EditorialAuth, versionId: string): Promise<Response> {
+async function createReview(
+  request: Request,
+  env: Env,
+  auth: EditorialAuth,
+  versionId: string,
+  producer: TrustedProducerContext,
+): Promise<Response> {
+  if (producer.role !== TRUSTED_PRODUCERS.review.role) return editorialJson({ error: "editorial_review_agent_only" }, 403);
   const version = await ownedVersion(env, auth, versionId);
   if (!version) return editorialJson({ error: "version_not_found" }, 404);
   const input = normalizeReviewInput(await parseJsonWithIdempotency(request));
@@ -187,8 +277,8 @@ async function createReview(request: Request, env: Env, auth: EditorialAuth, ver
     await env.DB.prepare(
       `INSERT INTO editorial_reviews
        (id, user_id, workspace_id, article_id, recording_id, input_version_id,
-        findings_json, decision, reviewer_version, idempotency_key, payload_hash, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        findings_json, decision, producer_role, producer_version, idempotency_key, payload_hash, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).bind(
       reviewId,
       auth.userId,
@@ -198,7 +288,8 @@ async function createReview(request: Request, env: Env, auth: EditorialAuth, ver
       version.id,
       canonicalJson(input.findings),
       input.decision,
-      input.reviewer_version,
+      producer.role,
+      producer.version,
       input.idempotency_key,
       payloadHash,
       now,
@@ -213,6 +304,88 @@ async function createReview(request: Request, env: Env, auth: EditorialAuth, ver
   }
   const row = await queryOne<any>(env, `SELECT * FROM editorial_reviews WHERE id = ? LIMIT 1`, [reviewId]);
   return editorialJson({ review: publicReview(row!), replayed: false }, 201);
+}
+
+async function transitionVersionState(
+  request: Request,
+  env: Env,
+  auth: EditorialAuth,
+  version: VersionRow,
+  producer: TrustedProducerContext,
+): Promise<Response> {
+  if (producer.role !== TRUSTED_PRODUCERS.coordinator.role) return editorialJson({ error: "coordinator_only" }, 403);
+  const body = await parseJsonWithIdempotency(request);
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    throw new EditorialContractError("transition_payload_required", "transition payload must be an object");
+  }
+  const record = body as Record<string, unknown>;
+  const toState = record.to_state ?? record.to;
+  const expectedRevision = Number(record.expected_revision ?? record.expectedRevision);
+  const idempotencyKey = typeof record.idempotency_key === "string"
+    ? record.idempotency_key
+    : typeof record.idempotencyKey === "string" ? record.idempotencyKey : "";
+  if (!Number.isInteger(expectedRevision) || expectedRevision < 0) {
+    throw new EditorialContractError("expected_revision_invalid", "expected_revision must be a non-negative integer");
+  }
+  if (!idempotencyKey.trim()) throw new EditorialContractError("idempotency_key_required", "idempotency_key is required");
+  if (typeof toState !== "string" || !PIPELINE_STAGE_VALUES.has(toState)) {
+    throw new EditorialContractError("to_state_invalid", "to_state is invalid");
+  }
+  const normalizedToState = toState as PipelineStage;
+  const payload = { expected_revision: expectedRevision, idempotency_key: idempotencyKey.trim(), to_state: normalizedToState };
+  const payloadHash = await sha256Hex(canonicalJson(payload));
+  const existing = await queryOne<any>(env,
+    `SELECT * FROM editorial_state_transition_requests WHERE version_id = ? AND user_id = ? AND workspace_id = ? AND idempotency_key = ? LIMIT 1`,
+    [version.id, auth.userId, auth.workspaceId, payload.idempotency_key]);
+  if (existing) {
+    if (existing.payload_hash !== payloadHash) return editorialJson({ error: "idempotency_conflict" }, 409);
+    return editorialJson({ state: { version_id: version.id, current_state: existing.to_state, state_revision: existing.result_revision }, replayed: true });
+  }
+
+  const current = await queryOne<VersionStateRow>(env,
+    `SELECT * FROM editorial_version_states
+     WHERE version_id = ? AND user_id = ? AND workspace_id = ? LIMIT 1`,
+    [version.id, auth.userId, auth.workspaceId]);
+  if (!current) return editorialJson({ error: "version_state_not_found" }, 409);
+  assertPipelineStageTransition(current.state, normalizedToState);
+  if (current.state_revision !== expectedRevision) return editorialJson({ error: "state_revision_conflict" }, 409);
+  const requestId = `tr_${crypto.randomUUID()}`;
+  const resultRevision = expectedRevision + 1;
+  const now = new Date().toISOString();
+  try {
+    const update = env.DB.prepare(
+      `UPDATE editorial_version_states
+       SET state = ?, state_revision = state_revision + 1, updated_at = ?
+       WHERE version_id = ? AND user_id = ? AND workspace_id = ? AND state = ? AND state_revision = ?`,
+    ).bind(normalizedToState, now, version.id, auth.userId, auth.workspaceId, current.state, expectedRevision);
+    const insert = env.DB.prepare(
+      `INSERT INTO editorial_state_transition_requests
+       (id, version_id, user_id, workspace_id, article_id, recording_id, from_state, to_state,
+        expected_revision, result_revision, idempotency_key, payload_hash, created_at)
+       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+       WHERE EXISTS (SELECT 1 FROM editorial_version_states
+         WHERE version_id = ? AND user_id = ? AND workspace_id = ? AND state = ? AND state_revision = ?)`,
+    ).bind(
+      requestId, version.id, auth.userId, auth.workspaceId, version.article_id, version.recording_id,
+      current.state, normalizedToState, expectedRevision, resultRevision, payload.idempotency_key, payloadHash, now,
+      version.id, auth.userId, auth.workspaceId, normalizedToState, resultRevision,
+    );
+    const results = await env.DB.batch([update, insert]);
+    if ((results[0]?.meta?.changes ?? 0) !== 1 || (results[1]?.meta?.changes ?? 0) !== 1) {
+      return editorialJson({ error: "state_revision_conflict" }, 409);
+    }
+  } catch (error) {
+    const raced = await queryOne<any>(env,
+      `SELECT * FROM editorial_state_transition_requests WHERE version_id = ? AND user_id = ? AND workspace_id = ? AND idempotency_key = ? LIMIT 1`,
+      [version.id, auth.userId, auth.workspaceId, payload.idempotency_key]);
+    if (raced) {
+      if (raced.payload_hash !== payloadHash) return editorialJson({ error: "idempotency_conflict" }, 409);
+      return editorialJson({ state: { version_id: version.id, current_state: raced.to_state, state_revision: raced.result_revision }, replayed: true });
+    }
+    if (error instanceof EditorialContractError) throw error;
+    return editorialJson({ error: "state_transition_conflict" }, 409);
+  }
+  return editorialJson({ state: { version_id: version.id, current_state: normalizedToState, state_revision: resultRevision }, replayed: false }, 201);
 }
 
 async function createVisualPlan(request: Request, env: Env, auth: EditorialAuth, versionId: string): Promise<Response> {
@@ -260,7 +433,11 @@ async function createVisualPlan(request: Request, env: Env, auth: EditorialAuth,
 
 async function getVersion(env: Env, auth: EditorialAuth, versionId: string): Promise<Response> {
   const row = await ownedVersion(env, auth, versionId);
-  return row ? editorialJson({ version: publicVersion(row) }) : editorialJson({ error: "version_not_found" }, 404);
+  if (!row) return editorialJson({ error: "version_not_found" }, 404);
+  const state = await queryOne<VersionStateRow>(env,
+    `SELECT * FROM editorial_version_states WHERE version_id = ? AND user_id = ? AND workspace_id = ? LIMIT 1`,
+    [row.id, auth.userId, auth.workspaceId]);
+  return editorialJson({ version: publicVersion(row), state: state ? publicState(state) : null });
 }
 
 async function listVersions(env: Env, auth: EditorialAuth, articleId: string): Promise<Response> {
@@ -348,8 +525,18 @@ function publicReview(row: any): Record<string, unknown> {
     input_version_id: row.input_version_id,
     findings: parseColumn(row.findings_json, []),
     decision: row.decision,
-    reviewer_version: row.reviewer_version,
+    producer_role: row.producer_role,
+    producer_version: row.producer_version,
+    reviewer_version: row.producer_version,
     created_at: row.created_at,
+  };
+}
+
+function publicState(row: VersionStateRow): Record<string, unknown> {
+  return {
+    version_id: row.version_id,
+    current_state: row.state,
+    state_revision: row.state_revision,
   };
 }
 
