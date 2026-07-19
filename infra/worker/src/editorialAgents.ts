@@ -130,6 +130,7 @@ type D1ArtifactRow = {
   workspace_id: string;
   article_id: string;
   recording_id: number;
+  schema_version: string;
   kind: string;
   producer_agent_role: string;
   producer_agent_version: string;
@@ -310,6 +311,7 @@ function d1IdentityMatchesArtifact(existing: D1ArtifactRow, artifact: OutboxRow,
     && existing.workspace_id === artifact.workspace_id
     && existing.article_id === artifact.article_id
     && existing.recording_id === artifact.recording_id
+    && existing.schema_version === EDITORIAL_SCHEMA_VERSION
     && existing.kind === artifact.kind
     && existing.producer_agent_role === artifact.producer_role
     && existing.producer_agent_version === artifact.producer_version
@@ -322,23 +324,47 @@ function d1IdentityMatchesArtifact(existing: D1ArtifactRow, artifact: OutboxRow,
     && existing.storage_ref === artifact.storage_ref;
 }
 
-async function verifyD1Artifacts(
+const D1_ARTIFACT_COLUMNS = `artifact_id, run_id, user_id, workspace_id, article_id, recording_id,
+  schema_version, kind, producer_agent_role, producer_agent_version, skill_id, skill_version,
+  workflow_version, policy_version, input_artifact_ids_json, payload_hash, storage_ref`;
+
+async function readD1Artifacts(db: D1Database, runId: string): Promise<D1ArtifactRow[]> {
+  const result = await db.prepare(
+    `SELECT ${D1_ARTIFACT_COLUMNS} FROM editorial_artifacts WHERE run_id = ? ORDER BY artifact_id`,
+  ).bind(runId).all<D1ArtifactRow>();
+  return result.results;
+}
+
+function d1ArtifactConflict(): EditorialRuntimeError {
+  return new EditorialRuntimeError("editorial_d1_mirror_conflict", "D1 artifact set or identity conflicts", 409);
+}
+
+async function assertNoUnexpectedD1Artifacts(
   db: D1Database,
   run: RunRow,
   artifacts: readonly OutboxRow[],
 ): Promise<void> {
-  for (const artifact of artifacts) {
-    const existingArtifact = await db.prepare(
-      `SELECT artifact_id, run_id, user_id, workspace_id, article_id, recording_id,
-              kind, producer_agent_role, producer_agent_version, skill_id, skill_version,
-              workflow_version, policy_version, input_artifact_ids_json, payload_hash, storage_ref
-       FROM editorial_artifacts
-       WHERE artifact_id = ? OR (run_id = ? AND kind = ? AND payload_hash = ?)
-       LIMIT 1`,
-    ).bind(artifact.artifact_id, artifact.run_id, artifact.kind, artifact.payload_hash).first<D1ArtifactRow>();
-    if (!existingArtifact || !d1IdentityMatchesArtifact(existingArtifact, artifact, run)) {
-      throw new EditorialRuntimeError("editorial_d1_mirror_conflict", "D1 artifact replay identity conflicts", 409);
+  const existingArtifacts = await readD1Artifacts(db, run.run_id);
+  const expectedById = new Map(artifacts.map(artifact => [artifact.artifact_id, artifact]));
+  for (const existing of existingArtifacts) {
+    const expected = expectedById.get(existing.artifact_id);
+    if (!expected || !d1IdentityMatchesArtifact(existing, expected, run)) {
+      throw d1ArtifactConflict();
     }
+  }
+}
+
+async function assertExactD1Artifacts(
+  db: D1Database,
+  run: RunRow,
+  artifacts: readonly OutboxRow[],
+): Promise<void> {
+  const existingArtifacts = await readD1Artifacts(db, run.run_id);
+  if (existingArtifacts.length !== artifacts.length) throw d1ArtifactConflict();
+  const existingById = new Map(existingArtifacts.map(artifact => [artifact.artifact_id, artifact]));
+  for (const expected of artifacts) {
+    const existing = existingById.get(expected.artifact_id);
+    if (!existing || !d1IdentityMatchesArtifact(existing, expected, run)) throw d1ArtifactConflict();
   }
 }
 
@@ -370,9 +396,14 @@ export async function mirrorEditorialOutboxToD1(
       throw new EditorialRuntimeError("editorial_d1_mirror_conflict", "D1 run ownership or payload conflicts", 409);
     }
     if (existingRun && (existingRun.status === "completed" || existingRun.status === "failed")) {
-      await verifyD1Artifacts(db, run, artifacts);
+      await assertExactD1Artifacts(db, run, artifacts);
       return;
     }
+
+    // Reject an extra or mismatched immutable row before any D1 INSERT. A
+    // missing expected row is the only repairable condition; it is inserted
+    // below and then checked again as an exact set.
+    await assertNoUnexpectedD1Artifacts(db, run, artifacts);
 
     const pins = runManifestPins(run);
     const statements: D1PreparedStatement[] = [];
@@ -403,16 +434,12 @@ export async function mirrorEditorialOutboxToD1(
 
     for (const artifact of artifacts) {
       const existingArtifact = await db.prepare(
-        `SELECT artifact_id, run_id, user_id, workspace_id, article_id, recording_id,
-                kind, producer_agent_role, producer_agent_version, skill_id, skill_version,
-                workflow_version, policy_version, input_artifact_ids_json, payload_hash, storage_ref
-         FROM editorial_artifacts
-         WHERE artifact_id = ? OR (run_id = ? AND kind = ? AND payload_hash = ?)
-         LIMIT 1`,
-      ).bind(artifact.artifact_id, artifact.run_id, artifact.kind, artifact.payload_hash).first<D1ArtifactRow>();
+        `SELECT ${D1_ARTIFACT_COLUMNS} FROM editorial_artifacts
+         WHERE artifact_id = ? LIMIT 1`,
+      ).bind(artifact.artifact_id).first<D1ArtifactRow>();
       if (existingArtifact) {
         if (!d1IdentityMatchesArtifact(existingArtifact, artifact, run)) {
-          throw new EditorialRuntimeError("editorial_d1_mirror_conflict", "D1 artifact ownership or payload conflicts", 409);
+          throw d1ArtifactConflict();
         }
         continue;
       }
@@ -445,6 +472,7 @@ export async function mirrorEditorialOutboxToD1(
       ));
     }
     if (statements.length > 0) await db.batch(statements);
+    await assertExactD1Artifacts(db, run, artifacts);
   } catch (error) {
     if (error instanceof EditorialRuntimeError) throw error;
     throw new EditorialRuntimeError("editorial_d1_mirror_unavailable", "D1 artifact mirror is temporarily unavailable", 503);
@@ -474,7 +502,7 @@ export async function mirrorEditorialTerminalToD1(
       throw new EditorialRuntimeError("editorial_d1_mirror_conflict", "D1 terminal run identity conflicts", 409);
     }
     if (existing.status === terminalStatus) {
-      await verifyD1Artifacts(db, run, artifacts);
+      await assertExactD1Artifacts(db, run, artifacts);
       return;
     }
     if (existing.status !== "planned" && existing.status !== "running") {
@@ -735,8 +763,7 @@ export class EditorialCoordinatorAgent extends Agent<EditorialRuntimeEnv, Editor
              o.recording_id, o.kind, o.payload_hash, o.producer_role, o.producer_version,
              o.input_artifact_ids_json, o.summary_json, o.storage_ref, o.created_at
       FROM editorial_phase2_outbox o
-      LEFT JOIN editorial_phase2_outbox_receipts r ON r.outbox_id = o.outbox_id
-      WHERE o.run_id = ${runId} AND r.outbox_id IS NULL
+      WHERE o.run_id = ${runId}
       ORDER BY o.created_at, o.outbox_id
     `;
     if (rows.length === 0) return;
@@ -786,7 +813,16 @@ export class EditorialCoordinatorAgent extends Agent<EditorialRuntimeEnv, Editor
     });
   }
 
-  private d1MirroredArtifactCount(runId: string): number {
+  private async d1MirroredArtifactCount(runId: string): Promise<number> {
+    const db = (this.env as EditorialRuntimeEnv & { DB?: D1Database }).DB;
+    if (!db) return 0;
+    const row = await db.prepare(
+      "SELECT count(*) AS count FROM editorial_artifacts WHERE run_id = ?",
+    ).bind(runId).first<{ count: number }>();
+    return Number(row?.count || 0);
+  }
+
+  private doReceiptCount(runId: string): number {
     return Number(this.sql<{ count: number }>`SELECT count(*) AS count FROM editorial_phase2_outbox_receipts r
       JOIN editorial_phase2_outbox o ON o.outbox_id = r.outbox_id WHERE o.run_id = ${runId}`[0]?.count || 0);
   }
@@ -826,7 +862,7 @@ export class EditorialCoordinatorAgent extends Agent<EditorialRuntimeEnv, Editor
     const existing = this.runRow(runId);
     if (existing) {
       if (existing.payload_hash !== payloadHash) throw new EditorialRuntimeError("idempotency_conflict", "run key already has another payload", 409);
-      if (existing.workflow_id) return this.publicRun(existing, true);
+      if (existing.workflow_id) return await this.publicRun(existing, true);
     }
 
     if (!existing) {
@@ -851,14 +887,14 @@ export class EditorialCoordinatorAgent extends Agent<EditorialRuntimeEnv, Editor
       this.sql`UPDATE editorial_phase2_runs SET workflow_id = ${workflowId}, updated_at = ${now()}
         WHERE run_id = ${runId} AND workflow_id IS NULL`;
     });
-    return this.publicRun(this.runRow(runId)!, Boolean(existing));
+    return await this.publicRun(this.runRow(runId)!, Boolean(existing));
   }
 
   public async getRun(runId: string): Promise<Record<string, unknown>> {
     this.ensureSchema();
     const row = this.runRow(validateOpaque(runId, "run_id"));
     if (!row) throw new EditorialRuntimeError("run_not_found", "editorial run not found", 404);
-    return this.publicRun(row, false);
+    return await this.publicRun(row, false);
   }
 
   private finalizeWorkflowStep(input: WorkflowStepInput, result: WorkflowStepResult): WorkflowStepResult {
@@ -1109,7 +1145,7 @@ export class EditorialCoordinatorAgent extends Agent<EditorialRuntimeEnv, Editor
     return Number(this.sql<{ count: number }>`SELECT count(*) AS count FROM editorial_phase2_artifacts WHERE run_id = ${runId}`[0]?.count || 0);
   }
 
-  private publicRun(row: RunRow, replayed: boolean): Record<string, unknown> {
+  private async publicRun(row: RunRow, replayed: boolean): Promise<Record<string, unknown>> {
     return {
       run_id: row.run_id,
       article_id: row.article_id,
@@ -1122,7 +1158,8 @@ export class EditorialCoordinatorAgent extends Agent<EditorialRuntimeEnv, Editor
       workflow_version: EDITORIAL_WORKFLOW_VERSION,
       policy_version: EDITORIAL_POLICY_VERSION,
       artifact_count: this.artifactCount(row.run_id),
-      d1_mirrored_artifact_count: this.d1MirroredArtifactCount(row.run_id),
+      d1_mirrored_artifact_count: await this.d1MirroredArtifactCount(row.run_id),
+      do_receipt_count: this.doReceiptCount(row.run_id),
       outbox_pending_count: this.outboxPendingCount(row.run_id),
       pins: parseJson<Record<string, unknown>>(row.manifest_json),
       replayed,

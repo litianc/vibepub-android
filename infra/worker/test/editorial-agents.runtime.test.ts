@@ -1,6 +1,7 @@
 import { env, evictDurableObject, runInDurableObject } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 import { handleEditorialOrchestrationInternalRoute } from "../src/editorialAgents";
+import { canonicalJson } from "../src/editorialContracts";
 
 const workerEnv = env as any;
 
@@ -77,7 +78,7 @@ beforeAll(async () => {
 });
 
 async function payloadHash(payload: unknown): Promise<string> {
-  const canonical = JSON.stringify(payload, Object.keys(payload as object).sort());
+  const canonical = canonicalJson(payload);
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(canonical));
   return `sha256:${Array.from(new Uint8Array(digest)).map(byte => byte.toString(16).padStart(2, "0")).join("")}`;
 }
@@ -114,6 +115,7 @@ describe("editorial Agent + Workflow runtime", () => {
     expect(waiting.approval_state).toBe("awaiting");
     expect(waiting.artifact_count).toBe(6);
     expect(waiting.d1_mirrored_artifact_count).toBe(6);
+    expect(waiting.do_receipt_count).toBe(6);
     expect(waiting.outbox_pending_count).toBe(0);
     expect(waiting.workflow_id).toBeTruthy();
     const duplicateStart = await start(first, "runtime-happy", "happy");
@@ -765,7 +767,8 @@ describe("editorial Agent + Workflow runtime", () => {
     const attempts = await Promise.all([failedAttempt, completedAttempt]);
     expect(attempts.filter(attempt => attempt.ok)).toHaveLength(1);
     expect(attempts.filter(attempt => !attempt.ok)).toHaveLength(1);
-    expect(["stale_workflow_step", "terminal_conflict"]).toContain(attempts.find(attempt => !attempt.ok)?.code);
+    expect(["stale_workflow_step", "terminal_conflict", "invalid_state_transition"]).toContain(attempts.find(attempt => !attempt.ok)?.code);
+    const winner = attempts.find(attempt => attempt.ok) as { ok: true; result: { state: string; terminal_status?: string } };
     const terminalState = await runInDurableObject(coordinator, (_instance, state) => state.storage.sql.exec<{
       state: string;
       steps: number;
@@ -786,8 +789,8 @@ describe("editorial Agent + Workflow runtime", () => {
       runId,
       runId,
     ).one());
-    expect(terminalState).toEqual({ state: "failed", steps: 1, intents: 1, receipts: 1, events: 1 });
-    expect(await workerEnv.DB.prepare("SELECT status FROM editorial_runs WHERE run_id = ?").bind(runId).first()).toEqual({ status: "failed" });
+    expect(terminalState).toEqual({ state: winner.result.state, steps: 1, intents: 1, receipts: 1, events: 1 });
+    expect(await workerEnv.DB.prepare("SELECT status FROM editorial_runs WHERE run_id = ?").bind(runId).first()).toEqual({ status: winner.result.terminal_status });
   });
 
   it("fails closed on existing D1 pin or input identity conflicts", async () => {
@@ -878,6 +881,266 @@ describe("editorial Agent + Workflow runtime", () => {
     expect(result).toEqual({ code: "editorial_d1_mirror_conflict", state: "queued", outbox: 1 });
     expect(await workerEnv.DB.prepare("SELECT count(*) AS count FROM editorial_artifacts WHERE run_id = ?").bind(runId).first()).toEqual({ count: 1 });
     expect(await workerEnv.DB.prepare("SELECT status FROM editorial_runs WHERE run_id = ?").bind(runId).first()).toEqual({ status: "running" });
+  });
+
+  it("fails closed when only an existing D1 artifact schema pin differs", async () => {
+    const coordinator = workerEnv.EDITORIAL_COORDINATOR.getByName("runtime-schema-pin-conflict");
+    const runId = "runtime-schema-pin-conflict";
+    const articleId = "article_schema_pin_conflict";
+    const artifact = {
+      kind: "article_draft" as const,
+      idempotency_key: `${runId}:draft:v1`,
+      producer_role: "writing" as const,
+      producer_version: "writing.agent.v2",
+      input_artifact_ids: [] as string[],
+      summary: { source: "synthetic", version_no: 1 },
+    };
+    const artifactId = `${runId}:${artifact.kind}:${artifact.idempotency_key}`;
+    const artifactPayloadHash = await payloadHash({ kind: artifact.kind, summary: artifact.summary, input_artifact_ids: [] });
+    const agentVersions = JSON.stringify({
+      cover: "cover.agent.v2",
+      editorial_coordinator: "editorial-coordinator.agent.v2",
+      editorial_review: "editorial-review.agent.v2",
+      illustration: "illustration.agent.v2",
+      writing: "writing.agent.v2",
+    });
+    const skillPins = JSON.stringify({ formatting: { id: "md_to_wechat", version: "1.0.0" } });
+    await workerEnv.DB.batch([
+      workerEnv.DB.prepare(`INSERT INTO editorial_runs
+        (run_id, user_id, workspace_id, article_id, recording_id, schema_version,
+         workflow_version, policy_version, agent_versions_json, skill_pins_json,
+         status, idempotency_key, payload_hash, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?)`)
+        .bind(runId, "user_runtime_a", "workspace_runtime_a", articleId, 92, "editorial-orchestration.v2", "editorial-workflow.v2", "editorial-policy.v2", agentVersions, skillPins, `run:${runId}`, "sha256:schema-pin-conflict", "2026-07-19T00:00:00.000Z", "2026-07-19T00:00:00.000Z"),
+      workerEnv.DB.prepare(`INSERT INTO editorial_artifacts
+        (artifact_id, run_id, user_id, workspace_id, article_id, recording_id,
+         schema_version, kind, producer_agent_role, producer_agent_version,
+         skill_id, skill_version, workflow_version, policy_version,
+         input_artifact_ids_json, payload_hash, storage_ref, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .bind(artifactId, runId, "user_runtime_a", "workspace_runtime_a", articleId, 92, "editorial-orchestration.v1", artifact.kind, artifact.producer_role, artifact.producer_version, "md_to_wechat", "1.0.0", "editorial-workflow.v2", "editorial-policy.v2", JSON.stringify([]), artifactPayloadHash, `do://editorial-phase2/${runId}/${artifactId}`, "2026-07-19T00:00:00.000Z"),
+    ]);
+    await runInDurableObject(coordinator, async (_instance, state) => {
+      try {
+        await _instance.getRun(runId);
+      } catch {
+        // getRun initializes the fresh DO schema.
+      }
+      state.storage.sql.exec(
+        `INSERT INTO editorial_phase2_runs
+          (run_id, article_id, recording_id, user_id, workspace_id, scenario, payload_hash, manifest_json,
+           workflow_id, state, state_revision, approval_state, revision_count, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 'queued', 0, 'not_required', 0, ?, ?)`,
+        runId,
+        articleId,
+        92,
+        "user_runtime_a",
+        "workspace_runtime_a",
+        "happy",
+        "sha256:schema-pin-conflict",
+        JSON.stringify({
+          schema_version: "editorial-orchestration.v2",
+          agent_versions: {
+            editorial_coordinator: "editorial-coordinator.agent.v2",
+            writing: "writing.agent.v2",
+            editorial_review: "editorial-review.agent.v2",
+            illustration: "illustration.agent.v2",
+            cover: "cover.agent.v2",
+          },
+          skill_pins: { formatting: { id: "md_to_wechat", version: "1.0.0" } },
+        }),
+        "2026-07-19T00:00:00.000Z",
+        "2026-07-19T00:00:00.000Z",
+      );
+    });
+    const result = await runInDurableObject(coordinator, async (instance, state) => {
+      try {
+        await instance.commitWorkflowStep({
+          run_id: runId,
+          step_name: "draft-v1",
+          step_key: `${runId}:draft-v1`,
+          expected_state: "queued",
+          next_state: "draft_generated",
+          artifacts: [artifact],
+        });
+        return { code: "unexpected_success" };
+      } catch (error) {
+        return {
+          code: (error as { code?: string }).code,
+          state: state.storage.sql.exec<{ state: string }>("SELECT state FROM editorial_phase2_runs WHERE run_id = ?", runId).one().state,
+          receipts: state.storage.sql.exec<{ count: number }>("SELECT count(*) AS count FROM editorial_phase2_outbox_receipts WHERE outbox_id IN (SELECT outbox_id FROM editorial_phase2_outbox WHERE run_id = ?)", runId).one().count,
+          events: state.storage.sql.exec<{ count: number }>("SELECT count(*) AS count FROM editorial_phase2_events WHERE run_id = ?", runId).one().count,
+        };
+      }
+    });
+    expect(result).toEqual({ code: "editorial_d1_mirror_conflict", state: "queued", receipts: 0, events: 0 });
+    expect(await workerEnv.DB.prepare("SELECT status, schema_version FROM editorial_runs WHERE run_id = ?").bind(runId).first()).toEqual({ status: "running", schema_version: "editorial-orchestration.v2" });
+    expect(await workerEnv.DB.prepare("SELECT count(*) AS count FROM editorial_artifacts WHERE run_id = ?").bind(runId).first()).toEqual({ count: 1 });
+  });
+
+  it("rejects a D1 orphan artifact, then recovers after append-only quarantine reconciliation", async () => {
+    const coordinator = workerEnv.EDITORIAL_COORDINATOR.getByName("runtime-d1-orphan");
+    const runId = "runtime-d1-orphan";
+    const articleId = "article_d1_orphan";
+    const manifest = JSON.stringify({
+      schema_version: "editorial-orchestration.v2",
+      agent_versions: {
+        editorial_coordinator: "editorial-coordinator.agent.v2",
+        writing: "writing.agent.v2",
+        editorial_review: "editorial-review.agent.v2",
+        illustration: "illustration.agent.v2",
+        cover: "cover.agent.v2",
+      },
+      skill_pins: { formatting: { id: "md_to_wechat", version: "1.0.0" } },
+    });
+    await runInDurableObject(coordinator, async instance => {
+      try {
+        await instance.getRun(runId);
+      } catch {
+        // getRun initializes the fresh DO schema.
+      }
+    });
+    await runInDurableObject(coordinator, async (_instance, state) => {
+      state.storage.sql.exec(
+        `INSERT INTO editorial_phase2_runs
+          (run_id, article_id, recording_id, user_id, workspace_id, scenario, payload_hash, manifest_json,
+           workflow_id, state, state_revision, approval_state, revision_count, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 'queued', 0, 'not_required', 0, ?, ?)`,
+        runId,
+        articleId,
+        92,
+        "user_runtime_a",
+        "workspace_runtime_a",
+        "happy",
+        "sha256:d1-orphan",
+        manifest,
+        "2026-07-19T00:00:00.000Z",
+        "2026-07-19T00:00:00.000Z",
+      );
+    });
+    const draftArtifact = {
+      kind: "article_draft" as const,
+      idempotency_key: `${runId}:draft:v1`,
+      producer_role: "writing" as const,
+      producer_version: "writing.agent.v2",
+      input_artifact_ids: [] as string[],
+      summary: { source: "synthetic", version_no: 1 },
+    };
+    const draft = await runInDurableObject(coordinator, async instance => instance.commitWorkflowStep({
+      run_id: runId,
+      step_name: "draft-v1",
+      step_key: `${runId}:draft-v1`,
+      expected_state: "queued",
+      next_state: "draft_generated",
+      artifacts: [draftArtifact],
+    }));
+    expect(draft.state).toBe("draft_generated");
+    const orphan = {
+      artifactId: `${runId}:orphan:cover`,
+      kind: "cover_plan" as const,
+      producerRole: "cover",
+      producerVersion: "cover.agent.v2",
+      summary: { source: "synthetic", version_no: 99 },
+      inputArtifactIds: [] as string[],
+      storageRef: `do://editorial-phase2/${runId}:${runId}:orphan:cover`,
+    };
+    const orphanHash = await payloadHash({ kind: orphan.kind, summary: orphan.summary, input_artifact_ids: orphan.inputArtifactIds });
+    await workerEnv.DB.prepare(`INSERT INTO editorial_artifacts
+      (artifact_id, run_id, user_id, workspace_id, article_id, recording_id,
+       schema_version, kind, producer_agent_role, producer_agent_version,
+       skill_id, skill_version, workflow_version, policy_version,
+       input_artifact_ids_json, payload_hash, storage_ref, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .bind(orphan.artifactId, runId, "user_runtime_a", "workspace_runtime_a", articleId, 92, "editorial-orchestration.v2", orphan.kind, orphan.producerRole, orphan.producerVersion, "md_to_wechat", "1.0.0", "editorial-workflow.v2", "editorial-policy.v2", JSON.stringify(orphan.inputArtifactIds), orphanHash, orphan.storageRef, "2026-07-19T00:00:00.000Z")
+      .run();
+    const rejected = await runInDurableObject(coordinator, async (instance, state) => {
+      try {
+        await instance.commitWorkflowStep({
+          run_id: runId,
+          step_name: "review-v1",
+          step_key: `${runId}:review-v1`,
+          expected_state: "draft_generated",
+          next_state: "review_pending",
+          artifacts: [],
+        });
+        return { code: "unexpected_success" };
+      } catch (error) {
+        return {
+          code: (error as { code?: string }).code,
+          state: state.storage.sql.exec<{ state: string }>("SELECT state FROM editorial_phase2_runs WHERE run_id = ?", runId).one().state,
+          steps: state.storage.sql.exec<{ count: number }>("SELECT count(*) AS count FROM editorial_phase2_steps WHERE run_id = ?", runId).one().count,
+          receipts: state.storage.sql.exec<{ count: number }>("SELECT count(*) AS count FROM editorial_phase2_outbox_receipts WHERE outbox_id IN (SELECT outbox_id FROM editorial_phase2_outbox WHERE run_id = ?)", runId).one().count,
+          events: state.storage.sql.exec<{ count: number }>("SELECT count(*) AS count FROM editorial_phase2_events WHERE run_id = ?", runId).one().count,
+        };
+      }
+    });
+    expect(rejected).toEqual({ code: "editorial_d1_mirror_conflict", state: "draft_generated", steps: 2, receipts: 1, events: 1 });
+    expect(await workerEnv.DB.prepare("SELECT count(*) AS count FROM editorial_artifacts WHERE run_id = ?").bind(runId).first()).toEqual({ count: 2 });
+
+    // Immutable D1 rows are not deleted. Quarantine is represented by
+    // restoring the same stable artifact identity into the DO outbox, after
+    // which replay can prove an exact set without duplicating either row.
+    await runInDurableObject(coordinator, async (_instance, state) => {
+      state.storage.sql.exec(
+        `INSERT INTO editorial_phase2_artifacts
+          (artifact_id, run_id, kind, idempotency_key, payload_hash, producer_role, producer_version,
+           input_artifact_ids_json, summary_json, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        orphan.artifactId,
+        runId,
+        orphan.kind,
+        `${runId}:orphan:cover`,
+        orphanHash,
+        orphan.producerRole,
+        orphan.producerVersion,
+        JSON.stringify(orphan.inputArtifactIds),
+        JSON.stringify(orphan.summary),
+        "2026-07-19T00:00:00.000Z",
+      );
+      state.storage.sql.exec(
+        `INSERT INTO editorial_phase2_outbox
+          (outbox_id, run_id, artifact_id, user_id, workspace_id, article_id, recording_id, kind,
+           payload_hash, producer_role, producer_version, input_artifact_ids_json, summary_json, storage_ref, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `${runId}:outbox:${orphan.artifactId}`,
+        runId,
+        orphan.artifactId,
+        "user_runtime_a",
+        "workspace_runtime_a",
+        articleId,
+        92,
+        orphan.kind,
+        orphanHash,
+        orphan.producerRole,
+        orphan.producerVersion,
+        JSON.stringify(orphan.inputArtifactIds),
+        JSON.stringify(orphan.summary),
+        orphan.storageRef,
+        "2026-07-19T00:00:00.000Z",
+      );
+    });
+    const recovered = await runInDurableObject(coordinator, async instance => instance.commitWorkflowStep({
+      run_id: runId,
+      step_name: "review-v1",
+      step_key: `${runId}:review-v1`,
+      expected_state: "draft_generated",
+      next_state: "review_pending",
+      artifacts: [],
+    }));
+    expect(recovered.state).toBe("review_pending");
+    const reconciled = await runInDurableObject(coordinator, (_instance, state) => state.storage.sql.exec<{ doRows: number; receipts: number; events: number; state: string }>(
+      `SELECT
+         (SELECT count(*) FROM editorial_phase2_outbox WHERE run_id = ?) AS doRows,
+         (SELECT count(*) FROM editorial_phase2_outbox_receipts WHERE outbox_id IN (SELECT outbox_id FROM editorial_phase2_outbox WHERE run_id = ?)) AS receipts,
+         (SELECT count(*) FROM editorial_phase2_events WHERE run_id = ?) AS events,
+         (SELECT state FROM editorial_phase2_runs WHERE run_id = ?) AS state`,
+      runId,
+      runId,
+      runId,
+      runId,
+    ).one());
+    expect(reconciled).toEqual({ doRows: 2, receipts: 2, events: 2, state: "review_pending" });
+    expect(await workerEnv.DB.prepare("SELECT count(*) AS count FROM editorial_artifacts WHERE run_id = ?").bind(runId).first()).toEqual({ count: 2 });
   });
 
   it("does not resolve a DO or create orchestration state when the server flag is off", async () => {

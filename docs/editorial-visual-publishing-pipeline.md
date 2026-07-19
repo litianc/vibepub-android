@@ -119,6 +119,15 @@ storage-ref, and stable artifact identity matches.
 Each run has one unique terminal intent; competing completed/failed attempts
 therefore yield one legal terminal outcome and a stale/conflict response.
 
+The D1 artifact mirror is an exact set for the run: extra, missing, or
+mismatched rows (including `schema_version`) block the awaiting and terminal
+transitions. The pre-write check rejects extras before any INSERT; a successful
+replay performs a post-write count and identity reconciliation. Public
+`d1_mirrored_artifact_count` is queried from D1, while the DO receipt count and
+pending count remain separate diagnostics. Immutable D1 rows are quarantined
+by restoring the same stable artifact identity into the DO outbox; they are
+never edited or deleted as a recovery shortcut.
+
 The server-owned state path is:
 
 `queued -> draft_generated -> review_pending/revision_pending -> reviewed -> content_frozen -> awaiting_human_confirmation -> approved_for_phase3`
