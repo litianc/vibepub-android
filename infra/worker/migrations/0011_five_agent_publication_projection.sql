@@ -229,7 +229,7 @@ WHEN NOT EXISTS (
         AND p.state = 'needs_action'
         AND p.run_status = 'needs_action'
         AND p.next_action = NEW.action) OR
-      (NEW.action_origin = 'system' AND NEW.action IN ('retry', 'cancel')
+      (NEW.action_origin = 'system' AND NEW.action IN ('retry', 'cancel', 'resume')
         AND p.state_revision = NEW.expected_state_revision + 1
         AND p.last_event_type = 'action_' || NEW.action
         AND p.last_event_idempotency_key = NEW.idempotency_key

@@ -36,7 +36,7 @@ export const PUBLICATION_STATES = [
 ] as const;
 
 export type PublicationState = (typeof PUBLICATION_STATES)[number];
-export type PublicationAction = "retry" | "cancel";
+export type PublicationAction = "retry" | "cancel" | "resume";
 
 export type PublicationAuthContext = {
   userId: string;
@@ -278,7 +278,7 @@ export function projectPublicationTransition(
   const allowed = targetState === "retrying"
     ? (current.state === "failed" || current.state === "needs_action")
     : current.state === "retrying"
-      ? targetState === current.resume_state
+      ? targetState === current.resume_state || targetState === "cancelled"
       : ALLOWED_PROJECTION_TRANSITIONS[current.state]?.includes(targetState);
   if (!isPublicationState(targetState) || !allowed) {
     throw new PublicationProjectionError("publication_transition_invalid", "publication state transition is not allowed", 409);
@@ -748,17 +748,24 @@ export async function applyPublicationAction(
     if (!(current.state === "failed" || current.state === "needs_action")) {
       throw new PublicationProjectionError("publication_retry_not_allowed", "publication run is not retryable", 409);
     }
-  } else {
+  } else if (action === "cancel") {
     if (TERMINAL_STATES.has(current.state)) {
       throw new PublicationProjectionError("publication_cancel_not_allowed", "publication run is already terminal", 409);
     }
+  } else if (current.state !== "retrying" || !current.resume_state) {
+    throw new PublicationProjectionError("publication_resume_not_allowed", "publication run is not resumable", 409);
   }
 
   const revision = current.state_revision + 1;
   const now = new Date().toISOString();
   const eventId = `${runId}:event:${revision}`;
   const actionId = `${runId}:action:${idempotencyKey}`;
-  const projected = projectPublicationTransition(current, action === "retry" ? "retrying" : "cancelled", {
+  const targetState = action === "retry"
+    ? "retrying"
+    : action === "cancel"
+      ? "cancelled"
+      : current.resume_state as PublicationState;
+  const projected = projectPublicationTransition(current, targetState, {
     eventId,
     eventType: `action_${action}`,
     eventIdempotencyKey: idempotencyKey,
@@ -968,4 +975,15 @@ export async function assertPublicationAction(
     throw new PublicationProjectionError("idempotency_key_invalid", "idempotency key is invalid", 400);
   }
   return applyPublicationAction(db, auth, runId, action, idempotencyKey, payloadHash, expectedStateRevision);
+}
+
+export async function resumePublicationRun(
+  db: D1Database,
+  auth: PublicationAuthContext,
+  runId: string,
+  idempotencyKey: string,
+  payloadHash: string,
+  expectedStateRevision: number,
+): Promise<Record<string, unknown>> {
+  return applyPublicationAction(db, auth, runId, "resume", idempotencyKey, payloadHash, expectedStateRevision);
 }

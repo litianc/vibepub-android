@@ -246,6 +246,9 @@ error_code=external_side_effect_unknown is a reconciliation hold: system
 retry and cancel return the stable reconciliation_required conflict without
 writing an action or pretending the run was cancelled; only a controlled
 reconciliation writer may advance it.
+When a controlled worker resumes a retrying run, it targets the stored
+resume_state through the same CAS event/action batch; retrying may also be
+cancelled through that batch without clearing the last successful progress.
 
 The recordings list exposes only the agreed summary fields. The detail route
 marks legacy data `legacy=true`, `identity_status=legacy_unpinned`, and

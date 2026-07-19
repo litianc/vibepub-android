@@ -104,6 +104,42 @@ test("system retry and cancel fail closed while external side effects need recon
   }
 });
 
+test("retrying cancel is durable, idempotent, and competes with internal resume by revision", async () => {
+  const source = sourceRow();
+  const current = projectionRow({
+    state: "retrying",
+    run_status: "retrying",
+    resume_state: "writing",
+    last_successful_state: "writing",
+    last_successful_progress_percent: 28,
+    progress_percent: 28,
+    state_revision: 5,
+    next_action: null,
+    error_code: null,
+  });
+  current.source_manifest_hash = await sourceHash(source);
+
+  const replayDb = actionDb({ source, current: structuredClone(current), barrier: true });
+  const replayResults = await Promise.all([
+    projection.applyPublicationAction(replayDb, auth, "run-v3", "cancel", "cancel-1", "sha256:cancel", 5),
+    projection.applyPublicationAction(replayDb, auth, "run-v3", "cancel", "cancel-1", "sha256:cancel", 5),
+  ]);
+  assert.equal(replayResults.filter((result) => result.replayed === true).length, 1);
+  assert.equal(replayResults[0].run.state, "cancelled");
+  assert.equal(replayDb.actions.size, 1);
+  assert.equal(replayDb.events.length, 1);
+
+  const raceDb = actionDb({ source, current: structuredClone(current), barrier: true });
+  const raceResults = await Promise.allSettled([
+    projection.resumePublicationRun(raceDb, auth, "run-v3", "resume-1", "sha256:resume", 5),
+    projection.applyPublicationAction(raceDb, auth, "run-v3", "cancel", "cancel-2", "sha256:cancel-2", 5),
+  ]);
+  assert.equal(raceResults.filter((result) => result.status === "fulfilled").length, 1);
+  assert.equal(raceResults.filter((result) => result.status === "rejected" && result.reason.code === "publication_revision_conflict").length, 1);
+  assert.equal(raceDb.actions.size, 1);
+  assert.equal(raceDb.events.length, 1);
+});
+
 function sourceRow() {
   return {
     run_id: "run-v3",
@@ -160,6 +196,7 @@ function projectionRow(overrides = {}) {
 
 function actionDb({ source, current, barrier = false, mutateBeforeInsert = false }) {
   const actions = new Map();
+  const events = [];
   let initialActionReads = 0;
   let releaseActionReads;
   const actionReadsReleased = new Promise((resolve) => { releaseActionReads = resolve; });
@@ -168,6 +205,7 @@ function actionDb({ source, current, barrier = false, mutateBeforeInsert = false
   const currentReadsReleased = new Promise((resolve) => { releaseCurrentReads = resolve; });
   const db = {
     actions,
+    events,
     prepare(sql) {
       return {
         sql,
@@ -228,9 +266,20 @@ function actionDb({ source, current, barrier = false, mutateBeforeInsert = false
         payload_hash: payload,
         result_json: actionStatement.values[6],
       });
+      events.push({ action: actionStatement.values[1], revision: expectedRevision + 1 });
       current.state_revision = expectedRevision + 1;
-      current.state = actionStatement.values[1] === "retry" ? "retrying" : "cancelled";
-      current.run_status = current.state;
+      if (actionStatement.values[1] === "retry") {
+        current.state = "retrying";
+        current.run_status = "retrying";
+      } else if (actionStatement.values[1] === "cancel") {
+        current.state = "cancelled";
+        current.run_status = "cancelled";
+        current.resume_state = null;
+      } else {
+        current.state = current.resume_state || current.last_successful_state;
+        current.run_status = "active";
+        current.resume_state = null;
+      }
       return [{ meta: { changes: 1 } }, { meta: { changes: 1 } }, { meta: { changes: 1 } }];
     },
   };
