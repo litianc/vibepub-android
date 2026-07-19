@@ -72,6 +72,55 @@ test("publication action routes stay disabled when the V3 allowlist is empty", a
   assert.equal(prepareCalled, false);
 });
 
+test("all publication reads stay disabled when the V3 flag is off", async () => {
+  let publicationReads = 0;
+  const db = {
+    prepare(sql) {
+      if (sql.includes("publication_")) {
+        publicationReads += 1;
+        throw new Error("publication DB must not be read while the flag is off");
+      }
+      if (sql.includes("FROM recordings")) {
+        return statement({ all: async () => ({ results: [{
+          id: 101,
+          filename: "flag-off.m4a",
+          status: "COMPLETED",
+          created_at: "2026-07-19T00:00:01Z",
+          updated_at: "2026-07-19T00:00:02Z",
+          article_title: null,
+          raw_text_preview: null,
+          processing_stage: "COMPLETED",
+          wechat_url: null,
+          wechat_draft_id: null,
+          error_message: null,
+        }] }) });
+      }
+      throw new Error(`unexpected flag-off SQL: ${sql}`);
+    },
+  };
+  const disabledEnv = createEnv({ DB: db });
+  const runResponse = await worker.fetch(
+    authorizedRequest("https://example.test/api/recordings/101/publication-run"),
+    disabledEnv,
+    createExecutionContext(),
+  );
+  const eventsResponse = await worker.fetch(
+    authorizedRequest("https://example.test/api/publication-runs/synthetic-run/events"),
+    disabledEnv,
+    createExecutionContext(),
+  );
+  const recordingsResponse = await worker.fetch(
+    authorizedRequest("https://example.test/api/recordings"),
+    disabledEnv,
+    createExecutionContext(),
+  );
+  assert.equal(runResponse.status, 404);
+  assert.equal(eventsResponse.status, 404);
+  assert.equal(recordingsResponse.status, 200);
+  assert.equal((await recordingsResponse.json()).recordings[0].run_id, undefined);
+  assert.equal(publicationReads, 0);
+});
+
 test("recording publication route falls back once to a legacy run when projection tables are absent", async () => {
   const legacyRow = {
     run_id: "legacy-run",
@@ -108,7 +157,7 @@ test("recording publication route falls back once to a legacy run when projectio
 
   const response = await worker.fetch(
     authorizedRequest("https://example.test/api/recordings/101/publication-run"),
-    createEnv({ DB: db }),
+    createEnv({ DB: db, FIVE_AGENT_PUBLISHING_V3: "true", FIVE_AGENT_PUBLISHING_V3_ALLOWLIST: "default_user:vibepub-dogfood" }),
     createExecutionContext(),
   );
 
@@ -191,7 +240,7 @@ test("publication events paginate in bounded revision order and reject invalid b
 
   const firstPageResponse = await worker.fetch(
     authorizedRequest("https://example.test/api/publication-runs/synthetic-run/events"),
-    createEnv({ DB: db }),
+    createEnv({ DB: db, FIVE_AGENT_PUBLISHING_V3: "true", FIVE_AGENT_PUBLISHING_V3_ALLOWLIST: "default_user:vibepub-dogfood" }),
     createExecutionContext(),
   );
   assert.equal(firstPageResponse.status, 200);
@@ -203,7 +252,7 @@ test("publication events paginate in bounded revision order and reject invalid b
 
   const exactPageResponse = await worker.fetch(
     authorizedRequest("https://example.test/api/publication-runs/synthetic-run/events?after_revision=0&limit=2"),
-    createEnv({ DB: db }),
+    createEnv({ DB: db, FIVE_AGENT_PUBLISHING_V3: "true", FIVE_AGENT_PUBLISHING_V3_ALLOWLIST: "default_user:vibepub-dogfood" }),
     createExecutionContext(),
   );
   const exactPage = await exactPageResponse.json();
@@ -213,7 +262,7 @@ test("publication events paginate in bounded revision order and reject invalid b
 
   const finalPageResponse = await worker.fetch(
     authorizedRequest("https://example.test/api/publication-runs/synthetic-run/events?after_revision=1&limit=2"),
-    createEnv({ DB: db }),
+    createEnv({ DB: db, FIVE_AGENT_PUBLISHING_V3: "true", FIVE_AGENT_PUBLISHING_V3_ALLOWLIST: "default_user:vibepub-dogfood" }),
     createExecutionContext(),
   );
   const finalPage = await finalPageResponse.json();
@@ -223,7 +272,7 @@ test("publication events paginate in bounded revision order and reject invalid b
 
   const remainderResponse = await worker.fetch(
     authorizedRequest("https://example.test/api/publication-runs/synthetic-run/events?after_revision=2&limit=2"),
-    createEnv({ DB: db }),
+    createEnv({ DB: db, FIVE_AGENT_PUBLISHING_V3: "true", FIVE_AGENT_PUBLISHING_V3_ALLOWLIST: "default_user:vibepub-dogfood" }),
     createExecutionContext(),
   );
   const remainder = await remainderResponse.json();
@@ -233,7 +282,7 @@ test("publication events paginate in bounded revision order and reject invalid b
 
   const emptyResponse = await worker.fetch(
     authorizedRequest("https://example.test/api/publication-runs/synthetic-run/events?after_revision=3&limit=2"),
-    createEnv({ DB: db }),
+    createEnv({ DB: db, FIVE_AGENT_PUBLISHING_V3: "true", FIVE_AGENT_PUBLISHING_V3_ALLOWLIST: "default_user:vibepub-dogfood" }),
     createExecutionContext(),
   );
   const empty = await emptyResponse.json();
@@ -243,7 +292,7 @@ test("publication events paginate in bounded revision order and reject invalid b
 
   const repeatResponse = await worker.fetch(
     authorizedRequest("https://example.test/api/publication-runs/synthetic-run/events?after_revision=0&limit=2"),
-    createEnv({ DB: db }),
+    createEnv({ DB: db, FIVE_AGENT_PUBLISHING_V3: "true", FIVE_AGENT_PUBLISHING_V3_ALLOWLIST: "default_user:vibepub-dogfood" }),
     createExecutionContext(),
   );
   const repeat = await repeatResponse.json();
@@ -251,7 +300,7 @@ test("publication events paginate in bounded revision order and reject invalid b
 
   const invalid = await worker.fetch(
     authorizedRequest("https://example.test/api/publication-runs/synthetic-run/events?after_revision=0&limit=101"),
-    createEnv({ DB: db }),
+    createEnv({ DB: db, FIVE_AGENT_PUBLISHING_V3: "true", FIVE_AGENT_PUBLISHING_V3_ALLOWLIST: "default_user:vibepub-dogfood" }),
     createExecutionContext(),
   );
   assert.equal(invalid.status, 400);
@@ -401,7 +450,7 @@ test("lists Android recording display fields including processing stage", async 
 
   const response = await worker.fetch(
     authorizedRequest("https://example.test/api/recordings"),
-    createEnv({ DB: db }),
+    createEnv({ DB: db, FIVE_AGENT_PUBLISHING_V3: "true", FIVE_AGENT_PUBLISHING_V3_ALLOWLIST: "default_user:vibepub-dogfood" }),
     createExecutionContext(),
   );
 
@@ -466,7 +515,7 @@ test("recording list exposes only the agreed publication projection fields", asy
   };
   const response = await worker.fetch(
     authorizedRequest("https://example.test/api/recordings"),
-    createEnv({ DB: db }),
+    createEnv({ DB: db, FIVE_AGENT_PUBLISHING_V3: "true", FIVE_AGENT_PUBLISHING_V3_ALLOWLIST: "default_user:vibepub-dogfood" }),
     createExecutionContext(),
   );
 

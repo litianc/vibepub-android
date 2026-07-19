@@ -70,6 +70,8 @@ export interface Env {
   EDITORIAL_REVIEW: DurableObjectNamespace<EditorialReviewAgent>;
   EDITORIAL_VISUAL_PRODUCTION: DurableObjectNamespace<EditorialVisualProductionAgent>;
   EDITORIAL_WECHAT_PUBLISHING: DurableObjectNamespace<EditorialWechatPublishingAgent>;
+  EDITORIAL_ILLUSTRATION: DurableObjectNamespace<EditorialIllustrationAgent>;
+  EDITORIAL_COVER: DurableObjectNamespace<EditorialCoverAgent>;
 }
 
 const MINING_CLAIM_LEASE_MS = 2 * 60 * 60 * 1000;
@@ -279,6 +281,9 @@ export default {
 
     const recordingPublicationMatch = url.pathname.match(/^\/api\/recordings\/(\d+)\/publication-run$/);
     if (request.method === "GET" && recordingPublicationMatch) {
+      if (!publicationFeatureEnabled(env, auth.userId, auth.workspaceId)) {
+        return json({ error: "publication_workflow_disabled" }, 404);
+      }
       return publicationRoute(async () => getPublicationRunForRecording(
         env.DB,
         auth,
@@ -288,6 +293,9 @@ export default {
 
     const publicationEventsMatch = url.pathname.match(/^\/api\/publication-runs\/([^/]+)\/events$/);
     if (request.method === "GET" && publicationEventsMatch) {
+      if (!publicationFeatureEnabled(env, auth.userId, auth.workspaceId)) {
+        return json({ error: "publication_workflow_disabled" }, 404);
+      }
       const afterRevisionParam = url.searchParams.get("after_revision");
       const afterRevision = afterRevisionParam === null ? -1 : Number(afterRevisionParam);
       const limit = Number(url.searchParams.get("limit") || "50");
@@ -1396,7 +1404,10 @@ async function listUploads(env: Env, url: URL, auth: AuthContext): Promise<Respo
 async function listRecordings(env: Env, auth: AuthContext): Promise<Response> {
   try {
     const recordings = await queryRecordings(env, auth.userId);
-    return json({ recordings: withRecordingDisplayFields(await enrichRecordingList(env.DB, auth, recordings)) });
+    const projected = publicationFeatureEnabled(env, auth.userId, auth.workspaceId)
+      ? await enrichRecordingList(env.DB, auth, recordings)
+      : recordings;
+    return json({ recordings: withRecordingDisplayFields(projected) });
   } catch (dbErr: any) {
     console.error("Failed to fetch from D1:", dbErr);
     return json({ error: "database_error", details: dbErr.message }, 500);

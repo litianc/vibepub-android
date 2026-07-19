@@ -51,6 +51,16 @@ class_name = "EditorialVisualProductionAgent"
 name = "EDITORIAL_WECHAT_PUBLISHING"
 class_name = "EditorialWechatPublishingAgent"
 
+# Historical namespace compatibility only. These classes are not active Wave 1
+# business roles and are never selected for new runs.
+[[durable_objects.bindings]]
+name = "EDITORIAL_ILLUSTRATION"
+class_name = "EditorialIllustrationAgent"
+
+[[durable_objects.bindings]]
+name = "EDITORIAL_COVER"
+class_name = "EditorialCoverAgent"
+
 [[workflows]]
 name = "editorial-workflow-v2"
 binding = "EDITORIAL_WORKFLOW"

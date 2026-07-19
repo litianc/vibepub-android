@@ -24,12 +24,24 @@ test("phase 2 runtime configuration is fresh-safe and feature-gated", async () =
     );
   }
 
+  for (const [binding, className] of [
+    ["EDITORIAL_ILLUSTRATION", "EditorialIllustrationAgent"],
+    ["EDITORIAL_COVER", "EditorialCoverAgent"],
+  ]) {
+    assert.match(
+      wrangler,
+      new RegExp(`name = "${binding}"[\\s\\S]*?class_name = "${className}"`),
+    );
+  }
+
   assert.match(
     wrangler,
     /name\s*=\s*"editorial-workflow-v2"[\s\S]*?binding\s*=\s*"EDITORIAL_WORKFLOW"[\s\S]*?class_name\s*=\s*"EditorialWorkflow"/,
   );
   assert.match(wrangler, /tag\s*=\s*"v2-editorial-agents"/);
-  assert.match(wrangler, /tag\s*=\s*"v3-five-agent-publishing"/);
+  assert.match(wrangler, /tag\s*=\s*"v3-five-agent-publishing"[\s\S]*?EditorialVisualProductionAgent[\s\S]*?EditorialWechatPublishingAgent/);
+  const v3Migration = wrangler.match(/tag\s*=\s*"v3-five-agent-publishing"[\s\S]*?(?=\[\[migrations\]\]|$)/)?.[0] || "";
+  assert.doesNotMatch(v3Migration, /EditorialIllustrationAgent|EditorialCoverAgent/);
 
   const migrationFiles = await readdir(resolve(root, "migrations"));
   assert.equal(migrationFiles.some((file) => file === "0011_five_agent_publication_projection.sql"), true);

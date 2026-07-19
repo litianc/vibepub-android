@@ -43,7 +43,7 @@ POST /api/internal/editorial/versions/{version_id}/transition
 ```
 
 The runtime assigns `writing.worker.v1`, `editorial-review.worker.v1`, and
-`editorial-coordinator.worker.v1`; producer role/version fields in a request body are rejected. Only the five runtime agents are allowed: Coordinator, Writing, Review, Illustration, and Cover.
+`editorial-coordinator.worker.v1`; producer role/version fields in a request body are rejected. Historical Phase 1 records may contain Illustration/Cover, but the Wave 1 active registry has only Coordinator, Writing, Review, VisualProduction, and WechatPublishing.
 ```
 
 Version creation assigns the next version number from the scoped append-only history. Every write requires `idempotency_key` in JSON or the standard `Idempotency-Key` header. The same key and canonical payload return the existing object with `replayed=true`; the same key with another payload returns `409 idempotency_conflict`. A version or review belonging to another user is indistinguishable from not found.
@@ -65,9 +65,12 @@ Phase 1 intentionally does not create a draft, publish to WeChat, download an im
 ## Phase 2 Durable Editorial Orchestration
 
 Phase 2 adds an isolated Cloudflare Agents SDK runtime behind the existing
-internal service-token boundary. The five registered Durable Object classes are
+internal service-token boundary. The five active Durable Object classes are
 `EditorialCoordinatorAgent`, `EditorialWritingAgent`, `EditorialReviewAgent`,
-`EditorialIllustrationAgent`, and `EditorialCoverAgent`; Formatting, VisualQA,
+`EditorialVisualProductionAgent`, and `EditorialWechatPublishingAgent`.
+`EditorialIllustrationAgent` and `EditorialCoverAgent` remain legacy namespace
+compatibility bindings so old DO state and pins remain readable; they are not
+active business roles and new runs never select them. Formatting, VisualQA,
 ImageGeneration, and Publisher remain Skills or pipeline steps, not Agents.
 
 `EditorialCoordinatorAgent` is selected by a SHA-256 opaque name derived from
@@ -146,9 +149,11 @@ must match the server-side `EDITORIAL_WORKFLOW_V2_ALLOWLIST` pair
 `user_id:workspace_id`; clients cannot set the flag, ownership, role, producer,
 or state. Flag-off requests return `editorial_workflow_disabled` before a DO is
 resolved, so legacy Mining and Android behavior creates no Phase 2 artifact or
-Workflow. This phase adds no D1 migration. Wrangler adds the new
-`v2-editorial-agents` SQLite migration tag for the five DO classes; it has not
-been applied remotely.
+Workflow. This phase adds no D1 migration. Wrangler retains the historical
+`v2-editorial-agents` SQLite migration tag for the original namespaces and
+adds the forward-only `v3-five-agent-publishing` tag for VisualProduction and
+WechatPublishing; old namespaces are not renamed or deleted. These local
+configuration changes have not been applied remotely.
 
 Rollback is a stop-write/flag-off operation followed by Worker version rollback;
 DO histories are retained for forward-fix and are never deleted. No GLM, ASR,
@@ -208,9 +213,44 @@ verification may expose `draft_ready`.
 
 `FIVE_AGENT_PUBLISHING_V3` defaults to false and its allowlist defaults empty.
 Flag-off behavior leaves legacy Mining and Android paths unchanged and does
-not resolve a new Durable Object or create a projection row. Migration 0011 is
+not resolve a new Durable Object, read `publication_*`, or create a projection
+row; the new GET routes return stable 404. Legacy fallback is available only
+when the flag and owner/workspace allowlist are enabled. Migration 0011 is
 an additive forward migration for environments that have not applied it; its
 artifact allowlist forward-fix preserves old Illustration/Cover rows and is
 validated on fresh and legacy schemas. D1 migrations are applied once by the
 normal migration runner; fresh, existing, and migration-order fixtures are
 covered by SQLite tests rather than promised as a rerunnable SQL script.
+
+### Projection write and App read contract
+
+Only the authorized Coordinator/internal service may write the publication
+projection. It updates one owner-bound run with a state-revision CAS and the
+complete server-generated `last_event_*` marker in the same batch as the
+append-only event/action rows. Clients never supply producer roles, pins,
+state, stage, or progress, and the projection cannot write back to the
+canonical `editorial_runs`/Coordinator ledger.
+
+System `retry` is allowed from `failed` or `needs_action`; system `cancel` is
+allowed from any non-terminal v3 run. Human `confirm`, `abandon`, and `resume`
+are intent-only and require the same `expected_state_revision`,
+`state=needs_action`, `run_status=needs_action`, and exact `next_action`.
+Queued, active, terminal, legacy, stale, or mismatched actions return a
+conflict without an intent. Repeating the same key and payload replays one
+intent; a different payload conflicts. Retry resumes the stored
+`last_successful_state`, and retry/needs-action/failed/cancelled responses
+retain the last successful stage and progress rather than moving the App
+backwards.
+A needs_action projection with next_action=reconcile_external_side_effect or
+error_code=external_side_effect_unknown is a reconciliation hold: system
+retry and cancel return the stable reconciliation_required conflict without
+writing an action or pretending the run was cancelled; only a controlled
+reconciliation writer may advance it.
+
+The recordings list exposes only the agreed summary fields. The detail route
+marks legacy data `legacy=true`, `identity_status=legacy_unpinned`, and
+read-only capabilities; it never fabricates v3 pins or `draft_ready`.
+Transient/error states show the last successful stage and a `next_action`; only
+a real server-side draft verification may expose `draft_ready`. Event reads
+use `after_revision=-1` to include revision zero, bounded pages, stable
+ascending revisions, and a cursor equal to the last returned revision.

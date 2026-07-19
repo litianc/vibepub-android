@@ -7,6 +7,9 @@ import {
 export const PUBLICATION_SCHEMA_VERSION = "publication-projection.v1";
 export const PUBLICATION_WORKFLOW_VERSION = "publishing-workflow.v1";
 export const PUBLICATION_POLICY_VERSION = "publishing-policy.v1";
+export const CANONICAL_EDITORIAL_SCHEMA_VERSION = "editorial-orchestration.v3";
+export const CANONICAL_EDITORIAL_WORKFLOW_VERSION = "editorial-workflow.v3";
+export const CANONICAL_EDITORIAL_POLICY_VERSION = "editorial-policy.v3";
 
 export const PUBLICATION_STATES = [
   "queued",
@@ -69,6 +72,11 @@ export type PublicationRunRow = {
   payload_hash: string;
   created_at: string;
   updated_at: string;
+  last_event_id?: string;
+  last_event_type?: string;
+  last_event_idempotency_key?: string;
+  last_event_payload_hash?: string;
+  last_event_created_at?: string;
 };
 
 type PublicationEventRow = {
@@ -142,7 +150,7 @@ const PROGRESS_BY_STATE: Record<PublicationState, number> = {
   transcript_ready: 20,
   writing: 28,
   draft_generated: 36,
-  reviewing: 44,
+  reviewing: 50,
   revising: 50,
   reviewed: 56,
   content_frozen: 62,
@@ -185,6 +193,33 @@ const STATE_RANK: Record<PublicationState, number> = {
 };
 
 const TERMINAL_STATES = new Set<PublicationState>(["draft_ready", "failed", "cancelled"]);
+const SUCCESSFUL_STATES = new Set<PublicationState>(PUBLICATION_STATES.filter((state) =>
+  !["retrying", "needs_action", "failed", "cancelled"].includes(state),
+));
+
+const ALLOWED_PROJECTION_TRANSITIONS: Record<PublicationState, readonly PublicationState[]> = {
+  queued: ["transcribing", "failed", "cancelled"],
+  transcribing: ["transcript_ready", "failed", "cancelled"],
+  transcript_ready: ["writing", "failed", "cancelled"],
+  writing: ["draft_generated", "failed", "cancelled"],
+  draft_generated: ["reviewing", "failed", "cancelled"],
+  reviewing: ["revising", "reviewed", "needs_action", "failed", "cancelled"],
+  revising: ["reviewing", "needs_action", "failed", "cancelled"],
+  reviewed: ["content_frozen", "failed", "cancelled"],
+  content_frozen: ["visual_planning", "failed", "cancelled"],
+  visual_planning: ["visual_generating", "failed", "cancelled"],
+  visual_generating: ["visual_ready", "needs_action", "failed", "cancelled"],
+  visual_ready: ["formatting", "failed", "cancelled"],
+  formatting: ["visual_qa", "failed", "cancelled"],
+  visual_qa: ["draft_syncing", "failed", "cancelled"],
+  draft_syncing: ["draft_verifying", "needs_action", "failed", "cancelled"],
+  draft_verifying: ["draft_ready", "needs_action", "failed", "cancelled"],
+  draft_ready: [],
+  retrying: [],
+  needs_action: ["retrying", "cancelled"],
+  failed: ["retrying", "cancelled"],
+  cancelled: [],
+};
 
 export function publicationStage(state: PublicationState): string {
   return STAGE_BY_STATE[state];
@@ -217,6 +252,82 @@ export function publicationFeatureEnabled(
     .map((value) => value.trim())
     .filter(Boolean);
   return allowlist.includes(`${userId}:${workspaceId}`);
+}
+
+export type PublicationProjectionTransitionOptions = {
+  eventId: string;
+  eventType: string;
+  eventIdempotencyKey: string;
+  eventPayloadHash: string;
+  eventCreatedAt: string;
+  nextAction?: string | null;
+  errorCode?: string | null;
+  retryCount?: number;
+};
+
+/**
+ * The only mutable projection derivation point. Route handlers and workers
+ * provide an intended target plus an event identity; they cannot hand-build a
+ * stage/progress/status combination that regresses the App projection.
+ */
+export function projectPublicationTransition(
+  current: PublicationRunRow,
+  targetState: PublicationState,
+  options: PublicationProjectionTransitionOptions,
+): PublicationRunRow {
+  const allowed = targetState === "retrying"
+    ? (current.state === "failed" || current.state === "needs_action")
+    : current.state === "retrying"
+      ? targetState === current.resume_state
+      : ALLOWED_PROJECTION_TRANSITIONS[current.state]?.includes(targetState);
+  if (!isPublicationState(targetState) || !allowed) {
+    throw new PublicationProjectionError("publication_transition_invalid", "publication state transition is not allowed", 409);
+  }
+  if (current.last_successful_progress_percent < 0 || current.last_successful_progress_percent > 100) {
+    throw new PublicationProjectionError("publication_projection_invalid", "publication progress is invalid", 409);
+  }
+  const revision = current.state_revision + 1;
+  const successfulTarget = SUCCESSFUL_STATES.has(targetState);
+  const progress = successfulTarget
+    ? Math.max(current.last_successful_progress_percent, publicationProgress(targetState))
+    : current.last_successful_progress_percent;
+  const retrying = targetState === "retrying";
+  const exceptional = ["needs_action", "failed", "cancelled"].includes(targetState);
+  const runStatus: PublicationRunRow["run_status"] = targetState === "draft_ready"
+    ? "ready"
+    : retrying
+      ? "retrying"
+      : exceptional
+        ? targetState as "needs_action" | "failed" | "cancelled"
+        : "active";
+  const lastSuccessfulState = successfulTarget ? targetState : current.last_successful_state;
+  const lastSuccessfulProgress = successfulTarget ? progress : current.last_successful_progress_percent;
+  const resumeState = retrying ? current.last_successful_state : null;
+  const nextAction = exceptional ? (options.nextAction ?? null) : null;
+  const errorCode = exceptional ? (options.errorCode ?? null) : null;
+  const retryCount = options.retryCount ?? current.retry_count;
+  if (lastSuccessfulProgress < current.last_successful_progress_percent) {
+    throw new PublicationProjectionError("publication_progress_regression", "publication progress cannot regress", 409);
+  }
+  return {
+    ...current,
+    state: targetState,
+    run_status: runStatus,
+    state_revision: revision,
+    progress_percent: progress,
+    resume_state: resumeState,
+    last_successful_state: lastSuccessfulState,
+    last_successful_progress_percent: lastSuccessfulProgress,
+    retry_count: retryCount,
+    next_action: nextAction,
+    error_code: errorCode,
+    updated_at: options.eventCreatedAt,
+    last_event_id: options.eventId,
+    last_event_type: options.eventType,
+    last_event_idempotency_key: options.eventIdempotencyKey,
+    last_event_payload_hash: options.eventPayloadHash,
+    last_event_created_at: options.eventCreatedAt,
+  };
 }
 
 function parseJson<T>(value: string | null | undefined, fallback: T): T {
@@ -463,6 +574,21 @@ async function sourceRun(
     LIMIT 1
   `, [input.sourceRunId, input.userId, input.workspaceId, input.articleId, input.recordingId]);
   if (!row) return null;
+  const agentVersions = parseJson(row.agent_versions_json, {});
+  const skillPins = parseJson(row.skill_pins_json, {});
+  if (
+    row.schema_version !== CANONICAL_EDITORIAL_SCHEMA_VERSION ||
+    row.workflow_version !== CANONICAL_EDITORIAL_WORKFLOW_VERSION ||
+    row.policy_version !== CANONICAL_EDITORIAL_POLICY_VERSION ||
+    canonicalJson(agentVersions) !== canonicalJson(PUBLICATION_AGENT_VERSIONS) ||
+    canonicalJson(skillPins) !== canonicalJson(PUBLICATION_SKILL_PINS)
+  ) {
+    throw new PublicationProjectionError(
+      "publication_source_not_v3",
+      "canonical editorial run is not an active v3 publication run",
+      409,
+    );
+  }
   const state = row.status === "planned"
     ? "queued"
     : row.status === "completed"
@@ -481,8 +607,8 @@ async function sourceRun(
       workspace_id: input.workspaceId,
       workflow_version: row.workflow_version,
       policy_version: row.policy_version,
-      agent_versions: parseJson(row.agent_versions_json, {}),
-      skill_pins: parseJson(row.skill_pins_json, {}),
+      agent_versions: agentVersions,
+      skill_pins: skillPins,
       idempotency_key: row.idempotency_key,
       payload_hash: row.payload_hash,
     }),
@@ -532,12 +658,15 @@ export async function createPublicationRun(
        workflow_version, policy_version, agent_versions_json, skill_pins_json, state,
        run_status, state_revision, progress_percent, last_successful_state,
        last_successful_progress_percent, retry_count, next_action, error_code,
-       idempotency_key, payload_hash, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 'active', 0, 0, 'queued', 0, 0, NULL, NULL, ?, ?, ?, ?)`)
+       idempotency_key, payload_hash, created_at, updated_at, last_event_id,
+       last_event_type, last_event_idempotency_key, last_event_payload_hash,
+       last_event_created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 'active', 0, 0, 'queued', 0, 0, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .bind(input.runId, input.runId, input.userId, input.workspaceId, input.articleId, input.recordingId,
         sourceManifestHash, canonical.state, canonical.state_revision,
         PUBLICATION_SCHEMA_VERSION, PUBLICATION_WORKFLOW_VERSION, PUBLICATION_POLICY_VERSION,
-        agents, skills, input.idempotencyKey, input.payloadHash, now, now),
+        agents, skills, input.idempotencyKey, input.payloadHash, now, now,
+        `${input.runId}:event:0`, "run_queued", `${input.runId}:event:0`, input.payloadHash, now),
     db.prepare(`INSERT INTO publication_run_events
       (event_id, run_id, user_id, workspace_id, recording_id, revision, event_type, state,
        publication_stage, progress_percent, retry_count, next_action, error_code,
@@ -599,6 +728,9 @@ export async function applyPublicationAction(
   if (current.state_revision !== expectedStateRevision) {
     throw new PublicationProjectionError("publication_revision_conflict", "publication run revision is stale", 409);
   }
+  if (publicationRequiresReconciliation(current)) {
+    throw new PublicationProjectionError("reconciliation_required", "external side effect requires controlled reconciliation", 409);
+  }
   const canonical = current.source_run_id
     ? await sourceRun(db, {
         sourceRunId: current.source_run_id,
@@ -612,70 +744,81 @@ export async function applyPublicationAction(
     throw new PublicationProjectionError("publication_source_conflict", "canonical editorial run changed", 409);
   }
 
-  let nextState: PublicationState;
-  const nextRunStatus: PublicationRunRow["run_status"] = action === "retry" ? "retrying" : "cancelled";
-  let nextAction: string | null = null;
-  let errorCode = current.error_code;
-  let retryCount = current.retry_count;
-  const resumeState = action === "retry" ? current.last_successful_state : null;
   if (action === "retry") {
     if (!(current.state === "failed" || current.state === "needs_action")) {
       throw new PublicationProjectionError("publication_retry_not_allowed", "publication run is not retryable", 409);
     }
-    nextState = "retrying";
-    retryCount += 1;
-    errorCode = null;
   } else {
     if (TERMINAL_STATES.has(current.state)) {
       throw new PublicationProjectionError("publication_cancel_not_allowed", "publication run is already terminal", 409);
     }
-    nextState = "cancelled";
-    nextAction = null;
   }
 
   const revision = current.state_revision + 1;
   const now = new Date().toISOString();
   const eventId = `${runId}:event:${revision}`;
   const actionId = `${runId}:action:${idempotencyKey}`;
-  const projected = {
-    ...current,
-    state: nextState,
-    run_status: nextRunStatus,
-    state_revision: revision,
-    progress_percent: current.last_successful_progress_percent,
-    resume_state: resumeState,
-    retry_count: retryCount,
-    next_action: nextAction,
-    error_code: errorCode,
-    updated_at: now,
-  };
+  const projected = projectPublicationTransition(current, action === "retry" ? "retrying" : "cancelled", {
+    eventId,
+    eventType: `action_${action}`,
+    eventIdempotencyKey: idempotencyKey,
+    eventPayloadHash: payloadHash,
+    eventCreatedAt: now,
+    retryCount: action === "retry" ? current.retry_count + 1 : current.retry_count,
+    errorCode: null,
+  });
   const result = actionResult(projected, action, false);
   const resultJson = JSON.stringify(result);
-  const batch = await db.batch([
-    db.prepare(`UPDATE publication_runs
-      SET state = ?, run_status = ?, state_revision = ?, progress_percent = ?, resume_state = ?, retry_count = ?,
-          next_action = ?, error_code = ?, updated_at = ?
+  let batch: D1Result[];
+  try {
+    batch = await db.batch([
+      db.prepare(`UPDATE publication_runs
+      SET state = ?, run_status = ?, state_revision = ?, progress_percent = ?, resume_state = ?,
+          last_successful_state = ?, last_successful_progress_percent = ?, retry_count = ?,
+          next_action = ?, error_code = ?, updated_at = ?, last_event_id = ?, last_event_type = ?,
+          last_event_idempotency_key = ?, last_event_payload_hash = ?, last_event_created_at = ?
       WHERE run_id = ? AND user_id = ? AND workspace_id = ? AND state_revision = ?`)
-      .bind(nextState, nextRunStatus, revision, current.last_successful_progress_percent, resumeState, retryCount, nextAction, errorCode, now,
-        runId, auth.userId, auth.workspaceId, current.state_revision),
-    db.prepare(`INSERT INTO publication_run_events
+        .bind(projected.state, projected.run_status, projected.state_revision, projected.progress_percent, projected.resume_state,
+        projected.last_successful_state, projected.last_successful_progress_percent, projected.retry_count,
+        projected.next_action, projected.error_code, projected.updated_at, projected.last_event_id, projected.last_event_type,
+        projected.last_event_idempotency_key, projected.last_event_payload_hash, projected.last_event_created_at,
+          runId, auth.userId, auth.workspaceId, current.state_revision),
+      db.prepare(`INSERT INTO publication_run_events
       (event_id, run_id, user_id, workspace_id, recording_id, revision, event_type, state,
        publication_stage, progress_percent, retry_count, next_action, error_code,
        idempotency_key, payload_hash, created_at)
       SELECT ?, run_id, user_id, workspace_id, recording_id, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
       FROM publication_runs
       WHERE run_id = ? AND user_id = ? AND workspace_id = ? AND state_revision = ?`)
-      .bind(eventId, revision, `action_${action}`, nextState, publicationStage(current.last_successful_state), current.last_successful_progress_percent, retryCount, nextAction, errorCode, idempotencyKey, payloadHash, now, runId, auth.userId, auth.workspaceId, revision),
-    db.prepare(`INSERT INTO publication_run_actions
-      (action_id, run_id, user_id, workspace_id, recording_id, action, idempotency_key, payload_hash, result_json, created_at)
-      SELECT ?, run_id, user_id, workspace_id, recording_id, ?, ?, ?, ?, ?
+        .bind(eventId, revision, `action_${action}`, projected.state, publicationStage(projected.last_successful_state), projected.progress_percent, projected.retry_count, projected.next_action, projected.error_code, idempotencyKey, payloadHash, now, runId, auth.userId, auth.workspaceId, revision),
+      db.prepare(`INSERT INTO publication_run_actions
+      (action_id, run_id, user_id, workspace_id, recording_id, action, action_contract_version,
+       action_origin, expected_state_revision, idempotency_key, payload_hash, intent_json, result_json, created_at)
+      SELECT ?, run_id, user_id, workspace_id, recording_id, ?, ?, 'system', ?, ?, ?, '{}', ?, ?
       FROM publication_runs
       WHERE run_id = ? AND user_id = ? AND workspace_id = ? AND state_revision = ?`)
-      .bind(actionId, action, idempotencyKey, payloadHash, resultJson, now, runId, auth.userId, auth.workspaceId, revision),
-  ]);
+        .bind(actionId, action, "publication-system-action.v1", current.state_revision, idempotencyKey, payloadHash, resultJson, now,
+          runId, auth.userId, auth.workspaceId, revision),
+    ]);
+  } catch (error) {
+    if (!/unique|constraint/i.test(String((error as { message?: unknown })?.message || error))) throw error;
+    const replay = await existingAction(db, { runId, ...auth, idempotencyKey, payloadHash });
+    if (replay) return replay;
+    const latest = await first<PublicationRunRow>(db, `SELECT * FROM publication_runs WHERE run_id = ? AND user_id = ? AND workspace_id = ? LIMIT 1`, [runId, auth.userId, auth.workspaceId]);
+    if (!latest || latest.state_revision !== expectedStateRevision) {
+      throw new PublicationProjectionError("publication_revision_conflict", "publication run changed during action", 409);
+    }
+    throw new PublicationProjectionError("publication_action_conflict", "publication action conflicts with an existing action", 409);
+  }
   const changed = Number((batch[0] as { meta?: { changes?: number } })?.meta?.changes || 0);
   if (changed !== 1) {
-    throw new PublicationProjectionError("publication_revision_conflict", "publication run changed during action", 409);
+    const replay = await existingAction(db, { runId, ...auth, idempotencyKey, payloadHash });
+    if (replay) return replay;
+    const latest = await first<PublicationRunRow>(db, `SELECT * FROM publication_runs WHERE run_id = ? AND user_id = ? AND workspace_id = ? LIMIT 1`, [runId, auth.userId, auth.workspaceId]);
+    if (!latest || latest.state_revision !== expectedStateRevision) {
+      throw new PublicationProjectionError("publication_revision_conflict", "publication run changed during action", 409);
+    }
+    throw new PublicationProjectionError("publication_action_conflict", "publication action conflicts with an existing action", 409);
   }
   return result;
 }
@@ -683,6 +826,11 @@ export async function applyPublicationAction(
 export const HUMAN_ACTION_CONTRACT_VERSION = "publication-human-action.v1";
 export const HUMAN_ACTIONS = ["confirm", "abandon", "resume"] as const;
 export type HumanActionIntent = (typeof HUMAN_ACTIONS)[number];
+
+export function publicationRequiresReconciliation(current: PublicationRunRow): boolean {
+  return current.state === "needs_action" &&
+    (current.next_action === "reconcile_external_side_effect" || current.error_code === "external_side_effect_unknown");
+}
 
 export async function recordPublicationActionIntent(
   db: D1Database,
@@ -705,6 +853,9 @@ export async function recordPublicationActionIntent(
   if (current.state_revision !== expectedStateRevision) {
     throw new PublicationProjectionError("publication_revision_conflict", "publication run revision is stale", 409);
   }
+  if (current.state !== "needs_action" || current.run_status !== "needs_action" || current.next_action !== action) {
+    throw new PublicationProjectionError("publication_action_not_allowed", "human action is not allowed for the current projection", 409);
+  }
   const canonical = current.source_run_id
     ? await sourceRun(db, { sourceRunId: current.source_run_id, userId: auth.userId, workspaceId: auth.workspaceId, articleId: current.article_id, recordingId: current.recording_id })
     : null;
@@ -717,16 +868,41 @@ export async function recordPublicationActionIntent(
     action_contract_version: HUMAN_ACTION_CONTRACT_VERSION,
     intent_recorded: true,
     canonical_workflow_advanced: false,
+    expected_state_revision: expectedStateRevision,
     run: publicationResponse(current),
     replayed: false,
   };
-  await db.prepare(`INSERT INTO publication_run_actions
-    (action_id, run_id, user_id, workspace_id, recording_id, action, action_contract_version,
-     idempotency_key, payload_hash, intent_json, result_json, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-    .bind(actionId, runId, auth.userId, auth.workspaceId, current.recording_id, action, HUMAN_ACTION_CONTRACT_VERSION,
-      idempotencyKey, payloadHash, JSON.stringify({ action, action_contract_version: HUMAN_ACTION_CONTRACT_VERSION }), JSON.stringify(result), new Date().toISOString())
-    .run();
+  const createdAt = new Date().toISOString();
+  let insertResult: { meta?: { changes?: number } };
+  try {
+    insertResult = await db.prepare(`INSERT INTO publication_run_actions
+      (action_id, run_id, user_id, workspace_id, recording_id, action, action_contract_version,
+       action_origin, expected_state_revision, idempotency_key, payload_hash, intent_json, result_json, created_at)
+      SELECT ?, run_id, user_id, workspace_id, recording_id, ?, ?, 'human', state_revision, ?, ?, ?, ?, ?
+      FROM publication_runs
+      WHERE run_id = ? AND user_id = ? AND workspace_id = ? AND recording_id = ?
+        AND state_revision = ? AND state = 'needs_action' AND run_status = 'needs_action' AND next_action = ?`)
+      .bind(actionId, action, HUMAN_ACTION_CONTRACT_VERSION, expectedStateRevision, idempotencyKey, payloadHash,
+        JSON.stringify({ action, action_contract_version: HUMAN_ACTION_CONTRACT_VERSION, expected_state_revision: expectedStateRevision }),
+        JSON.stringify(result), createdAt, runId, auth.userId, auth.workspaceId, current.recording_id, expectedStateRevision, action)
+      .run();
+  } catch (error) {
+    if (!/unique|constraint/i.test(String((error as { message?: unknown })?.message || error))) throw error;
+    const replay = await existingAction(db, { runId, ...auth, idempotencyKey, payloadHash });
+    if (replay) return replay;
+    const latest = await first<PublicationRunRow>(db, `SELECT * FROM publication_runs WHERE run_id = ? AND user_id = ? AND workspace_id = ? LIMIT 1`, [runId, auth.userId, auth.workspaceId]);
+    if (!latest || latest.state_revision !== expectedStateRevision) {
+      throw new PublicationProjectionError("publication_revision_conflict", "publication run changed during human action", 409);
+    }
+    throw new PublicationProjectionError("publication_human_action_conflict", "another human action already owns this revision", 409);
+  }
+  if (Number(insertResult.meta?.changes || 0) !== 1) {
+    const latest = await first<PublicationRunRow>(db, `SELECT * FROM publication_runs WHERE run_id = ? AND user_id = ? AND workspace_id = ? LIMIT 1`, [runId, auth.userId, auth.workspaceId]);
+    if (!latest || latest.state_revision !== expectedStateRevision) {
+      throw new PublicationProjectionError("publication_revision_conflict", "publication run changed during human action", 409);
+    }
+    throw new PublicationProjectionError("publication_human_action_conflict", "another human action already owns this revision", 409);
+  }
   return result;
 }
 

@@ -47,12 +47,15 @@ function publicationInsert({
        workflow_version, policy_version, agent_versions_json, skill_pins_json,
        state, run_status, state_revision, progress_percent, resume_state,
        last_successful_state, last_successful_progress_percent, retry_count,
-       next_action, error_code, idempotency_key, payload_hash, created_at, updated_at)
+       next_action, error_code, idempotency_key, payload_hash, created_at, updated_at,
+       last_event_id, last_event_type, last_event_idempotency_key,
+       last_event_payload_hash, last_event_created_at)
     VALUES ('${runId}', '${sourceRunId}', '${userId}', '${workspaceId}', '${articleId}', ${recordingId},
        'sha256:manifest-${runId}', 'writing', 0, 'publication-projection.v1',
        'publishing-workflow.v1', 'publishing-policy.v1', '{}', '{}',
        'queued', 'active', 0, 0, NULL, 'queued', 0, 0, NULL, NULL,
-       '${idempotencyKey}', 'sha256:payload-${runId}', '${sourceCreatedAt}', '${sourceCreatedAt}');`;
+       '${idempotencyKey}', 'sha256:payload-${runId}', '${sourceCreatedAt}', '${sourceCreatedAt}',
+       '${runId}:event:0', 'run_queued', '${runId}:event:0', 'sha256:payload-${runId}', '${sourceCreatedAt}');`;
 }
 
 function eventInsert({
@@ -65,15 +68,19 @@ function eventInsert({
   stage = "upload",
   progress = 0,
   idempotencyKey = `${runId}:event:${revision}`,
+  eventId = idempotencyKey,
+  eventType = revision === 0 ? "run_queued" : "projection",
+  payloadHash = revision === 0 ? `sha256:payload-${runId}` : `sha256:event-${revision}`,
+  createdAt = revision === 0 ? "2026-07-19T00:00:01Z" : "2026-07-19T00:00:02Z",
 } = {}) {
   return `
     INSERT INTO publication_run_events
       (event_id, run_id, user_id, workspace_id, recording_id, revision, event_type,
        state, publication_stage, progress_percent, retry_count, next_action,
        error_code, idempotency_key, payload_hash, created_at)
-    VALUES ('${idempotencyKey}', '${runId}', '${userId}', '${workspaceId}', ${recordingId}, ${revision},
-       'projection', '${state}', '${stage}', ${progress}, 0, NULL, NULL,
-       '${idempotencyKey}', 'sha256:event-${revision}', '2026-07-19T00:00:02Z');`;
+    VALUES ('${eventId}', '${runId}', '${userId}', '${workspaceId}', ${recordingId}, ${revision},
+       '${eventType}', '${state}', '${stage}', ${progress}, 0, NULL, NULL,
+       '${idempotencyKey}', '${payloadHash}', '${createdAt}');`;
 }
 
 test("publication projection schema is fresh-safe, migration-order tested, and binds one canonical run id", () => {
@@ -82,6 +89,12 @@ test("publication projection schema is fresh-safe, migration-order tested, and b
   assert.match(result, /publication_run_events_projection_insert/);
   assert.doesNotMatch(result, /wave1_legacy/);
   assert.doesNotMatch(migration0011, /Reapplying this migration.*no-op/i);
+  const publicationColumns = runSql(`${schema}\nSELECT group_concat(name, '|') FROM pragma_table_info('publication_runs');`).trim();
+  const editorialColumns = runSql(`${schema}\nSELECT group_concat(name, '|') FROM pragma_table_info('editorial_runs');`).trim();
+  assert.match(publicationColumns, /last_event_id\|last_event_type\|last_event_idempotency_key\|last_event_payload_hash\|last_event_created_at/);
+  assert.doesNotMatch(editorialColumns, /last_event_id/);
+  const migratedColumns = runSql(`${legacy}\n${migration0010}\n${migration0011}\nSELECT group_concat(name, '|') FROM pragma_table_info('publication_runs');`).trim();
+  assert.equal(migratedColumns, publicationColumns);
   assert.equal(runSql(`${schema}\n${migration0011}\n${base}\n${publicationInsert()}\n${eventInsert()}\nSELECT run_id || ':' || source_run_id FROM publication_runs;`).trim(), "run_projection_a:run_projection_a");
   assert.throws(() => runSql(`${schema}\n${migration0011}\n${base}\n${publicationInsert({ sourceRunId: "different-canonical-run" })}`));
 });
@@ -95,36 +108,89 @@ test("publication child rows enforce composite ownership and append-only history
   assert.throws(() => runSql(`${valid}\nINSERT INTO publication_current_runs (recording_id, user_id, workspace_id, current_run_id, current_run_created_at, updated_at) VALUES (101, 'other-user', 'ws_projection', 'run_projection_a', '2026-07-19T00:00:01Z', '2026-07-19T00:00:03Z');`));
 });
 
+test("publication event identity is bound to the current projection metadata", () => {
+  const cases = [
+    ["event id", { eventId: "tampered-event" }],
+    ["event type", { eventType: "tampered_type" }],
+    ["idempotency key", { idempotencyKey: "tampered-key" }],
+    ["payload hash", { payloadHash: "sha256:tampered" }],
+    ["created at", { createdAt: "2026-07-19T00:00:03Z" }],
+  ];
+  for (const [, overrides] of cases) {
+    assert.throws(() => runSql(`${schema}\n${migration0011}\n${base}\n${publicationInsert()}\n${eventInsert(overrides)}`));
+  }
+  assert.doesNotThrow(() => runSql(`${schema}\n${migration0011}\n${base}\n${publicationInsert()}\n${eventInsert()}`));
+});
+
+test("human action insert is revision-CAS protected and append-only", () => {
+  const needsAction = `${schema}\n${migration0011}\n${base}\n${publicationInsert()}
+    UPDATE publication_runs SET state = 'needs_action', run_status = 'needs_action', state_revision = 1,
+      next_action = 'confirm', updated_at = '2026-07-19T00:00:03Z',
+      last_event_id = 'run_projection_a:event:1', last_event_type = 'needs_action',
+      last_event_idempotency_key = 'run_projection_a:event:1', last_event_payload_hash = 'sha256:event-1',
+      last_event_created_at = '2026-07-19T00:00:03Z'
+      WHERE run_id = 'run_projection_a';`;
+  const action = (key, actionName = "confirm") => `
+    INSERT INTO publication_run_actions
+      (action_id, run_id, user_id, workspace_id, recording_id, action, action_contract_version,
+       action_origin, expected_state_revision, idempotency_key, payload_hash, intent_json, result_json)
+    VALUES ('action-${key}', 'run_projection_a', 'usr_projection', 'ws_projection', 101,
+      '${actionName}', 'publication-human-action.v1', 'human', 1, '${key}', 'sha256:${key}', '{}', '{}');`;
+  assert.doesNotThrow(() => runSql(`${needsAction}${action("human-a")}`));
+  assert.throws(() => runSql(`${needsAction}${action("human-a")}${action("human-b")}`));
+  assert.throws(() => runSql(`${needsAction}${action("human-b", "abandon")}`));
+  assert.throws(() => runSql(`${schema}\n${migration0011}\n${base}\n${publicationInsert()}${action("queued", "confirm")}`));
+});
+
 test("publication INSERT and retry recovery are fail-closed", () => {
   const invalidInsert = `${schema}\n${migration0011}\n${base}\n${publicationInsert({ runId: "bad-insert" }).replace("'queued', 'active', 0, 0, NULL, 'queued'", "'retrying', 'retrying', 0, 0, 'reviewed', 'writing'")}`;
   assert.throws(() => runSql(invalidInsert));
+  const bypassInitialIdentity = publicationInsert({ runId: "bad-revision" })
+    .replace("'queued', 'active', 0, 0, NULL, 'queued'", "'queued', 'active', 1, 0, NULL, 'queued'")
+    .replace("'bad-revision:event:0', 'run_queued', 'bad-revision:event:0'", "'bad-revision:event:1', 'projection', 'bad-revision:event:1'");
+  assert.throws(() => runSql(`${schema}\n${migration0011}\n${base}\n${bypassInitialIdentity}`));
 
   const retrySetup = `${schema}\n${migration0011}\n${base}\n${publicationInsert()}\n
     UPDATE publication_runs
       SET state = 'transcribing', run_status = 'active', state_revision = 1,
           progress_percent = 14, last_successful_state = 'transcribing',
-          last_successful_progress_percent = 14, updated_at = '2026-07-19T00:00:03.000Z'
+          last_successful_progress_percent = 14, updated_at = '2026-07-19T00:00:03.000Z',
+          last_event_id = 'run_projection_a:event:1', last_event_type = 'projection',
+          last_event_idempotency_key = 'run_projection_a:event:1', last_event_payload_hash = 'sha256:event-1',
+          last_event_created_at = '2026-07-19T00:00:03.000Z'
       WHERE run_id = 'run_projection_a';
     UPDATE publication_runs
       SET state = 'transcript_ready', run_status = 'active', state_revision = 2,
           progress_percent = 20, last_successful_state = 'transcript_ready',
-          last_successful_progress_percent = 20, updated_at = '2026-07-19T00:00:03.250Z'
+          last_successful_progress_percent = 20, updated_at = '2026-07-19T00:00:03.250Z',
+          last_event_id = 'run_projection_a:event:2', last_event_type = 'projection',
+          last_event_idempotency_key = 'run_projection_a:event:2', last_event_payload_hash = 'sha256:event-2',
+          last_event_created_at = '2026-07-19T00:00:03.250Z'
       WHERE run_id = 'run_projection_a';
     UPDATE publication_runs
       SET state = 'writing', run_status = 'active', state_revision = 3,
           progress_percent = 28, last_successful_state = 'writing',
-          last_successful_progress_percent = 28, updated_at = '2026-07-19T00:00:03.500Z'
+          last_successful_progress_percent = 28, updated_at = '2026-07-19T00:00:03.500Z',
+          last_event_id = 'run_projection_a:event:3', last_event_type = 'projection',
+          last_event_idempotency_key = 'run_projection_a:event:3', last_event_payload_hash = 'sha256:event-3',
+          last_event_created_at = '2026-07-19T00:00:03.500Z'
       WHERE run_id = 'run_projection_a';
     UPDATE publication_runs
       SET state = 'failed', run_status = 'failed', state_revision = 4,
           progress_percent = 28, last_successful_state = 'writing',
-          last_successful_progress_percent = 28, updated_at = '2026-07-19T00:00:04Z'
+          last_successful_progress_percent = 28, updated_at = '2026-07-19T00:00:04Z',
+          last_event_id = 'run_projection_a:event:4', last_event_type = 'projection',
+          last_event_idempotency_key = 'run_projection_a:event:4', last_event_payload_hash = 'sha256:event-4',
+          last_event_created_at = '2026-07-19T00:00:04Z'
       WHERE run_id = 'run_projection_a';
     UPDATE publication_runs
       SET state = 'retrying', run_status = 'retrying', state_revision = 5,
           progress_percent = 28, resume_state = 'writing',
           last_successful_state = 'writing', last_successful_progress_percent = 28,
-          updated_at = '2026-07-19T00:00:05Z'
+          updated_at = '2026-07-19T00:00:05Z',
+          last_event_id = 'run_projection_a:event:5', last_event_type = 'projection',
+          last_event_idempotency_key = 'run_projection_a:event:5', last_event_payload_hash = 'sha256:event-5',
+          last_event_created_at = '2026-07-19T00:00:05Z'
       WHERE run_id = 'run_projection_a';
 `;
   const retryFlow = `${retrySetup}
@@ -133,14 +199,38 @@ test("publication INSERT and retry recovery are fail-closed", () => {
   assert.throws(() => runSql(`${retrySetup}
     UPDATE publication_runs SET state = 'queued', run_status = 'active', state_revision = 6,
       progress_percent = 0, resume_state = NULL, last_successful_state = 'queued',
-      last_successful_progress_percent = 0, updated_at = '2026-07-19T00:00:06Z'
+      last_successful_progress_percent = 0, updated_at = '2026-07-19T00:00:06Z',
+      last_event_id = 'run_projection_a:event:6', last_event_type = 'projection',
+      last_event_idempotency_key = 'run_projection_a:event:6', last_event_payload_hash = 'sha256:event-6',
+      last_event_created_at = '2026-07-19T00:00:06Z'
       WHERE run_id = 'run_projection_a';`));
   assert.equal(runSql(`${retrySetup}
     UPDATE publication_runs SET state = 'writing', run_status = 'active', state_revision = 6,
       progress_percent = 28, resume_state = NULL, last_successful_state = 'writing',
-      last_successful_progress_percent = 28, updated_at = '2026-07-19T00:00:06Z'
+      last_successful_progress_percent = 28, updated_at = '2026-07-19T00:00:06Z',
+      last_event_id = 'run_projection_a:event:6', last_event_type = 'projection',
+      last_event_idempotency_key = 'run_projection_a:event:6', last_event_payload_hash = 'sha256:event-6',
+      last_event_created_at = '2026-07-19T00:00:06Z'
       WHERE run_id = 'run_projection_a';
     SELECT state || ':' || COALESCE(resume_state, '') || ':' || progress_percent FROM publication_runs;`).trim(), "writing::28");
+});
+
+test("reconciliation holds reject system retry and cancel in SQL", () => {
+  const setup = schema + "\n" + migration0011 + "\n" + base + "\n" + publicationInsert() + "\n" +
+    "UPDATE publication_runs SET state = 'needs_action', run_status = 'needs_action', state_revision = 1, " +
+    "next_action = 'reconcile_external_side_effect', error_code = NULL, updated_at = '2026-07-19T00:00:03Z', " +
+    "last_event_id = 'run_projection_a:event:1', last_event_type = 'needs_action', " +
+    "last_event_idempotency_key = 'run_projection_a:event:1', last_event_payload_hash = 'sha256:event-1', " +
+    "last_event_created_at = '2026-07-19T00:00:03Z' WHERE run_id = 'run_projection_a';";
+  for (const [state, status, action] of [["retrying", "retrying", "retry"], ["cancelled", "cancelled", "cancel"]]) {
+    assert.throws(() => runSql(setup + "\n" +
+      "UPDATE publication_runs SET state = '" + state + "', run_status = '" + status + "', state_revision = 2, " +
+      "progress_percent = 0, resume_state = " + (state === "retrying" ? "'queued'" : "NULL") + ", " +
+      "last_successful_state = 'queued', last_successful_progress_percent = 0, updated_at = '2026-07-19T00:00:04Z', " +
+      "last_event_id = 'run_projection_a:event:2', last_event_type = 'action_" + action + "', " +
+      "last_event_idempotency_key = 'action-" + state + "', last_event_payload_hash = 'sha256:" + state + "', " +
+      "last_event_created_at = '2026-07-19T00:00:04Z' WHERE run_id = 'run_projection_a';"));
+  }
 });
 
 test("current run selector uses canonical creation order, not state revision", () => {
