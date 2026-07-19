@@ -13,6 +13,7 @@
 
 | 时间 | 功能更新 |
 | --- | --- |
+| 2026-07-19 14:47 CST | 图文发布流水线 Phase 2 接入五角色 Cloudflare Agents/Workflow 可恢复编排，默认关闭并按用户工作区 allowlist 隔离，合成审核与人工确认不产生外部发布副作用。 |
 | 2026-07-19 13:27 CST | 图文发布流水线 Phase 1 follow-up 将版本/审核写入收敛到受信 Agent 内部路由，新增不可伪造的 RunManifest/ArtifactEnvelope、状态 CAS 与可重跑的旧录音 scope 迁移兼容。 |
 | 2026-07-19 13:47 CST | 图文发布流水线 Phase 1 follow-up-v2 为状态 CAS 写入增加事务内 transition marker，阻止陈旧并发请求留下孤儿 transition。 |
 | 2026-07-19 13:55 CST | 图文发布流水线 Phase 1 follow-up-v2 补齐录音删除后的审计墓碑策略、0010/canonical trigger parity 与状态 CAS 三语句完整性校验。 |

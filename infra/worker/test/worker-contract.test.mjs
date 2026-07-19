@@ -1430,7 +1430,21 @@ async function loadWorker() {
     .replaceAll('from "./editorialContracts"', `from ${JSON.stringify(contractsUrl)}`);
   const pipelineUrl = moduleDataUrl(pipeline);
   const source = transpile(await readFile(sourcePath, "utf8"), sourcePath)
-    .replaceAll('from "./editorialPipeline"', `from ${JSON.stringify(pipelineUrl)}`);
+    .replaceAll('from "./editorialPipeline"', `from ${JSON.stringify(pipelineUrl)}`)
+    // The legacy Node harness exercises the Worker HTTP contract only. The
+    // real Agents SDK classes are covered by the Workers runtime suite.
+    .replace(
+      /import\s+\{\s*EditorialCoordinatorAgent,[\s\S]*?\}\s+from\s+"\.\/editorialAgents";/,
+      [
+        "class EditorialCoordinatorAgent {}",
+        "class EditorialCoverAgent {}",
+        "class EditorialIllustrationAgent {}",
+        "class EditorialReviewAgent {}",
+        "class EditorialWorkflow {}",
+        "class EditorialWritingAgent {}",
+        'const handleEditorialOrchestrationInternalRoute = async () => new Response(JSON.stringify({ error: "editorial_workflow_disabled" }), { status: 404 });',
+      ].join("\n"),
+    );
   return (await import(moduleDataUrl(source))).default;
 }
 

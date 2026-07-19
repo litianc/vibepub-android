@@ -1,6 +1,7 @@
 name = "vibepub-api"
 main = "src/index.ts"
 compatibility_date = "2026-06-24"
+compatibility_flags = ["nodejs_compat"]
 
 routes = [
   { pattern = "vibepub.litianc.cn", custom_domain = true }
@@ -20,8 +21,45 @@ GITHUB_WORKFLOW_REF = "main"
 WRITING_AGENT_BASE_URL = "https://writing-agent.719153161.workers.dev"
 EMAIL_FROM = "VibePub <no-reply@vibepub.litianc.cn>"
 INVITE_BASE_URL = "vibepub://auth"
+EDITORIAL_WORKFLOW_V2 = "false"
+EDITORIAL_WORKFLOW_V2_ALLOWLIST = ""
 
 [[d1_databases]]
 binding = "DB"
 database_name = "vibepub-db"
 database_id = "0804a462-4413-4eaf-bfab-60531eef06be"
+
+[[durable_objects.bindings]]
+name = "EDITORIAL_COORDINATOR"
+class_name = "EditorialCoordinatorAgent"
+
+[[durable_objects.bindings]]
+name = "EDITORIAL_WRITING"
+class_name = "EditorialWritingAgent"
+
+[[durable_objects.bindings]]
+name = "EDITORIAL_REVIEW"
+class_name = "EditorialReviewAgent"
+
+[[durable_objects.bindings]]
+name = "EDITORIAL_ILLUSTRATION"
+class_name = "EditorialIllustrationAgent"
+
+[[durable_objects.bindings]]
+name = "EDITORIAL_COVER"
+class_name = "EditorialCoverAgent"
+
+[[workflows]]
+name = "editorial-workflow-v2"
+binding = "EDITORIAL_WORKFLOW"
+class_name = "EditorialWorkflow"
+
+[[migrations]]
+tag = "v2-editorial-agents"
+new_sqlite_classes = [
+  "EditorialCoordinatorAgent",
+  "EditorialWritingAgent",
+  "EditorialReviewAgent",
+  "EditorialIllustrationAgent",
+  "EditorialCoverAgent",
+]

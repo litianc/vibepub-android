@@ -61,3 +61,52 @@ The minimal `RunManifest` and `ArtifactEnvelope` contracts pin workflow, policy,
 Rollback is a stop-write operation for the new `/api/editorial/*` routes followed by a Worker rollback to the previous version. The additive tables are retained for forward-fix; they are never dropped as part of rollback. Re-enable the routes only after the migration and Worker that understand the same contract are both verified.
 
 Phase 1 intentionally does not create a draft, publish to WeChat, download an image, or call a new external service. Those side effects belong to later phases after review, content freeze, visual QA, and idempotent draft synchronization are connected.
+
+## Phase 2 Durable Editorial Orchestration
+
+Phase 2 adds an isolated Cloudflare Agents SDK runtime behind the existing
+internal service-token boundary. The five registered Durable Object classes are
+`EditorialCoordinatorAgent`, `EditorialWritingAgent`, `EditorialReviewAgent`,
+`EditorialIllustrationAgent`, and `EditorialCoverAgent`; Formatting, VisualQA,
+ImageGeneration, and Publisher remain Skills or pipeline steps, not Agents.
+
+`EditorialCoordinatorAgent` is selected by a SHA-256 opaque name derived from
+`user_id`, `workspace_id`, `article_id`, and `run_id`. There is no global
+coordinator. The Agent stores only redacted run metadata, version pins, artifact
+hashes, step results, human action categories, and append-only event rows in its
+own SQLite storage. Article text, prompts, tokens, image bytes, and external
+payloads are never written by this phase.
+
+The `editorial-workflow-v2` AgentWorkflow uses stable step names and keys with
+finite exponential retries. It writes synthetic `ArticleBrief`, `ArticleDraft`,
+`ReviewReport`, `FrozenArticleVersion`, `IllustrationPlan`, and `CoverPlan`
+envelopes. Duplicate step/artifact keys replay the original result; a different
+payload returns an idempotency conflict. Artifact parents must already exist or
+be created in the same step. `transactionSync()` keeps state CAS, step, event,
+and artifact writes atomic, and append-only triggers protect artifacts/events.
+
+The server-owned state path is:
+
+`queued -> draft_generated -> review_pending/revision_pending -> reviewed -> content_frozen -> awaiting_human_confirmation -> approved_for_phase3`
+
+P0 and a second failed P1 review end in `failed` with
+`human_action_required`; a single P1 revision creates a new draft artifact and
+re-enters review. Human approval is durable and concurrent confirmation is
+accepted once. Approval only authorizes a later phase and has no publication
+side effect. Eviction/restart resumes from the stored run/step ledger.
+
+The `EDITORIAL_WORKFLOW_V2` flag defaults to `false`. Even when enabled, a run
+must match the server-side `EDITORIAL_WORKFLOW_V2_ALLOWLIST` pair
+`user_id:workspace_id`; clients cannot set the flag, ownership, role, producer,
+or state. Flag-off requests return `editorial_workflow_disabled` before a DO is
+resolved, so legacy Mining and Android behavior creates no Phase 2 artifact or
+Workflow. This phase adds no D1 migration. Wrangler adds the new
+`v2-editorial-agents` SQLite migration tag for the five DO classes; it has not
+been applied remotely.
+
+Rollback is a stop-write/flag-off operation followed by Worker version rollback;
+DO histories are retained for forward-fix and are never deleted. No GLM, ASR,
+image, WeChat, CDN, R2, or other network call is made by the Phase 2 synthetic
+workflow. Production enablement requires a later detached review of the
+bindings, allowlist, workflow retries, and evidence before any migration or
+deployment.

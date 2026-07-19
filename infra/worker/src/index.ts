@@ -1,4 +1,23 @@
 import { handleEditorialInternalRoute, handleEditorialRoute } from "./editorialPipeline";
+import {
+  EditorialCoordinatorAgent,
+  EditorialCoverAgent,
+  EditorialIllustrationAgent,
+  EditorialReviewAgent,
+  EditorialWorkflow,
+  EditorialWritingAgent,
+  handleEditorialOrchestrationInternalRoute,
+} from "./editorialAgents";
+import type { EditorialWorkflowParams } from "./editorialAgents";
+
+export {
+  EditorialCoordinatorAgent,
+  EditorialWritingAgent,
+  EditorialReviewAgent,
+  EditorialIllustrationAgent,
+  EditorialCoverAgent,
+  EditorialWorkflow,
+};
 
 export interface Env {
   FILES_BUCKET: R2Bucket;
@@ -27,6 +46,14 @@ export interface Env {
   INVITE_BASE_URL?: string;
   BOOTSTRAP_ADMIN_EMAIL?: string;
   BOOTSTRAP_ADMIN_USER_ID?: string;
+  EDITORIAL_WORKFLOW_V2?: string;
+  EDITORIAL_WORKFLOW_V2_ALLOWLIST?: string;
+  EDITORIAL_WORKFLOW: Workflow<EditorialWorkflowParams>;
+  EDITORIAL_COORDINATOR: DurableObjectNamespace<EditorialCoordinatorAgent>;
+  EDITORIAL_WRITING: DurableObjectNamespace<EditorialWritingAgent>;
+  EDITORIAL_REVIEW: DurableObjectNamespace<EditorialReviewAgent>;
+  EDITORIAL_ILLUSTRATION: DurableObjectNamespace<EditorialIllustrationAgent>;
+  EDITORIAL_COVER: DurableObjectNamespace<EditorialCoverAgent>;
 }
 
 const MINING_CLAIM_LEASE_MS = 2 * 60 * 60 * 1000;
@@ -127,6 +154,9 @@ export default {
     if (url.pathname.startsWith("/api/internal/editorial/")) {
       if (!(await isInternalAuthorized(request, env))) {
         return json({ error: "unauthorized" }, 401);
+      }
+      if (url.pathname.startsWith("/api/internal/editorial/runs")) {
+        return handleEditorialOrchestrationInternalRoute(request, env, url);
       }
       return handleEditorialInternalRoute(request, env, url);
     }
