@@ -13,6 +13,7 @@
 
 | 时间 | 功能更新 |
 | --- | --- |
+| 2026-07-19 23:10 CST | Wave 1 增加五 Agent 发布投影兼容层：统一 canonical run、受限状态/事件分页、用户动作幂等和旧 Illustration/Cover 数据可读回退，默认关闭且不产生外部副作用。 |
 | 2026-07-19 17:06 CST | 图文发布流水线 Phase 2 follow-up-v3 将 D1/DO 产物收敛为含 schema pin 的 exact-set 对账，D1 实际镜像计数与 DO receipt 分离，并补孤儿恢复。 |
 | 2026-07-19 15:31 CST | 图文发布流水线 Phase 2 增加 DO 审计步骤/人工确认不可变保护、D1 脱敏 outbox 镜像与故障恢复，非法人工等待不会改变编排状态。 |
 | 2026-07-19 14:47 CST | 图文发布流水线 Phase 2 接入五角色 Cloudflare Agents/Workflow 可恢复编排，默认关闭并按用户工作区 allowlist 隔离，合成审核与人工确认不产生外部发布副作用。 |

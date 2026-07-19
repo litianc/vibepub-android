@@ -156,3 +156,61 @@ image, WeChat, CDN, R2, or other network call is made by the Phase 2 synthetic
 workflow. Production enablement requires a later detached review of the
 bindings, allowlist, workflow retries, and evidence before any migration or
 deployment.
+
+## Wave 1 Five-Agent Publishing Projection
+
+Wave 1 keeps the Phase 1 `editorial_runs`/`editorial_artifacts` ledger and the
+Coordinator DO as the only canonical durable workflow state. The new
+`publication_runs`, `publication_run_events`, and `publication_run_actions`
+tables are server-owned App projections, bounded event history, and action
+idempotency records; they cannot create a run without a matching canonical
+`editorial_runs` identity and cannot advance the canonical ledger.
+
+New runs use exactly five active runtime roles:
+`editorial_coordinator`, `writing`, `editorial_review`, `visual_production`,
+and `wechat_publishing`. The old `illustration` and `cover` producer pins
+remain readable historical data and are never rewritten. The new
+`VisualProduction` and `WechatPublishing` Durable Object bindings are
+additive; no old Durable Object namespace is renamed or deleted.
+
+`publication_runs.run_id` is the canonical `editorial_runs.run_id` (the
+`source_run_id` compatibility column is constrained to the same value).
+Projection rows are owner/workspace/recording-bound with composite foreign
+keys, immutable identity fields, insert-only event/action history, monotonic
+state revisions, and a creation-order current-run selector. A late write from
+an older run cannot replace a newer current pointer, and a run's state
+revision is never compared across runs.
+
+The App projection endpoints are:
+
+```text
+GET  /api/recordings/{recording_id}/publication-run
+GET  /api/publication-runs/{run_id}/events?after_revision=-1&limit=50
+POST /api/publication-runs/{run_id}/retry
+POST /api/publication-runs/{run_id}/cancel
+POST /api/publication-runs/{run_id}/actions
+```
+
+Event pagination is bounded to 1-100 rows. The default cursor `-1` reads the
+initial revision `0`; an explicit cursor `0` skips revision `0`. Results are
+strictly ascending and non-overlapping, and `next_after_revision` is the last
+returned revision for every non-empty page, including the final page; an empty
+page returns the supplied cursor. Mutating endpoints require a server-checked
+`expected_state_revision`, an idempotency key, and the authenticated owner;
+stale actions return 409 without writing an intent.
+
+When the additive projection tables are unavailable, the recording endpoint
+uses a conservative legacy response. It does not fabricate a v3 manifest,
+pins, or draft readiness: legacy runs are read-only, marked
+`identity_status=legacy_unpinned`, and awaiting/approved legacy states stop at
+`content_frozen` with `v3_projection_required`. Only a real v3 draft
+verification may expose `draft_ready`.
+
+`FIVE_AGENT_PUBLISHING_V3` defaults to false and its allowlist defaults empty.
+Flag-off behavior leaves legacy Mining and Android paths unchanged and does
+not resolve a new Durable Object or create a projection row. Migration 0011 is
+an additive forward migration for environments that have not applied it; its
+artifact allowlist forward-fix preserves old Illustration/Cover rows and is
+validated on fresh and legacy schemas. D1 migrations are applied once by the
+normal migration runner; fresh, existing, and migration-order fixtures are
+covered by SQLite tests rather than promised as a rerunnable SQL script.

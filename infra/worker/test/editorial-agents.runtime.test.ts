@@ -275,8 +275,8 @@ describe("editorial Agent + Workflow runtime", () => {
     const fixedAgents = [
       [workerEnv.EDITORIAL_WRITING, "writing"],
       [workerEnv.EDITORIAL_REVIEW, "editorial_review"],
-      [workerEnv.EDITORIAL_ILLUSTRATION, "illustration"],
-      [workerEnv.EDITORIAL_COVER, "cover"],
+      [workerEnv.EDITORIAL_VISUAL_PRODUCTION, "visual_production"],
+      [workerEnv.EDITORIAL_WECHAT_PUBLISHING, "wechat_publishing"],
     ] as const;
     for (const [namespace, role] of fixedAgents) {
       expect(await namespace.getByName(`runtime-agent-${role}`).runtimeIdentity()).toMatchObject({ role });

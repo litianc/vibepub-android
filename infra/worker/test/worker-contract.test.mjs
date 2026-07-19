@@ -49,6 +49,276 @@ test("health check exposes deploy version metadata", async () => {
   });
 });
 
+test("publication action routes stay disabled when the V3 allowlist is empty", async () => {
+  let prepareCalled = false;
+  const db = {
+    prepare() {
+      prepareCalled = true;
+      throw new Error("publication DB must not be touched while the flag is off");
+    },
+  };
+  const response = await worker.fetch(
+    authorizedRequest("https://example.test/api/publication-runs/synthetic-run/retry", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Idempotency-Key": "retry-1" },
+      body: JSON.stringify({ expected_state_revision: 0 }),
+    }),
+    createEnv({ DB: db }),
+    createExecutionContext(),
+  );
+
+  assert.equal(response.status, 404);
+  assert.equal((await response.json()).error, "publication_workflow_disabled");
+  assert.equal(prepareCalled, false);
+});
+
+test("recording publication route falls back once to a legacy run when projection tables are absent", async () => {
+  const legacyRow = {
+    run_id: "legacy-run",
+    user_id: "default_user",
+    workspace_id: "vibepub-dogfood",
+    article_id: "legacy-article",
+    recording_id: 101,
+    state: "awaiting_human_confirmation",
+    schema_version: "editorial-orchestration.v2",
+    workflow_version: "editorial-workflow.v2",
+    policy_version: "editorial-policy.v2",
+    agent_versions_json: "{}",
+    skill_pins_json: "{}",
+    idempotency_key: "legacy-key",
+    payload_hash: "sha256:legacy",
+    created_at: "2026-07-19T00:00:01Z",
+    updated_at: "2026-07-19T00:00:02Z",
+  };
+  const db = {
+    prepare(sql) {
+      if (sql.includes("publication_current_runs") || sql.includes("FROM publication_runs")) {
+        return statement({
+          all: async () => {
+            throw new Error("no such table: publication_runs");
+          },
+        });
+      }
+      if (sql.includes("FROM editorial_runs")) {
+        return statement({ all: async () => ({ results: [legacyRow] }) });
+      }
+      throw new Error(`Unexpected publication fallback SQL: ${sql}`);
+    },
+  };
+
+  const response = await worker.fetch(
+    authorizedRequest("https://example.test/api/recordings/101/publication-run"),
+    createEnv({ DB: db }),
+    createExecutionContext(),
+  );
+
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.run.legacy, true);
+  assert.equal(body.run.state, "content_frozen");
+  assert.equal(body.run.publication_stage, "review");
+  assert.equal(body.run.identity_status, "legacy_unpinned");
+  assert.deepEqual(body.run.capabilities, { read_only: true, actions: [] });
+  assert.equal(body.run.next_action, "v3_projection_required");
+  assert.equal(body.run.source_manifest_hash, null);
+});
+
+test("publication events paginate in bounded revision order and reject invalid bounds", async () => {
+  const runRow = {
+    run_id: "synthetic-run",
+    user_id: "default_user",
+    workspace_id: "vibepub-dogfood",
+    article_id: "synthetic-article",
+    recording_id: 101,
+    source_run_id: "synthetic-run",
+    source_manifest_hash: "sha256:synthetic",
+    source_state: "writing",
+    source_state_revision: 0,
+    schema_version: "publication-projection.v1",
+    workflow_version: "publishing-workflow.v1",
+    policy_version: "publishing-policy.v1",
+    agent_versions_json: "{}",
+    skill_pins_json: "{}",
+    state: "writing",
+    run_status: "active",
+    state_revision: 3,
+    progress_percent: 28,
+    resume_state: null,
+    last_successful_state: "writing",
+    last_successful_progress_percent: 28,
+    retry_count: 0,
+    next_action: null,
+    error_code: null,
+    idempotency_key: "synthetic-run",
+    payload_hash: "sha256:synthetic",
+    created_at: "2026-07-19T00:00:01Z",
+    updated_at: "2026-07-19T00:00:04Z",
+  };
+  const events = [0, 1, 2, 3].map((revision) => ({
+    event_id: `synthetic-run:event:${revision}`,
+    run_id: "synthetic-run",
+    user_id: "default_user",
+    workspace_id: "vibepub-dogfood",
+    revision,
+    event_type: "projection",
+    state: revision === 0 ? "queued" : revision === 1 ? "transcribing" : revision === 2 ? "transcript_ready" : "writing",
+    publication_stage: revision === 0 ? "upload" : revision < 3 ? "transcription" : "writing",
+    progress_percent: revision === 0 ? 0 : revision === 1 ? 14 : revision === 2 ? 20 : 28,
+    retry_count: 0,
+    next_action: null,
+    error_code: null,
+    idempotency_key: `synthetic-event:${revision}`,
+    payload_hash: `sha256:event:${revision}`,
+    created_at: `2026-07-19T00:00:0${revision}Z`,
+  }));
+  const db = {
+    prepare(sql) {
+      if (sql.includes("FROM publication_run_events")) {
+        return statement({
+          all: async (values) => ({
+            results: events
+              .filter((event) => event.revision > values[3])
+              .slice(0, values[4]),
+          }),
+        });
+      }
+      if (sql.includes("FROM publication_runs")) {
+        return statement({ all: async () => ({ results: [runRow] }) });
+      }
+      throw new Error(`Unexpected publication event SQL: ${sql}`);
+    },
+  };
+
+  const firstPageResponse = await worker.fetch(
+    authorizedRequest("https://example.test/api/publication-runs/synthetic-run/events"),
+    createEnv({ DB: db }),
+    createExecutionContext(),
+  );
+  assert.equal(firstPageResponse.status, 200);
+  const firstPage = await firstPageResponse.json();
+  assert.deepEqual(firstPage.events.map((event) => event.revision), [0, 1, 2, 3]);
+  assert.equal(firstPage.after_revision, -1);
+  assert.equal(firstPage.has_more, false);
+  assert.equal(firstPage.next_after_revision, 3);
+
+  const exactPageResponse = await worker.fetch(
+    authorizedRequest("https://example.test/api/publication-runs/synthetic-run/events?after_revision=0&limit=2"),
+    createEnv({ DB: db }),
+    createExecutionContext(),
+  );
+  const exactPage = await exactPageResponse.json();
+  assert.deepEqual(exactPage.events.map((event) => event.revision), [1, 2]);
+  assert.equal(exactPage.has_more, true);
+  assert.equal(exactPage.next_after_revision, 2);
+
+  const finalPageResponse = await worker.fetch(
+    authorizedRequest("https://example.test/api/publication-runs/synthetic-run/events?after_revision=1&limit=2"),
+    createEnv({ DB: db }),
+    createExecutionContext(),
+  );
+  const finalPage = await finalPageResponse.json();
+  assert.deepEqual(finalPage.events.map((event) => event.revision), [2, 3]);
+  assert.equal(finalPage.has_more, false);
+  assert.equal(finalPage.next_after_revision, 3);
+
+  const remainderResponse = await worker.fetch(
+    authorizedRequest("https://example.test/api/publication-runs/synthetic-run/events?after_revision=2&limit=2"),
+    createEnv({ DB: db }),
+    createExecutionContext(),
+  );
+  const remainder = await remainderResponse.json();
+  assert.deepEqual(remainder.events.map((event) => event.revision), [3]);
+  assert.equal(remainder.has_more, false);
+  assert.equal(remainder.next_after_revision, 3);
+
+  const emptyResponse = await worker.fetch(
+    authorizedRequest("https://example.test/api/publication-runs/synthetic-run/events?after_revision=3&limit=2"),
+    createEnv({ DB: db }),
+    createExecutionContext(),
+  );
+  const empty = await emptyResponse.json();
+  assert.deepEqual(empty.events, []);
+  assert.equal(empty.has_more, false);
+  assert.equal(empty.next_after_revision, 3);
+
+  const repeatResponse = await worker.fetch(
+    authorizedRequest("https://example.test/api/publication-runs/synthetic-run/events?after_revision=0&limit=2"),
+    createEnv({ DB: db }),
+    createExecutionContext(),
+  );
+  const repeat = await repeatResponse.json();
+  assert.deepEqual(repeat.events.map((event) => event.revision), exactPage.events.map((event) => event.revision));
+
+  const invalid = await worker.fetch(
+    authorizedRequest("https://example.test/api/publication-runs/synthetic-run/events?after_revision=0&limit=101"),
+    createEnv({ DB: db }),
+    createExecutionContext(),
+  );
+  assert.equal(invalid.status, 400);
+  assert.equal((await invalid.json()).error, "event_limit_invalid");
+});
+
+test("publication action rejects a stale revision before writing an intent", async () => {
+  const runRow = {
+    run_id: "synthetic-run",
+    user_id: "default_user",
+    workspace_id: "vibepub-dogfood",
+    article_id: "synthetic-article",
+    recording_id: 101,
+    source_run_id: "synthetic-run",
+    source_manifest_hash: "sha256:synthetic",
+    source_state: "writing",
+    source_state_revision: 0,
+    schema_version: "publication-projection.v1",
+    workflow_version: "publishing-workflow.v1",
+    policy_version: "publishing-policy.v1",
+    agent_versions_json: "{}",
+    skill_pins_json: "{}",
+    state: "failed",
+    run_status: "failed",
+    state_revision: 4,
+    progress_percent: 28,
+    resume_state: null,
+    last_successful_state: "writing",
+    last_successful_progress_percent: 28,
+    retry_count: 0,
+    next_action: "retry",
+    error_code: "synthetic_failure",
+    idempotency_key: "synthetic-run",
+    payload_hash: "sha256:synthetic",
+    created_at: "2026-07-19T00:00:01Z",
+    updated_at: "2026-07-19T00:00:04Z",
+  };
+  let batchCalled = false;
+  const db = {
+    prepare(sql) {
+      if (sql.includes("FROM publication_run_actions")) {
+        return statement({ all: async () => ({ results: [] }) });
+      }
+      if (sql.includes("FROM publication_runs")) {
+        return statement({ all: async () => ({ results: [runRow] }) });
+      }
+      throw new Error(`Unexpected stale action SQL: ${sql}`);
+    },
+    batch() {
+      batchCalled = true;
+      throw new Error("stale action must not write");
+    },
+  };
+  const response = await worker.fetch(
+    authorizedRequest("https://example.test/api/publication-runs/synthetic-run/retry", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Idempotency-Key": "retry-stale" },
+      body: JSON.stringify({ expected_state_revision: 3 }),
+    }),
+    createEnv({ DB: db, FIVE_AGENT_PUBLISHING_V3: "true", FIVE_AGENT_PUBLISHING_V3_ALLOWLIST: "default_user:vibepub-dogfood" }),
+    createExecutionContext(),
+  );
+  assert.equal(response.status, 409);
+  assert.equal((await response.json()).error, "publication_revision_conflict");
+  assert.equal(batchCalled, false);
+});
+
 test("GLM production defaults keep Mining and WritingAgent on the Coding endpoint", async () => {
   const codingBaseUrl = "https://open.bigmodel.cn/api/coding/paas/v4/";
   const [miningLlm, writingAgent, writingAgentWrangler] = await Promise.all([
@@ -148,6 +418,80 @@ test("lists Android recording display fields including processing stage", async 
   assert.equal(body.recordings[0].cover_image_url, "https://example.test/api/files/covers%2FVibePub-2026-06-29-160846-0m6s-Mon-Afternoon-Beijing-Chaoyang.png");
 });
 
+test("recording list exposes only the agreed publication projection fields", async () => {
+  const db = {
+    prepare(sql) {
+      if (sql.includes("FROM publication_runs")) {
+        return statement({
+          all: async () => ({
+            results: [{
+              run_id: "synthetic-run",
+              recording_id: 1,
+              source_manifest_hash: "sha256:internal",
+              agent_versions_json: '{"writing":"writing.agent.v3"}',
+              skill_pins_json: '{"formatting":{"id":"md_to_wechat","version":"1.0.0"}}',
+              state: "writing",
+              run_status: "active",
+              state_revision: 2,
+              progress_percent: 28,
+              last_successful_state: "writing",
+              last_successful_progress_percent: 28,
+              retry_count: 0,
+              next_action: null,
+            }],
+          }),
+        });
+      }
+      if (sql.includes("FROM recordings")) {
+        return statement({
+          all: async () => ({
+            results: [{
+              id: 1,
+              filename: "synthetic.m4a",
+              status: "PROCESSING",
+              created_at: "2026-07-19 00:00:01",
+              updated_at: "2026-07-19 00:00:02",
+              article_title: "合成标题",
+              raw_text_preview: "合成预览",
+              processing_stage: "DRAFTING",
+              wechat_url: null,
+              wechat_draft_id: null,
+              error_message: null,
+            }],
+          }),
+        });
+      }
+      throw new Error(`Unexpected recording list SQL: ${sql}`);
+    },
+  };
+  const response = await worker.fetch(
+    authorizedRequest("https://example.test/api/recordings"),
+    createEnv({ DB: db }),
+    createExecutionContext(),
+  );
+
+  assert.equal(response.status, 200);
+  const recording = (await response.json()).recordings[0];
+  assert.deepEqual({
+    run_id: recording.run_id,
+    publication_stage: recording.publication_stage,
+    state_revision: recording.state_revision,
+    progress_percent: recording.progress_percent,
+    retry_count: recording.retry_count,
+    next_action: recording.next_action,
+  }, {
+    run_id: "synthetic-run",
+    publication_stage: "writing",
+    state_revision: 2,
+    progress_percent: 28,
+    retry_count: 0,
+    next_action: null,
+  });
+  assert.equal(recording.source_manifest_hash, undefined);
+  assert.equal(recording.agent_versions, undefined);
+  assert.equal(recording.skill_pins, undefined);
+});
+
 test("preserves explicit recording duration when D1 starts returning it", async () => {
   let selectedSql = "";
   const db = createDb([
@@ -167,7 +511,7 @@ test("preserves explicit recording duration when D1 starts returning it", async 
     },
   ], {
     onPrepare(sql) {
-      selectedSql = sql;
+      if (/duration_ms/.test(sql)) selectedSql = sql;
     },
   });
 
@@ -537,9 +881,10 @@ test("keeps rich recording fields when only processing_stage is not migrated yet
   assert.equal(body.recordings[0].duration_ms, null);
   assert.equal(body.recordings[0].wechat_draft_id, "MEDIA_ID_OLD");
   assert.equal(body.recordings[0].cover_image_url, null);
-  assert.equal(sqlCalls.length, 2);
-  assert.match(sqlCalls[0], /\n\s*processing_stage,/);
-  assert.match(sqlCalls[1], /NULL AS processing_stage/);
+  const recordingQueries = sqlCalls.filter((sql) => /FROM recordings/.test(sql));
+  assert.equal(recordingQueries.length, 2);
+  assert.match(recordingQueries[0], /\n\s*processing_stage,/);
+  assert.match(recordingQueries[1], /NULL AS processing_stage/);
 });
 
 test("keeps processing stage when only duration column is not migrated yet", async () => {
@@ -587,10 +932,11 @@ test("keeps processing stage when only duration column is not migrated yet", asy
   assert.equal(body.recordings[0].duration_ms, null);
   assert.equal(body.recordings[0].processing_stage, "DRAFTING");
   assert.equal(body.recordings[0].cover_image_url, null);
-  assert.equal(sqlCalls.length, 2);
-  assert.match(sqlCalls[0], /\n\s*duration_ms,/);
-  assert.match(sqlCalls[1], /NULL AS duration_ms/);
-  assert.match(sqlCalls[1], /\n\s*processing_stage,/);
+  const recordingQueries = sqlCalls.filter((sql) => /FROM recordings/.test(sql));
+  assert.equal(recordingQueries.length, 2);
+  assert.match(recordingQueries[0], /\n\s*duration_ms,/);
+  assert.match(recordingQueries[1], /NULL AS duration_ms/);
+  assert.match(recordingQueries[1], /\n\s*processing_stage,/);
 });
 
 test("stores parsed duration on upload when duration column exists", async () => {
@@ -1429,8 +1775,13 @@ async function loadWorker() {
   const pipeline = transpile(await readFile(pipelinePath, "utf8"), pipelinePath)
     .replaceAll('from "./editorialContracts"', `from ${JSON.stringify(contractsUrl)}`);
   const pipelineUrl = moduleDataUrl(pipeline);
+  const publicationProjectionPath = resolve("src/publicationProjection.ts");
+  const publicationProjection = transpile(await readFile(publicationProjectionPath, "utf8"), publicationProjectionPath)
+    .replaceAll('from "./editorialContracts"', `from ${JSON.stringify(contractsUrl)}`);
+  const publicationProjectionUrl = moduleDataUrl(publicationProjection);
   const source = transpile(await readFile(sourcePath, "utf8"), sourcePath)
     .replaceAll('from "./editorialPipeline"', `from ${JSON.stringify(pipelineUrl)}`)
+    .replaceAll('from "./publicationProjection"', `from ${JSON.stringify(publicationProjectionUrl)}`)
     // The legacy Node harness exercises the Worker HTTP contract only. The
     // real Agents SDK classes are covered by the Workers runtime suite.
     .replace(
@@ -1439,6 +1790,8 @@ async function loadWorker() {
         "class EditorialCoordinatorAgent {}",
         "class EditorialCoverAgent {}",
         "class EditorialIllustrationAgent {}",
+        "class EditorialVisualProductionAgent {}",
+        "class EditorialWechatPublishingAgent {}",
         "class EditorialReviewAgent {}",
         "class EditorialWorkflow {}",
         "class EditorialWritingAgent {}",
@@ -1609,6 +1962,11 @@ function statement(handlers) {
     bind(...values) {
       return {
         all: () => handlers.all(values),
+        first: async () => {
+          if (handlers.first) return handlers.first(values);
+          const result = await handlers.all(values);
+          return result.results?.[0] || null;
+        },
         run: () => handlers.run(values),
       };
     },

@@ -23,6 +23,8 @@ EMAIL_FROM = "VibePub <no-reply@vibepub.litianc.cn>"
 INVITE_BASE_URL = "vibepub://auth"
 EDITORIAL_WORKFLOW_V2 = "false"
 EDITORIAL_WORKFLOW_V2_ALLOWLIST = ""
+FIVE_AGENT_PUBLISHING_V3 = "false"
+FIVE_AGENT_PUBLISHING_V3_ALLOWLIST = ""
 
 [[d1_databases]]
 binding = "DB"
@@ -42,12 +44,12 @@ name = "EDITORIAL_REVIEW"
 class_name = "EditorialReviewAgent"
 
 [[durable_objects.bindings]]
-name = "EDITORIAL_ILLUSTRATION"
-class_name = "EditorialIllustrationAgent"
+name = "EDITORIAL_VISUAL_PRODUCTION"
+class_name = "EditorialVisualProductionAgent"
 
 [[durable_objects.bindings]]
-name = "EDITORIAL_COVER"
-class_name = "EditorialCoverAgent"
+name = "EDITORIAL_WECHAT_PUBLISHING"
+class_name = "EditorialWechatPublishingAgent"
 
 [[workflows]]
 name = "editorial-workflow-v2"
@@ -62,4 +64,11 @@ new_sqlite_classes = [
   "EditorialReviewAgent",
   "EditorialIllustrationAgent",
   "EditorialCoverAgent",
+]
+
+[[migrations]]
+tag = "v3-five-agent-publishing"
+new_sqlite_classes = [
+  "EditorialVisualProductionAgent",
+  "EditorialWechatPublishingAgent",
 ]

@@ -4,7 +4,12 @@ import {
   type AgentWorkflowEvent,
   type AgentWorkflowStep,
 } from "agents/workflows";
-import { EDITORIAL_AGENT_IDS, canonicalJson } from "./editorialContracts";
+import {
+  EDITORIAL_AGENT_IDS,
+  PUBLICATION_AGENT_IDS,
+  PUBLICATION_AGENT_VERSIONS as CONTRACT_PUBLICATION_AGENT_VERSIONS,
+  canonicalJson,
+} from "./editorialContracts";
 import type { EditorialAgentId } from "./editorialContracts";
 
 export const EDITORIAL_WORKFLOW_VERSION = "editorial-workflow.v2";
@@ -18,6 +23,9 @@ export const EDITORIAL_AGENT_VERSIONS: Record<EditorialAgentId, string> = {
   illustration: "illustration.agent.v2",
   cover: "cover.agent.v2",
 };
+
+export const PUBLICATION_AGENT_VERSIONS = { ...CONTRACT_PUBLICATION_AGENT_VERSIONS };
+export const PUBLICATION_ROLES = PUBLICATION_AGENT_IDS;
 
 export const EDITORIAL_ROLES = EDITORIAL_AGENT_IDS;
 export const EDITORIAL_SCENARIOS = ["happy", "p0", "p1_once", "p1_second_failure"] as const;
@@ -572,7 +580,7 @@ abstract class EditorialSpecialistAgent extends Agent<EditorialRuntimeEnv, Edito
     this.setState(this.initialState);
   }
 
-  public async runtimeIdentity(): Promise<{ role: EditorialAgentId; version: string }> {
+  public async runtimeIdentity(): Promise<{ role: string; version: string }> {
     const role = this.constructor.name === "EditorialWritingAgent"
       ? "writing"
       : this.constructor.name === "EditorialReviewAgent"
@@ -590,6 +598,20 @@ export class EditorialWritingAgent extends EditorialSpecialistAgent {}
 export class EditorialReviewAgent extends EditorialSpecialistAgent {}
 export class EditorialIllustrationAgent extends EditorialSpecialistAgent {}
 export class EditorialCoverAgent extends EditorialSpecialistAgent {}
+
+/** Active Wave 1 visual role. The old classes remain exported solely so old
+ * Phase 2 objects and tests can be decoded; they are not bound in wrangler. */
+export class EditorialVisualProductionAgent extends EditorialSpecialistAgent {
+  public async runtimeIdentity(): Promise<{ role: string; version: string }> {
+    return { role: "visual_production", version: PUBLICATION_AGENT_VERSIONS.visual_production };
+  }
+}
+
+export class EditorialWechatPublishingAgent extends EditorialSpecialistAgent {
+  public async runtimeIdentity(): Promise<{ role: string; version: string }> {
+    return { role: "wechat_publishing", version: PUBLICATION_AGENT_VERSIONS.wechat_publishing };
+  }
+}
 
 export class EditorialCoordinatorAgent extends Agent<EditorialRuntimeEnv, EditorialAgentState> {
   initialState = coordinatorInitialState();

@@ -32,14 +32,44 @@ export const EDITORIAL_AGENT_IDS = [
   "cover",
 ] as const;
 
+/**
+ * The active Wave 1 registry. The legacy ids above remain valid only for
+ * reading Phase 2 manifests and artifacts; they are not active bindings.
+ */
+export const PUBLICATION_AGENT_IDS = [
+  "editorial_coordinator",
+  "writing",
+  "editorial_review",
+  "visual_production",
+  "wechat_publishing",
+] as const;
+
 export type VersionSource = (typeof VERSION_SOURCES)[number];
 export type ReviewDecision = (typeof REVIEW_DECISIONS)[number];
 export type FindingSeverity = (typeof FINDING_SEVERITIES)[number];
 export type PipelineStage = (typeof PIPELINE_STAGES)[number];
 export type EditorialAgentId = (typeof EDITORIAL_AGENT_IDS)[number];
+export type PublicationAgentId = (typeof PUBLICATION_AGENT_IDS)[number];
+
+export const PUBLICATION_AGENT_VERSIONS: Record<PublicationAgentId, string> = {
+  editorial_coordinator: "editorial-coordinator.agent.v3",
+  writing: "writing.agent.v3",
+  editorial_review: "editorial-review.agent.v3",
+  visual_production: "visual-production.agent.v1",
+  wechat_publishing: "wechat-publishing.agent.v1",
+};
+
+export const PUBLICATION_SKILL_PINS = {
+  workflow: { id: "vibepub-publishing-workflow", version: "1.0.0" },
+  writing: { id: "vibepub-article-writing", version: "1.0.0" },
+  review: { id: "vibepub-editorial-review", version: "1.0.0" },
+  visual: { id: "vibepub-visual-production", version: "1.0.0" },
+  publishing: { id: "vibepub-wechat-publishing", version: "1.0.0" },
+  formatting: { id: "md_to_wechat", version: "1.0.0" },
+} as const;
 
 export type TrustedProducerContext = {
-  role: EditorialAgentId;
+  role: EditorialAgentId | PublicationAgentId;
   version: string;
 };
 
@@ -229,7 +259,7 @@ export function normalizeRunManifest(body: unknown): RunManifest {
 export function normalizeArtifactEnvelope(body: unknown): ArtifactEnvelope {
   const record = objectValue(body, "artifact envelope");
   const producer = objectValue(record.producer_agent ?? record.producerAgent, "producer_agent");
-  const agent = enumValue(producer.role, EDITORIAL_AGENT_IDS, "producer_agent.role");
+  const agent = enumValue(producer.role, [...EDITORIAL_AGENT_IDS, ...PUBLICATION_AGENT_IDS] as const, "producer_agent.role");
   const inputArtifactIds = stringArray(record.input_artifact_ids ?? record.inputArtifactIds, "input_artifact_ids", 64, 160);
   const skillValue = record.skill_pin ?? record.skillPin;
   const skillPin = skillValue === undefined ? undefined : (() => {
@@ -256,6 +286,61 @@ export function normalizeArtifactEnvelope(body: unknown): ArtifactEnvelope {
     payload_hash: requiredText(record.payload_hash ?? record.payloadHash, "payload_hash", 200),
     storage_ref: requiredText(record.storage_ref ?? record.storageRef, "storage_ref", 500),
   };
+}
+
+export type PublicationRunManifest = Omit<RunManifest, "agent_versions"> & {
+  agent_versions: Record<PublicationAgentId, string>;
+};
+
+export function normalizePublicationRunManifest(body: unknown): PublicationRunManifest {
+  const record = objectValue(body, "publication run manifest");
+  const agentVersions = objectValue(record.agent_versions ?? record.agentVersions, "agent_versions");
+  const normalized = Object.fromEntries(PUBLICATION_AGENT_IDS.map((agentId) => {
+    const version = requiredText(agentVersions[agentId], `agent_versions.${agentId}`, 120);
+    if (version !== PUBLICATION_AGENT_VERSIONS[agentId]) {
+      throw new EditorialContractError("agent_version_conflict", `${agentId} version is not active`, 409);
+    }
+    return [agentId, version];
+  })) as Record<PublicationAgentId, string>;
+  for (const key of Object.keys(agentVersions)) {
+    if (!PUBLICATION_AGENT_IDS.includes(key as PublicationAgentId)) {
+      throw new EditorialContractError("agent_not_allowed", `agent is not part of the active publication runtime: ${key}`);
+    }
+  }
+  const skillPins = objectValue(record.skill_pins ?? record.skillPins ?? {}, "skill_pins");
+  const normalizedSkillPins: Record<string, SkillPin> = {};
+  for (const [skillId, value] of Object.entries(skillPins)) {
+    const pin = objectValue(value, `skill_pins.${skillId}`);
+    normalizedSkillPins[requiredId(skillId, `skill_pins.${skillId}`)] = {
+      id: requiredId(pin.id, `skill_pins.${skillId}.id`),
+      version: requiredText(pin.version, `skill_pins.${skillId}.version`, 120),
+    };
+  }
+  return {
+    schema_version: requiredText(record.schema_version ?? record.schemaVersion, "schema_version", 80),
+    run_id: requiredId(record.run_id ?? record.runId, "run_id"),
+    article_id: requiredId(record.article_id ?? record.articleId, "article_id"),
+    recording_id: positiveInteger(record.recording_id ?? record.recordingId, "recording_id"),
+    user_id: requiredId(record.user_id ?? record.userId, "user_id"),
+    workspace_id: requiredId(record.workspace_id ?? record.workspaceId, "workspace_id"),
+    workflow_version: requiredText(record.workflow_version ?? record.workflowVersion, "workflow_version", 120),
+    policy_version: requiredText(record.policy_version ?? record.policyVersion, "policy_version", 120),
+    agent_versions: normalized,
+    skill_pins: normalizedSkillPins,
+    idempotency_key: requiredKey(record.idempotency_key ?? record.idempotencyKey, "idempotency_key"),
+  };
+}
+
+export function normalizePublicationArtifactEnvelope(body: unknown): ArtifactEnvelope {
+  const record = objectValue(body, "publication artifact envelope");
+  const producer = objectValue(record.producer_agent ?? record.producerAgent, "producer_agent");
+  const role = enumValue(producer.role, PUBLICATION_AGENT_IDS, "producer_agent.role");
+  const expectedVersion = PUBLICATION_AGENT_VERSIONS[role];
+  const version = requiredText(producer.version, "producer_agent.version", 120);
+  if (version !== expectedVersion) {
+    throw new EditorialContractError("agent_version_conflict", `${role} version is not active`, 409);
+  }
+  return normalizeArtifactEnvelope({ ...record, producer_agent: { role, version } });
 }
 
 export function normalizeVersionInput(body: unknown): NormalizedVersionInput {

@@ -276,7 +276,7 @@ CREATE TABLE editorial_artifacts (
     recording_id INTEGER NOT NULL,
     schema_version TEXT NOT NULL,
     kind TEXT NOT NULL,
-    producer_agent_role TEXT NOT NULL CHECK (producer_agent_role IN ('editorial_coordinator', 'writing', 'editorial_review', 'illustration', 'cover')),
+    producer_agent_role TEXT NOT NULL CHECK (producer_agent_role IN ('editorial_coordinator', 'writing', 'editorial_review', 'illustration', 'cover', 'visual_production', 'wechat_publishing')),
     producer_agent_version TEXT NOT NULL,
     skill_id TEXT,
     skill_version TEXT,
@@ -390,3 +390,227 @@ BEFORE DELETE ON visual_plans
 BEGIN
     SELECT RAISE(ABORT, 'visual_plans_append_only');
 END;
+
+-- Wave 1 publication projection. editorial_runs/editorial_artifacts and the
+-- Coordinator DO remain the canonical durable ledger; these rows are only a
+-- server-owned App projection, event page and action idempotency record.
+CREATE TABLE IF NOT EXISTS publication_runs (
+    run_id TEXT PRIMARY KEY,
+    source_run_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    article_id TEXT NOT NULL,
+    recording_id INTEGER NOT NULL,
+    source_manifest_hash TEXT NOT NULL,
+    source_state TEXT NOT NULL,
+    source_state_revision INTEGER NOT NULL DEFAULT 0,
+    schema_version TEXT NOT NULL,
+    workflow_version TEXT NOT NULL,
+    policy_version TEXT NOT NULL,
+    agent_versions_json TEXT NOT NULL,
+    skill_pins_json TEXT NOT NULL,
+    state TEXT NOT NULL,
+    run_status TEXT NOT NULL,
+    state_revision INTEGER NOT NULL DEFAULT 0 CHECK (state_revision >= 0),
+    progress_percent INTEGER NOT NULL CHECK (progress_percent BETWEEN 0 AND 100),
+    resume_state TEXT,
+    last_successful_state TEXT NOT NULL,
+    last_successful_progress_percent INTEGER NOT NULL CHECK (last_successful_progress_percent BETWEEN 0 AND 100),
+    retry_count INTEGER NOT NULL DEFAULT 0 CHECK (retry_count >= 0),
+    next_action TEXT,
+    error_code TEXT,
+    idempotency_key TEXT NOT NULL,
+    payload_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CHECK (run_id = source_run_id),
+    CHECK (last_successful_state IN ('queued', 'transcribing', 'transcript_ready', 'writing', 'draft_generated', 'reviewing', 'revising', 'reviewed', 'content_frozen', 'visual_planning', 'visual_generating', 'visual_ready', 'formatting', 'visual_qa', 'draft_syncing', 'draft_verifying', 'draft_ready')),
+    CHECK (
+      (state = 'retrying' AND run_status = 'retrying' AND resume_state = last_successful_state AND resume_state IN ('queued', 'transcribing', 'transcript_ready', 'writing', 'draft_generated', 'reviewing', 'revising', 'reviewed', 'content_frozen', 'visual_planning', 'visual_generating', 'visual_ready', 'formatting', 'visual_qa', 'draft_syncing', 'draft_verifying', 'draft_ready') AND progress_percent = last_successful_progress_percent) OR
+      (state = 'needs_action' AND run_status = 'needs_action' AND resume_state IS NULL AND progress_percent = last_successful_progress_percent) OR
+      (state = 'failed' AND run_status = 'failed' AND resume_state IS NULL AND progress_percent = last_successful_progress_percent) OR
+      (state = 'cancelled' AND run_status = 'cancelled' AND resume_state IS NULL AND progress_percent = last_successful_progress_percent) OR
+      (state = 'draft_ready' AND run_status = 'ready' AND resume_state IS NULL AND progress_percent = 100 AND last_successful_state = 'draft_ready' AND last_successful_progress_percent = 100) OR
+      (state NOT IN ('retrying', 'needs_action', 'failed', 'cancelled', 'draft_ready') AND run_status = 'active' AND resume_state IS NULL AND last_successful_state = state AND last_successful_progress_percent = progress_percent)
+    ),
+    UNIQUE(user_id, workspace_id, article_id, idempotency_key),
+    UNIQUE(run_id, user_id, workspace_id, recording_id),
+    UNIQUE(source_run_id, user_id, workspace_id, article_id, recording_id),
+    FOREIGN KEY (source_run_id, user_id, workspace_id, article_id, recording_id)
+      REFERENCES editorial_runs(run_id, user_id, workspace_id, article_id, recording_id)
+);
+
+CREATE INDEX IF NOT EXISTS publication_runs_recording
+    ON publication_runs(user_id, workspace_id, recording_id, state_revision DESC);
+
+CREATE TABLE IF NOT EXISTS publication_current_runs (
+    recording_id INTEGER NOT NULL,
+    user_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    current_run_id TEXT NOT NULL,
+    current_run_created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (recording_id, user_id, workspace_id),
+    FOREIGN KEY (current_run_id, user_id, workspace_id, recording_id)
+      REFERENCES publication_runs(run_id, user_id, workspace_id, recording_id)
+);
+
+CREATE TABLE IF NOT EXISTS publication_run_events (
+    event_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    recording_id INTEGER NOT NULL,
+    revision INTEGER NOT NULL CHECK (revision >= 0),
+    event_type TEXT NOT NULL,
+    state TEXT NOT NULL,
+    publication_stage TEXT NOT NULL,
+    progress_percent INTEGER NOT NULL CHECK (progress_percent BETWEEN 0 AND 100),
+    retry_count INTEGER NOT NULL DEFAULT 0,
+    next_action TEXT,
+    error_code TEXT,
+    idempotency_key TEXT NOT NULL,
+    payload_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(run_id, revision),
+    UNIQUE(run_id, idempotency_key),
+    FOREIGN KEY (run_id, user_id, workspace_id, recording_id)
+      REFERENCES publication_runs(run_id, user_id, workspace_id, recording_id)
+);
+
+CREATE INDEX IF NOT EXISTS publication_run_events_page
+    ON publication_run_events(run_id, revision ASC);
+
+CREATE TABLE IF NOT EXISTS publication_run_actions (
+    action_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    recording_id INTEGER NOT NULL,
+    action TEXT NOT NULL CHECK (action IN ('retry', 'cancel', 'confirm', 'abandon', 'resume')),
+    action_contract_version TEXT NOT NULL DEFAULT 'publication-human-action.v1',
+    idempotency_key TEXT NOT NULL,
+    payload_hash TEXT NOT NULL,
+    intent_json TEXT NOT NULL DEFAULT '{}',
+    result_json TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(run_id, idempotency_key),
+    FOREIGN KEY (run_id, user_id, workspace_id, recording_id)
+      REFERENCES publication_runs(run_id, user_id, workspace_id, recording_id)
+);
+
+CREATE INDEX IF NOT EXISTS publication_run_actions_scope
+    ON publication_run_actions(user_id, workspace_id, run_id, created_at);
+
+CREATE TRIGGER IF NOT EXISTS publication_runs_projection_update
+BEFORE UPDATE ON publication_runs
+WHEN NEW.run_id <> OLD.run_id OR NEW.source_run_id <> OLD.source_run_id OR
+  NEW.user_id <> OLD.user_id OR NEW.workspace_id <> OLD.workspace_id OR
+  NEW.article_id <> OLD.article_id OR NEW.recording_id <> OLD.recording_id OR
+  NEW.source_manifest_hash <> OLD.source_manifest_hash OR NEW.schema_version <> OLD.schema_version OR
+  NEW.workflow_version <> OLD.workflow_version OR NEW.policy_version <> OLD.policy_version OR
+  NEW.agent_versions_json <> OLD.agent_versions_json OR NEW.skill_pins_json <> OLD.skill_pins_json OR
+  NEW.idempotency_key <> OLD.idempotency_key OR NEW.payload_hash <> OLD.payload_hash OR
+  NEW.created_at <> OLD.created_at OR
+  NEW.run_status NOT IN ('active', 'retrying', 'needs_action', 'failed', 'cancelled', 'ready') OR
+  NEW.state_revision <> OLD.state_revision + 1 OR NEW.updated_at <= OLD.updated_at OR
+  (NEW.state = 'draft_ready' AND (NEW.run_status <> 'ready' OR NEW.progress_percent <> 100 OR NEW.last_successful_state <> 'draft_ready' OR NEW.last_successful_progress_percent <> 100)) OR
+  (NEW.state = 'retrying' AND (NEW.run_status <> 'retrying' OR NEW.resume_state IS NULL OR NEW.progress_percent <> NEW.last_successful_progress_percent)) OR
+  (NEW.state = 'needs_action' AND (NEW.run_status <> 'needs_action' OR NEW.progress_percent <> NEW.last_successful_progress_percent)) OR
+  (NEW.state = 'failed' AND (NEW.run_status <> 'failed' OR NEW.progress_percent <> NEW.last_successful_progress_percent)) OR
+  (NEW.state = 'cancelled' AND (NEW.run_status <> 'cancelled' OR NEW.progress_percent <> NEW.last_successful_progress_percent)) OR
+  (NEW.state NOT IN ('retrying', 'needs_action', 'failed', 'cancelled', 'draft_ready') AND
+    (NEW.run_status <> 'active' OR NEW.last_successful_state <> NEW.state OR NEW.last_successful_progress_percent <> NEW.progress_percent)) OR
+  NOT (
+    NEW.state = OLD.state OR
+    (OLD.state = 'queued' AND NEW.state IN ('transcribing', 'failed', 'cancelled')) OR
+    (OLD.state = 'transcribing' AND NEW.state IN ('transcript_ready', 'failed', 'cancelled')) OR
+    (OLD.state = 'transcript_ready' AND NEW.state IN ('writing', 'failed', 'cancelled')) OR
+    (OLD.state = 'writing' AND NEW.state IN ('draft_generated', 'failed', 'cancelled')) OR
+    (OLD.state = 'draft_generated' AND NEW.state IN ('reviewing', 'failed', 'cancelled')) OR
+    (OLD.state = 'reviewing' AND NEW.state IN ('revising', 'reviewed', 'needs_action', 'failed', 'cancelled')) OR
+    (OLD.state = 'revising' AND NEW.state IN ('draft_generated', 'needs_action', 'failed', 'cancelled')) OR
+    (OLD.state = 'reviewed' AND NEW.state IN ('content_frozen', 'failed', 'cancelled')) OR
+    (OLD.state = 'content_frozen' AND NEW.state IN ('visual_planning', 'failed', 'cancelled')) OR
+    (OLD.state = 'visual_planning' AND NEW.state IN ('visual_generating', 'failed', 'cancelled')) OR
+    (OLD.state = 'visual_generating' AND NEW.state IN ('visual_ready', 'needs_action', 'failed', 'cancelled')) OR
+    (OLD.state = 'visual_ready' AND NEW.state IN ('formatting', 'failed', 'cancelled')) OR
+    (OLD.state = 'formatting' AND NEW.state IN ('visual_qa', 'failed', 'cancelled')) OR
+    (OLD.state = 'visual_qa' AND NEW.state IN ('draft_syncing', 'failed', 'cancelled')) OR
+    (OLD.state = 'draft_syncing' AND NEW.state IN ('draft_verifying', 'needs_action', 'failed', 'cancelled')) OR
+    (OLD.state = 'draft_verifying' AND NEW.state IN ('draft_ready', 'needs_action', 'failed', 'cancelled')) OR
+    (OLD.state IN ('failed', 'needs_action') AND NEW.state = 'retrying') OR
+    (OLD.state = 'retrying' AND NEW.state = OLD.resume_state) OR
+    (OLD.state = 'retrying' AND NEW.state IN ('failed', 'cancelled')) OR
+    (NEW.state = 'needs_action' AND OLD.state NOT IN ('draft_ready', 'failed', 'cancelled')) OR
+    (NEW.state = 'cancelled' AND OLD.state NOT IN ('draft_ready', 'failed', 'cancelled'))
+  )
+BEGIN
+    SELECT RAISE(ABORT, 'publication_runs_projection_update_invalid');
+END;
+
+CREATE TRIGGER IF NOT EXISTS publication_run_events_append_only_update
+BEFORE UPDATE ON publication_run_events
+BEGIN SELECT RAISE(ABORT, 'publication_run_events_append_only'); END;
+
+CREATE TRIGGER IF NOT EXISTS publication_run_events_append_only_delete
+BEFORE DELETE ON publication_run_events
+BEGIN SELECT RAISE(ABORT, 'publication_run_events_append_only'); END;
+
+CREATE TRIGGER IF NOT EXISTS publication_run_actions_append_only_update
+BEFORE UPDATE ON publication_run_actions
+BEGIN SELECT RAISE(ABORT, 'publication_run_actions_append_only'); END;
+
+CREATE TRIGGER IF NOT EXISTS publication_run_actions_append_only_delete
+BEFORE DELETE ON publication_run_actions
+BEGIN SELECT RAISE(ABORT, 'publication_run_actions_append_only'); END;
+
+CREATE TRIGGER IF NOT EXISTS publication_runs_append_only_delete
+BEFORE DELETE ON publication_runs
+BEGIN SELECT RAISE(ABORT, 'publication_runs_append_only'); END;
+
+CREATE TRIGGER IF NOT EXISTS publication_run_events_projection_insert
+BEFORE INSERT ON publication_run_events
+WHEN NOT EXISTS (
+  SELECT 1 FROM publication_runs p
+  WHERE p.run_id = NEW.run_id
+    AND p.user_id = NEW.user_id
+    AND p.workspace_id = NEW.workspace_id
+    AND p.recording_id = NEW.recording_id
+    AND p.state_revision = NEW.revision
+    AND p.state = NEW.state
+    AND p.progress_percent = NEW.progress_percent
+    AND p.retry_count = NEW.retry_count
+    AND COALESCE(p.next_action, '') = COALESCE(NEW.next_action, '')
+    AND COALESCE(p.error_code, '') = COALESCE(NEW.error_code, '')
+    AND NEW.publication_stage = CASE
+      CASE WHEN p.state IN ('retrying', 'needs_action', 'failed', 'cancelled') THEN p.last_successful_state ELSE p.state END
+      WHEN 'queued' THEN 'upload'
+      WHEN 'transcribing' THEN 'transcription'
+      WHEN 'transcript_ready' THEN 'transcription'
+      WHEN 'writing' THEN 'writing'
+      WHEN 'draft_generated' THEN 'writing'
+      WHEN 'reviewing' THEN 'review'
+      WHEN 'revising' THEN 'review'
+      WHEN 'reviewed' THEN 'review'
+      WHEN 'content_frozen' THEN 'review'
+      WHEN 'visual_planning' THEN 'visual'
+      WHEN 'visual_generating' THEN 'visual'
+      WHEN 'visual_ready' THEN 'visual'
+      WHEN 'formatting' THEN 'publishing'
+      WHEN 'visual_qa' THEN 'publishing'
+      WHEN 'draft_syncing' THEN 'publishing'
+      WHEN 'draft_verifying' THEN 'publishing'
+      WHEN 'draft_ready' THEN 'ready'
+      ELSE ''
+    END
+)
+BEGIN SELECT RAISE(ABORT, 'publication_run_event_projection_mismatch'); END;
+
+CREATE TRIGGER IF NOT EXISTS publication_current_runs_identity_update
+BEFORE UPDATE ON publication_current_runs
+WHEN NEW.recording_id <> OLD.recording_id OR NEW.user_id <> OLD.user_id OR
+  NEW.workspace_id <> OLD.workspace_id OR NEW.updated_at <= OLD.updated_at OR
+  NEW.current_run_created_at < OLD.current_run_created_at OR
+  (NEW.current_run_created_at = OLD.current_run_created_at AND NEW.current_run_id < OLD.current_run_id)
+BEGIN SELECT RAISE(ABORT, 'publication_current_runs_identity_update_invalid'); END;

@@ -4,11 +4,23 @@ import {
   EditorialCoverAgent,
   EditorialIllustrationAgent,
   EditorialReviewAgent,
+  EditorialVisualProductionAgent,
+  EditorialWechatPublishingAgent,
   EditorialWorkflow,
   EditorialWritingAgent,
   handleEditorialOrchestrationInternalRoute,
 } from "./editorialAgents";
 import type { EditorialWorkflowParams } from "./editorialAgents";
+import {
+  assertPublicationAction,
+  getPublicationRun,
+  getPublicationRunEvents,
+  getPublicationRunForRecording,
+  enrichRecordingList,
+  publicationFeatureEnabled,
+  PublicationProjectionError,
+  recordPublicationActionIntent,
+} from "./publicationProjection";
 
 export {
   EditorialCoordinatorAgent,
@@ -16,6 +28,8 @@ export {
   EditorialReviewAgent,
   EditorialIllustrationAgent,
   EditorialCoverAgent,
+  EditorialVisualProductionAgent,
+  EditorialWechatPublishingAgent,
   EditorialWorkflow,
 };
 
@@ -48,12 +62,14 @@ export interface Env {
   BOOTSTRAP_ADMIN_USER_ID?: string;
   EDITORIAL_WORKFLOW_V2?: string;
   EDITORIAL_WORKFLOW_V2_ALLOWLIST?: string;
+  FIVE_AGENT_PUBLISHING_V3?: string;
+  FIVE_AGENT_PUBLISHING_V3_ALLOWLIST?: string;
   EDITORIAL_WORKFLOW: Workflow<EditorialWorkflowParams>;
   EDITORIAL_COORDINATOR: DurableObjectNamespace<EditorialCoordinatorAgent>;
   EDITORIAL_WRITING: DurableObjectNamespace<EditorialWritingAgent>;
   EDITORIAL_REVIEW: DurableObjectNamespace<EditorialReviewAgent>;
-  EDITORIAL_ILLUSTRATION: DurableObjectNamespace<EditorialIllustrationAgent>;
-  EDITORIAL_COVER: DurableObjectNamespace<EditorialCoverAgent>;
+  EDITORIAL_VISUAL_PRODUCTION: DurableObjectNamespace<EditorialVisualProductionAgent>;
+  EDITORIAL_WECHAT_PUBLISHING: DurableObjectNamespace<EditorialWechatPublishingAgent>;
 }
 
 const MINING_CLAIM_LEASE_MS = 2 * 60 * 60 * 1000;
@@ -259,6 +275,75 @@ export default {
 
     if (request.method === "GET" && url.pathname === "/api/recordings") {
       return listRecordings(env, auth);
+    }
+
+    const recordingPublicationMatch = url.pathname.match(/^\/api\/recordings\/(\d+)\/publication-run$/);
+    if (request.method === "GET" && recordingPublicationMatch) {
+      return publicationRoute(async () => getPublicationRunForRecording(
+        env.DB,
+        auth,
+        Number(recordingPublicationMatch[1]),
+      ));
+    }
+
+    const publicationEventsMatch = url.pathname.match(/^\/api\/publication-runs\/([^/]+)\/events$/);
+    if (request.method === "GET" && publicationEventsMatch) {
+      const afterRevisionParam = url.searchParams.get("after_revision");
+      const afterRevision = afterRevisionParam === null ? -1 : Number(afterRevisionParam);
+      const limit = Number(url.searchParams.get("limit") || "50");
+      return publicationRoute(() => getPublicationRunEvents(
+        env.DB,
+        auth,
+        safeDecodeURIComponent(publicationEventsMatch[1]),
+        afterRevision,
+        limit,
+      ));
+    }
+
+    const publicationActionMatch = url.pathname.match(/^\/api\/publication-runs\/([^/]+)\/(retry|cancel|actions)$/);
+    if (request.method === "POST" && publicationActionMatch) {
+      const verified = requireVerifiedEmail(auth);
+      if (verified) return verified;
+      if (!publicationFeatureEnabled(env, auth.userId, auth.workspaceId)) {
+        return json({ error: "publication_workflow_disabled" }, 404);
+      }
+      const body = await parseJson(request);
+      const endpointAction = publicationActionMatch[2];
+      const action = endpointAction === "actions"
+        ? normalizeOptionalString(body?.action)
+        : endpointAction;
+      const idempotencyKey = normalizeOptionalString(
+        body?.idempotency_key ?? body?.idempotencyKey ?? request.headers.get("Idempotency-Key"),
+      );
+      const expectedStateRevision = Number(body?.expected_state_revision ?? body?.expectedStateRevision);
+      if (!action || !idempotencyKey) return json({ error: "idempotency_key_required" }, 400);
+      if (!Number.isSafeInteger(expectedStateRevision) || expectedStateRevision < 0) {
+        return json({ error: "expected_state_revision_required" }, 400);
+      }
+      const payloadHash = `sha256:${await sha256Hex(JSON.stringify({
+        action,
+        expected_state_revision: expectedStateRevision,
+        contract: endpointAction === "actions" ? "human.v1" : "system.v1",
+      }))}`;
+      return publicationRoute(async () => endpointAction === "actions"
+        ? recordPublicationActionIntent(
+          env.DB,
+          auth,
+          safeDecodeURIComponent(publicationActionMatch[1]),
+          action as "confirm" | "abandon" | "resume",
+          idempotencyKey,
+          payloadHash,
+          expectedStateRevision,
+        )
+        : assertPublicationAction(
+          env.DB,
+          auth,
+          safeDecodeURIComponent(publicationActionMatch[1]),
+          action,
+          idempotencyKey,
+          payloadHash,
+          expectedStateRevision,
+        ));
     }
 
     if (request.method === "POST" && isRecordingRevisionPath(url.pathname)) {
@@ -1310,10 +1395,23 @@ async function listUploads(env: Env, url: URL, auth: AuthContext): Promise<Respo
 
 async function listRecordings(env: Env, auth: AuthContext): Promise<Response> {
   try {
-    return json({ recordings: withRecordingDisplayFields(await queryRecordings(env, auth.userId)) });
+    const recordings = await queryRecordings(env, auth.userId);
+    return json({ recordings: withRecordingDisplayFields(await enrichRecordingList(env.DB, auth, recordings)) });
   } catch (dbErr: any) {
     console.error("Failed to fetch from D1:", dbErr);
     return json({ error: "database_error", details: dbErr.message }, 500);
+  }
+}
+
+async function publicationRoute(factory: () => Promise<Record<string, unknown>>): Promise<Response> {
+  try {
+    return json(await factory());
+  } catch (error) {
+    if (error instanceof PublicationProjectionError) {
+      return json({ error: error.code }, error.status);
+    }
+    console.error("Publication projection request failed:", error);
+    return json({ error: "publication_projection_unavailable" }, 503);
   }
 }
 

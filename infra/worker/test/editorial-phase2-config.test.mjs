@@ -15,8 +15,8 @@ test("phase 2 runtime configuration is fresh-safe and feature-gated", async () =
     ["EDITORIAL_COORDINATOR", "EditorialCoordinatorAgent"],
     ["EDITORIAL_WRITING", "EditorialWritingAgent"],
     ["EDITORIAL_REVIEW", "EditorialReviewAgent"],
-    ["EDITORIAL_ILLUSTRATION", "EditorialIllustrationAgent"],
-    ["EDITORIAL_COVER", "EditorialCoverAgent"],
+    ["EDITORIAL_VISUAL_PRODUCTION", "EditorialVisualProductionAgent"],
+    ["EDITORIAL_WECHAT_PUBLISHING", "EditorialWechatPublishingAgent"],
   ]) {
     assert.match(
       wrangler,
@@ -29,8 +29,8 @@ test("phase 2 runtime configuration is fresh-safe and feature-gated", async () =
     /name\s*=\s*"editorial-workflow-v2"[\s\S]*?binding\s*=\s*"EDITORIAL_WORKFLOW"[\s\S]*?class_name\s*=\s*"EditorialWorkflow"/,
   );
   assert.match(wrangler, /tag\s*=\s*"v2-editorial-agents"/);
-  assert.doesNotMatch(wrangler, /migrations\/0011|tag\s*=\s*"0011/);
+  assert.match(wrangler, /tag\s*=\s*"v3-five-agent-publishing"/);
 
   const migrationFiles = await readdir(resolve(root, "migrations"));
-  assert.equal(migrationFiles.some((file) => file.startsWith("0011")), false);
+  assert.equal(migrationFiles.some((file) => file === "0011_five_agent_publication_projection.sql"), true);
 });
