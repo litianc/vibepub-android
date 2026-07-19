@@ -62,6 +62,72 @@ Rollback is a stop-write operation for the new `/api/editorial/*` routes followe
 
 Phase 1 intentionally does not create a draft, publish to WeChat, download an image, or call a new external service. Those side effects belong to later phases after review, content freeze, visual QA, and idempotent draft synchronization are connected.
 
+## Wave 2A Text Artifact Foundation
+
+Wave 2A adds the versioned contracts used by the later five-agent runtime without
+starting that runtime. The private R2 object is exactly
+`{ envelope: <provenance and payload_hash>, payload: <ArticleBrief|ArticleDraft|ReviewReport|RevisionDispatch|FrozenArticleVersion> }`.
+The envelope is deterministic: `created_at` must be supplied by the durable
+Coordinator intent, artifact IDs and keys are derived from immutable identity,
+and payload hashes use one default-code-unit key ordering shared by Worker and
+Writing/Review adapters. A repeated logical write replays the same object;
+different bytes under the same derived identity are an `artifact_conflict`.
+
+The envelope and D1/DO mirror contain only ownership, hashes, storage references,
+version pins, input IDs, and bounded summaries. They never contain title, body,
+transcript, prompt, instruction, evidence text, or the payload. R2 writes are
+conditional and are read back by hash, length, metadata, and canonical object
+bytes. An unknown write or unreadable read is held as
+`artifact_reconciliation_required`; it is never reported as created.
+
+`FrozenArticleVersion` is the only semantic content input for Wave 2C and carries
+the complete immutable blocks, claim ledger, title candidates, selected title,
+cover title, formatting pins, and accepted artifact hashes. Its provenance is
+bound by `draft_artifact_id`, `accepted_draft_payload_hash`,
+`accepted_review_payload_hash`, and the RunManifest rather than duplicated in
+the frozen payload. Wave 2A validates the Frozen snapshot's local invariants
+but does not dereference Draft and Review artifacts for a cross-artifact
+field-by-field acceptance check; that Coordinator-owned check belongs to Wave
+2B before a Frozen artifact is produced. While content is frozen, `html_hash`
+must remain `null`; rendered HTML hashes belong to the later
+`RenderedArticlePackage`.
+
+The controlled Writing V3 adapter accepts the existing exact
+`style_litianc_default@2026-07-05` profile or a custom profile bound to an inline
+body hash. Briefs pin the default without copying its registry body; custom
+briefs keep the body and canonical hash only in private R2. A revision must carry and revalidate the complete draft, review report,
+and Coordinator-created revision dispatch. The dispatch is a separate immutable
+artifact, keyed by `run_id + source_review_artifact_id`; it names the exact target
+blocks (including `@title` when applicable). It hashes each non-target block and
+the protected title value. The source draft payload hash binds the complete title
+metadata, which Writing compares. The Dispatch also carries the exact ordered
+producer pin array for `editorial_coordinator`, `writing`, and `editorial_review`;
+it permits one revision only. Writing recomputes all three
+payload hashes before any model request and rejects style/profile/model changes,
+malformed claims, body/block drift, and protected metadata changes. Revision
+prompts pass only a transient canonical allowlist of the current title metadata,
+full blocks, claim ledger, exact targets, and instruction; they exclude artifact
+payload hashes, producer credentials, and authorization data and are not logged
+or persisted. The model returns blocks and title metadata; the adapter computes
+the body projection and each block `text_hash`, while stored/current Drafts must
+still carry and verify both values.
+
+The separate Editorial Review Worker receives a transient full Draft payload,
+recomputes its input hash, and returns only a pinned ReviewReport. Its first
+review with P1 and no P0 is `revise`; P0 and a second P1 result are `block`, and P2 is
+non-blocking. It does not persist article text, call a provider, execute local
+skills, or include a self-referential revision instruction. The Coordinator will
+persist the report and create the RevisionDispatch in the next orchestration wave.
+
+Wave 2A includes internal service-binding clients with token authentication and a
+URL fallback only for local/legacy environments. Binding does not imply identity:
+the corresponding service secret is still required. Unknown/auth/schema errors
+are non-retryable; network, timeout, 408, and 429 responses are retryable, and
+Writing 5xx responses are retryable only for the controlled 502/503/504
+allowlist; 500, 501, and unknown 5xx responses are non-retryable. The clients and
+artifacts are not yet wired to Coordinator/D1/DO, Mining, Android, image
+generation, WeChat, or real model calls. This is an intentional 2B boundary.
+
 ## Phase 2 Durable Editorial Orchestration
 
 Phase 2 adds an isolated Cloudflare Agents SDK runtime behind the existing

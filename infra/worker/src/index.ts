@@ -46,6 +46,10 @@ export interface Env {
   DEPLOYED_AT?: string;
   WRITING_AGENT_BASE_URL?: string;
   WRITING_AGENT_TOKEN?: string;
+  REVIEW_AGENT_BASE_URL?: string;
+  REVIEW_AGENT_TOKEN?: string;
+  WRITING_AGENT?: Fetcher;
+  REVIEW_AGENT?: Fetcher;
   CREDENTIAL_ENCRYPTION_KEY?: string;
   EMAIL?: {
     send(message: {

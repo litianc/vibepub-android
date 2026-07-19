@@ -13,6 +13,12 @@
 
 | 时间 | 功能更新 |
 | --- | --- |
+| 2026-07-20 03:18 CST | Wave 2A 要求 Review 输入的 claim ledger 与 block claim_ids 精确一致，并将 Writing 供应商 5xx 重试收敛到受控 502/503/504。 |
+| 2026-07-20 03:14 CST | Wave 2A 将 content_frozen 快照限制为有效 style/formatting pins 与空 HTML hash，避免把后续渲染产物误当冻结内容。 |
+| 2026-07-20 03:08 CST | Wave 2A 将 Writing 修文输入改为受保护 Draft 白名单提示，并由 adapter 计算 body 与 block 哈希，模型无需承担密码学字段生成。 |
+| 2026-07-20 02:56 CST | Wave 2A 将 Draft 与 FrozenArticleVersion 的标题元数据和 claim ledger 收敛为不可变、可校验的完整语义快照，为 Wave 2C 提供唯一内容输入。 |
+| 2026-07-20 02:24 CST | Wave 2A 将 V3 Writing 内部接口收敛为专用服务令牌认证，阻止旧 FILES_TOKEN 越权并保持旧版接口兼容。 |
+| 2026-07-20 01:58 CST | Wave 2A 建立脱敏、不可变且可重放的五类文本 Artifact/R2 合同，接入受控 Writing/Review 服务适配器与三方修订校验，但暂不连接编排或外部副作用。 |
 | 2026-07-20 00:52 CST | Wave 1 将真实 D1 投影竞态的事件触发冲突归一化为可重试的 revision/action 冲突，同时保留未知存储故障并验证无孤儿账本。 |
 | 2026-07-20 00:30 CST | Wave 1 矫正 retrying 状态矩阵，支持受控恢复或取消并保持进度、事件和动作账本的 CAS 幂等。 |
 | 2026-07-20 00:09 CST | Wave 1 follow-up 为未知外部副作用增加受控对账停写态，系统重试与取消在函数和数据库层均 fail-closed。 |

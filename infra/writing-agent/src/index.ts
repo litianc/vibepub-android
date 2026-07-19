@@ -20,6 +20,7 @@ import {
   type FormattingSkillDefinition,
   type ResolvedFormattingSkill,
 } from "./formattingSkills";
+import { runV3WritingAdapter, V3WritingError, type V3WriteRequest } from "./v3Adapter";
 
 export interface Env {
   DB?: D1Database;
@@ -136,9 +137,28 @@ export function createWritingAgentWorker(
       return json({ ok: true, service: "writing-agent" });
     }
 
-    const identity = await authenticate(request, env);
-    if (url.pathname.startsWith("/v1/") && !identity) {
+    const isV3Write = request.method === "POST" && url.pathname === "/internal/v3/write";
+    const identity = isV3Write
+      ? await authenticateV3(request, env)
+      : await authenticate(request, env);
+    if ((url.pathname.startsWith("/v1/") || isV3Write) && !identity) {
       return json({ error: { code: "unauthorized", message: "Missing or invalid WritingAgent token" } }, 401);
+    }
+
+    if (request.method === "POST" && url.pathname === "/internal/v3/write") {
+      try {
+        const payload = await request.json() as V3WriteRequest;
+        return json({
+          protocol_version: "vibepub.editorial.v3",
+          status: "article_draft_ready",
+          result: await runV3WritingAdapter(env, payload),
+        }, 201);
+      } catch (error) {
+        if (error instanceof V3WritingError) {
+          return json({ error: { code: error.code, retryable: error.retryable } }, error.status);
+        }
+        return json({ error: { code: "v3_adapter_failed", retryable: false } }, 500);
+      }
     }
 
     if (request.method === "GET" && url.pathname === "/v1/style-profiles") {
@@ -1288,6 +1308,20 @@ async function deterministicJobId(
 
 async function authenticate(request: Request, env: Env): Promise<AuthIdentity | null> {
   const expected = env.WRITING_AGENT_TOKEN?.trim() || env.FILES_TOKEN?.trim();
+  if (!expected) return null;
+  const authorization = request.headers.get("authorization") || "";
+  const tokenHeader = request.headers.get("x-writing-agent-token") || "";
+  const bearerToken = authorization.startsWith("Bearer ") ? authorization.slice("Bearer ".length).trim() : "";
+  const authorized = await secureTokenEquals(expected, bearerToken) || await secureTokenEquals(expected, tokenHeader.trim());
+  if (!authorized) return null;
+  return {
+    userId: normalizeOptionalString(request.headers.get("x-vibepub-user-id")) || DEFAULT_USER_ID,
+    workspaceId: normalizeOptionalString(request.headers.get("x-vibepub-workspace-id")) || DEFAULT_WORKSPACE_ID,
+  };
+}
+
+async function authenticateV3(request: Request, env: Env): Promise<AuthIdentity | null> {
+  const expected = env.WRITING_AGENT_TOKEN?.trim();
   if (!expected) return null;
   const authorization = request.headers.get("authorization") || "";
   const tokenHeader = request.headers.get("x-writing-agent-token") || "";
