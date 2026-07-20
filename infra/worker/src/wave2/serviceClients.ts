@@ -9,7 +9,7 @@ export type InternalServiceEnv = {
 
 export class InternalServiceError extends Error {
   constructor(
-    public readonly code: "service_unconfigured" | "service_unavailable" | "service_invalid_response",
+    public readonly code: "service_unconfigured" | "service_unavailable" | "service_invalid_response" | "external_side_effect_unknown",
     public readonly status = 503,
     public readonly retryable = false,
     public readonly upstreamCode?: string,

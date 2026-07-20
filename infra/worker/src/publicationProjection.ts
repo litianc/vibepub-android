@@ -209,7 +209,7 @@ const ALLOWED_PROJECTION_TRANSITIONS: Record<PublicationState, readonly Publicat
   revising: ["reviewing", "needs_action", "failed", "cancelled"],
   reviewed: ["content_frozen", "needs_action", "failed", "cancelled"],
   content_frozen: ["visual_planning", "failed", "cancelled"],
-  visual_planning: ["visual_generating", "failed", "cancelled"],
+  visual_planning: ["visual_generating", "needs_action", "failed", "cancelled"],
   visual_generating: ["visual_ready", "needs_action", "failed", "cancelled"],
   visual_ready: ["formatting", "failed", "cancelled"],
   formatting: ["visual_qa", "failed", "cancelled"],
@@ -750,7 +750,7 @@ export async function createPublicationRun(
     }
     return { run: publicationResponse(existing), replayed: true };
   }
-  const now = new Date().toISOString();
+  const now = canonical.created_at;
   const sourceManifest = parseJson<Record<string, unknown>>(canonical.manifest_json, {});
   const agents = canonicalJson(sourceManifest.agent_versions);
   const skills = canonicalJson(sourceManifest.skill_pins);

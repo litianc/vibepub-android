@@ -25,6 +25,8 @@ EDITORIAL_WORKFLOW_V2 = "false"
 EDITORIAL_WORKFLOW_V2_ALLOWLIST = ""
 FIVE_AGENT_PUBLISHING_V3 = "false"
 FIVE_AGENT_PUBLISHING_V3_ALLOWLIST = ""
+VISUAL_PRODUCTION_V3 = "false"
+VISUAL_PRODUCTION_V3_ALLOWLIST = ""
 
 [[services]]
 binding = "WRITING_AGENT"
@@ -33,6 +35,10 @@ service = "writing-agent"
 [[services]]
 binding = "REVIEW_AGENT"
 service = "editorial-review-agent"
+
+[[services]]
+binding = "IMAGE_GENERATION_ADAPTER"
+service = "image-generation-adapter"
 
 [[d1_databases]]
 binding = "DB"

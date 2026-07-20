@@ -1,0 +1,23 @@
+name = "image-generation-adapter"
+main = "src/index.ts"
+compatibility_date = "2026-06-24"
+workers_dev = false
+preview_urls = false
+
+[vars]
+# Deployment must set IMAGE_PROVIDER_HOST and IMAGE_PROVIDER_URL to the same
+# approved TLS gateway. Empty checked-in values keep this candidate fail-closed.
+IMAGE_PROVIDER_HOST = ""
+IMAGE_PROVIDER_URL = ""
+
+[[r2_buckets]]
+binding = "VISUAL_RESULTS_BUCKET"
+bucket_name = "vibepub-visual-adapter-results"
+
+[[durable_objects.bindings]]
+name = "VISUAL_OPERATION"
+class_name = "VisualOperationAgent"
+
+[[migrations]]
+tag = "v1-visual-operation"
+new_sqlite_classes = ["VisualOperationAgent"]

@@ -15,13 +15,15 @@ import {
 } from "./editorialContracts";
 import type { EditorialAgentId } from "./editorialContracts";
 import { artifactKey, WAVE2_ARTIFACT_KINDS, WAVE2_SCHEMA_VERSION, validateArtifactKey } from "./wave2/artifactContracts";
+import { visualArtifactKey } from "./wave2/visualContracts";
+import type { VisualArtifactMetadata } from "./wave2/visualContracts";
 
 export const EDITORIAL_WORKFLOW_VERSION = "editorial-workflow.v2";
 export const EDITORIAL_POLICY_VERSION = "editorial-policy.v2";
 export const EDITORIAL_SCHEMA_VERSION = "editorial-orchestration.v2";
 const WAVE2B_OPAQUE_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/;
-const WAVE2B_STATES = ["queued", "transcribing", "transcript_ready", "writing", "draft_generated", "reviewing", "revising", "reviewed", "content_frozen", "needs_action", "failed"] as const;
-const WAVE2B_EVENT_TYPES = ["run_queued", "transcription_started", "transcript_ready", "writing_started", "draft_generated", "review_started", "reviewed", "revision_requested", "content_frozen", "needs_action", "failed", "artifact_committed"] as const;
+const WAVE2B_STATES = ["queued", "transcribing", "transcript_ready", "writing", "draft_generated", "reviewing", "revising", "reviewed", "content_frozen", "visual_planning", "visual_generating", "visual_ready", "needs_action", "failed"] as const;
+const WAVE2B_EVENT_TYPES = ["run_queued", "transcription_started", "transcript_ready", "writing_started", "draft_generated", "review_started", "reviewed", "revision_requested", "content_frozen", "visual_planning", "visual_generating", "visual_ready", "visual_plan_committed", "visual_asset_committed", "visual_qa_committed", "needs_action", "failed", "artifact_committed"] as const;
 const WAVE2B_PROGRESS: Record<string, number> = {
   queued: 0,
   transcribing: 10,
@@ -32,6 +34,9 @@ const WAVE2B_PROGRESS: Record<string, number> = {
   revising: 50,
   reviewed: 55,
   content_frozen: 62,
+  visual_planning: 68,
+  visual_generating: 74,
+  visual_ready: 80,
 };
 
 function deriveWave2BProjection(current: Record<string, unknown>, state: string, nextAction?: string | null, errorCode?: string | null): {
@@ -64,8 +69,11 @@ const WAVE2B_TRANSITIONS: Record<string, readonly string[]> = {
   reviewing: ["revising", "reviewed", "needs_action", "failed"],
   revising: ["writing", "needs_action", "failed"],
   reviewed: ["content_frozen", "needs_action"],
-  content_frozen: [],
-  needs_action: ["writing", "reviewing", "failed"],
+  content_frozen: ["visual_planning", "needs_action", "failed"],
+  visual_planning: ["visual_generating", "needs_action", "failed"],
+  visual_generating: ["visual_ready", "needs_action", "failed"],
+  visual_ready: [],
+  needs_action: ["writing", "reviewing", "visual_planning", "visual_generating", "failed"],
   failed: [],
 };
 
@@ -128,6 +136,10 @@ export type EditorialRuntimeEnv = Cloudflare.Env & {
   REVIEW_AGENT_BASE_URL?: string;
   WRITING_AGENT_TOKEN?: string;
   REVIEW_AGENT_TOKEN?: string;
+  IMAGE_GENERATION_ADAPTER?: Fetcher;
+  VISUAL_PRODUCTION_V3?: string;
+  VISUAL_PRODUCTION_V3_ALLOWLIST?: string;
+  VISUAL_PRODUCTION_TOKEN?: string;
   GLM_MODEL?: string;
 };
 
@@ -1055,6 +1067,39 @@ export class EditorialCoordinatorAgent extends Agent<EditorialRuntimeEnv, Editor
       UNIQUE(run_id, event_type, state_revision),
       FOREIGN KEY(run_id) REFERENCES editorial_wave2b_runs(run_id)
     )`;
+    this.sql`CREATE TABLE IF NOT EXISTS editorial_wave2c_visual_artifacts (
+      artifact_id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      workspace_id TEXT NOT NULL,
+      envelope_json TEXT NOT NULL,
+      payload_hash TEXT NOT NULL,
+      storage_ref TEXT NOT NULL,
+      binary_storage_ref TEXT,
+      created_at TEXT NOT NULL,
+      UNIQUE(run_id, artifact_id),
+      FOREIGN KEY(run_id) REFERENCES editorial_wave2b_runs(run_id)
+    )`;
+    this.sql`CREATE TABLE IF NOT EXISTS editorial_wave2c_visual_receipts (
+      artifact_id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      payload_hash TEXT NOT NULL,
+      mirrored_at TEXT NOT NULL,
+      FOREIGN KEY(artifact_id) REFERENCES editorial_wave2c_visual_artifacts(artifact_id)
+    )`;
+    this.sql`CREATE TABLE IF NOT EXISTS editorial_wave2c_visual_events (
+      event_id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      event_type TEXT NOT NULL CHECK(event_type IN ('visual_plan_committed', 'visual_asset_committed', 'visual_qa_committed', 'visual_needs_action', 'visual_failed')),
+      state TEXT NOT NULL,
+      state_revision INTEGER NOT NULL,
+      artifact_id TEXT NOT NULL,
+      payload_hash TEXT NOT NULL,
+      idempotency_key TEXT NOT NULL UNIQUE,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY(run_id) REFERENCES editorial_wave2b_runs(run_id),
+      FOREIGN KEY(artifact_id) REFERENCES editorial_wave2c_visual_artifacts(artifact_id)
+    )`;
     this.sql`CREATE TRIGGER IF NOT EXISTS editorial_wave2b_runs_insert_guard
       BEFORE INSERT ON editorial_wave2b_runs
       WHEN NEW.state <> 'queued' OR NEW.state_revision <> 0 OR NEW.revision_count <> 0
@@ -1121,7 +1166,10 @@ export class EditorialCoordinatorAgent extends Agent<EditorialRuntimeEnv, Editor
         (OLD.state = 'reviewing' AND NEW.state IN ('revising', 'reviewed', 'needs_action', 'failed')) OR
         (OLD.state = 'revising' AND NEW.state IN ('writing', 'needs_action', 'failed')) OR
         (OLD.state = 'reviewed' AND NEW.state IN ('content_frozen', 'needs_action')) OR
-        (OLD.state = 'needs_action' AND NEW.state IN ('writing', 'reviewing', 'failed'))
+        (OLD.state = 'content_frozen' AND NEW.state IN ('visual_planning', 'needs_action', 'failed')) OR
+        (OLD.state = 'visual_planning' AND NEW.state IN ('visual_generating', 'needs_action', 'failed')) OR
+        (OLD.state = 'visual_generating' AND NEW.state IN ('visual_ready', 'needs_action', 'failed')) OR
+        (OLD.state = 'needs_action' AND NEW.state IN ('writing', 'reviewing', 'visual_planning', 'visual_generating', 'failed'))
       ) OR
         (NEW.state = 'needs_action' AND NEW.run_status <> 'needs_action') OR
         (NEW.state = 'failed' AND NEW.run_status <> 'failed') OR
@@ -1164,6 +1212,18 @@ export class EditorialCoordinatorAgent extends Agent<EditorialRuntimeEnv, Editor
       BEFORE UPDATE ON editorial_wave2b_events BEGIN SELECT RAISE(ABORT, 'editorial_wave2b_events_are_append_only'); END`;
     this.sql`CREATE TRIGGER IF NOT EXISTS editorial_wave2b_events_append_only_delete
       BEFORE DELETE ON editorial_wave2b_events BEGIN SELECT RAISE(ABORT, 'editorial_wave2b_events_are_append_only'); END`;
+    this.sql`CREATE TRIGGER IF NOT EXISTS editorial_wave2c_visual_artifacts_append_only_update
+      BEFORE UPDATE ON editorial_wave2c_visual_artifacts BEGIN SELECT RAISE(ABORT, 'editorial_wave2c_visual_artifacts_are_append_only'); END`;
+    this.sql`CREATE TRIGGER IF NOT EXISTS editorial_wave2c_visual_artifacts_append_only_delete
+      BEFORE DELETE ON editorial_wave2c_visual_artifacts BEGIN SELECT RAISE(ABORT, 'editorial_wave2c_visual_artifacts_are_append_only'); END`;
+    this.sql`CREATE TRIGGER IF NOT EXISTS editorial_wave2c_visual_receipts_append_only_update
+      BEFORE UPDATE ON editorial_wave2c_visual_receipts BEGIN SELECT RAISE(ABORT, 'editorial_wave2c_visual_receipts_are_append_only'); END`;
+    this.sql`CREATE TRIGGER IF NOT EXISTS editorial_wave2c_visual_receipts_append_only_delete
+      BEFORE DELETE ON editorial_wave2c_visual_receipts BEGIN SELECT RAISE(ABORT, 'editorial_wave2c_visual_receipts_are_append_only'); END`;
+    this.sql`CREATE TRIGGER IF NOT EXISTS editorial_wave2c_visual_events_append_only_update
+      BEFORE UPDATE ON editorial_wave2c_visual_events BEGIN SELECT RAISE(ABORT, 'editorial_wave2c_visual_events_are_append_only'); END`;
+    this.sql`CREATE TRIGGER IF NOT EXISTS editorial_wave2c_visual_events_append_only_delete
+      BEFORE DELETE ON editorial_wave2c_visual_events BEGIN SELECT RAISE(ABORT, 'editorial_wave2c_visual_events_are_append_only'); END`;
     this.sql`CREATE TRIGGER IF NOT EXISTS editorial_wave2b_calls_append_only_delete
       BEFORE DELETE ON editorial_wave2b_calls BEGIN SELECT RAISE(ABORT, 'editorial_wave2b_calls_are_append_only'); END`;
     this.sql`CREATE TRIGGER IF NOT EXISTS editorial_wave2b_call_results_run_guard
@@ -1174,7 +1234,8 @@ export class EditorialCoordinatorAgent extends Agent<EditorialRuntimeEnv, Editor
       BEFORE INSERT ON editorial_wave2b_events
       WHEN NOT (
         NEW.event_type IN ('run_queued', 'transcription_started', 'transcript_ready', 'writing_started', 'draft_generated',
-          'review_started', 'reviewed', 'revision_requested', 'content_frozen', 'needs_action', 'failed', 'artifact_committed')
+          'review_started', 'reviewed', 'revision_requested', 'content_frozen', 'visual_planning', 'visual_generating',
+          'visual_ready', 'visual_plan_committed', 'visual_asset_committed', 'visual_qa_committed', 'needs_action', 'failed', 'artifact_committed')
         AND (NEW.state_revision = 0 OR NEW.state_revision = (
           SELECT state_revision FROM editorial_wave2b_runs WHERE run_id = NEW.run_id
         ))
@@ -1736,6 +1797,24 @@ export class EditorialCoordinatorAgent extends Agent<EditorialRuntimeEnv, Editor
     };
   }
 
+  public async listFiveAgentCallAttempts(runId: string, userId: string, workspaceId: string): Promise<Array<{
+    call_id: string; call_kind: string; idempotency_key: string; attempt: number;
+    status: "succeeded" | "failed" | "needs_action" | null; error_code: string | null; retryable: boolean | null;
+  }>> {
+    this.ensureSchema();
+    const run = this.wave2bRun(runId);
+    if (!run || run.user_id !== userId || run.workspace_id !== workspaceId) {
+      throw new EditorialRuntimeError("run_not_found", "Wave2B run is not in the requested scope", 404);
+    }
+    return this.sql<{
+      call_id: string; call_kind: string; idempotency_key: string; attempt: number;
+      status: "succeeded" | "failed" | "needs_action" | null; error_code: string | null; retryable: number | null;
+    }>`SELECT c.call_id, c.call_kind, c.idempotency_key, c.attempt, r.status, r.error_code, r.retryable
+      FROM editorial_wave2b_calls c LEFT JOIN editorial_wave2b_call_results r ON r.call_id = c.call_id
+      WHERE c.run_id = ${runId} ORDER BY c.call_kind, c.idempotency_key, c.attempt`
+      .map(row => ({ ...row, retryable: row.retryable === null ? null : row.retryable === 1 }));
+  }
+
   public async prepareFiveAgentCall(input: {
     run_id: string; call_kind: string; idempotency_key: string; attempt: number; created_at: string;
   }): Promise<{ status: "prepared" | "completed" | "failed" | "needs_action"; call_id: string; artifact_id?: string; response_hash?: string; error_code?: string; retryable?: boolean; attempt?: number }> {
@@ -1759,25 +1838,82 @@ export class EditorialCoordinatorAgent extends Agent<EditorialRuntimeEnv, Editor
       return { status: "needs_action", call_id: latest.call_id, artifact_id: latest.artifact_id || undefined, response_hash: latest.response_hash || undefined, error_code: latest.error_code || undefined, retryable: false, attempt: latest.attempt };
     }
     if (latest?.status === "failed" && !latest.retryable) {
-      const role = input.call_kind.startsWith("editorial_review") ? "review" : "writing";
-      return { status: "failed", call_id: latest.call_id, artifact_id: latest.artifact_id || undefined, response_hash: latest.response_hash || undefined, error_code: `${role}_adapter_non_retryable`, retryable: false, attempt: latest.attempt };
+      const role = input.call_kind.startsWith("editorial_review") ? "review" : input.call_kind.startsWith("visual_") ? "visual" : "writing";
+      return { status: "failed", call_id: latest.call_id, artifact_id: latest.artifact_id || undefined, response_hash: latest.response_hash || undefined, error_code: role === "visual" ? "visual_generation_non_retryable" : `${role}_adapter_non_retryable`, retryable: false, attempt: latest.attempt };
     }
     if (latest?.status === "failed" && latest.retryable && latest.attempt >= 3) {
-      const role = input.call_kind.startsWith("editorial_review") ? "review" : "writing";
-      return { status: "failed", call_id: latest.call_id, artifact_id: latest.artifact_id || undefined, response_hash: latest.response_hash || undefined, error_code: `${role}_adapter_retry_exhausted`, retryable: false, attempt: latest.attempt };
+      const role = input.call_kind.startsWith("editorial_review") ? "review" : input.call_kind.startsWith("visual_") ? "visual" : "writing";
+      return { status: "failed", call_id: latest.call_id, artifact_id: latest.artifact_id || undefined, response_hash: latest.response_hash || undefined, error_code: role === "visual" ? "visual_generation_retry_exhausted" : `${role}_adapter_retry_exhausted`, retryable: false, attempt: latest.attempt };
     }
     if (latest?.status === "failed" && input.attempt === latest.attempt) {
+      return { status: "failed", call_id: latest.call_id, artifact_id: latest.artifact_id || undefined, response_hash: latest.response_hash || undefined, error_code: latest.error_code || undefined, retryable: true, attempt: latest.attempt };
+    }
+    if (latest?.status === "failed" && latest.retryable && input.attempt < latest.attempt) {
       return { status: "failed", call_id: latest.call_id, artifact_id: latest.artifact_id || undefined, response_hash: latest.response_hash || undefined, error_code: latest.error_code || undefined, retryable: true, attempt: latest.attempt };
     }
     if (latest && input.attempt <= latest.attempt) {
       throw new EditorialRuntimeError("retry_attempt_conflict", "a retryable adapter attempt already has a durable result", 409);
     }
-    const inflight = this.sql<{ call_id: string }>`
-      SELECT c.call_id FROM editorial_wave2b_calls c
+    const inflight = this.sql<{ call_id: string; attempt: number }>`
+      SELECT c.call_id, c.attempt FROM editorial_wave2b_calls c
       LEFT JOIN editorial_wave2b_call_results r ON r.call_id = c.call_id
       WHERE c.run_id = ${input.run_id} AND c.call_kind = ${input.call_kind}
-        AND c.idempotency_key = ${input.idempotency_key} AND r.call_id IS NULL LIMIT 1`[0];
-    if (inflight) throw new EditorialRuntimeError("external_side_effect_unknown", "an adapter call has no durable result", 409);
+      AND c.idempotency_key = ${input.idempotency_key} AND r.call_id IS NULL LIMIT 1`[0];
+    if (inflight) {
+      const role = input.call_kind.startsWith("editorial_review") ? "review" : input.call_kind.startsWith("visual_") ? "visual" : "writing";
+      return {
+        status: "needs_action",
+        call_id: inflight.call_id,
+        error_code: role === "visual" ? "external_side_effect_unknown" : "external_side_effect_unknown",
+        retryable: false,
+        attempt: Number(inflight.attempt),
+      };
+    }
+    if (input.attempt > 1) {
+      const priorCalls = this.sql<{
+        attempt: number;
+        call_id: string | null;
+        result_status: "succeeded" | "failed" | "needs_action" | null;
+        retryable: number | null;
+      }>`
+        SELECT c.attempt, c.call_id, r.status AS result_status, r.retryable
+        FROM editorial_wave2b_calls c
+        LEFT JOIN editorial_wave2b_call_results r ON r.call_id = c.call_id
+        WHERE c.run_id = ${input.run_id} AND c.call_kind = ${input.call_kind}
+          AND c.idempotency_key = ${input.idempotency_key} AND c.attempt < ${input.attempt}
+        ORDER BY c.attempt`;
+      for (let priorAttempt = 1; priorAttempt < input.attempt; priorAttempt += 1) {
+        const prior = priorCalls.find(item => Number(item.attempt) === priorAttempt);
+        if (!prior || !prior.call_id) {
+          return {
+            status: "failed",
+            call_id: callId,
+            error_code: "attempt_order_invalid",
+            retryable: false,
+            attempt: input.attempt,
+          };
+        }
+        if (!prior.result_status) {
+          return {
+            status: "needs_action",
+            call_id: prior.call_id,
+            error_code: "external_side_effect_unknown",
+            retryable: false,
+            attempt: priorAttempt,
+          };
+        }
+        if (prior.result_status === "needs_action" || prior.result_status === "succeeded" || prior.retryable !== 1) {
+          const role = input.call_kind.startsWith("editorial_review") ? "review" : input.call_kind.startsWith("visual_") ? "visual" : "writing";
+          return {
+            status: prior.result_status === "succeeded" ? "completed" : "failed",
+            call_id: prior.call_id,
+            error_code: prior.result_status === "succeeded" ? undefined : role === "visual" ? "visual_generation_non_retryable" : `${role}_adapter_non_retryable`,
+            retryable: false,
+            attempt: priorAttempt,
+          };
+        }
+      }
+    }
     const row = this.wave2bRun(input.run_id);
     if (!row) throw new EditorialRuntimeError("run_not_found", "Wave2B run not found", 404);
     this.transactionSync(() => {
@@ -1960,12 +2096,110 @@ export class EditorialCoordinatorAgent extends Agent<EditorialRuntimeEnv, Editor
     };
   }
 
+  public async prepareFiveAgentVisualArtifact(input: {
+    run_id: string;
+    metadata: VisualArtifactMetadata;
+    envelope_json: string;
+  }): Promise<{ status: "prepared" | "replayed" }> {
+    this.ensureSchema();
+    const metadata = input.metadata;
+    const run = this.wave2bRun(input.run_id);
+    if (!run || metadata.run_id !== input.run_id || metadata.user_id !== run.user_id || metadata.workspace_id !== run.workspace_id || metadata.article_id !== run.article_id || Number(metadata.recording_id) !== Number(run.recording_id)) {
+      throw new EditorialRuntimeError("visual_artifact_scope_mismatch", "visual artifact is not bound to the run", 403);
+    }
+    if (metadata.schema_version !== "editorial-wave2c.v1" || metadata.producer.role !== "visual_production" || metadata.producer.version !== "visual-production.agent.v1" || !["visual_plan", "visual_asset", "visual_qa_report"].includes(metadata.kind) || metadata.artifact_key !== visualArtifactKey(metadata.user_id, metadata.workspace_id, metadata.run_id, metadata.kind, metadata.artifact_id) || metadata.storage_ref !== `r2://${metadata.artifact_key}` || (metadata.kind !== "visual_asset" && metadata.binary_storage_ref !== null) || (metadata.binary_storage_ref !== null && (!metadata.binary_storage_ref.startsWith("r2://editorial/v3/") || !metadata.binary_storage_ref.includes(`/${metadata.run_id}/visual-binary/`) || metadata.binary_storage_ref === metadata.storage_ref))) {
+      throw new EditorialRuntimeError("visual_artifact_metadata_invalid", "visual artifact metadata is not active", 409);
+    }
+    let parsed: unknown;
+    try { parsed = JSON.parse(input.envelope_json); } catch { throw new EditorialRuntimeError("visual_artifact_metadata_invalid", "visual envelope is not canonical JSON", 400); }
+    if (safeJson(parsed) !== safeJson(metadata)) throw new EditorialRuntimeError("visual_artifact_metadata_invalid", "visual envelope contains non-redacted fields", 409);
+    const existing = this.sql<{ payload_hash: string; envelope_json: string }>`
+      SELECT payload_hash, envelope_json FROM editorial_wave2c_visual_artifacts WHERE artifact_id = ${metadata.artifact_id} LIMIT 1`[0];
+    if (existing) {
+      if (existing.payload_hash !== metadata.payload_hash || existing.envelope_json !== input.envelope_json) throw new EditorialRuntimeError("visual_artifact_conflict", "visual artifact identity conflicts", 409);
+      return { status: "replayed" };
+    }
+    try {
+      this.transactionSync(() => {
+        this.sql`INSERT INTO editorial_wave2c_visual_artifacts
+          (artifact_id, run_id, user_id, workspace_id, envelope_json, payload_hash, storage_ref, binary_storage_ref, created_at)
+          VALUES (${metadata.artifact_id}, ${metadata.run_id}, ${metadata.user_id}, ${metadata.workspace_id}, ${input.envelope_json}, ${metadata.payload_hash}, ${metadata.storage_ref}, ${metadata.binary_storage_ref}, ${metadata.created_at})`;
+      });
+      return { status: "prepared" };
+    } catch {
+      const raced = this.sql<{ payload_hash: string; envelope_json: string }>`
+        SELECT payload_hash, envelope_json FROM editorial_wave2c_visual_artifacts WHERE artifact_id = ${metadata.artifact_id} LIMIT 1`[0];
+      if (raced && raced.payload_hash === metadata.payload_hash && raced.envelope_json === input.envelope_json) return { status: "replayed" };
+      if (raced) throw new EditorialRuntimeError("visual_artifact_conflict", "visual artifact identity conflicts", 409);
+      throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "visual artifact write outcome is unknown", 503);
+    }
+  }
+
+  public async completeFiveAgentVisualArtifact(input: {
+    artifact_id: string;
+    run_id: string;
+    payload_hash: string;
+    state: string;
+    state_revision: number;
+    event_type: "visual_plan_committed" | "visual_asset_committed" | "visual_qa_committed" | "visual_needs_action" | "visual_failed";
+    event_idempotency_key: string;
+    created_at: string;
+  }): Promise<{ replayed: boolean }> {
+    this.ensureSchema();
+    const artifact = this.sql<{ run_id: string; payload_hash: string }>`
+      SELECT run_id, payload_hash FROM editorial_wave2c_visual_artifacts WHERE artifact_id = ${input.artifact_id} LIMIT 1`[0];
+    if (!artifact || artifact.run_id !== input.run_id || artifact.payload_hash !== input.payload_hash) throw new EditorialRuntimeError("visual_artifact_identity_conflict", "visual artifact receipt is not bound to its outbox", 409);
+    const current = this.wave2bRun(input.run_id);
+    if (!current) throw new EditorialRuntimeError("run_not_found", "Wave2B run not found", 404);
+    if (!["visual_planning", "visual_generating", "visual_ready", "needs_action", "failed"].includes(input.state)) throw new EditorialRuntimeError("visual_state_invalid", "visual state is not allowed", 409);
+    const existingEvent = this.sql<{ event_id: string; state: string; state_revision: number; artifact_id: string; payload_hash: string; event_type: string }>`
+      SELECT event_id, state, state_revision, artifact_id, payload_hash, event_type FROM editorial_wave2c_visual_events WHERE idempotency_key = ${input.event_idempotency_key} LIMIT 1`[0];
+    if (existingEvent) {
+      if (existingEvent.event_id === `${input.run_id}:visual:${input.event_idempotency_key}` && existingEvent.state === input.state && Number(existingEvent.state_revision) === input.state_revision && existingEvent.artifact_id === input.artifact_id && existingEvent.payload_hash === input.payload_hash && existingEvent.event_type === input.event_type) return { replayed: true };
+      throw new EditorialRuntimeError("idempotency_conflict", "visual event replay conflicts", 409);
+    }
+    const stateChanged = input.state !== current.state;
+    if (stateChanged && (Number(current.state_revision) !== input.state_revision - 1 || !WAVE2B_TRANSITIONS[String(current.state)]?.includes(input.state))) throw new EditorialRuntimeError("stale_workflow_step", "visual state CAS failed", 409);
+    if (!stateChanged && (String(current.state) !== input.state || Number(current.state_revision) !== input.state_revision)) throw new EditorialRuntimeError("stale_workflow_step", "visual event revision is stale", 409);
+    const projected = deriveWave2BProjection(current, input.state);
+    this.transactionSync(() => {
+      if (stateChanged) {
+        const updated = this.sql<{ run_id: string }>`UPDATE editorial_wave2b_runs SET state = ${input.state}, state_revision = ${input.state_revision}, run_status = ${projected.runStatus}, progress_percent = ${projected.progress}, resume_state = ${projected.resumeState}, last_successful_state = ${projected.lastSuccessfulState}, last_successful_progress_percent = ${projected.lastSuccessfulProgress}, updated_at = ${input.created_at} WHERE run_id = ${input.run_id} AND state_revision = ${input.state_revision - 1} RETURNING run_id`;
+        if (updated.length !== 1) throw new EditorialRuntimeError("stale_workflow_step", "visual state CAS failed", 409);
+      }
+      this.sql`INSERT INTO editorial_wave2c_visual_receipts (artifact_id, run_id, payload_hash, mirrored_at) VALUES (${input.artifact_id}, ${input.run_id}, ${input.payload_hash}, ${input.created_at})`;
+      this.sql`INSERT INTO editorial_wave2c_visual_events (event_id, run_id, event_type, state, state_revision, artifact_id, payload_hash, idempotency_key, created_at) VALUES (${`${input.run_id}:visual:${input.event_idempotency_key}`}, ${input.run_id}, ${input.event_type}, ${input.state}, ${input.state_revision}, ${input.artifact_id}, ${input.payload_hash}, ${input.event_idempotency_key}, ${input.created_at})`;
+    });
+    return { replayed: false };
+  }
+
+  public async getFiveAgentVisualLedger(runId: string, userId: string, workspaceId: string): Promise<{
+    artifacts: VisualArtifactMetadata[];
+    receipt_ids: string[];
+    event_ids: string[];
+    event_artifacts: Array<{ event_id: string; artifact_id: string }>;
+    visual_events: Array<{ event_id: string; event_type: string; state_revision: number; artifact_id: string; payload_hash: string; idempotency_key: string; created_at: string }>;
+  }> {
+    this.ensureSchema();
+    const rows = this.sql<{ envelope_json: string; artifact_id: string; receipt_artifact_id: string | null }>`
+      SELECT a.envelope_json, a.artifact_id, r.artifact_id AS receipt_artifact_id FROM editorial_wave2c_visual_artifacts a LEFT JOIN editorial_wave2c_visual_receipts r ON r.artifact_id = a.artifact_id WHERE a.run_id = ${runId} AND a.user_id = ${userId} AND a.workspace_id = ${workspaceId} ORDER BY a.created_at, a.artifact_id`;
+    const events = this.sql<{ event_id: string; event_type: string; state_revision: number; artifact_id: string; payload_hash: string; idempotency_key: string; created_at: string }>`SELECT event_id, event_type, state_revision, artifact_id, payload_hash, idempotency_key, created_at FROM editorial_wave2c_visual_events WHERE run_id = ${runId} ORDER BY created_at, event_id`;
+    return {
+      artifacts: rows.map(row => parseJson<VisualArtifactMetadata>(row.envelope_json)),
+      receipt_ids: rows.filter(row => row.receipt_artifact_id !== null).map(row => row.artifact_id),
+      event_ids: events.map(row => row.event_id),
+      event_artifacts: events.map(row => ({ event_id: row.event_id, artifact_id: row.artifact_id })),
+      visual_events: events,
+    };
+  }
+
   public async listFiveAgentEvents(runId: string, userId: string, workspaceId: string): Promise<Array<{
     event_type: string;
     state: string;
     state_revision: number;
     artifact_id: string | null;
     payload_hash: string | null;
+    created_at: string;
   }>> {
     this.ensureSchema();
     const current = this.wave2bRun(runId);
@@ -1978,7 +2212,8 @@ export class EditorialCoordinatorAgent extends Agent<EditorialRuntimeEnv, Editor
       state_revision: number;
       artifact_id: string | null;
       payload_hash: string | null;
-    }>`SELECT event_type, state, state_revision, artifact_id, payload_hash
+      created_at: string;
+    }>`SELECT event_type, state, state_revision, artifact_id, payload_hash, created_at
       FROM editorial_wave2b_events WHERE run_id = ${runId} ORDER BY state_revision, event_type`;
   }
 

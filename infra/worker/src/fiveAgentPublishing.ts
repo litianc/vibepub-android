@@ -44,6 +44,28 @@ import {
 } from "./wave2/artifactContracts";
 import { ArtifactStoreError, putImmutableArtifact, readImmutableArtifact } from "./wave2/artifactStore";
 import { callReviewAgentV3, callWritingAgentV3, InternalServiceError } from "./wave2/serviceClients";
+import {
+  ACTIVE_VISUAL_PINS,
+  VISUAL_PIN_SNAPSHOT_ID,
+  buildVisualPlan,
+  decodeVisualPinSnapshot,
+  encodeVisualPinSnapshot,
+  assertVisualAssetMatchesPlanSlot,
+  deriveVisualImageOperationKey,
+  makeVisualArtifactObject,
+  normalizeVisualArtifact,
+  toVisualArtifactMetadata,
+  visualBinaryKey,
+  type VisualArtifactMetadata,
+  type VisualArtifactObject,
+  type VisualAssetPayload,
+  type VisualPlanPayload,
+  type VisualQAReportPayload,
+  VisualContractError,
+} from "./wave2/visualContracts";
+import { putImmutableVisualArtifact, readImmutableVisualArtifact, VisualArtifactStoreError } from "./wave2/visualArtifactStore";
+import { BinaryImageStoreError, describeImmutableBinaryImage, putImmutableBinaryImage, readExistingImmutableBinaryImage, readImmutableBinaryImage, verifyPngOpaqueCoverage, verifyPngWhiteBackground } from "./wave2/binaryImageStore";
+import { callVisualImageService, callVisualPlanService, reconcileVisualImageService, reconcileVisualPlanService } from "./wave2/visualServiceClients";
 
 export const FIVE_AGENT_PUBLISHING_WORKFLOW_NAME = "FIVE_AGENT_PUBLISHING_WORKFLOW";
 export const FIVE_AGENT_PUBLISHING_WORKFLOW_VERSION = "editorial-workflow.v3";
@@ -88,6 +110,12 @@ export type FiveAgentWorkflowResult = {
   transcript_hash: string;
   artifact_ids: string[];
 };
+
+export function visualProductionFeatureEnabled(env: Pick<EditorialRuntimeEnv, "VISUAL_PRODUCTION_V3" | "VISUAL_PRODUCTION_V3_ALLOWLIST">, userId: string, workspaceId: string): boolean {
+  if (env.VISUAL_PRODUCTION_V3 !== "true") return false;
+  const target = `${userId}:${workspaceId}`;
+  return (env.VISUAL_PRODUCTION_V3_ALLOWLIST || "").split(",").map(value => value.trim()).filter(Boolean).includes(target);
+}
 
 function errorResponse(error: unknown): Response {
   if (error instanceof EditorialRuntimeError) return Response.json({ error: error.code }, { status: error.status });
@@ -690,12 +718,30 @@ function workflowTimestamp(base: string, offsetMs: number): string {
   return new Date(parsed + offsetMs).toISOString();
 }
 
+function projectionEventCreatedAt(run: { last_event_created_at?: string }): string {
+  if (typeof run.last_event_created_at !== "string" || !Number.isFinite(Date.parse(run.last_event_created_at))) {
+    throw new EditorialRuntimeError("publication_event_identity_invalid", "publication event time is unavailable", 503);
+  }
+  return run.last_event_created_at;
+}
+
+function projectionEventIdentity(run: PublicationRunRow): { eventType: string; payloadHash: string; createdAt: string } {
+  if (typeof run.last_event_type !== "string" || typeof run.last_event_payload_hash !== "string") {
+    throw new EditorialRuntimeError("publication_event_identity_invalid", "publication event identity is unavailable", 503);
+  }
+  return {
+    eventType: run.last_event_type,
+    payloadHash: run.last_event_payload_hash,
+    createdAt: projectionEventCreatedAt(run),
+  };
+}
+
 async function applySystemState(
   env: EditorialRuntimeEnv,
   coordinator: DurableObjectStub<EditorialCoordinatorAgent>,
   params: FiveAgentWorkflowParams,
-  targetState: "transcribing" | "writing" | "reviewing" | "needs_action" | "failed",
-  eventType: "transcription_started" | "writing_started" | "review_started" | "needs_action" | "failed",
+  targetState: "transcribing" | "writing" | "reviewing" | "visual_planning" | "visual_generating" | "visual_ready" | "needs_action" | "failed",
+  eventType: "transcription_started" | "writing_started" | "review_started" | "visual_planning" | "visual_generating" | "visual_ready" | "needs_action" | "failed",
   doStateRevision: number,
   projectionRevision: number,
   offsetMs: number,
@@ -744,7 +790,7 @@ async function applySystemState(
     state_revision: doStateRevision + 1,
     event_type: eventType,
     payload_hash: eventPayloadHash,
-    created_at: createdAt,
+    created_at: projectionEventCreatedAt(projection.run),
     next_action: transition.nextAction,
     error_code: transition.errorCode,
     revision_count: transition.revisionCount,
@@ -901,6 +947,59 @@ function isReconciliationHold(error: unknown): boolean {
     (error.code === "external_side_effect_unknown" || error.code === "artifact_reconciliation_required" ||
       error.code === "artifact_mirror_unavailable" || error.code === "artifact_not_found")) ||
     (error instanceof ArtifactStoreError && error.code === "artifact_reconciliation_required");
+}
+
+function isVisualReconciliationHold(error: unknown): boolean {
+  return isReconciliationHold(error) ||
+    (error instanceof EditorialRuntimeError && error.code === "visual_artifact_reconciliation_required") ||
+    (error instanceof VisualArtifactStoreError && error.code === "visual_artifact_reconciliation_required") ||
+    (error instanceof BinaryImageStoreError && error.code === "binary_reconciliation_required");
+}
+
+class VisualCancelledError extends Error {
+  constructor() {
+    super("visual production was cancelled");
+    this.name = "VisualCancelledError";
+  }
+}
+
+async function isPublicationCancelled(env: EditorialRuntimeEnv, params: FiveAgentWorkflowParams): Promise<boolean> {
+  let row: { state: string } | null;
+  try {
+    row = await env.DB.prepare(`SELECT state FROM publication_runs WHERE run_id = ? AND user_id = ? AND workspace_id = ? LIMIT 1`)
+      .bind(params.run_id, params.user_id, params.workspace_id)
+      .first<{ state: string }>();
+  } catch {
+    throw new EditorialRuntimeError("external_side_effect_unknown", "visual cancellation state is unavailable", 503);
+  }
+  if (!row) throw new EditorialRuntimeError("external_side_effect_unknown", "visual cancellation state is unavailable", 503);
+  return row?.state === "cancelled";
+}
+
+function isKnownVisualPersistenceConflict(error: unknown): boolean {
+  return error instanceof EditorialRuntimeError && [
+    "visual_artifact_identity_conflict",
+    "visual_artifact_mirror_conflict",
+    "visual_artifact_metadata_invalid",
+    "visual_artifact_conflict",
+    "visual_state_invalid",
+    "publication_run_not_found",
+    "publication_revision_conflict",
+    "publication_transition_invalid",
+    "stale_workflow_step",
+    "idempotency_conflict",
+  ].includes(error.code);
+}
+
+function visualPersistenceUnknown(error: unknown): never {
+  if (isVisualReconciliationHold(error) || isKnownVisualPersistenceConflict(error)) throw error;
+  throw new EditorialRuntimeError("external_side_effect_unknown", "visual persistence outcome is unknown", 503);
+}
+
+function visualIntegrityError(error: unknown): boolean {
+  return (error instanceof VisualArtifactStoreError && error.code !== "visual_artifact_reconciliation_required") ||
+    (error instanceof BinaryImageStoreError && error.code !== "binary_reconciliation_required") ||
+    (error instanceof EditorialRuntimeError && (error.code === "visual_artifact_identity_conflict" || error.code === "visual_artifact_mirror_conflict" || error.code === "visual_artifact_metadata_invalid"));
 }
 
 function adapterFailureMetadata(error: unknown, role: "writing" | "review"): { errorCode: string; nextAction: string; retryCount: number } {
@@ -1073,10 +1172,10 @@ async function persistArtifact(
   await verifyExactArtifactSet(env, coordinator, params, fullSet, receiptIds, eventIds);
 
   const currentDoRun = await coordinator.getFiveAgentRun(params.run_id, params.user_id, params.workspace_id) as Record<string, unknown>;
-  const currentProjection = await env.DB.prepare(`SELECT state, state_revision
+  const currentProjection = await env.DB.prepare(`SELECT state, state_revision, last_event_created_at
     FROM publication_runs WHERE run_id = ? AND user_id = ? AND workspace_id = ? LIMIT 1`)
     .bind(params.run_id, params.user_id, params.workspace_id)
-    .first<{ state: string; state_revision: number }>();
+    .first<{ state: string; state_revision: number; last_event_created_at: string }>();
   if (!currentProjection) throw new EditorialRuntimeError("publication_run_not_found", "publication run is unavailable", 404);
 
   if (currentReceipt) {
@@ -1119,7 +1218,7 @@ async function persistArtifact(
     state: targetState,
     state_revision: doStateRevisionForWrite + 1,
     event_type: "artifact_committed",
-    created_at: metadata.created_at,
+    created_at: currentEvent ? projectionEventCreatedAt(currentProjection) : projectionEventCreatedAt(projection.run),
     summary: {
       kind: metadata.kind,
       payload_hash: metadata.payload_hash,
@@ -1132,6 +1231,1187 @@ async function persistArtifact(
   });
   await verifyExactArtifactSet(env, coordinator, params, fullSet, fullSet.map(item => item.artifact_id), fullSet.map(item => item.artifact_id));
   return { ...metadata, doStateRevision: doStateRevisionForWrite + 1, projectionRevision: currentEvent ? projectionRevisionForWrite : projection.run.state_revision };
+}
+
+type VisualPersistedMetadata = VisualArtifactMetadata & { doStateRevision: number; projectionRevision: number };
+
+async function mirrorVisualArtifactToD1(db: D1Database, object: VisualArtifactObject): Promise<void> {
+  const metadata = toVisualArtifactMetadata(object);
+  const inputIds = artifactCanonicalJson(metadata.input_artifact_ids);
+  const mirror = {
+    artifact_id: metadata.artifact_id,
+    run_id: metadata.run_id,
+    article_id: metadata.article_id,
+    recording_id: metadata.recording_id,
+    user_id: metadata.user_id,
+    workspace_id: metadata.workspace_id,
+    schema_version: metadata.schema_version,
+    kind: metadata.kind,
+    producer_agent_role: metadata.producer.role,
+    producer_agent_version: metadata.producer.version,
+    skill_id: VISUAL_PIN_SNAPSHOT_ID,
+    skill_version: encodeVisualPinSnapshot(),
+    workflow_version: FIVE_AGENT_PUBLISHING_WORKFLOW_VERSION,
+    policy_version: FIVE_AGENT_PUBLISHING_POLICY_VERSION,
+    input_artifact_ids_json: inputIds,
+    payload_hash: metadata.payload_hash,
+    storage_ref: metadata.storage_ref,
+    created_at: metadata.created_at,
+  };
+  const readExisting = () => db.prepare(`SELECT artifact_id, run_id, article_id, recording_id, user_id, workspace_id,
+      schema_version, kind, producer_agent_role, producer_agent_version, skill_id, skill_version,
+      workflow_version, policy_version, input_artifact_ids_json, payload_hash, storage_ref
+      FROM editorial_artifacts WHERE artifact_id = ? LIMIT 1`).bind(mirror.artifact_id).first<Record<string, unknown>>();
+  const matches = (existing: Record<string, unknown> | null): boolean => Boolean(existing &&
+    String(existing.artifact_id) === mirror.artifact_id && String(existing.run_id) === mirror.run_id &&
+    String(existing.article_id) === mirror.article_id && Number(existing.recording_id) === mirror.recording_id &&
+    String(existing.user_id) === mirror.user_id && String(existing.workspace_id) === mirror.workspace_id &&
+    String(existing.schema_version) === mirror.schema_version && String(existing.kind) === mirror.kind &&
+    String(existing.producer_agent_role) === mirror.producer_agent_role && String(existing.producer_agent_version) === mirror.producer_agent_version &&
+    String(existing.skill_id || "") === mirror.skill_id && String(existing.skill_version || "") === mirror.skill_version &&
+    String(existing.workflow_version) === mirror.workflow_version && String(existing.policy_version) === mirror.policy_version &&
+    String(existing.input_artifact_ids_json) === mirror.input_artifact_ids_json && String(existing.payload_hash) === mirror.payload_hash &&
+    String(existing.storage_ref) === mirror.storage_ref);
+  let existing = await readExisting();
+  if (existing && !matches(existing)) throw new EditorialRuntimeError("visual_artifact_mirror_conflict", "visual D1 artifact mirror conflicts", 409);
+  if (!existing) {
+    try {
+      await db.prepare(`INSERT INTO editorial_artifacts
+        (artifact_id, run_id, user_id, workspace_id, article_id, recording_id, schema_version, kind,
+         producer_agent_role, producer_agent_version, skill_id, skill_version, workflow_version,
+         policy_version, input_artifact_ids_json, payload_hash, storage_ref, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .bind(mirror.artifact_id, mirror.run_id, mirror.user_id, mirror.workspace_id, mirror.article_id, mirror.recording_id,
+          mirror.schema_version, mirror.kind, mirror.producer_agent_role, mirror.producer_agent_version, mirror.skill_id,
+          mirror.skill_version, mirror.workflow_version, mirror.policy_version, mirror.input_artifact_ids_json,
+          mirror.payload_hash, mirror.storage_ref, mirror.created_at).run();
+    } catch {
+      existing = await readExisting();
+      if (!existing) throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "visual D1 mirror outcome is unknown", 503);
+      if (!matches(existing)) throw new EditorialRuntimeError("visual_artifact_mirror_conflict", "visual D1 mirror insert conflicts", 409);
+    }
+  }
+  if (!matches(await readExisting())) throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "visual D1 mirror could not be verified", 503);
+}
+
+async function readVisualArtifactFromR2(env: EditorialRuntimeEnv, metadata: VisualArtifactMetadata): Promise<VisualArtifactObject> {
+  let body: R2ObjectBody | null;
+  try { body = await env.FILES_BUCKET.get(metadata.artifact_key); } catch { throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "visual artifact read is unknown", 503); }
+  if (!body) throw new EditorialRuntimeError("visual_artifact_not_found", "visual artifact is unavailable", 404);
+  let parsed: unknown;
+  try { parsed = JSON.parse(await body.text()); } catch { throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "visual artifact JSON cannot be read", 503); }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "visual artifact envelope is invalid", 503);
+  const raw = parsed as Record<string, unknown>;
+  const envelope = raw.envelope as Record<string, unknown>;
+  let object: VisualArtifactObject;
+  try {
+    object = await normalizeVisualArtifact({
+      schema_version: envelope.schema_version,
+      artifact_id: envelope.artifact_id,
+      artifact_key: envelope.artifact_key,
+      kind: envelope.kind,
+      run_id: envelope.run_id,
+      article_id: envelope.article_id,
+      recording_id: envelope.recording_id,
+      user_id: envelope.user_id,
+      workspace_id: envelope.workspace_id,
+      input_artifact_ids: envelope.input_artifact_ids,
+      idempotency_key: envelope.idempotency_key,
+      created_at: envelope.created_at,
+      storage_ref: envelope.storage_ref,
+      binary_storage_ref: envelope.binary_storage_ref,
+      producer: envelope.producer,
+      payload_hash: envelope.payload_hash,
+      payload_length: envelope.payload_length,
+      payload: raw.payload,
+    });
+  } catch (error) {
+    if (error instanceof VisualContractError) throw new EditorialRuntimeError("visual_artifact_identity_conflict", "visual artifact contract does not match its reference", 409);
+    throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "visual artifact contract cannot be verified", 503);
+  }
+  if (artifactCanonicalJson(object.envelope) !== artifactCanonicalJson({
+    schema_version: metadata.schema_version,
+    artifact_id: metadata.artifact_id,
+    artifact_key: metadata.artifact_key,
+    kind: metadata.kind,
+    producer: metadata.producer,
+    run_id: metadata.run_id,
+    article_id: metadata.article_id,
+    recording_id: metadata.recording_id,
+    user_id: metadata.user_id,
+    workspace_id: metadata.workspace_id,
+    input_artifact_ids: metadata.input_artifact_ids,
+    idempotency_key: metadata.idempotency_key,
+    payload_hash: metadata.payload_hash,
+    payload_length: metadata.payload_length,
+    created_at: metadata.created_at,
+    storage_ref: metadata.storage_ref,
+    binary_storage_ref: metadata.binary_storage_ref,
+  })) throw new EditorialRuntimeError("visual_artifact_identity_conflict", "visual artifact identity does not match", 409);
+  try { await readImmutableVisualArtifact(env.FILES_BUCKET, object); } catch (error) {
+    if (error instanceof VisualArtifactStoreError && error.code !== "visual_artifact_reconciliation_required") throw error;
+    throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "visual artifact readback is unknown", 503);
+  }
+  return object;
+}
+
+async function persistVisualArtifact(
+  env: EditorialRuntimeEnv,
+  coordinator: DurableObjectStub<EditorialCoordinatorAgent>,
+  params: FiveAgentWorkflowParams,
+  object: VisualArtifactObject,
+  targetState: "visual_planning" | "visual_generating" | "visual_ready",
+  eventType: "visual_plan_committed" | "visual_asset_committed" | "visual_qa_committed",
+  eventIdempotencyKey: string,
+  preparedMetadata?: VisualArtifactMetadata,
+): Promise<VisualPersistedMetadata> {
+  const metadata = toVisualArtifactMetadata(object);
+  if (preparedMetadata) {
+    if (artifactCanonicalJson(preparedMetadata) !== artifactCanonicalJson(metadata)) throw new EditorialRuntimeError("visual_artifact_identity_conflict", "prepared visual artifact identity changed", 409);
+  } else {
+    await prepareVisualArtifactIntent(coordinator, params, metadata);
+  }
+  try {
+    await putImmutableVisualArtifact(env.FILES_BUCKET, object);
+    await readImmutableVisualArtifact(env.FILES_BUCKET, object);
+    await mirrorVisualArtifactToD1(env.DB, object);
+  } catch (error) {
+    if (error instanceof VisualArtifactStoreError && error.code !== "visual_artifact_reconciliation_required") throw error;
+    if (error instanceof EditorialRuntimeError && error.code === "visual_artifact_mirror_conflict") throw error;
+    if (error instanceof EditorialRuntimeError && error.code === "visual_artifact_reconciliation_required") throw error;
+    if (error instanceof BinaryImageStoreError && error.code !== "binary_reconciliation_required") throw error;
+    throw new EditorialRuntimeError("external_side_effect_unknown", "visual artifact persistence outcome is unknown", 503);
+  }
+  try {
+    const currentDo = await coordinator.getFiveAgentRun(params.run_id, params.user_id, params.workspace_id) as Record<string, unknown>;
+    const currentProjection = await env.DB.prepare(`SELECT state, state_revision FROM publication_runs WHERE run_id = ? AND user_id = ? AND workspace_id = ? LIMIT 1`).bind(params.run_id, params.user_id, params.workspace_id).first<{ state: PublicationState; state_revision: number }>();
+    if (!currentProjection) throw new EditorialRuntimeError("publication_run_not_found", "publication run is unavailable", 404);
+    const projection = await applySystemPublicationTransition(env.DB, {
+      runId: params.run_id,
+      auth: { userId: params.user_id, workspaceId: params.workspace_id },
+      targetState,
+      expectedStateRevision: Number(currentProjection.state_revision),
+      options: {
+        eventId: `${params.run_id}:visual:event:${eventIdempotencyKey}`,
+        eventType,
+        eventIdempotencyKey,
+        eventPayloadHash: metadata.payload_hash,
+        eventCreatedAt: metadata.created_at,
+        allowSameState: currentProjection.state === targetState,
+      },
+    });
+    const targetDoRevision = String(currentDo.state) === targetState ? Number(currentDo.state_revision) : Number(currentDo.state_revision) + 1;
+    await coordinator.completeFiveAgentVisualArtifact({
+      artifact_id: metadata.artifact_id,
+      run_id: params.run_id,
+      payload_hash: metadata.payload_hash,
+      state: targetState,
+      state_revision: targetDoRevision,
+      event_type: eventType,
+      event_idempotency_key: eventIdempotencyKey,
+      created_at: projectionEventCreatedAt(projection.run),
+    });
+    return { ...metadata, doStateRevision: targetDoRevision, projectionRevision: projection.run.state_revision };
+  } catch (error) {
+    visualPersistenceUnknown(error);
+  }
+}
+
+async function prepareVisualArtifactIntent(
+  coordinator: DurableObjectStub<EditorialCoordinatorAgent>,
+  params: FiveAgentWorkflowParams,
+  metadata: VisualArtifactMetadata,
+): Promise<void> {
+  try {
+    await coordinator.prepareFiveAgentVisualArtifact({ run_id: params.run_id, metadata, envelope_json: artifactCanonicalJson(metadata) });
+    return;
+  } catch (error) {
+    if (isKnownVisualPersistenceConflict(error)) throw error;
+    let ledger: Awaited<ReturnType<EditorialCoordinatorAgent["getFiveAgentVisualLedger"]>>;
+    try { ledger = await coordinator.getFiveAgentVisualLedger(params.run_id, params.user_id, params.workspace_id); }
+    catch { throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "visual artifact intent outcome is unknown", 503); }
+    const existing = ledger.artifacts.find(item => item.artifact_id === metadata.artifact_id);
+    if (existing && artifactCanonicalJson(existing) === artifactCanonicalJson(metadata)) return;
+    if (existing) throw new EditorialRuntimeError("visual_artifact_identity_conflict", "visual artifact intent identity conflicts", 409);
+    throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "visual artifact intent outcome is unknown", 503);
+  }
+}
+
+async function verifyExactVisualArtifactSet(
+  env: EditorialRuntimeEnv,
+  coordinator: DurableObjectStub<EditorialCoordinatorAgent>,
+  params: FiveAgentWorkflowParams,
+  expected: readonly VisualArtifactMetadata[],
+  scope?: { frozenPayloadHash: string; planArtifactId: string; planPayloadHash: string },
+): Promise<void> {
+  const expectedIds = expected.map(item => item.artifact_id);
+  if (expected.length === 0 || new Set(expectedIds).size !== expectedIds.length) throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "visual artifact set is not exact", 503);
+  const expectedById = new Map(expected.map(item => [item.artifact_id, item]));
+  const ledger = await coordinator.getFiveAgentVisualLedger(params.run_id, params.user_id, params.workspace_id);
+  const currentFrozenHash = scope?.frozenPayloadHash || expected[0].payload_summary.frozen_payload_hash;
+  const currentPlanArtifactId = scope?.planArtifactId || expected.find(item => item.kind === "visual_plan")?.artifact_id;
+  const currentPlanPayloadHash = scope?.planPayloadHash || expected.find(item => item.kind === "visual_plan")?.payload_hash;
+  if (!currentFrozenHash || !currentPlanArtifactId || !currentPlanPayloadHash) throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "visual execution scope is incomplete", 503);
+  const isCurrentScope = (item: VisualArtifactMetadata): boolean => item.payload_summary.frozen_payload_hash === currentFrozenHash &&
+    (item.kind === "visual_plan"
+      ? item.artifact_id === currentPlanArtifactId && item.payload_hash === currentPlanPayloadHash
+      : item.payload_summary.plan_artifact_id === currentPlanArtifactId && item.payload_summary.plan_payload_hash === currentPlanPayloadHash);
+  const currentArtifacts = ledger.artifacts.filter(isCurrentScope);
+  const currentArtifactIds = currentArtifacts.map(item => item.artifact_id);
+  const currentReceiptIds = ledger.receipt_ids.filter(id => currentArtifactIds.includes(id));
+  const currentEventArtifacts = ledger.event_artifacts.filter(item => currentArtifactIds.includes(item.artifact_id));
+  if (currentArtifacts.length !== expected.length ||
+      artifactCanonicalJson(currentArtifactIds.sort()) !== artifactCanonicalJson([...expectedIds].sort()) ||
+      artifactCanonicalJson(currentReceiptIds.sort()) !== artifactCanonicalJson([...expectedIds].sort()) ||
+      artifactCanonicalJson(currentEventArtifacts.map(item => item.artifact_id).sort()) !== artifactCanonicalJson([...expectedIds].sort())) {
+    throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "visual DO artifact set is not exact", 503);
+  }
+  const expectedDoEvents = expected.map(item => ({
+    event_id: `${params.run_id}:visual:${item.idempotency_key}`,
+    event_type: item.kind === "visual_plan" ? "visual_plan_committed" : item.kind === "visual_asset" ? "visual_asset_committed" : "visual_qa_committed",
+    artifact_id: item.artifact_id,
+    payload_hash: item.payload_hash,
+    idempotency_key: item.idempotency_key,
+  })).sort((left, right) => left.event_id.localeCompare(right.event_id));
+  const currentDoEvents = ledger.visual_events
+    .filter(event => {
+      const artifact = ledger.artifacts.find(item => item.artifact_id === event.artifact_id);
+      return Boolean(artifact && isCurrentScope(artifact));
+    })
+    .map(event => ({ event_id: event.event_id, event_type: event.event_type, artifact_id: event.artifact_id, payload_hash: event.payload_hash, idempotency_key: event.idempotency_key }))
+    .sort((left, right) => left.event_id.localeCompare(right.event_id));
+  for (const event of ledger.visual_events) {
+    const artifact = ledger.artifacts.find(item => item.artifact_id === event.artifact_id);
+    if ((!artifact && event.idempotency_key.startsWith("visual")) || (artifact && artifact.payload_summary.frozen_payload_hash === currentFrozenHash && !isCurrentScope(artifact))) {
+      throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "visual DO contains an event outside the current execution scope", 503);
+    }
+  }
+  if (artifactCanonicalJson(currentDoEvents) !== artifactCanonicalJson(expectedDoEvents)) {
+    throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "visual DO event set is not exact", 503);
+  }
+  for (const item of ledger.artifacts) {
+    if (item.payload_summary.frozen_payload_hash === currentFrozenHash && !isCurrentScope(item)) {
+      throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "visual DO contains an extra artifact in the current execution scope", 503);
+    }
+  }
+  for (const event of ledger.event_artifacts) {
+    const artifact = ledger.artifacts.find(item => item.artifact_id === event.artifact_id);
+    if (artifact?.payload_summary.frozen_payload_hash === currentFrozenHash && !isCurrentScope(artifact)) {
+      throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "visual DO contains an extra artifact event in the current execution scope", 503);
+    }
+  }
+  for (const item of currentArtifacts) {
+    const expectedItem = expectedById.get(item.artifact_id);
+    if (!expectedItem) throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "visual DO metadata does not reconcile", 503);
+    const { doStateRevision: _doStateRevision, projectionRevision: _projectionRevision, ...expectedMetadata } = expectedItem as VisualPersistedMetadata;
+    if (artifactCanonicalJson(item) !== artifactCanonicalJson(expectedMetadata)) throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "visual DO metadata does not reconcile", 503);
+  }
+  const visualPrefixMarker = "/visual/";
+  const visualPrefixIndex = expected[0].artifact_key.indexOf(visualPrefixMarker);
+  if (visualPrefixIndex < 0) throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "visual artifact key is not canonical", 503);
+  const visualPrefix = expected[0].artifact_key.slice(0, visualPrefixIndex + visualPrefixMarker.length);
+  const visualKeys: string[] = [];
+  let cursor: string | undefined;
+  do {
+    let page: R2Objects;
+    try { page = await env.FILES_BUCKET.list({ prefix: visualPrefix, ...(cursor ? { cursor } : {}) }); }
+    catch { throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "visual JSON scope listing is unknown", 503); }
+    visualKeys.push(...page.objects.map(item => item.key));
+    cursor = page.truncated ? page.cursor : undefined;
+  } while (cursor);
+  const currentVisualKeys: string[] = [];
+  for (const key of visualKeys) {
+    let body: R2ObjectBody | null;
+    try { body = await env.FILES_BUCKET.get(key); } catch { throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "visual JSON scope read is unknown", 503); }
+    if (!body) throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "visual JSON scope object is unavailable", 503);
+    let raw: unknown;
+    try { raw = JSON.parse(await body.text()); } catch { throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "visual JSON scope object is invalid", 503); }
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "visual JSON scope object is invalid", 503);
+    const envelope = (raw as Record<string, unknown>).envelope;
+    const payload = (raw as Record<string, unknown>).payload;
+    if (!envelope || typeof envelope !== "object" || Array.isArray(envelope) || !payload || typeof payload !== "object" || Array.isArray(payload)) throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "visual JSON scope object is invalid", 503);
+    const envelopeRecord = envelope as Record<string, unknown>;
+    const payloadRecord = payload as Record<string, unknown>;
+    if (envelopeRecord.run_id !== params.run_id || envelopeRecord.user_id !== params.user_id || envelopeRecord.workspace_id !== params.workspace_id) throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "visual JSON object crosses tenant scope", 503);
+    const isCurrentObject = payloadRecord.frozen_payload_hash === currentFrozenHash &&
+      (envelopeRecord.artifact_id === currentPlanArtifactId
+        ? envelopeRecord.artifact_id === currentPlanArtifactId && envelopeRecord.payload_hash === currentPlanPayloadHash
+        : payloadRecord.plan_artifact_id === currentPlanArtifactId && payloadRecord.plan_payload_hash === currentPlanPayloadHash);
+    if (payloadRecord.frozen_payload_hash === currentFrozenHash && !isCurrentObject) {
+      throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "visual JSON object is outside the current plan scope", 503);
+    }
+    if (isCurrentObject) currentVisualKeys.push(key);
+  }
+  if (artifactCanonicalJson(currentVisualKeys.sort()) !== artifactCanonicalJson(expected.map(item => item.artifact_key).sort())) throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "visual JSON object set is not exact", 503);
+  const binaryExpected = expected.filter(item => item.kind === "visual_asset").map(item => item.binary_storage_ref).filter((value): value is string => Boolean(value)).map(value => value.slice(5));
+  if (binaryExpected.length !== expected.filter(item => item.kind === "visual_asset").length) throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "visual binary refs are incomplete", 503);
+  const binaryMarker = "/visual-binary/";
+  const binaryIndex = binaryExpected[0]?.indexOf(binaryMarker) ?? -1;
+  if (binaryIndex < 0) throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "visual binary key is not canonical", 503);
+  const binaryPrefix = `${binaryExpected[0].slice(0, binaryIndex + binaryMarker.length)}${currentFrozenHash.slice(7, 23)}/`;
+  const binaryKeys: string[] = [];
+  cursor = undefined;
+  do {
+    let page: R2Objects;
+    try { page = await env.FILES_BUCKET.list({ prefix: binaryPrefix, ...(cursor ? { cursor } : {}) }); }
+    catch { throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "visual binary scope listing is unknown", 503); }
+    binaryKeys.push(...page.objects.map(item => item.key));
+    cursor = page.truncated ? page.cursor : undefined;
+  } while (cursor);
+  if (artifactCanonicalJson(binaryKeys.sort()) !== artifactCanonicalJson(binaryExpected.sort())) throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "visual binary object set is not exact", 503);
+  const rows = await env.DB.prepare(`SELECT artifact_id, run_id, article_id, recording_id, user_id, workspace_id,
+      schema_version, kind, producer_agent_role, producer_agent_version, skill_id, skill_version,
+      workflow_version, policy_version, input_artifact_ids_json, payload_hash, storage_ref
+      FROM editorial_artifacts WHERE run_id = ? AND user_id = ? AND workspace_id = ?
+      AND kind IN ('visual_plan', 'visual_asset', 'visual_qa_report')`).bind(params.run_id, params.user_id, params.workspace_id).all<Record<string, unknown>>();
+  const historicalPayloadHashes = new Set<string>();
+  const currentD1Artifacts: VisualArtifactMetadata[] = [];
+  const readD1VisualMetadata = async (row: Record<string, unknown>): Promise<VisualArtifactMetadata> => {
+    const storageRef = String(row.storage_ref || "");
+    if (!storageRef.startsWith("r2://")) throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "visual D1 storage ref is invalid", 503);
+    let stored: R2ObjectBody | null;
+    try { stored = await env.FILES_BUCKET.get(storageRef.slice(5)); } catch { throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "visual D1 artifact read is unknown", 503); }
+    if (!stored) throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "visual D1 artifact is unavailable", 503);
+    let parsed: unknown;
+    try { parsed = JSON.parse(await stored.text()); } catch { throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "visual D1 artifact is invalid", 503); }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "visual D1 artifact is invalid", 503);
+    const record = parsed as Record<string, unknown>;
+    const envelope = record.envelope;
+    if (!envelope || typeof envelope !== "object" || Array.isArray(envelope) || !Object.prototype.hasOwnProperty.call(record, "payload")) throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "visual D1 artifact envelope is incomplete", 503);
+    const rawEnvelope = envelope as Record<string, unknown>;
+    let object: VisualArtifactObject;
+    try {
+      object = await normalizeVisualArtifact({
+        schema_version: rawEnvelope.schema_version,
+        artifact_id: rawEnvelope.artifact_id,
+        artifact_key: rawEnvelope.artifact_key,
+        kind: rawEnvelope.kind,
+        run_id: rawEnvelope.run_id,
+        article_id: rawEnvelope.article_id,
+        recording_id: rawEnvelope.recording_id,
+        user_id: rawEnvelope.user_id,
+        workspace_id: rawEnvelope.workspace_id,
+        producer: rawEnvelope.producer,
+        input_artifact_ids: rawEnvelope.input_artifact_ids,
+        idempotency_key: rawEnvelope.idempotency_key,
+        created_at: rawEnvelope.created_at,
+        storage_ref: rawEnvelope.storage_ref,
+        binary_storage_ref: rawEnvelope.binary_storage_ref,
+        payload_hash: rawEnvelope.payload_hash,
+        payload_length: rawEnvelope.payload_length,
+        payload: record.payload,
+      });
+    } catch { throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "visual D1 artifact identity cannot be verified", 503); }
+    const metadata = toVisualArtifactMetadata(object);
+    if (String(row.artifact_id) !== metadata.artifact_id || String(row.run_id) !== metadata.run_id || String(row.article_id) !== metadata.article_id || Number(row.recording_id) !== metadata.recording_id ||
+        String(row.user_id) !== metadata.user_id || String(row.workspace_id) !== metadata.workspace_id || String(row.schema_version) !== metadata.schema_version ||
+        String(row.kind) !== metadata.kind || String(row.producer_agent_role) !== metadata.producer.role || String(row.producer_agent_version) !== metadata.producer.version ||
+        String(row.skill_id) !== VISUAL_PIN_SNAPSHOT_ID ||
+        String(row.workflow_version) !== FIVE_AGENT_PUBLISHING_WORKFLOW_VERSION || String(row.policy_version) !== FIVE_AGENT_PUBLISHING_POLICY_VERSION ||
+        String(row.input_artifact_ids_json) !== artifactCanonicalJson(metadata.input_artifact_ids) || String(row.payload_hash) !== metadata.payload_hash || String(row.storage_ref) !== metadata.storage_ref) {
+      throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "visual D1 artifact identity does not reconcile", 503);
+    }
+    try { decodeVisualPinSnapshot(row.skill_version); } catch {
+      throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "visual D1 pin snapshot does not reconcile", 503);
+    }
+    return metadata;
+  };
+  for (const row of rows.results || []) {
+    const metadata = await readD1VisualMetadata(row);
+    if (isCurrentScope(metadata)) {
+      currentD1Artifacts.push(metadata);
+      continue;
+    }
+    if (metadata.payload_summary.frozen_payload_hash === currentFrozenHash) {
+      throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "visual D1 artifact is outside the current plan scope", 503);
+    }
+    historicalPayloadHashes.add(metadata.payload_hash);
+  }
+  if (artifactCanonicalJson(currentD1Artifacts.map(item => item.artifact_id).sort()) !== artifactCanonicalJson([...expectedIds].sort())) {
+    throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "visual D1 artifact set is not exact", 503);
+  }
+  const eventRows = await env.DB.prepare(`SELECT event_type, idempotency_key, payload_hash FROM publication_run_events
+      WHERE run_id = ? AND user_id = ? AND workspace_id = ?
+      ORDER BY revision ASC`).bind(params.run_id, params.user_id, params.workspace_id).all<{ event_type: string; idempotency_key: string; payload_hash: string }>();
+  const expectedArtifactEvents = expected.map(item => ({ idempotency_key: item.idempotency_key, payload_hash: item.payload_hash }));
+  const expectedStateEvents = [
+    { idempotency_key: `visual_planning:11:${params.run_id}`, payload_hash: await hashJson({ run_payload_hash: params.payload_hash, event_type: "visual_planning", phase: 11, target_state: "visual_planning", error_code: null, next_action: null, revision_count: null, retry_count: null }) },
+    { idempotency_key: `visual_generating:13:${params.run_id}`, payload_hash: await hashJson({ run_payload_hash: params.payload_hash, event_type: "visual_generating", phase: 13, target_state: "visual_generating", error_code: null, next_action: null, revision_count: null, retry_count: null }) },
+  ];
+  const currentProjection = await env.DB.prepare(`SELECT state FROM publication_runs WHERE run_id = ? AND user_id = ? AND workspace_id = ? LIMIT 1`).bind(params.run_id, params.user_id, params.workspace_id).first<{ state: string }>();
+  if (currentProjection?.state === "visual_ready") {
+    expectedStateEvents.push({ idempotency_key: `visual_ready:21:${params.run_id}`, payload_hash: await hashJson({ run_payload_hash: params.payload_hash, event_type: "visual_ready", phase: 21, target_state: "visual_ready", error_code: null, next_action: null, revision_count: null, retry_count: null }) });
+  }
+  const currentPayloadHashes = new Set(expectedArtifactEvents.map(item => item.payload_hash));
+  const visualEventTypes = new Set(["visual_planning", "visual_generating", "visual_ready", "visual_plan_committed", "visual_asset_committed", "visual_qa_committed"]);
+  const visualRows = (eventRows.results || []).filter(row => visualEventTypes.has(row.event_type) || row.idempotency_key.startsWith("visual"));
+  if (visualRows.some(row => !visualEventTypes.has(row.event_type))) {
+    throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "publication contains an unknown visual event", 503);
+  }
+  const currentArtifactEvents = visualRows
+    .filter(row => ["visual_plan_committed", "visual_asset_committed", "visual_qa_committed"].includes(row.event_type) && currentPayloadHashes.has(row.payload_hash))
+    .map(row => ({ idempotency_key: row.idempotency_key, payload_hash: row.payload_hash }));
+  for (const row of visualRows) {
+    if (["visual_plan_committed", "visual_asset_committed", "visual_qa_committed"].includes(row.event_type) &&
+        !currentPayloadHashes.has(row.payload_hash) && !historicalPayloadHashes.has(row.payload_hash)) {
+      throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "visual publication event is outside the known artifact scope", 503);
+    }
+  }
+  const actualStateEvents = visualRows
+    .filter(row => ["visual_planning", "visual_generating", "visual_ready"].includes(row.event_type))
+    .map(row => ({ idempotency_key: row.idempotency_key, payload_hash: row.payload_hash }));
+  const actualEvents = [...currentArtifactEvents, ...actualStateEvents].sort((left, right) => left.idempotency_key.localeCompare(right.idempotency_key));
+  const expectedEvents = [...expectedArtifactEvents, ...expectedStateEvents].sort((left, right) => left.idempotency_key.localeCompare(right.idempotency_key));
+  if (artifactCanonicalJson(actualEvents) !== artifactCanonicalJson(expectedEvents)) {
+    throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "visual publication event set is not exact", 503);
+  }
+}
+
+async function verifyVisualAssetReadback(
+  env: EditorialRuntimeEnv,
+  params: FiveAgentWorkflowParams,
+  frozen: FrozenArticleVersion,
+  plan: VisualPlanPayload,
+  planMeta: VisualArtifactMetadata,
+  slot: VisualPlanPayload["slots"][number],
+  metadata: VisualArtifactMetadata,
+): Promise<{ byte_hash: string; white_background: boolean }> {
+  const object = await readVisualArtifactFromR2(env, metadata);
+  const asset = object.payload as VisualAssetPayload;
+  await assertVisualAssetMatchesPlanSlot(asset, slot, planMeta.payload_hash, object.envelope.idempotency_key);
+  if (asset.frozen_artifact_id !== plan.frozen_artifact_id || asset.plan_artifact_id !== planMeta.artifact_id ||
+      asset.plan_payload_hash !== planMeta.payload_hash ||
+      (asset.purpose === "cover" && artifactCanonicalJson(asset.visible_text) !== artifactCanonicalJson(frozen.cover_title)) ||
+      (asset.purpose === "body" && asset.visible_text.length !== 0)) {
+    throw new VisualContractError("visual_asset_contract_invalid", "visual asset provenance or visible text evidence is invalid", 409);
+  }
+  const key = visualBinaryKey(params.user_id, params.workspace_id, params.run_id, plan.frozen_payload_hash, slot.slot_id);
+  const bytes = await readImmutableBinaryImage(env.FILES_BUCKET, key, {
+    storage_ref: asset.binary_storage_ref,
+    byte_hash: asset.byte_hash,
+    byte_length: asset.byte_length,
+    mime: asset.mime,
+    width: asset.width,
+    height: asset.height,
+    user_id: params.user_id,
+    workspace_id: params.workspace_id,
+    run_id: params.run_id,
+    frozen_payload_hash: plan.frozen_payload_hash,
+    slot_id: slot.slot_id,
+  });
+  const whiteBackground = slot.purpose === "cover"
+    ? await verifyPngOpaqueCoverage(bytes, slot.width, slot.height)
+    : await verifyPngWhiteBackground(bytes, slot.width, slot.height);
+  if (asset.white_background_verified !== whiteBackground) throw new VisualContractError("visual_asset_contract_invalid", "visual asset QA claim does not match deterministic verification", 409);
+  return { byte_hash: asset.byte_hash, white_background: whiteBackground };
+}
+
+async function verifyCompletedVisualExecution(
+  env: EditorialRuntimeEnv,
+  coordinator: DurableObjectStub<EditorialCoordinatorAgent>,
+  params: FiveAgentWorkflowParams,
+  frozen: StoredArtifactMetadata,
+  currentArtifacts: readonly VisualArtifactMetadata[],
+): Promise<void> {
+  const frozenObject = await readArtifactFromR2(env, params, frozen.artifact_id, frozen.artifact_key, frozen.payload_hash);
+  const frozenPayload = frozenObject.payload as FrozenArticleVersion;
+  const planMeta = currentArtifacts.find(item => item.kind === "visual_plan");
+  if (!planMeta) throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "completed visual plan is unavailable", 503);
+  const planObject = await readVisualArtifactFromR2(env, planMeta);
+  const plan = planObject.payload as VisualPlanPayload;
+  if (plan.frozen_artifact_id !== frozen.artifact_id || plan.frozen_payload_hash !== frozen.payload_hash) {
+    throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "completed visual plan parent is not exact", 503);
+  }
+  const recomputedPlan = await buildVisualPlan({
+    frozen: frozenPayload,
+    user_id: params.user_id,
+    workspace_id: params.workspace_id,
+    frozen_artifact_id: frozen.artifact_id,
+    frozen_payload_hash: frozen.payload_hash,
+    created_at: plan.created_at,
+  });
+  if (artifactCanonicalJson(recomputedPlan) !== artifactCanonicalJson(plan)) {
+    throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "completed visual plan does not match deterministic planning", 503);
+  }
+  const assetMetadata = plan.slots.map(slot => {
+    const asset = currentArtifacts.find(item => item.kind === "visual_asset" && item.payload_summary.slot_id === slot.slot_id);
+    if (!asset) throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "completed visual asset slot is missing", 503);
+    return asset;
+  });
+  const verifiedAssets = [] as Array<{ byte_hash: string; white_background: boolean }>;
+  for (const [index, slot] of plan.slots.entries()) {
+    verifiedAssets.push(await verifyVisualAssetReadback(env, params, frozenPayload, plan, planMeta, slot, assetMetadata[index]));
+  }
+  const verifiedCover = verifiedAssets[0];
+  const verifiedBody = verifiedAssets.slice(1);
+  const qaMeta = currentArtifacts.find(item => item.kind === "visual_qa_report");
+  if (!qaMeta) throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "completed visual QA report is unavailable", 503);
+  const qaObject = await readVisualArtifactFromR2(env, qaMeta);
+  const qa = qaObject.payload as VisualQAReportPayload;
+  const expectedAssetIds = assetMetadata.map(item => item.artifact_id);
+  const expectedByteHashes = verifiedAssets.map(item => item.byte_hash);
+  if (qa.frozen_artifact_id !== frozen.artifact_id || qa.frozen_payload_hash !== frozen.payload_hash ||
+      qa.plan_artifact_id !== planMeta.artifact_id || qa.plan_payload_hash !== planMeta.payload_hash ||
+      artifactCanonicalJson(qa.asset_artifact_ids) !== artifactCanonicalJson(expectedAssetIds) ||
+      artifactCanonicalJson(qa.asset_byte_hashes) !== artifactCanonicalJson(expectedByteHashes) ||
+      qa.passed !== true || qa.checks.ordered_slots !== true || qa.checks.png_signature !== true ||
+      qa.checks.dimensions !== true || qa.checks.metadata !== true || qa.checks.white_background !== "verified" ||
+      qa.checks.visible_text_pin !== "evidence_only" || artifactCanonicalJson(qa.pins) !== artifactCanonicalJson(ACTIVE_VISUAL_PINS) ||
+      verifiedCover?.white_background !== true || verifiedBody.length === 0 || verifiedBody.some(item => item.white_background !== true)) {
+    throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "completed visual QA report is not exact", 503);
+  }
+  await verifyExactVisualArtifactSet(env, coordinator, params, [planMeta, ...assetMetadata, qaMeta], {
+    frozenPayloadHash: frozen.payload_hash,
+    planArtifactId: planMeta.artifact_id,
+    planPayloadHash: planMeta.payload_hash,
+  });
+}
+
+async function verifyVisualExecutionReadyForQa(
+  env: EditorialRuntimeEnv,
+  coordinator: DurableObjectStub<EditorialCoordinatorAgent>,
+  params: FiveAgentWorkflowParams,
+  frozen: StoredArtifactMetadata,
+  ledger: Awaited<ReturnType<EditorialCoordinatorAgent["getFiveAgentVisualLedger"]>>,
+  planMeta: VisualArtifactMetadata,
+): Promise<void> {
+  const frozenObject = await readArtifactFromR2(env, params, frozen.artifact_id, frozen.artifact_key, frozen.payload_hash);
+  const frozenPayload = frozenObject.payload as FrozenArticleVersion;
+  const planObject = await readVisualArtifactFromR2(env, planMeta);
+  const plan = planObject.payload as VisualPlanPayload;
+  const recomputedPlan = await buildVisualPlan({
+    frozen: frozenPayload,
+    user_id: params.user_id,
+    workspace_id: params.workspace_id,
+    frozen_artifact_id: frozen.artifact_id,
+    frozen_payload_hash: frozen.payload_hash,
+    created_at: plan.created_at,
+  });
+  if (artifactCanonicalJson(recomputedPlan) !== artifactCanonicalJson(plan)) {
+    throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "visual plan cannot be reconciled before QA", 503);
+  }
+  const assets = plan.slots.map(slot => {
+    const metadata = ledger.artifacts.find(item => item.kind === "visual_asset" &&
+      item.payload_summary.plan_artifact_id === planMeta.artifact_id &&
+      item.payload_summary.plan_payload_hash === planMeta.payload_hash &&
+      item.payload_summary.slot_id === slot.slot_id && visualArtifactHasReceipt(ledger, item));
+    if (!metadata) throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "visual asset evidence is incomplete before QA", 503);
+    return metadata;
+  });
+  for (const [index, slot] of plan.slots.entries()) {
+    await verifyVisualAssetReadback(env, params, frozenPayload, plan, planMeta, slot, assets[index]);
+  }
+  const qa = ledger.artifacts.find(item => item.kind === "visual_qa_report" &&
+    item.payload_summary.plan_artifact_id === planMeta.artifact_id &&
+    item.payload_summary.plan_payload_hash === planMeta.payload_hash && visualArtifactHasReceipt(ledger, item));
+  if (qa) {
+    await verifyCompletedVisualExecution(env, coordinator, params, frozen, [planMeta, ...assets, qa]);
+    return;
+  }
+  await verifyExactVisualArtifactSet(env, coordinator, params, [planMeta, ...assets], {
+    frozenPayloadHash: frozen.payload_hash,
+    planArtifactId: planMeta.artifact_id,
+    planPayloadHash: planMeta.payload_hash,
+  });
+}
+
+function decodeBase64(value: unknown): Uint8Array {
+  if (typeof value !== "string" || value.length === 0) throw new EditorialRuntimeError("visual_asset_contract_invalid", "image adapter did not return PNG bytes", 502);
+  try {
+    const binary = atob(value);
+    return Uint8Array.from(binary, character => character.charCodeAt(0));
+  } catch { throw new EditorialRuntimeError("visual_asset_contract_invalid", "image adapter returned invalid bytes", 502); }
+}
+
+async function visualFailure(
+  env: EditorialRuntimeEnv,
+  coordinator: DurableObjectStub<EditorialCoordinatorAgent>,
+  params: FiveAgentWorkflowParams,
+  transcript: { ref: string; hash: string },
+  artifactIds: string[],
+  errorCode: string,
+  nextAction: string,
+  phase: number,
+  retryCount = 1,
+): Promise<FiveAgentWorkflowResult> {
+  const currentDo = await coordinator.getFiveAgentRun(params.run_id, params.user_id, params.workspace_id) as Record<string, unknown>;
+  const currentProjection = await env.DB.prepare(`SELECT state_revision FROM publication_runs WHERE run_id = ? AND user_id = ? AND workspace_id = ? LIMIT 1`).bind(params.run_id, params.user_id, params.workspace_id).first<{ state_revision: number }>();
+  const failed = await applySystemState(env, coordinator, params, "failed", "failed", Number(currentDo.state_revision), Number(currentProjection?.state_revision || 0), phase * 1_000, phase, { errorCode, nextAction, retryCount });
+  return { run_id: params.run_id, state: "failed", state_revision: failed.doStateRevision, transcript_ref: transcript.ref, transcript_hash: transcript.hash, artifact_ids: artifactIds };
+}
+
+async function visualHold(
+  env: EditorialRuntimeEnv,
+  coordinator: DurableObjectStub<EditorialCoordinatorAgent>,
+  params: FiveAgentWorkflowParams,
+  transcript: { ref: string; hash: string },
+  artifactIds: string[],
+  phase: number,
+  retryCount = 1,
+): Promise<FiveAgentWorkflowResult> {
+  return visualHoldWithCode(env, coordinator, params, transcript, artifactIds, "external_side_effect_unknown", "reconcile_external_side_effect", phase, retryCount);
+}
+
+async function visualHoldWithCode(
+  env: EditorialRuntimeEnv,
+  coordinator: DurableObjectStub<EditorialCoordinatorAgent>,
+  params: FiveAgentWorkflowParams,
+  transcript: { ref: string; hash: string },
+  artifactIds: string[],
+  errorCode: string,
+  nextAction: string,
+  phase: number,
+  retryCount = 1,
+): Promise<FiveAgentWorkflowResult> {
+  const currentDo = await coordinator.getFiveAgentRun(params.run_id, params.user_id, params.workspace_id) as Record<string, unknown>;
+  const currentProjection = await env.DB.prepare(`SELECT state_revision FROM publication_runs WHERE run_id = ? AND user_id = ? AND workspace_id = ? LIMIT 1`).bind(params.run_id, params.user_id, params.workspace_id).first<{ state_revision: number }>();
+  const held = await applySystemState(env, coordinator, params, "needs_action", "needs_action", Number(currentDo.state_revision), Number(currentProjection?.state_revision || 0), phase * 1_000, phase, { errorCode, nextAction, retryCount });
+  return { run_id: params.run_id, state: "needs_action", state_revision: held.doStateRevision, transcript_ref: transcript.ref, transcript_hash: transcript.hash, artifact_ids: artifactIds };
+}
+
+type VisualAdapterCallResult = {
+  callId: string;
+  response: Record<string, unknown> | null;
+  replayed: boolean;
+  durable: Awaited<ReturnType<EditorialCoordinatorAgent["prepareFiveAgentCall"]>>;
+};
+
+async function reconcileExistingVisualAdapterCall(
+  env: EditorialRuntimeEnv,
+  coordinator: DurableObjectStub<EditorialCoordinatorAgent>,
+  params: FiveAgentWorkflowParams,
+  operation: "plan" | "image",
+  callKind: string,
+  idempotencyKey: string,
+  payload: unknown,
+  recordedAt: string,
+): Promise<VisualAdapterCallResult | null> {
+  const attempts = (await coordinator.listFiveAgentCallAttempts(params.run_id, params.user_id, params.workspace_id))
+    .filter(item => item.call_kind === callKind && item.idempotency_key === idempotencyKey)
+    .sort((left, right) => left.attempt - right.attempt);
+  const latest = attempts.at(-1);
+  if (!latest) {
+    throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "visual reconciliation has no durable adapter call intent", 503);
+  }
+  if (latest.status === "succeeded") {
+    throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "completed visual call is missing its committed artifact evidence", 503);
+  }
+  if (latest.status === "failed") return null;
+  if (latest.status !== null && latest.status !== "needs_action") {
+    throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "visual adapter call is not reconcilable", 503);
+  }
+  if (await isPublicationCancelled(env, params)) throw new VisualCancelledError();
+  const requestPayload = payload && typeof payload === "object" && !Array.isArray(payload)
+    ? { ...(payload as Record<string, unknown>), attempt: latest.attempt }
+    : payload;
+  try {
+    const response = operation === "plan"
+      ? await reconcileVisualPlanService(env, requestPayload)
+      : await reconcileVisualImageService(env, requestPayload);
+    return {
+      callId: latest.call_id,
+      response: response.result,
+      replayed: false,
+      durable: {
+        status: "needs_action",
+        call_id: latest.call_id,
+        error_code: latest.error_code || "external_side_effect_unknown",
+        retryable: false,
+        attempt: latest.attempt,
+      },
+    };
+  } catch (error) {
+    if (error instanceof InternalServiceError && error.upstreamCode === "external_side_effect_unknown") {
+      throw new EditorialRuntimeError("external_side_effect_unknown", "visual adapter result still requires reconciliation", 503, latest.attempt);
+    }
+    if (!(error instanceof InternalServiceError)) throw error;
+    const retryable = wave2bRetryable(error);
+    await coordinator.completeFiveAgentCall({
+      call_id: latest.call_id,
+      run_id: params.run_id,
+      status: "failed",
+      error_code: retryable ? "upstream_retryable" : "visual_generation_non_retryable",
+      retryable,
+      recorded_at: recordedAt,
+    });
+    return null;
+  }
+}
+
+async function runVisualAdapterCall(
+  env: EditorialRuntimeEnv,
+  coordinator: DurableObjectStub<EditorialCoordinatorAgent>,
+  params: FiveAgentWorkflowParams,
+  operation: "plan" | "image",
+  callKind: string,
+  idempotencyKey: string,
+  payload: unknown,
+  createdAt: string,
+  reconciledCalls?: Map<string, { callId: string; response: Record<string, unknown> | null; replayed: boolean; durable: Awaited<ReturnType<EditorialCoordinatorAgent["prepareFiveAgentCall"]>> }>,
+): Promise<VisualAdapterCallResult> {
+  const reconciled = reconciledCalls?.get(idempotencyKey);
+  if (reconciled) {
+    reconciledCalls!.delete(idempotencyKey);
+    return reconciled;
+  }
+  const completeReconciledFailure = async (
+    error: unknown,
+    prepared: Awaited<ReturnType<EditorialCoordinatorAgent["prepareFiveAgentCall"]>>,
+  ): Promise<boolean> => {
+    if (error instanceof InternalServiceError && error.upstreamCode === "external_side_effect_unknown") {
+      throw new EditorialRuntimeError("external_side_effect_unknown", "visual adapter result requires reconciliation", 503, prepared.attempt || 1);
+    }
+    const retryable = wave2bRetryable(error);
+    const durableAttempt = prepared.attempt || 1;
+    await coordinator.completeFiveAgentCall({
+      call_id: prepared.call_id,
+      run_id: params.run_id,
+      status: "failed",
+      error_code: retryable ? "upstream_retryable" : "visual_generation_non_retryable",
+      retryable,
+      recorded_at: createdAt,
+    });
+    if (retryable && durableAttempt < 3) {
+      return true;
+    }
+    throw new EditorialRuntimeError(
+      retryable ? "visual_generation_retry_exhausted" : "visual_generation_non_retryable",
+      "visual adapter call failed",
+      retryable ? 503 : 409,
+      durableAttempt,
+    );
+  };
+
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    if (await isPublicationCancelled(env, params)) throw new VisualCancelledError();
+    const prepared = await coordinator.prepareFiveAgentCall({ run_id: params.run_id, call_kind: callKind, idempotency_key: idempotencyKey, attempt, created_at: createdAt });
+    if (prepared.status === "needs_action") {
+      if (await isPublicationCancelled(env, params)) throw new VisualCancelledError();
+      const requestPayload = payload && typeof payload === "object" && !Array.isArray(payload)
+        ? { ...(payload as Record<string, unknown>), attempt: prepared.attempt || attempt }
+        : payload;
+      try {
+        const reconciled = operation === "plan"
+          ? await reconcileVisualPlanService(env, requestPayload)
+          : await reconcileVisualImageService(env, requestPayload);
+        return { callId: prepared.call_id, response: reconciled.result, replayed: false, durable: prepared };
+      } catch (error) {
+        if (await completeReconciledFailure(error, prepared)) {
+          attempt = prepared.attempt || attempt;
+          continue;
+        }
+      }
+    }
+    if (prepared.status === "failed") {
+      const durableAttempt = prepared.attempt || attempt;
+      if (prepared.retryable === true) {
+        if (durableAttempt >= 3) throw new EditorialRuntimeError("visual_generation_retry_exhausted", "visual adapter retry limit exceeded", 503, durableAttempt);
+        attempt = durableAttempt;
+        continue;
+      }
+      throw new EditorialRuntimeError(prepared.error_code || "visual_generation_non_retryable", "visual adapter call failed", 409, durableAttempt);
+    }
+    if (prepared.status === "completed") {
+      return { callId: prepared.call_id, response: null, replayed: true, durable: prepared };
+    }
+    try {
+      if (await isPublicationCancelled(env, params)) throw new VisualCancelledError();
+      const requestPayload = payload && typeof payload === "object" && !Array.isArray(payload)
+        ? { ...(payload as Record<string, unknown>), attempt }
+        : payload;
+      const response = operation === "plan" ? await callVisualPlanService(env, requestPayload) : await callVisualImageService(env, requestPayload);
+      return { callId: prepared.call_id, response: response.result, replayed: false, durable: prepared };
+    } catch (error) {
+      if (error instanceof VisualCancelledError) throw error;
+      if (error instanceof InternalServiceError && error.upstreamCode === "external_side_effect_unknown") {
+        throw new EditorialRuntimeError("external_side_effect_unknown", "visual adapter result requires reconciliation", 503, attempt);
+      }
+      const retryable = error instanceof InternalServiceError && error.retryable;
+      await coordinator.completeFiveAgentCall({ call_id: prepared.call_id, run_id: params.run_id, status: "failed", error_code: retryable ? "upstream_retryable" : "visual_generation_non_retryable", retryable, recorded_at: createdAt });
+      if (retryable && attempt < 3) continue;
+      throw new EditorialRuntimeError(retryable ? "visual_generation_retry_exhausted" : "visual_generation_non_retryable", "visual adapter call failed", retryable ? 503 : 409, attempt);
+    }
+  }
+  throw new EditorialRuntimeError("visual_generation_retry_exhausted", "visual adapter retry limit exceeded", 503, 3);
+}
+
+function visualArtifactHasReceipt(
+  ledger: Awaited<ReturnType<EditorialCoordinatorAgent["getFiveAgentVisualLedger"]>>,
+  metadata: VisualArtifactMetadata,
+): boolean {
+  return ledger.receipt_ids.includes(metadata.artifact_id) && ledger.visual_events.some(event =>
+    event.artifact_id === metadata.artifact_id && event.payload_hash === metadata.payload_hash &&
+    event.idempotency_key === metadata.idempotency_key,
+  );
+}
+
+async function resumeVisualReconciliationHold(
+  env: EditorialRuntimeEnv,
+  coordinator: DurableObjectStub<EditorialCoordinatorAgent>,
+  params: FiveAgentWorkflowParams,
+): Promise<"visual_planning" | "visual_generating"> {
+  let doRun = await coordinator.getFiveAgentRun(params.run_id, params.user_id, params.workspace_id) as Record<string, unknown>;
+  let projection = await env.DB.prepare(`SELECT state, state_revision, resume_state, last_successful_state, error_code, next_action,
+      last_event_type, last_event_payload_hash, last_event_created_at
+      FROM publication_runs WHERE run_id = ? AND user_id = ? AND workspace_id = ? LIMIT 1`)
+    .bind(params.run_id, params.user_id, params.workspace_id)
+    .first<PublicationRunRow>();
+  if (!projection) throw new EditorialRuntimeError("publication_run_not_found", "visual publication projection is unavailable", 404);
+  const target = String(doRun.last_successful_state || projection.last_successful_state);
+  if (target !== "visual_planning" && target !== "visual_generating") {
+    throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "visual reconciliation has no resumable successful state", 503);
+  }
+  if (String(doRun.state) === "needs_action" &&
+      (doRun.error_code !== "external_side_effect_unknown" || doRun.next_action !== "reconcile_external_side_effect")) {
+    throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "visual hold is not eligible for automatic reconciliation", 503);
+  }
+  if (projection.state === "needs_action") {
+    if (projection.error_code !== "external_side_effect_unknown" || projection.next_action !== "reconcile_external_side_effect") {
+      throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "publication hold is not eligible for automatic reconciliation", 503);
+    }
+    const reconciledAt = workflowTimestamp(params.created_at, 22_000);
+    const reconciledHash = await hashJson({ run_payload_hash: params.payload_hash, event_type: "visual_side_effect_reconciled", target_state: "needs_action", resume_state: target });
+    const marked = await applySystemPublicationTransition(env.DB, {
+      runId: params.run_id,
+      auth: { userId: params.user_id, workspaceId: params.workspace_id },
+      targetState: "needs_action",
+      expectedStateRevision: projection.state_revision,
+      options: {
+        eventId: `${params.run_id}:event:${projection.state_revision + 1}`,
+        eventType: "visual_side_effect_reconciled",
+        eventIdempotencyKey: `wave2c-reconciled:${target}:${params.run_id}`,
+        eventPayloadHash: reconciledHash,
+        eventCreatedAt: reconciledAt,
+        errorCode: "visual_side_effect_reconciled",
+        nextAction: "resume_reconciled_visual",
+        allowSameState: true,
+      },
+    });
+    projection = marked.run;
+  }
+  if (projection.state === "needs_action") {
+    if (projection.error_code !== "visual_side_effect_reconciled" || projection.next_action !== "resume_reconciled_visual") {
+      throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "visual reconciliation evidence is incomplete", 503);
+    }
+    const createdAt = workflowTimestamp(params.created_at, 22_500);
+    const payloadHash = await hashJson({ run_payload_hash: params.payload_hash, event_type: "visual_reconciliation_retrying", target_state: "retrying", resume_state: target });
+    const retried = await applySystemPublicationTransition(env.DB, {
+      runId: params.run_id,
+      auth: { userId: params.user_id, workspaceId: params.workspace_id },
+      targetState: "retrying",
+      expectedStateRevision: projection.state_revision,
+      options: {
+        eventId: `${params.run_id}:event:${projection.state_revision + 1}`,
+        eventType: "visual_reconciliation_retrying",
+        eventIdempotencyKey: `wave2c-retrying:${target}:${params.run_id}`,
+        eventPayloadHash: payloadHash,
+        eventCreatedAt: createdAt,
+      },
+    });
+    projection = retried.run;
+  }
+  if (projection.state === "retrying") {
+    if (projection.resume_state !== target) throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "visual retry target is not exact", 503);
+    const createdAt = workflowTimestamp(params.created_at, 23_000);
+    const payloadHash = await hashJson({ run_payload_hash: params.payload_hash, event_type: "visual_reconciliation_resumed", target_state: target });
+    const resumed = await applySystemPublicationTransition(env.DB, {
+      runId: params.run_id,
+      auth: { userId: params.user_id, workspaceId: params.workspace_id },
+      targetState: target,
+      expectedStateRevision: projection.state_revision,
+      options: {
+        eventId: `${params.run_id}:event:${projection.state_revision + 1}`,
+        eventType: "visual_reconciliation_resumed",
+        eventIdempotencyKey: `wave2c-resumed:${target}:${params.run_id}`,
+        eventPayloadHash: payloadHash,
+        eventCreatedAt: createdAt,
+      },
+    });
+    projection = resumed.run;
+  }
+  if (projection.state !== target) throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "visual publication reconciliation did not converge", 503);
+  if (String(doRun.state) === "needs_action") {
+    const resumedEvent = projectionEventIdentity(projection);
+    if (resumedEvent.eventType !== "visual_reconciliation_resumed") {
+      throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "visual reconciliation event identity is incomplete", 503);
+    }
+    await coordinator.recordFiveAgentState({
+      run_id: params.run_id,
+      state: target,
+      state_revision: Number(doRun.state_revision) + 1,
+      event_type: target,
+      payload_hash: resumedEvent.payloadHash,
+      created_at: resumedEvent.createdAt,
+      retry_count: Number(doRun.retry_count || 0),
+    });
+    doRun = await coordinator.getFiveAgentRun(params.run_id, params.user_id, params.workspace_id) as Record<string, unknown>;
+  }
+  if (String(doRun.state) !== target) throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "visual coordinator reconciliation did not converge", 503);
+  return target;
+}
+
+export async function runVisualProductionPhase(input: {
+  env: EditorialRuntimeEnv;
+  coordinator: DurableObjectStub<EditorialCoordinatorAgent>;
+  params: FiveAgentWorkflowParams;
+  frozen: StoredArtifactMetadata;
+  priorArtifactIds: string[];
+  transcript: { ref: string; hash: string };
+  step: AgentWorkflowStep;
+}): Promise<FiveAgentWorkflowResult> {
+  const { env, coordinator, params, frozen, priorArtifactIds, transcript, step } = input;
+  if (!visualProductionFeatureEnabled(env, params.user_id, params.workspace_id)) {
+    return { run_id: params.run_id, state: "content_frozen", state_revision: Number(frozen.doStateRevision || 0), transcript_ref: transcript.ref, transcript_hash: transcript.hash, artifact_ids: priorArtifactIds };
+  }
+  if (await isPublicationCancelled(env, params)) {
+    return { run_id: params.run_id, state: "cancelled", state_revision: Number(frozen.doStateRevision || 0), transcript_ref: transcript.ref, transcript_hash: transcript.hash, artifact_ids: priorArtifactIds };
+  }
+  const reconciledCalls = new Map<string, { callId: string; response: Record<string, unknown> | null; replayed: boolean; durable: Awaited<ReturnType<EditorialCoordinatorAgent["prepareFiveAgentCall"]>> }>();
+  let existingRun = await coordinator.getFiveAgentRun(params.run_id, params.user_id, params.workspace_id) as Record<string, unknown>;
+  if (existingRun.state === "needs_action" && existingRun.error_code === "external_side_effect_unknown" && existingRun.next_action === "reconcile_external_side_effect") {
+    const target = String(existingRun.last_successful_state);
+    try {
+      if (target === "visual_planning") {
+        const frozenObject = await readArtifactFromR2(env, params, frozen.artifact_id, frozen.artifact_key, frozen.payload_hash);
+        const planPayload = await buildVisualPlan({
+          frozen: frozenObject.payload as FrozenArticleVersion,
+          user_id: params.user_id,
+          workspace_id: params.workspace_id,
+          frozen_artifact_id: frozen.artifact_id,
+          frozen_payload_hash: frozen.payload_hash,
+          created_at: workflowTimestamp(params.created_at, 12_000),
+        });
+        const key = `visual-plan:${params.run_id}:${frozen.payload_hash}`;
+        const reconciled = await reconcileExistingVisualAdapterCall(env, coordinator, params, "plan", "visual_plan", key, { operation_id: key, plan: planPayload }, workflowTimestamp(params.created_at, 12_100));
+        if (reconciled) reconciledCalls.set(key, reconciled);
+      } else if (target === "visual_generating") {
+        const ledger = await coordinator.getFiveAgentVisualLedger(params.run_id, params.user_id, params.workspace_id);
+        const planMeta = ledger.artifacts.find(item => item.kind === "visual_plan" && item.payload_summary.frozen_payload_hash === frozen.payload_hash && visualArtifactHasReceipt(ledger, item));
+        if (!planMeta) throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "visual reconciliation cannot find the committed plan", 503);
+        const planObject = await readVisualArtifactFromR2(env, planMeta);
+        const planPayload = planObject.payload as VisualPlanPayload;
+        const pendingSlot = planPayload.slots.find(slot => !ledger.artifacts.some(item => item.kind === "visual_asset" &&
+          item.payload_summary.plan_artifact_id === planMeta.artifact_id && item.payload_summary.plan_payload_hash === planMeta.payload_hash &&
+          item.payload_summary.slot_id === slot.slot_id && visualArtifactHasReceipt(ledger, item)));
+        if (pendingSlot) {
+          const key = await deriveVisualImageOperationKey(params.run_id, planPayload.frozen_payload_hash, planMeta.payload_hash, pendingSlot.slot_id, pendingSlot.prompt_hash);
+          const reconciled = await reconcileExistingVisualAdapterCall(env, coordinator, params, "image", "visual_image", key, {
+            operation_id: key,
+            prompt: pendingSlot.prompt,
+            size: `${pendingSlot.width}x${pendingSlot.height}`,
+            model: "gpt-image-2",
+          }, workflowTimestamp(params.created_at, 14_000 + pendingSlot.order));
+          if (reconciled) reconciledCalls.set(key, reconciled);
+        } else {
+          await verifyVisualExecutionReadyForQa(env, coordinator, params, frozen, ledger, planMeta);
+        }
+      } else {
+        throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "visual hold has no resumable state", 503);
+      }
+    } catch (error) {
+      if (isVisualReconciliationHold(error)) {
+        const ledger = await coordinator.getFiveAgentVisualLedger(params.run_id, params.user_id, params.workspace_id);
+        const completedIds = ledger.artifacts.filter(item => visualArtifactHasReceipt(ledger, item)).map(item => item.artifact_id);
+        return { run_id: params.run_id, state: "needs_action", state_revision: Number(existingRun.state_revision), transcript_ref: transcript.ref, transcript_hash: transcript.hash, artifact_ids: [...new Set([...priorArtifactIds, ...completedIds])] };
+      }
+      throw error;
+    }
+    await resumeVisualReconciliationHold(env, coordinator, params);
+    existingRun = await coordinator.getFiveAgentRun(params.run_id, params.user_id, params.workspace_id) as Record<string, unknown>;
+  }
+  if (existingRun.state === "visual_ready") {
+    const visualLedger = await coordinator.getFiveAgentVisualLedger(params.run_id, params.user_id, params.workspace_id);
+    const currentPlan = visualLedger.artifacts.find(item => item.kind === "visual_plan" && item.payload_summary.frozen_payload_hash === frozen.payload_hash);
+    if (!currentPlan) throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "the current frozen visual plan is unavailable", 503);
+    const currentArtifacts = visualLedger.artifacts.filter(item =>
+      item.payload_summary.frozen_payload_hash === frozen.payload_hash &&
+      (item.kind === "visual_plan"
+        ? item.artifact_id === currentPlan.artifact_id
+        : item.payload_summary.plan_artifact_id === currentPlan.artifact_id && item.payload_summary.plan_payload_hash === currentPlan.payload_hash));
+    await verifyCompletedVisualExecution(env, coordinator, params, frozen, currentArtifacts);
+    return { run_id: params.run_id, state: "visual_ready", state_revision: Number(existingRun.state_revision), transcript_ref: transcript.ref, transcript_hash: transcript.hash, artifact_ids: [...new Set([...priorArtifactIds, ...currentArtifacts.map(item => item.artifact_id)])] };
+  }
+  let qaMetadata: VisualPersistedMetadata | null = null;
+  if (existingRun.state === "content_frozen") try {
+    if (await isPublicationCancelled(env, params)) throw new VisualCancelledError();
+    const currentDo = await coordinator.getFiveAgentRun(params.run_id, params.user_id, params.workspace_id) as Record<string, unknown>;
+    const currentProjection = await env.DB.prepare(`SELECT state_revision FROM publication_runs WHERE run_id = ? AND user_id = ? AND workspace_id = ? LIMIT 1`).bind(params.run_id, params.user_id, params.workspace_id).first<{ state_revision: number }>();
+    await applySystemState(env, coordinator, params, "visual_planning", "visual_planning", Number(currentDo.state_revision), Number(currentProjection?.state_revision || 0), 11_000, 11);
+  } catch (error) {
+    if (error instanceof VisualCancelledError) {
+      return { run_id: params.run_id, state: "cancelled", state_revision: Number(frozen.doStateRevision || 0), transcript_ref: transcript.ref, transcript_hash: transcript.hash, artifact_ids: priorArtifactIds };
+    }
+    return visualFailure(env, coordinator, params, transcript, priorArtifactIds, "visual_generation_non_retryable", "retry_after_service_fix", 11);
+  } else if (existingRun.state !== "visual_planning" && existingRun.state !== "visual_generating") {
+    throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "visual workflow state is not resumable", 503);
+  }
+
+  let planMeta: VisualPersistedMetadata;
+  const entryLedger = await coordinator.getFiveAgentVisualLedger(params.run_id, params.user_id, params.workspace_id);
+  const committedPlan = entryLedger.artifacts.find(item => item.kind === "visual_plan" && item.payload_summary.frozen_payload_hash === frozen.payload_hash && visualArtifactHasReceipt(entryLedger, item));
+  if (committedPlan) {
+    planMeta = committedPlan as VisualPersistedMetadata;
+  } else try {
+    planMeta = await step.do("visual-plan", { retries: { limit: 2, delay: "5 seconds" as const, backoff: "exponential" as const }, timeout: "2 minutes" as const }, async () => {
+      const frozenObject = await readArtifactFromR2(env, params, frozen.artifact_id, frozen.artifact_key, frozen.payload_hash);
+      const payload = await buildVisualPlan({ frozen: frozenObject.payload as FrozenArticleVersion, user_id: params.user_id, workspace_id: params.workspace_id, frozen_artifact_id: frozen.artifact_id, frozen_payload_hash: frozen.payload_hash, created_at: workflowTimestamp(params.created_at, 12_000) });
+      const call = await runVisualAdapterCall(env, coordinator, params, "plan", "visual_plan", `visual-plan:${params.run_id}:${frozen.payload_hash}`, { operation_id: `visual-plan:${params.run_id}:${frozen.payload_hash}`, plan: payload }, workflowTimestamp(params.created_at, 12_100), reconciledCalls);
+      if (call.response && call.response.prompt_hash && call.response.prompt_hash !== await hashJson(payload.slots.map(slot => slot.prompt_hash))) throw new EditorialRuntimeError("visual_generation_non_retryable", "visual plan adapter response is not deterministic", 409);
+      const object = await makeVisualArtifactObject({ kind: "visual_plan", payload, user_id: params.user_id, workspace_id: params.workspace_id, input_artifact_ids: [frozen.artifact_id], idempotency_key: `visual-plan:${params.run_id}:${frozen.payload_hash}`, created_at: payload.created_at });
+      const persisted = await persistVisualArtifact(env, coordinator, params, object, "visual_planning", "visual_plan_committed", object.envelope.idempotency_key);
+      if (!call.replayed) await coordinator.completeFiveAgentCall({ call_id: call.callId, run_id: params.run_id, status: "succeeded", response_hash: persisted.payload_hash, artifact_id: persisted.artifact_id, recorded_at: payload.created_at });
+      return persisted;
+    });
+  } catch (error) {
+    if (error instanceof VisualCancelledError) return { run_id: params.run_id, state: "cancelled", state_revision: Number(frozen.doStateRevision || 0), transcript_ref: transcript.ref, transcript_hash: transcript.hash, artifact_ids: priorArtifactIds };
+    if (error instanceof VisualContractError && error.code === "visual_plan_insufficient_unique_blocks") return visualHoldWithCode(env, coordinator, params, transcript, priorArtifactIds, "visual_plan_insufficient_unique_blocks", "revise_content_before_visuals", 12, 0);
+    if (isVisualReconciliationHold(error)) return visualHold(env, coordinator, params, transcript, priorArtifactIds, 12, error instanceof EditorialRuntimeError ? error.retryCount : 1);
+    if (visualIntegrityError(error)) return visualFailure(env, coordinator, params, transcript, priorArtifactIds, "visual_asset_contract_invalid", "retry_after_service_fix", 12);
+    return visualFailure(env, coordinator, params, transcript, priorArtifactIds, error instanceof EditorialRuntimeError ? error.code : "visual_generation_non_retryable", "retry_after_service_fix", 12, error instanceof EditorialRuntimeError ? error.retryCount : 1);
+  }
+
+  const stateAfterPlan = await coordinator.getFiveAgentRun(params.run_id, params.user_id, params.workspace_id) as Record<string, unknown>;
+  if (stateAfterPlan.state === "visual_planning") try {
+    const currentDo = await coordinator.getFiveAgentRun(params.run_id, params.user_id, params.workspace_id) as Record<string, unknown>;
+    const currentProjection = await env.DB.prepare(`SELECT state_revision FROM publication_runs WHERE run_id = ? AND user_id = ? AND workspace_id = ? LIMIT 1`).bind(params.run_id, params.user_id, params.workspace_id).first<{ state_revision: number }>();
+    await applySystemState(env, coordinator, params, "visual_generating", "visual_generating", Number(currentDo.state_revision), Number(currentProjection?.state_revision || 0), 13_000, 13);
+  } catch (error) {
+    if (error instanceof VisualCancelledError) return { run_id: params.run_id, state: "cancelled", state_revision: Number(planMeta.doStateRevision || frozen.doStateRevision || 0), transcript_ref: transcript.ref, transcript_hash: transcript.hash, artifact_ids: [...priorArtifactIds, planMeta.artifact_id] };
+    if (isVisualReconciliationHold(error)) return visualHold(env, coordinator, params, transcript, [...priorArtifactIds, planMeta.artifact_id], 13, error instanceof EditorialRuntimeError ? error.retryCount : 1);
+    return visualFailure(env, coordinator, params, transcript, [...priorArtifactIds, planMeta.artifact_id], "visual_generation_non_retryable", "retry_after_service_fix", 13);
+  } else if (stateAfterPlan.state !== "visual_generating") {
+    throw new EditorialRuntimeError("visual_artifact_reconciliation_required", "visual generation state is not resumable", 503);
+  }
+
+  const assetMetadata: VisualPersistedMetadata[] = [];
+  let planObject: VisualArtifactObject;
+  try { planObject = await readVisualArtifactFromR2(env, planMeta); } catch (error) {
+    if (isVisualReconciliationHold(error)) return visualHold(env, coordinator, params, transcript, [...priorArtifactIds, planMeta.artifact_id], 14, error instanceof EditorialRuntimeError ? error.retryCount : 1);
+    if (visualIntegrityError(error)) return visualFailure(env, coordinator, params, transcript, [...priorArtifactIds, planMeta.artifact_id], "visual_asset_contract_invalid", "retry_after_service_fix", 14);
+    return visualFailure(env, coordinator, params, transcript, [...priorArtifactIds, planMeta.artifact_id], "visual_generation_non_retryable", "retry_after_service_fix", 14, error instanceof EditorialRuntimeError ? error.retryCount : 1);
+  }
+  const planPayload = planObject.payload as VisualPlanPayload;
+  const ledgerAfterPlan = await coordinator.getFiveAgentVisualLedger(params.run_id, params.user_id, params.workspace_id);
+  for (const slot of planPayload.slots) {
+    const committedAsset = ledgerAfterPlan.artifacts.find(item => item.kind === "visual_asset" &&
+      item.payload_summary.plan_artifact_id === planMeta.artifact_id && item.payload_summary.plan_payload_hash === planMeta.payload_hash &&
+      item.payload_summary.slot_id === slot.slot_id && visualArtifactHasReceipt(ledgerAfterPlan, item));
+    if (committedAsset) {
+      assetMetadata.push(committedAsset as VisualPersistedMetadata);
+      continue;
+    }
+    try {
+      const assetMeta = await step.do(`visual-asset-${slot.slot_id}`, { retries: { limit: 2, delay: "5 seconds" as const, backoff: "exponential" as const }, timeout: "2 minutes" as const }, async () => {
+        const imageOperationId = await deriveVisualImageOperationKey(params.run_id, planPayload.frozen_payload_hash, planMeta.payload_hash, slot.slot_id, slot.prompt_hash);
+        const call = await runVisualAdapterCall(env, coordinator, params, "image", "visual_image", imageOperationId, { operation_id: imageOperationId, prompt: slot.prompt, size: `${slot.width}x${slot.height}`, model: "gpt-image-2" }, workflowTimestamp(params.created_at, 14_000 + slot.order), reconciledCalls);
+        if (await isPublicationCancelled(env, params)) throw new VisualCancelledError();
+        const binaryKey = visualBinaryKey(params.user_id, params.workspace_id, params.run_id, planPayload.frozen_payload_hash, slot.slot_id);
+        const existingBinary = call.response ? null : await readExistingImmutableBinaryImage(env.FILES_BUCKET, binaryKey, {
+          user_id: params.user_id,
+          workspace_id: params.workspace_id,
+          run_id: params.run_id,
+          frozen_payload_hash: planPayload.frozen_payload_hash,
+          slot_id: slot.slot_id,
+        });
+        if (!call.response && !existingBinary) throw new EditorialRuntimeError("external_side_effect_unknown", "visual image result requires binary reconciliation", 503);
+        const result = call.response as Record<string, unknown> | null;
+        const imageBytes = result ? decodeBase64(result.bytes_base64 ?? result.b64_json) : existingBinary!.bytes;
+        const expectedBinary = existingBinary?.metadata ?? await describeImmutableBinaryImage(binaryKey, imageBytes, {
+          mime: "image/png", width: slot.width, height: slot.height, user_id: params.user_id, workspace_id: params.workspace_id,
+          run_id: params.run_id, frozen_payload_hash: planPayload.frozen_payload_hash, slot_id: slot.slot_id,
+        });
+        const whiteBackgroundVerified = slot.purpose === "cover"
+          ? await verifyPngOpaqueCoverage(imageBytes, slot.width, slot.height)
+          : await verifyPngWhiteBackground(imageBytes, slot.width, slot.height);
+        const payload: VisualAssetPayload = {
+          protocol_version: "visual_asset.v2", article_id: params.article_id, run_id: params.run_id, recording_id: params.recording_id,
+          frozen_artifact_id: planPayload.frozen_artifact_id, frozen_payload_hash: planPayload.frozen_payload_hash,
+          plan_artifact_id: planMeta.artifact_id, plan_payload_hash: planMeta.payload_hash, slot_id: slot.slot_id, order: slot.order,
+          purpose: slot.purpose, aspect_ratio: slot.aspect_ratio, block_id: slot.block_id, block_text_hash: slot.block_text_hash, binary_storage_ref: expectedBinary.storage_ref,
+          byte_hash: expectedBinary.byte_hash, byte_length: expectedBinary.byte_length, mime: "image/png", width: slot.width, height: slot.height,
+          prompt_hash: slot.prompt_hash, model_version: "gpt-image-2", adapter_version: "visual-generation.adapter.1.0.0", pins: ACTIVE_VISUAL_PINS,
+          visible_text: slot.purpose === "cover" ? (await readArtifactFromR2(env, params, frozen.artifact_id, frozen.artifact_key, frozen.payload_hash).then(value => (value.payload as FrozenArticleVersion).cover_title)) : [],
+          visible_text_evidence: "prompt_contract",
+          white_background_verified: whiteBackgroundVerified, created_at: workflowTimestamp(params.created_at, 15_000 + slot.order),
+        };
+        const object = await makeVisualArtifactObject({ kind: "visual_asset", payload, user_id: params.user_id, workspace_id: params.workspace_id, input_artifact_ids: [planPayload.frozen_artifact_id, planMeta.artifact_id], idempotency_key: imageOperationId, created_at: payload.created_at, binary_storage_ref: expectedBinary.storage_ref });
+        const preparedMetadata = toVisualArtifactMetadata(object);
+        await prepareVisualArtifactIntent(coordinator, params, preparedMetadata);
+        if (!existingBinary) {
+          const binary = await putImmutableBinaryImage(env.FILES_BUCKET, binaryKey, imageBytes, {
+            mime: "image/png", width: slot.width, height: slot.height, user_id: params.user_id, workspace_id: params.workspace_id,
+            run_id: params.run_id, frozen_payload_hash: planPayload.frozen_payload_hash, slot_id: slot.slot_id,
+          });
+          if (artifactCanonicalJson(binary.metadata) !== artifactCanonicalJson(expectedBinary)) throw new EditorialRuntimeError("visual_artifact_identity_conflict", "visual binary identity changed after artifact intent", 409);
+        }
+        const persisted = await persistVisualArtifact(env, coordinator, params, object, "visual_generating", "visual_asset_committed", imageOperationId, preparedMetadata);
+        if (!call.replayed) await coordinator.completeFiveAgentCall({ call_id: call.callId, run_id: params.run_id, status: "succeeded", response_hash: persisted.payload_hash, artifact_id: persisted.artifact_id, recorded_at: payload.created_at });
+        return persisted;
+      });
+      assetMetadata.push(assetMeta);
+    } catch (error) {
+      const ids = [...priorArtifactIds, planMeta.artifact_id, ...assetMetadata.map(asset => asset.artifact_id)];
+      if (error instanceof VisualCancelledError) return { run_id: params.run_id, state: "cancelled", state_revision: Number(planMeta.doStateRevision || frozen.doStateRevision || 0), transcript_ref: transcript.ref, transcript_hash: transcript.hash, artifact_ids: ids };
+      if (isVisualReconciliationHold(error)) return visualHold(env, coordinator, params, transcript, ids, 15 + slot.order, error instanceof EditorialRuntimeError ? error.retryCount : 1);
+      if (visualIntegrityError(error)) return visualFailure(env, coordinator, params, transcript, ids, "visual_asset_contract_invalid", "retry_after_service_fix", 15 + slot.order);
+      return visualFailure(env, coordinator, params, transcript, ids, error instanceof EditorialRuntimeError ? error.code : "visual_generation_non_retryable", error instanceof EditorialRuntimeError && error.code === "visual_generation_retry_exhausted" ? "retry" : "retry_after_service_fix", 15 + slot.order, error instanceof EditorialRuntimeError ? error.retryCount : 1);
+    }
+  }
+
+  try {
+    if (await isPublicationCancelled(env, params)) throw new VisualCancelledError();
+    const qaLedger = await coordinator.getFiveAgentVisualLedger(params.run_id, params.user_id, params.workspace_id);
+    const committedQa = qaLedger.artifacts.find(item => item.kind === "visual_qa_report" &&
+      item.payload_summary.plan_artifact_id === planMeta.artifact_id &&
+      item.payload_summary.plan_payload_hash === planMeta.payload_hash && visualArtifactHasReceipt(qaLedger, item));
+    if (committedQa) {
+      qaMetadata = committedQa as VisualPersistedMetadata;
+      await verifyCompletedVisualExecution(env, coordinator, params, frozen, [planMeta, ...assetMetadata, committedQa]);
+      if (await isPublicationCancelled(env, params)) throw new VisualCancelledError();
+      const currentDo = await coordinator.getFiveAgentRun(params.run_id, params.user_id, params.workspace_id) as Record<string, unknown>;
+      const currentProjection = await env.DB.prepare(`SELECT state_revision FROM publication_runs WHERE run_id = ? AND user_id = ? AND workspace_id = ? LIMIT 1`).bind(params.run_id, params.user_id, params.workspace_id).first<{ state_revision: number }>();
+      const ready = await applySystemState(env, coordinator, params, "visual_ready", "visual_ready", Number(currentDo.state_revision), Number(currentProjection?.state_revision || 0), 21_000, 21);
+      return { run_id: params.run_id, state: "visual_ready", state_revision: ready.doStateRevision, transcript_ref: transcript.ref, transcript_hash: transcript.hash, artifact_ids: [...priorArtifactIds, planMeta.artifact_id, ...assetMetadata.map(asset => asset.artifact_id), committedQa.artifact_id] };
+    }
+    const frozenObject = await readArtifactFromR2(env, params, frozen.artifact_id, frozen.artifact_key, frozen.payload_hash);
+    const frozenPayload = frozenObject.payload as FrozenArticleVersion;
+    const verifiedAssets = [] as Array<{ byte_hash: string; white_background: boolean }>;
+    for (const slot of planPayload.slots) {
+      const metadata = assetMetadata.find(item => item.payload_summary.slot_id === slot.slot_id);
+      if (!metadata) throw new VisualContractError("visual_slot_conflict", "visual asset slot is missing", 409);
+      verifiedAssets.push(await verifyVisualAssetReadback(env, params, frozenPayload, planPayload, planMeta, slot, metadata));
+    }
+    const coverAsset = verifiedAssets[0];
+    const bodyAssets = verifiedAssets.slice(1);
+    const whiteBackgroundPassed = coverAsset?.white_background === true && bodyAssets.length > 0 && bodyAssets.every(item => item.white_background);
+    const qaPayload: VisualQAReportPayload = {
+      protocol_version: "visual_qa_report.v2", article_id: params.article_id, run_id: params.run_id, recording_id: params.recording_id,
+      frozen_artifact_id: planPayload.frozen_artifact_id, frozen_payload_hash: planPayload.frozen_payload_hash, plan_artifact_id: planMeta.artifact_id,
+      plan_payload_hash: planMeta.payload_hash, asset_artifact_ids: assetMetadata.map(asset => asset.artifact_id),
+      asset_byte_hashes: verifiedAssets.map(item => item.byte_hash),
+      checks: { ordered_slots: true, png_signature: true, dimensions: true, metadata: true, white_background: whiteBackgroundPassed ? "verified" : "failed", visible_text_pin: "evidence_only" },
+      visible_text_evidence: "prompt_contract", passed: whiteBackgroundPassed, pins: ACTIVE_VISUAL_PINS, created_at: workflowTimestamp(params.created_at, 20_000),
+    };
+    const qaObject = await makeVisualArtifactObject({ kind: "visual_qa_report", payload: qaPayload, user_id: params.user_id, workspace_id: params.workspace_id, input_artifact_ids: [planPayload.frozen_artifact_id, planMeta.artifact_id, ...assetMetadata.map(asset => asset.artifact_id)], idempotency_key: `visual-qa:${params.run_id}:${planMeta.payload_hash}`, created_at: qaPayload.created_at });
+    // Keep the QA artifact in the last successful visual state until the
+    // complete JSON/binary/D1/event set has been reconciled. Only then may the
+    // system transition the run to the terminal Wave2C state.
+    const qa = await persistVisualArtifact(env, coordinator, params, qaObject, "visual_generating", "visual_qa_committed", qaObject.envelope.idempotency_key);
+    qaMetadata = qa;
+    if (await isPublicationCancelled(env, params)) throw new VisualCancelledError();
+    await verifyExactVisualArtifactSet(env, coordinator, params, [planMeta, ...assetMetadata, qa]);
+    if (!whiteBackgroundPassed) return visualHoldWithCode(env, coordinator, params, transcript, [...priorArtifactIds, planMeta.artifact_id, ...assetMetadata.map(asset => asset.artifact_id), qa.artifact_id], "visual_qa_failed", "review_visual_assets", 20);
+    const currentDo = await coordinator.getFiveAgentRun(params.run_id, params.user_id, params.workspace_id) as Record<string, unknown>;
+    const currentProjection = await env.DB.prepare(`SELECT state_revision FROM publication_runs WHERE run_id = ? AND user_id = ? AND workspace_id = ? LIMIT 1`).bind(params.run_id, params.user_id, params.workspace_id).first<{ state_revision: number }>();
+    const ready = await applySystemState(env, coordinator, params, "visual_ready", "visual_ready", Number(currentDo.state_revision), Number(currentProjection?.state_revision || 0), 21_000, 21);
+    return { run_id: params.run_id, state: "visual_ready", state_revision: ready.doStateRevision, transcript_ref: transcript.ref, transcript_hash: transcript.hash, artifact_ids: [...priorArtifactIds, planMeta.artifact_id, ...assetMetadata.map(asset => asset.artifact_id), qa.artifact_id] };
+  } catch (error) {
+    const ids = [...priorArtifactIds, planMeta.artifact_id, ...assetMetadata.map(asset => asset.artifact_id), ...(qaMetadata ? [qaMetadata.artifact_id] : [])];
+    if (error instanceof VisualCancelledError) return { run_id: params.run_id, state: "cancelled", state_revision: Number(planMeta.doStateRevision || frozen.doStateRevision || 0), transcript_ref: transcript.ref, transcript_hash: transcript.hash, artifact_ids: ids };
+    if (isVisualReconciliationHold(error)) return visualHold(env, coordinator, params, transcript, ids, 20, error instanceof EditorialRuntimeError ? error.retryCount : 1);
+    if (visualIntegrityError(error)) return visualFailure(env, coordinator, params, transcript, ids, "visual_asset_contract_invalid", "retry_after_service_fix", 20);
+    return visualFailure(env, coordinator, params, transcript, ids, "visual_qa_failed", "review_visual_assets", 20);
+  }
 }
 
 async function readTranscript(env: EditorialRuntimeEnv, input: FiveAgentWorkflowParams): Promise<{ ref: string; hash: string; length: number; text: string }> {
@@ -1975,6 +3255,25 @@ export class FiveAgentPublishingWorkflow extends AgentWorkflow<EditorialCoordina
       }
       return { run_id: params.run_id, workflow_id: params.workflow_id, event_id: confirmation.event_id };
     });
+    const confirmedCurrentRun = await coordinator.getFiveAgentRun(params.run_id, params.user_id, params.workspace_id) as Record<string, unknown> | null;
+    const visualResumeState = confirmedCurrentRun?.state === "content_frozen" || confirmedCurrentRun?.state === "visual_planning" ||
+      confirmedCurrentRun?.state === "visual_generating" || confirmedCurrentRun?.state === "visual_ready" ||
+      (confirmedCurrentRun?.state === "needs_action" && confirmedCurrentRun?.error_code === "external_side_effect_unknown" &&
+        confirmedCurrentRun?.next_action === "reconcile_external_side_effect" &&
+        (confirmedCurrentRun?.last_successful_state === "visual_planning" || confirmedCurrentRun?.last_successful_state === "visual_generating"));
+    if (visualResumeState && visualProductionFeatureEnabled(this.env, params.user_id, params.workspace_id)) {
+      const frozen = (await coordinator.listFiveAgentArtifacts(params.run_id, params.user_id, params.workspace_id)).find(item => item.kind === "frozen_article_version") as StoredArtifactMetadata | undefined;
+      if (!frozen) throw new EditorialRuntimeError("frozen_artifact_not_found", "visual replay cannot find the frozen artifact", 503);
+      return await runVisualProductionPhase({
+        env: this.env,
+        coordinator,
+        params,
+        frozen,
+        priorArtifactIds: (await coordinator.listFiveAgentArtifacts(params.run_id, params.user_id, params.workspace_id)).map(item => item.artifact_id),
+        transcript: { ref: params.transcript_ref, hash: params.transcript_hash },
+        step,
+      });
+    }
     const transcript = await step.do("transcript-verify", retry, async () => {
       const value = await readTranscript(this.env, params);
       return { ref: value.ref, hash: value.hash, length: value.length };
@@ -2210,7 +3509,7 @@ export class FiveAgentPublishingWorkflow extends AgentWorkflow<EditorialCoordina
         }
       });
       if ("state" in frozen2) return frozen2;
-      return { run_id: params.run_id, state: "content_frozen", state_revision: frozen2.doStateRevision, transcript_ref: transcript.ref, transcript_hash: transcript.hash, artifact_ids: [briefCommit.artifact_id, draft.artifact_id, review.artifact_id, dispatch.artifact_id, draft2.artifact_id, review2.artifact_id, frozen2.artifact_id] };
+      return await runVisualProductionPhase({ env: this.env, coordinator, params, frozen: frozen2, priorArtifactIds: [briefCommit.artifact_id, draft.artifact_id, review.artifact_id, dispatch.artifact_id, draft2.artifact_id, review2.artifact_id, frozen2.artifact_id], transcript, step });
     }
     const frozen = await step.do("freeze-content", retry, async () => {
       try {
@@ -2226,14 +3525,7 @@ export class FiveAgentPublishingWorkflow extends AgentWorkflow<EditorialCoordina
       }
     });
     if ("state" in frozen) return frozen;
-    return {
-      run_id: params.run_id,
-      state: "content_frozen",
-      state_revision: frozen.doStateRevision,
-      transcript_ref: transcript.ref,
-      transcript_hash: transcript.hash,
-      artifact_ids: [briefCommit.artifact_id, draft.artifact_id, review.artifact_id, frozen.artifact_id],
-    };
+    return await runVisualProductionPhase({ env: this.env, coordinator, params, frozen, priorArtifactIds: [briefCommit.artifact_id, draft.artifact_id, review.artifact_id, frozen.artifact_id], transcript, step });
   }
 }
 

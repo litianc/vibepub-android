@@ -382,3 +382,104 @@ Transient/error states show the last successful stage and a `next_action`; only
 a real server-side draft verification may expose `draft_ready`. Event reads
 use `after_revision=-1` to include revision zero, bounded pages, stable
 ascending revisions, and a cursor equal to the last returned revision.
+
+## Wave 2C Visual Production
+
+Wave 2C is an additive, feature-gated continuation after `content_frozen`.
+The normal and revision freeze branches call the same
+`runVisualProductionPhase`; when `VISUAL_PRODUCTION_V3` is off or the exact
+`user_id:workspace_id` pair is not allowlisted, the existing Wave2B result is
+returned at `content_frozen` and no Wave2C binding, R2 object, D1 row, or DO
+visual ledger is touched. There is no new client route and no migration or
+schema-file change in this wave.
+
+The active visual states are `visual_planning` (68), `visual_generating` (74),
+and `visual_ready` (80), where this wave stops. `visual_plan.v2`, one
+`visual_asset.v2` per slot, and `visual_qa_report.v2` use the independent
+`editorial-wave2c.v1` envelope and `visual_production` producer. Normal plans
+contain one cover plus two body slots and five logical JSON artifacts; long
+plans contain one cover plus five body slots and eight logical JSON artifacts.
+PNG binaries have separate canonical keys and are not mirrored as D1 rows.
+
+Planning counts Unicode code points with `Array.from`, excludes blank blocks,
+deduplicates by the first ordered `text_hash`, and selects slots with the
+fixed spread formula. Fewer unique blocks produces
+`needs_action/visual_plan_insufficient_unique_blocks` before any plan or image
+adapter call. Every plan, asset, binary, and QA object is conditional and
+read-back verified; same identity replays and different bytes conflict.
+The frozen project-adapter manifests compile prompts in the fixed order
+`output_contract`, `immutable_input`, `style_pins`, `content`, `slot_binding`,
+`composition`, `color_material`, `text_policy`, `negative_constraints`, and
+`final_check`. Both manifests pin `version=1.0.0`,
+`version_source=project_adapter_manifest`,
+`prompt_serialization=canonical_utf8_v1`, `output_count=1`, and
+`random_style_extension=forbidden`. Cover prompts retain the exact ordered
+one-to-four title lines and one deterministic punk/retro-dot-matrix metaphor.
+Body prompts bind one selected block to a deterministic, per-slot unique
+core idea, metaphor, concrete action, and one or two objects, plus the frozen
+white-background, Xiaohei, restrained-color, no-text, and negative rules.
+Normalization rebuilds these sections and hashes, so removing or drifting a
+manifest rule fails closed.
+
+The Coordinator mirror contains only redacted identity, hash, ref, slot, and
+active pin metadata. D1 uses the existing `skill_id`/`skill_version` columns
+for a versioned, canonical, independently decodable visual pin snapshot that
+contains model, adapter, cover/body skill, cover style, formatting, and each
+`version_source`; exact-set verification rejects any decoded pin drift. Full
+prompts, payloads, and image bytes remain private to the relevant R2 object or
+transient adapter call.
+
+`IMAGE_GENERATION_ADAPTER` is a dedicated service binding authenticated with
+`VISUAL_PRODUCTION_TOKEN`; it never accepts the old service tokens or user
+sessions. The adapter fixes `gpt-image-2`, requires a deployment-configured
+HTTPS provider manifest, and owns the provider key. HTTP, wildcard,
+user-selected, or unconfigured endpoints fail closed. Its
+`VISUAL_OPERATION` Durable Object transaction claims each operation/attempt
+before provider access, while `VISUAL_RESULTS_BUCKET` stores the immutable
+intent/result and readback evidence. Only explicit provider HTTP responses
+408/429 and controlled 502/503/504 errors retry, with at most three attempts
+per logical plan/image call. Transport and network exceptions are
+`external_side_effect_unknown` and reconcile-only; unknown provider or storage
+outcomes stop the chain at
+`needs_action/external_side_effect_unknown/reconcile_external_side_effect`;
+known contract errors are failed with a stable visual error category. Each
+operation/attempt has a durable intent and outcome; a later attempt is
+permitted only after the immediately preceding attempt has a durable retryable
+failure. An inflight or storage-unknown result is recovered through a
+read-only adapter reconciliation by operation and attempt, never by blind
+regeneration. Replays use the current frozen+plan execution scope while
+preserving older immutable partial artifacts from prior scopes.
+
+Whole-Workflow re-entry reads the Coordinator and publication states plus the
+current execution ledger. A visual `needs_action` hold performs only an exact,
+read-only reconciliation of the existing operation first. Unknown evidence
+returns the same hold without another execute; proven terminal evidence is
+recorded through a same-state `visual_side_effect_reconciled` event, then D1
+advances through `needs_action -> retrying -> last_successful visual state`
+while the Coordinator resumes its matching visual state. Only then may the
+pipeline finish missing binary, JSON, D1, projection, receipt, and event work.
+Previously committed slots and provider results are not regenerated.
+
+A completed `visual_ready` replay does not trust ledger counts alone. It
+re-reads the Frozen input, rebuilds the Plan with the Plan's original
+`created_at`, compares the canonical Plan payload, and revalidates every asset
+JSON and scoped binary before checking the ordered QA report and the exact
+DO/D1/publication event set. The QA pass is bound to freshly recomputed cover
+opacity and body white-background results, not to the report's boolean claim.
+
+Cancellation is checked before planning, generation, every adapter execute or
+reconcile, each later slot, and the final QA-to-ready transition. A D1
+cancellation lookup that is missing or unavailable fails closed without an
+adapter call. A provider request already in flight cannot be revoked, but no
+later slot or terminal visual write begins after cancellation is observed;
+artifacts already committed remain immutable and are returned in the run's
+artifact set, including a QA report committed before a later hold.
+
+The QA report checks PNG signature, IHDR dimensions, metadata, ordered slot
+identity, and deterministic body white-background evidence (98% opaque white
+pixel threshold with at least one non-white pixel). Cover visible text is an
+adapter prompt-contract evidence pin for the exact ordered frozen cover-title
+lines, while body assets require an empty visible-text list; this wave does not
+claim OCR. The visual chain never edits the frozen title, body, blocks, claims, or
+HTML hash, and it does not enter formatting, WeChat, Android, or real-provider
+production paths.

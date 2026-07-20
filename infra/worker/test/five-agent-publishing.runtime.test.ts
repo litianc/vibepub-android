@@ -21,7 +21,7 @@ import {
   deriveArtifactId,
   WAVE2_SCHEMA_VERSION,
 } from "../src/wave2/artifactContracts";
-import { projectPublicationTransition, type PublicationRunRow } from "../src/publicationProjection";
+import { applySystemPublicationTransition, projectPublicationTransition, type PublicationRunRow } from "../src/publicationProjection";
 import { coordinatorShardName, EditorialRuntimeError } from "../src/editorialAgents";
 
 const runtimeEnv = env as any;
@@ -89,6 +89,44 @@ beforeAll(async () => {
 async function sha256Text(value: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
   return `sha256:${Array.from(new Uint8Array(digest)).map(byte => byte.toString(16).padStart(2, "0")).join("")}`;
+}
+
+async function syntheticVisualPng(width: number, height: number, mode: "valid" | "transparent" | "nonwhite"): Promise<string> {
+  const rowLength = width * 4 + 1;
+  const raw = new Uint8Array(rowLength * height);
+  for (let y = 0; y < height; y += 1) {
+    raw[y * rowLength] = 0;
+    for (let x = 0; x < width; x += 1) {
+      const offset = y * rowLength + 1 + x * 4;
+      const nonwhite = mode === "nonwhite";
+      raw[offset] = nonwhite ? 32 : 255;
+      raw[offset + 1] = nonwhite ? 64 : 255;
+      raw[offset + 2] = nonwhite ? 96 : 255;
+      raw[offset + 3] = mode === "transparent" ? 0 : 255;
+    }
+  }
+  const compressed = new Uint8Array(await new Response(new Blob([raw]).stream().pipeThrough(new CompressionStream("deflate"))).arrayBuffer());
+  const crc32 = (bytes: Uint8Array): number => {
+    let crc = 0xffffffff;
+    for (const byte of bytes) { crc ^= byte; for (let bit = 0; bit < 8; bit += 1) crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0); }
+    return (crc ^ 0xffffffff) >>> 0;
+  };
+  const chunk = (type: string, data: Uint8Array): Uint8Array => {
+    const typeBytes = new TextEncoder().encode(type);
+    const value = new Uint8Array(12 + data.byteLength);
+    const view = new DataView(value.buffer);
+    view.setUint32(0, data.byteLength); value.set(typeBytes, 4); value.set(data, 8);
+    view.setUint32(8 + data.byteLength, crc32(value.slice(4, 8 + data.byteLength)));
+    return value;
+  };
+  const ihdr = new Uint8Array(13); const view = new DataView(ihdr.buffer);
+  view.setUint32(0, width); view.setUint32(4, height); ihdr.set([8, 6, 0, 0, 0], 8);
+  const signature = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+  const parts = [signature, chunk("IHDR", ihdr), chunk("IDAT", compressed), chunk("IEND", new Uint8Array())];
+  const output = new Uint8Array(parts.reduce((sum, part) => sum + part.byteLength, 0));
+  let offset = 0; for (const part of parts) { output.set(part, offset); offset += part.byteLength; }
+  let binary = ""; for (let index = 0; index < output.byteLength; index += 0x8000) binary += String.fromCharCode(...output.slice(index, Math.min(index + 0x8000, output.byteLength)));
+  return btoa(binary);
 }
 
 async function hashJson(value: unknown): Promise<string> {
@@ -178,11 +216,15 @@ function expectStartResponseShape(body: Record<string, any>, runId: string): voi
   });
 }
 
-async function syntheticDraftPayload(input: { run_id: string; article_id: string; recording_id: number; source_hash: string; title?: string; revision?: 1 | 2; parent_artifact_id?: string | null; parent_review_artifact_id?: string | null; parent_dispatch_artifact_id?: string | null }) {
+async function syntheticDraftPayload(input: { run_id: string; article_id: string; recording_id: number; source_hash: string; title?: string; revision?: 1 | 2; parent_artifact_id?: string | null; parent_review_artifact_id?: string | null; parent_dispatch_artifact_id?: string | null; long?: boolean; insufficient?: boolean }) {
   const title = input.title || "Synthetic editorial title";
+  const sourceBlocks = input.insufficient
+    ? ["Only one unique visual source block."]
+    : input.long
+    ? [`${"长文内容".repeat(1_700)}`, "第二个长文段落。", "第三个长文段落。", "第四个长文段落。", "第五个长文段落。"]
+    : ["A short synthetic paragraph.", "A second synthetic paragraph."];
   const blocks = await Promise.all([
-    "A short synthetic paragraph.",
-    "A second synthetic paragraph.",
+    ...sourceBlocks,
   ].map(async (text, index) => ({
     block_id: `block_v1_${index + 1}`,
     kind: "paragraph",
@@ -233,6 +275,32 @@ async function executeSyntheticScenario(
     reviewRoundOverride?: Partial<Record<1 | 2, 1 | 2>>;
     draftPinDrift?: "model" | "adapter" | "style" | "formatting" | "style_body_hash";
     reviewPinDrift?: "reviewer_version" | "rules_pins";
+    visual?: boolean;
+    visualReplay?: boolean;
+    visualLong?: boolean;
+    visualResponseLoss?: boolean;
+    visualJsonResponseLoss?: boolean;
+    visualBinaryResponseLoss?: boolean;
+    visualProjectionResponseLoss?: boolean;
+    visualReceiptResponseLoss?: boolean;
+    visualExtraScope?: boolean;
+    visualHistoricalScope?: boolean;
+    visualPlanTamper?: boolean;
+    visualInsufficientBlocks?: boolean;
+    visualAllowlistMismatch?: boolean;
+    visualAdapterResponseLoss?: boolean;
+    visualCoverTransparent?: boolean;
+    visualBodyNonWhite?: boolean;
+    visualFailure?: "nonretry" | "retryable" | "unknown";
+    visualPreCancelled?: boolean;
+    visualCancellationReadFailure?: boolean;
+    visualQaExactSetFailure?: boolean;
+    visualWholeRunRestartAt?: "plan" | "cover" | "unknown";
+    visualBindingFetchThrow?: boolean;
+    visualAssetIntentRestart?: boolean;
+    visualWholeRunSuccessfulReconcile?: boolean;
+    visualFrozenReadHold?: boolean;
+    visualQaWholeRunRecovery?: boolean;
   } = {},
 ): Promise<{
   runId: string;
@@ -245,12 +313,20 @@ async function executeSyntheticScenario(
   artifactCount: number;
   receiptCount: number;
   artifactIds: string[];
+  visualCalls: number;
+  visualExecuteCalls: number;
+  visualProviderOperations: number;
+  visualReconcileCalls: number;
+  projectionFaultTriggered: boolean;
   callIntentCount: number;
   revisionCount: number;
   projection: Record<string, unknown> | null;
   projectionEventHashes: string[];
   doEventHashes: string[];
+  visualReplayDelta?: Record<string, number>;
+  visualReplayError?: string;
   workflowError?: string;
+  visualIntentCheckpoint?: { asset_intents: number; binary_objects: number };
 }> {
   const suffix = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
   const runId = `runtime-v3-${scenario}-${suffix}`;
@@ -264,6 +340,16 @@ async function executeSyntheticScenario(
   await runtimeEnv.FILES_BUCKET.put(transcriptRef, transcriptText, { customMetadata: { user_id: userId, workspace_id: workspaceId } });
   let writingCalls = 0;
   let reviewCalls = 0;
+  let visualCalls = 0;
+  let visualExecuteCalls = 0;
+  let visualProviderOperations = 0;
+  let visualReconcileCalls = 0;
+  let visualAdapterResponseLost = false;
+  let visualSuccessfulResponseLost = false;
+  let visualFirstBodyFailureInjected = false;
+  let visualBindingThrowInjected = false;
+  const visualDurableResponses = new Map<string, string>();
+  let projectionFaultTriggered = false;
   const writing = serviceBinding(async (request) => {
     writingCalls += 1;
     const input = await request.json() as Record<string, any>;
@@ -274,7 +360,7 @@ async function executeSyntheticScenario(
       } }, { status: failure.retryable ? 503 : 401 });
     }
     if (input.mode === "initial") {
-      const draft = await syntheticDraftPayload({ run_id: input.run_id, article_id: input.article_id, recording_id: input.recording_id, source_hash: input.source_hash });
+      const draft = await syntheticDraftPayload({ run_id: input.run_id, article_id: input.article_id, recording_id: input.recording_id, source_hash: input.source_hash, long: options.visualLong, insufficient: options.visualInsufficientBlocks });
       if (scenario === "p2_pass" && options.draftPinDrift === "model") draft.model_version = "unbound-model";
       if (scenario === "p2_pass" && options.draftPinDrift === "adapter") draft.adapter_version = "unbound-adapter";
       if (scenario === "p2_pass" && options.draftPinDrift === "style") draft.profile_pins.style = { id: "unbound-style", version: "0.0.0" };
@@ -362,6 +448,64 @@ async function executeSyntheticScenario(
       },
     }), { status: 200, headers: { "content-type": "application/json" } });
   });
+  const visualAdapter = runtimeEnv.IMAGE_GENERATION_ADAPTER;
+  const countedVisualAdapter = visualAdapter ? { fetch: async (request: Request) => {
+    visualCalls += 1;
+    let body: Record<string, unknown> | null = null;
+    try {
+      body = await request.clone().json() as Record<string, unknown>;
+      const responseKey = `${String(body.operation_id)}:${String(body.attempt)}`;
+      if (body.reconcile_only === true) {
+        visualReconcileCalls += 1;
+        const stored = visualDurableResponses.get(responseKey);
+        if (!stored) return Response.json({ error: { code: "external_side_effect_unknown", retryable: false } }, { status: 503 });
+        return new Response(stored, { status: 200, headers: { "content-type": "application/json" } });
+      }
+      else {
+        visualExecuteCalls += 1;
+        if (request.url.endsWith("/internal/v3/visual/image")) visualProviderOperations += 1;
+      }
+    } catch { /* service boundary owns response validation */ }
+    if (body && body.reconcile_only !== true && options.visualBindingFetchThrow && !visualBindingThrowInjected &&
+        request.url.endsWith("/internal/v3/visual/image") && body.size === "1536x864") {
+      visualBindingThrowInjected = true;
+      throw new Error("synthetic service binding response unknown");
+    }
+    if (body && body.reconcile_only !== true && request.url.endsWith("/internal/v3/visual/image") &&
+        body.size === "1536x864" && options.visualFailure &&
+        (options.visualFailure === "retryable" || !visualFirstBodyFailureInjected)) {
+      visualFirstBodyFailureInjected = true;
+      if (options.visualFailure === "unknown") {
+        return Response.json({ error: { code: "external_side_effect_unknown", retryable: false } }, { status: 503 });
+      }
+      if (options.visualFailure === "retryable") {
+        return Response.json({ error: { code: "upstream_retryable", retryable: true } }, { status: 503 });
+      }
+      return Response.json({ error: { code: "invalid_request", retryable: false } }, { status: 400 });
+    }
+    const response = await visualAdapter.fetch(request);
+    if (body && body.reconcile_only !== true) {
+      const responseBody = await response.clone().text();
+      visualDurableResponses.set(`${String(body.operation_id)}:${String(body.attempt)}`, responseBody);
+      if (options.visualAdapterResponseLoss && !visualAdapterResponseLost && request.url.endsWith("/internal/v3/visual/plan")) {
+        visualAdapterResponseLost = true;
+        return Response.json({ error: { code: "external_side_effect_unknown", retryable: false } }, { status: 503 });
+      }
+      if (options.visualWholeRunSuccessfulReconcile && !visualSuccessfulResponseLost &&
+          request.url.endsWith("/internal/v3/visual/image") && body.size === "1536x864") {
+        visualSuccessfulResponseLost = true;
+        return Response.json({ error: { code: "external_side_effect_unknown", retryable: false } }, { status: 503 });
+      }
+    }
+    if (request.url.endsWith("/internal/v3/visual/image") && body && body.reconcile_only !== true && (options.visualCoverTransparent || options.visualBodyNonWhite)) {
+      const value = await response.json() as Record<string, any>;
+      const size = typeof body.size === "string" && /^\d+x\d+$/.test(body.size) ? body.size.split("x").map(Number) as [number, number] : [1536, 864];
+      const mode = size[0] === 2256 ? (options.visualCoverTransparent ? "transparent" : "valid") : (options.visualBodyNonWhite ? "nonwhite" : "valid");
+      value.result.b64_json = await syntheticVisualPng(size[0], size[1], mode);
+      return Response.json(value);
+    }
+    return response;
+  } } : undefined;
   const workflow = { get: async () => ({ status: async () => ({ status: "queued" }) }), create: async (input: { id: string }) => ({ id: input.id }) };
   const testEnv = Object.create(runtimeEnv);
   Object.assign(testEnv, {
@@ -373,6 +517,10 @@ async function executeSyntheticScenario(
     REVIEW_AGENT: review,
     WRITING_AGENT_TOKEN: "synthetic-writing-token",
     REVIEW_AGENT_TOKEN: "synthetic-review-token",
+    IMAGE_GENERATION_ADAPTER: countedVisualAdapter,
+    VISUAL_PRODUCTION_V3: options.visual && !options.visualPreCancelled && !options.visualCancellationReadFailure ? "true" : "false",
+    VISUAL_PRODUCTION_V3_ALLOWLIST: options.visual && !options.visualAllowlistMismatch ? `${userId}:${workspaceId}` : options.visual ? `${userId}:another-workspace` : "",
+    VISUAL_PRODUCTION_TOKEN: "test-visual-token",
     GLM_MODEL: "glm-5.2",
   });
   if (artifactUnknown) {
@@ -406,7 +554,186 @@ async function executeSyntheticScenario(
   }), testEnv, {} as any);
   expect([200, 202]).toContain(start.status);
   expectStartResponseShape(await start.json() as Record<string, any>, runId);
+
+  if (options.visualFrozenReadHold) {
+    const baseBucket = testEnv.FILES_BUCKET;
+    const frozenReadBucket = Object.create(baseBucket);
+    let failed = false;
+    Object.defineProperty(frozenReadBucket, "get", {
+      value: async (key: string) => {
+        const projection = key.includes("frozen_article_version")
+          ? await runtimeEnv.DB.prepare(`SELECT state FROM publication_runs WHERE run_id = ? LIMIT 1`).bind(runId).first<{ state: string }>()
+          : null;
+        if (!failed && projection?.state === "visual_planning") {
+          failed = true;
+          throw new Error("synthetic frozen artifact read outcome unknown");
+        }
+        return baseBucket.get(key);
+      },
+    });
+    Object.defineProperty(frozenReadBucket, "head", { value: (key: string) => baseBucket.head(key) });
+    Object.defineProperty(frozenReadBucket, "put", { value: (key: string, value: unknown, optionsArg?: unknown) => baseBucket.put(key, value as any, optionsArg as any) });
+    Object.defineProperty(frozenReadBucket, "list", { value: (optionsArg?: unknown) => baseBucket.list(optionsArg as any) });
+    Object.defineProperty(testEnv, "FILES_BUCKET", { value: frozenReadBucket, configurable: true });
+  }
+
+  if (options.visualJsonResponseLoss || options.visualBinaryResponseLoss || options.visualQaExactSetFailure || options.visualQaWholeRunRecovery) {
+    const baseBucket = testEnv.FILES_BUCKET;
+    const visualBucket = Object.create(baseBucket);
+    let jsonWriteLost = false;
+    let jsonReadLost = false;
+    let binaryWriteLost = false;
+    let binaryReadLost = false;
+    let qaListLost = false;
+    Object.defineProperty(visualBucket, "put", {
+      value: async (key: string, value: unknown, optionsArg?: unknown) => {
+        const isJson = key.includes("/visual/");
+        const isBinary = key.includes("/visual-binary/");
+        const result = await baseBucket.put(key, value as any, optionsArg as any);
+        if (isJson && options.visualJsonResponseLoss && !jsonWriteLost) {
+          jsonWriteLost = true;
+          throw new Error("synthetic visual JSON write response lost");
+        }
+        if (isBinary && options.visualBinaryResponseLoss && !binaryWriteLost) {
+          binaryWriteLost = true;
+          throw new Error("synthetic visual binary write response lost");
+        }
+        return result;
+      },
+    });
+    Object.defineProperty(visualBucket, "get", {
+      value: async (key: string) => {
+        if (key.includes("/visual/") && jsonWriteLost && !jsonReadLost) {
+          jsonReadLost = true;
+          throw new Error("synthetic visual JSON read outcome unknown");
+        }
+        if (key.includes("/visual-binary/") && binaryWriteLost && !binaryReadLost) {
+          binaryReadLost = true;
+          throw new Error("synthetic visual binary read outcome unknown");
+        }
+        return baseBucket.get(key);
+      },
+    });
+    Object.defineProperty(visualBucket, "head", {
+      value: async (key: string) => baseBucket.head(key),
+    });
+    Object.defineProperty(visualBucket, "list", {
+      value: async (optionsArg?: { prefix?: string }) => {
+        const page = await baseBucket.list(optionsArg as any);
+        if (options.visualQaWholeRunRecovery && !qaListLost && optionsArg?.prefix?.includes("/visual/") && page.objects.some((item: { key: string }) => item.key.includes("/visual_qa_report/"))) {
+          qaListLost = true;
+          throw new Error("synthetic post-QA exact-set read outcome unknown");
+        }
+        if (options.visualQaExactSetFailure && optionsArg?.prefix?.includes("/visual/") && page.objects.some((item: { key: string }) => item.key.includes("/visual_qa_report/"))) {
+          return { ...page, objects: [...page.objects, { key: `${optionsArg.prefix}synthetic-current-scope-extra.json` }] };
+        }
+        return page;
+      },
+    });
+    Object.defineProperty(testEnv, "FILES_BUCKET", { value: visualBucket, configurable: true });
+  }
+
+  if (options.visualProjectionResponseLoss) {
+    const baseDb = testEnv.DB;
+    const rawPrepared = new WeakMap<object, object>();
+    const boundValues = new WeakMap<object, readonly unknown[]>();
+    const wrapStatement = (statement: any, values: readonly unknown[] = []): any => {
+      const wrapped = new Proxy(statement, {
+        get(target, property) {
+          if (property === "bind") return (...nextValues: unknown[]) => wrapStatement(target.bind(...nextValues), nextValues);
+          const value = target[property as keyof typeof target];
+          if (typeof value === "function") return (...args: unknown[]) => value.apply(target, args);
+          return value;
+        },
+      });
+      rawPrepared.set(wrapped, statement);
+      boundValues.set(wrapped, values);
+      return wrapped;
+    };
+    let dropped = false;
+    let visualProjectionBatchCount = 0;
+    const projectionDb = new Proxy(baseDb, {
+      get(target, property) {
+        if (property === "prepare") return (sql: string) => wrapStatement(target.prepare(sql));
+        if (property === "batch") return async (statements: unknown[]) => {
+          const result = await target.batch(statements.map(statement => rawPrepared.get(statement as object) || statement) as any);
+          const visualTransition = statements.some(statement => boundValues.get(statement as object)?.[0] === "visual_planning");
+          if (visualTransition) visualProjectionBatchCount += 1;
+          if (visualTransition && visualProjectionBatchCount === 2 && !dropped) {
+            dropped = true;
+            projectionFaultTriggered = true;
+            throw new Error("synthetic publication projection response lost");
+          }
+          return result;
+        };
+        const value = target[property as keyof typeof target];
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    Object.defineProperty(testEnv, "DB", { value: projectionDb, configurable: true });
+  }
+
   const coordinator = runtimeEnv.EDITORIAL_COORDINATOR.getByName(await coordinatorShardName(userId, workspaceId, articleId, runId));
+  let workflowCoordinator = coordinator;
+  let assetIntentReached: (() => void) | undefined;
+  let releaseAssetIntent: (() => void) | undefined;
+  const assetIntentCheckpoint = new Promise<void>(resolve => { assetIntentReached = resolve; });
+  const assetIntentRelease = new Promise<void>(resolve => { releaseAssetIntent = resolve; });
+  let assetIntentPaused = false;
+  if (options.visualAssetIntentRestart) {
+    workflowCoordinator = new Proxy(coordinator as any, {
+      get(target, property, receiver) {
+        if (property === "prepareFiveAgentVisualArtifact") return async (input: { metadata?: { kind?: string } }) => {
+          const result = await target.prepareFiveAgentVisualArtifact(input);
+          if (!assetIntentPaused && input.metadata?.kind === "visual_asset") {
+            assetIntentPaused = true;
+            assetIntentReached?.();
+            await assetIntentRelease;
+          }
+          return result;
+        };
+        return Reflect.get(target, property, receiver);
+      },
+    }) as typeof coordinator;
+  } else if (options.visualResponseLoss) {
+    let dropped = false;
+    workflowCoordinator = new Proxy(coordinator as any, {
+      get(target, property, receiver) {
+        if (property === "completeFiveAgentCall") return async (input: { call_id: string; status: string }) => {
+          const result = await target.completeFiveAgentCall(input);
+          if (!dropped && input.status === "succeeded" && input.call_id.includes(":visual_plan:")) {
+            dropped = true;
+            throw new Error("synthetic visual call result response lost");
+          }
+          return result;
+        };
+        if (property === "completeFiveAgentVisualArtifact" && options.visualReceiptResponseLoss) return async (input: Record<string, unknown>) => {
+          const result = await target.completeFiveAgentVisualArtifact(input);
+          if (!dropped) {
+            dropped = true;
+            throw new Error("synthetic visual receipt response lost");
+          }
+          return result;
+        };
+        return Reflect.get(target, property, receiver);
+      },
+    }) as typeof coordinator;
+  } else if (options.visualReceiptResponseLoss) {
+    let dropped = false;
+    workflowCoordinator = new Proxy(coordinator as any, {
+      get(target, property, receiver) {
+        if (property === "completeFiveAgentVisualArtifact") return async (input: Record<string, unknown>) => {
+          const result = await target.completeFiveAgentVisualArtifact(input);
+          if (!dropped) {
+            dropped = true;
+            throw new Error("synthetic visual receipt response lost");
+          }
+          return result;
+        };
+        return Reflect.get(target, property, receiver);
+      },
+    }) as typeof coordinator;
+  }
   const run = await coordinator.getFiveAgentRun(runId, userId, workspaceId) as Record<string, unknown>;
   const brief = (await coordinator.listFiveAgentArtifacts(runId, userId, workspaceId)).find(item => item.kind === "article_brief");
   expect(brief).toBeDefined();
@@ -430,18 +757,160 @@ async function executeSyntheticScenario(
   };
   const workflowInstance = Object.create(FiveAgentPublishingWorkflow.prototype) as any;
   workflowInstance.env = testEnv;
-  workflowInstance._agent = coordinator;
-  const step = { do: async (...args: unknown[]) => await (args[args.length - 1] as () => Promise<unknown>)() };
+  workflowInstance._agent = workflowCoordinator;
+  let wholeRunRestartInjected = false;
+  let checkpointReached: (() => void) | undefined;
+  let releaseCheckpoint: (() => void) | undefined;
+  const checkpoint = new Promise<void>(resolve => { checkpointReached = resolve; });
+  const checkpointRelease = new Promise<void>(resolve => { releaseCheckpoint = resolve; });
+  const executeStep = async (args: unknown[], pauseAtCheckpoint: boolean): Promise<unknown> => {
+    const stepName = String(args[0]);
+    const closure = args[args.length - 1] as () => Promise<unknown>;
+    const attempts = options.visualResponseLoss || options.visualJsonResponseLoss || options.visualBinaryResponseLoss || options.visualProjectionResponseLoss || options.visualReceiptResponseLoss || options.visualAdapterResponseLoss || (options.visualFailure === "unknown" && options.visualWholeRunRestartAt !== "unknown") ? 2 : 1;
+    let lastError: unknown;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      try {
+        const value = await closure();
+        const restartStep = options.visualWholeRunRestartAt === "plan" ? "visual-plan" : options.visualWholeRunRestartAt === "cover" ? "visual-asset-cover_01" : null;
+        if (pauseAtCheckpoint && !wholeRunRestartInjected && restartStep === stepName) {
+          wholeRunRestartInjected = true;
+          checkpointReached?.();
+          await checkpointRelease;
+        }
+        return value;
+      } catch (error) { lastError = error; }
+    }
+    throw lastError;
+  };
+  const step = { do: (...args: unknown[]) => executeStep(args, true) };
+  const resumedStep = { do: (...args: unknown[]) => executeStep(args, false) };
   let result: Record<string, unknown>;
   let workflowError: string | undefined;
+  let visualIntentCheckpoint: { asset_intents: number; binary_objects: number } | undefined;
   try {
-    result = await workflowInstance.run({ payload: params, instanceId: String(run.workflow_id) }, step) as Record<string, unknown>;
+    if (options.visualAssetIntentRestart) {
+      const interruptedRun = workflowInstance.run({ payload: params, instanceId: String(run.workflow_id) }, step) as Promise<Record<string, unknown>>;
+      await assetIntentCheckpoint;
+      const checkpointLedger = await coordinator.getFiveAgentVisualLedger(runId, userId, workspaceId);
+      const pendingAsset = checkpointLedger.artifacts.find(item => item.kind === "visual_asset");
+      const binaryPrefix = pendingAsset?.binary_storage_ref?.replace(/^r2:\/\//, "").replace(/\/[^/]+\/[^/]+$/, "/") || `missing-${runId}`;
+      visualIntentCheckpoint = {
+        asset_intents: checkpointLedger.artifacts.filter(item => item.kind === "visual_asset").length,
+        binary_objects: (await testEnv.FILES_BUCKET.list({ prefix: binaryPrefix })).objects.length,
+      };
+      result = await workflowInstance.run({ payload: params, instanceId: String(run.workflow_id) }, resumedStep) as Record<string, unknown>;
+      releaseAssetIntent?.();
+      await interruptedRun.catch(() => undefined);
+    } else if (options.visualWholeRunRestartAt === "plan" || options.visualWholeRunRestartAt === "cover") {
+      const interruptedRun = workflowInstance.run({ payload: params, instanceId: String(run.workflow_id) }, step) as Promise<Record<string, unknown>>;
+      await checkpoint;
+      result = await workflowInstance.run({ payload: params, instanceId: String(run.workflow_id) }, resumedStep) as Record<string, unknown>;
+      releaseCheckpoint?.();
+      await interruptedRun.catch(() => undefined);
+    } else {
+      result = await workflowInstance.run({ payload: params, instanceId: String(run.workflow_id) }, step) as Record<string, unknown>;
+    }
+    if ((options.visualWholeRunRestartAt === "unknown" || options.visualBindingFetchThrow || options.visualWholeRunSuccessfulReconcile || options.visualFrozenReadHold || options.visualQaWholeRunRecovery) && result.state === "needs_action") {
+      result = await workflowInstance.run({ payload: params, instanceId: String(run.workflow_id) }, step) as Record<string, unknown>;
+    }
+    if (options.visualPreCancelled || options.visualCancellationReadFailure) {
+      Object.assign(testEnv, { VISUAL_PRODUCTION_V3: "true" });
+      if (options.visualPreCancelled) {
+        const current = await runtimeEnv.DB.prepare(`SELECT state_revision, updated_at FROM publication_runs WHERE run_id = ? AND user_id = ? AND workspace_id = ? LIMIT 1`)
+          .bind(runId, userId, workspaceId).first<{ state_revision: number; updated_at: string }>();
+        const cancelEventKey = `visual-cancel:${runId}`;
+        const cancelEventTime = new Date(Math.max(Date.now(), Date.parse(String(current?.updated_at || "")) + 1)).toISOString();
+        await applySystemPublicationTransition(runtimeEnv.DB, {
+          runId,
+          auth: { userId, workspaceId },
+          targetState: "cancelled",
+          expectedStateRevision: Number(current?.state_revision || 0),
+          options: {
+            eventId: `${runId}:event:${Number(current?.state_revision || 0) + 1}`,
+            eventType: "action_cancel",
+            eventIdempotencyKey: cancelEventKey,
+            eventPayloadHash: await sha256Text(cancelEventKey),
+            eventCreatedAt: cancelEventTime,
+          },
+        });
+      }
+      if (options.visualCancellationReadFailure) {
+        const baseDb = runtimeEnv.DB;
+        const failingDb = new Proxy(baseDb as any, {
+          get(target, property, receiver) {
+            if (property === "prepare") return (sql: string) => {
+              if (sql.includes("SELECT state FROM publication_runs")) throw new Error("synthetic cancellation state read failure");
+              return target.prepare(sql);
+            };
+            return Reflect.get(target, property, receiver);
+          },
+        });
+        Object.defineProperty(testEnv, "DB", { value: failingDb, configurable: true });
+      }
+      result = await workflowInstance.run({ payload: params, instanceId: String(run.workflow_id) }, step) as Record<string, unknown>;
+    }
   } catch (error) {
-    if (!options.reviewRoundOverride && !options.draftPinDrift && !options.reviewPinDrift) throw error;
+    if (!options.reviewRoundOverride && !options.draftPinDrift && !options.reviewPinDrift && !options.visualCancellationReadFailure) throw error;
     workflowError = error instanceof EditorialRuntimeError
       ? error.code
       : String((error as { code?: unknown })?.code || error);
     result = { state: "integrity_error", artifact_ids: [] };
+  }
+  let visualReplayDelta: Record<string, number> | undefined;
+  let visualReplayError: string | undefined;
+  if (options.visualReplay && result.state === "visual_ready") {
+    const beforeLedger = await coordinator.getFiveAgentVisualLedger(runId, userId, workspaceId);
+    const beforePlan = beforeLedger.artifacts.find(item => item.kind === "visual_plan");
+    const beforeJsonCount = beforePlan ? (await testEnv.FILES_BUCKET.list({ prefix: beforePlan.artifact_key.slice(0, beforePlan.artifact_key.indexOf("/visual/") + "/visual/".length) })).objects.length : 0;
+    const beforeBinary = beforeLedger.artifacts.find(item => item.kind === "visual_asset")?.binary_storage_ref?.replace(/^r2:\/\//, "");
+    const beforeBinaryCount = beforeBinary ? (await testEnv.FILES_BUCKET.list({ prefix: beforeBinary.slice(0, beforeBinary.lastIndexOf("/") + 1) })).objects.length : 0;
+    const beforeD1 = await testEnv.DB.prepare(`SELECT count(*) AS count FROM editorial_artifacts WHERE run_id = ? AND kind IN ('visual_plan', 'visual_asset', 'visual_qa_report')`).bind(runId).first<{ count: number }>();
+    const beforePublication = await testEnv.DB.prepare(`SELECT count(*) AS count FROM publication_run_events WHERE run_id = ? AND event_type IN ('visual_planning', 'visual_generating', 'visual_ready', 'visual_plan_committed', 'visual_asset_committed', 'visual_qa_committed')`).bind(runId).first<{ count: number }>();
+    if (options.visualExtraScope && beforePlan) {
+      const original = await testEnv.FILES_BUCKET.get(beforePlan.artifact_key);
+      if (!original) throw new Error("visual scope fixture plan is unavailable");
+      const extraKey = `${beforePlan.artifact_key}.extra`;
+      await testEnv.FILES_BUCKET.put(extraKey, await original.text(), { customMetadata: { synthetic: "extra-current-scope" } });
+    }
+    if (options.visualHistoricalScope && beforePlan) {
+      const original = await testEnv.FILES_BUCKET.get(beforePlan.artifact_key);
+      if (!original) throw new Error("visual historical fixture plan is unavailable");
+      const historical = JSON.parse(await original.text()) as Record<string, any>;
+      historical.payload.frozen_payload_hash = `sha256:${"b".repeat(64)}`;
+      await testEnv.FILES_BUCKET.put(`${beforePlan.artifact_key}.historical`, JSON.stringify(historical), { customMetadata: { synthetic: "historical-frozen-scope" } });
+    }
+    if (options.visualPlanTamper && beforePlan) {
+      const original = await testEnv.FILES_BUCKET.get(beforePlan.artifact_key);
+      if (!original) throw new Error("visual plan tamper fixture is unavailable");
+      const tampered = JSON.parse(await original.text()) as { envelope: Record<string, unknown>; payload: Record<string, unknown> };
+      tampered.payload.body_code_point_count = Number(tampered.payload.body_code_point_count || 0) + 1;
+      tampered.envelope.payload_hash = await sha256Text(canonicalJson(tampered.payload));
+      tampered.envelope.payload_length = new TextEncoder().encode(canonicalJson(tampered.payload)).byteLength;
+      await testEnv.FILES_BUCKET.put(beforePlan.artifact_key, canonicalJson(tampered), { customMetadata: { synthetic: "tampered-plan-recomputed-hash" } });
+    }
+    const beforeVisualCalls = visualCalls;
+    try {
+      result = await workflowInstance.run({ payload: params, instanceId: String(run.workflow_id) }, step) as Record<string, unknown>;
+    } catch (error) {
+      visualReplayError = error instanceof EditorialRuntimeError ? error.code : String((error as { code?: unknown })?.code || error);
+      result = { state: "visual_reconciliation_required", artifact_ids: [] };
+    }
+    const afterLedger = await coordinator.getFiveAgentVisualLedger(runId, userId, workspaceId);
+    const afterJsonCount = beforePlan ? (await testEnv.FILES_BUCKET.list({ prefix: beforePlan.artifact_key.slice(0, beforePlan.artifact_key.indexOf("/visual/") + "/visual/".length) })).objects.length : 0;
+    const afterBinary = afterLedger.artifacts.find(item => item.kind === "visual_asset")?.binary_storage_ref?.replace(/^r2:\/\//, "");
+    const afterBinaryCount = afterBinary ? (await testEnv.FILES_BUCKET.list({ prefix: afterBinary.slice(0, afterBinary.lastIndexOf("/") + 1) })).objects.length : 0;
+    const afterD1 = await testEnv.DB.prepare(`SELECT count(*) AS count FROM editorial_artifacts WHERE run_id = ? AND kind IN ('visual_plan', 'visual_asset', 'visual_qa_report')`).bind(runId).first<{ count: number }>();
+    const afterPublication = await testEnv.DB.prepare(`SELECT count(*) AS count FROM publication_run_events WHERE run_id = ? AND event_type IN ('visual_planning', 'visual_generating', 'visual_ready', 'visual_plan_committed', 'visual_asset_committed', 'visual_qa_committed')`).bind(runId).first<{ count: number }>();
+    visualReplayDelta = {
+      adapter_calls: visualCalls - beforeVisualCalls,
+      do_artifacts: afterLedger.artifacts.length - beforeLedger.artifacts.length,
+      do_receipts: afterLedger.receipt_ids.length - beforeLedger.receipt_ids.length,
+      do_events: afterLedger.event_ids.length - beforeLedger.event_ids.length,
+      d1_rows: Number(afterD1?.count || 0) - Number(beforeD1?.count || 0),
+      publication_events: Number(afterPublication?.count || 0) - Number(beforePublication?.count || 0),
+      json_objects: afterJsonCount - beforeJsonCount,
+      binary_objects: afterBinaryCount - beforeBinaryCount,
+    };
   }
   const ledger = await coordinator.getFiveAgentArtifactLedger(runId, userId, workspaceId);
   const afterRun = await coordinator.getFiveAgentRun(runId, userId, workspaceId) as Record<string, unknown>;
@@ -460,12 +929,20 @@ async function executeSyntheticScenario(
     artifactCount: ledger.artifacts.length,
     receiptCount: ledger.receipt_ids.length,
     artifactIds: ledger.artifacts.map(item => item.artifact_id),
+    visualCalls,
+    visualExecuteCalls,
+    visualProviderOperations,
+    visualReconcileCalls,
+    projectionFaultTriggered,
     callIntentCount: Number(afterRun.call_intent_count),
     revisionCount: Number(afterRun.revision_count),
     projection,
     projectionEventHashes: (projectionEvents.results || []).map(row => row.payload_hash),
     doEventHashes: doEvents.flatMap(row => row.payload_hash ? [row.payload_hash] : []),
+    visualReplayDelta,
+    visualReplayError,
     workflowError,
+    visualIntentCheckpoint,
   };
 }
 
@@ -980,6 +1457,409 @@ describe("Wave2B publishing runtime boundary", () => {
     expect(new Set(p2.doEventHashes).size).toBe(p2.doEventHashes.length);
   });
 
+  it("runs the same frozen result through the gated visual chain to visual_ready with exact visual artifacts", async () => {
+    const visual = await executeSyntheticScenario("p2_pass", undefined, false, { visual: true, visualReplay: true });
+    expect(visual.result).toMatchObject({ state: "visual_ready", artifact_ids: expect.any(Array) });
+    expect(visual.result.artifact_ids).toHaveLength(9);
+    expect(visual.projection).toMatchObject({ state: "visual_ready", progress_percent: 80, error_code: null, next_action: null });
+    const coordinator = runtimeEnv.EDITORIAL_COORDINATOR.getByName(await coordinatorShardName(visual.userId, visual.workspaceId, visual.articleId, visual.runId));
+    const ledger = await coordinator.getFiveAgentVisualLedger(visual.runId, visual.userId, visual.workspaceId);
+    expect(ledger.artifacts).toHaveLength(5);
+    expect(ledger.receipt_ids).toHaveLength(5);
+    expect(ledger.event_ids).toHaveLength(5);
+    expect(ledger.artifacts.filter(item => item.kind === "visual_plan")).toHaveLength(1);
+    expect(ledger.artifacts.filter(item => item.kind === "visual_asset")).toHaveLength(3);
+    expect(ledger.artifacts.filter(item => item.kind === "visual_qa_report")).toHaveLength(1);
+    expect(visual.visualCalls).toBe(4);
+    expect(visual.visualExecuteCalls).toBe(4);
+    expect(visual.visualProviderOperations).toBe(3);
+    expect(visual.visualReplayDelta).toEqual({ adapter_calls: 0, do_artifacts: 0, do_receipts: 0, do_events: 0, d1_rows: 0, publication_events: 0, json_objects: 0, binary_objects: 0 });
+    const binaryRef = ledger.artifacts.find(item => item.kind === "visual_asset")!.binary_storage_ref!;
+    const binaryPrefix = binaryRef.replace(/^r2:\/\//, "").replace(/\/[^/]+\/[^/]+$/, "/");
+    const binaries = await runtimeEnv.FILES_BUCKET.list({ prefix: binaryPrefix });
+    expect(binaries.objects).toHaveLength(3);
+    const jsonPrefix = ledger.artifacts.find(item => item.kind === "visual_plan")!.artifact_key.split("/visual/")[0] + "/visual/";
+    const jsonObjects = await runtimeEnv.FILES_BUCKET.list({ prefix: jsonPrefix });
+    expect(jsonObjects.objects.filter((item: { key: string }) => item.key.endsWith(".json")).length).toBe(5);
+  });
+
+  it("runs the long visual chain with five body slots and exact JSON/PNG counts", async () => {
+    const visual = await executeSyntheticScenario("p2_pass", undefined, false, { visual: true, visualLong: true });
+    expect(visual.result).toMatchObject({ state: "visual_ready", artifact_ids: expect.any(Array) });
+    expect(visual.result.artifact_ids).toHaveLength(12);
+    expect(visual.visualCalls).toBe(7);
+    expect(visual.visualExecuteCalls).toBe(7);
+    expect(visual.visualProviderOperations).toBe(6);
+    const coordinator = runtimeEnv.EDITORIAL_COORDINATOR.getByName(await coordinatorShardName(visual.userId, visual.workspaceId, visual.articleId, visual.runId));
+    const ledger = await coordinator.getFiveAgentVisualLedger(visual.runId, visual.userId, visual.workspaceId);
+    expect(ledger.artifacts).toHaveLength(8);
+    expect(ledger.artifacts.filter(item => item.kind === "visual_asset")).toHaveLength(6);
+    const binaryRef = ledger.artifacts.find(item => item.kind === "visual_asset")!.binary_storage_ref!;
+    const binaryPrefix = binaryRef.replace(/^r2:\/\//, "").replace(/\/[^/]+\/[^/]+$/, "/");
+    expect((await runtimeEnv.FILES_BUCKET.list({ prefix: binaryPrefix })).objects).toHaveLength(6);
+    const jsonPrefix = ledger.artifacts.find(item => item.kind === "visual_plan")!.artifact_key.split("/visual/")[0] + "/visual/";
+    expect((await runtimeEnv.FILES_BUCKET.list({ prefix: jsonPrefix })).objects.filter((item: { key: string }) => item.key.endsWith(".json")).length).toBe(8);
+  });
+
+  it.each([
+    ["visual_planning after the committed plan", "plan"],
+    ["visual_generating after the committed cover", "cover"],
+  ] as const)("resumes the whole Workflow from %s without replaying completed provider work", async (_label, restartAt) => {
+    const visual = await executeSyntheticScenario("p2_pass", undefined, false, {
+      visual: true,
+      visualWholeRunRestartAt: restartAt,
+    });
+    expect(visual.visualExecuteCalls).toBe(4);
+    expect(visual.visualProviderOperations).toBe(3);
+    expect(visual.visualReconcileCalls).toBe(0);
+    expect(visual.projection?.error_code).toBeNull();
+    expect({ result: visual.result, projection: visual.projection }).toMatchObject({ result: { state: "visual_ready" }, projection: { state: "visual_ready" } });
+    const coordinator = runtimeEnv.EDITORIAL_COORDINATOR.getByName(await coordinatorShardName(visual.userId, visual.workspaceId, visual.articleId, visual.runId));
+    const ledger = await coordinator.getFiveAgentVisualLedger(visual.runId, visual.userId, visual.workspaceId);
+    expect(ledger.artifacts).toHaveLength(5);
+    expect(ledger.receipt_ids).toHaveLength(5);
+    expect(ledger.event_ids).toHaveLength(5);
+  });
+
+  it("resumes a visual external-side-effect hold through D1 retrying without another execute", async () => {
+    const visual = await executeSyntheticScenario("p2_pass", undefined, false, {
+      visual: true,
+      visualFailure: "unknown",
+      visualWholeRunRestartAt: "unknown",
+    });
+    expect(visual.result).toMatchObject({ state: "needs_action" });
+    expect(visual.projection).toMatchObject({
+      state: "needs_action",
+      error_code: "external_side_effect_unknown",
+      next_action: "reconcile_external_side_effect",
+    });
+    expect(visual.visualExecuteCalls).toBe(3);
+    expect(visual.visualProviderOperations).toBe(2);
+    expect(visual.visualReconcileCalls).toBe(1);
+    expect(visual.visualCalls).toBe(4);
+  });
+
+  it("keeps a binding fetch exception inflight and reconciles the exact attempt without advancing", async () => {
+    const visual = await executeSyntheticScenario("p2_pass", undefined, false, {
+      visual: true,
+      visualBindingFetchThrow: true,
+    });
+    expect(visual.result).toMatchObject({ state: "needs_action" });
+    expect(visual.projection).toMatchObject({
+      state: "needs_action",
+      error_code: "external_side_effect_unknown",
+      next_action: "reconcile_external_side_effect",
+    });
+    expect(visual.visualExecuteCalls).toBe(3);
+    expect(visual.visualProviderOperations).toBe(2);
+    expect(visual.visualReconcileCalls).toBe(1);
+    expect(visual.visualCalls).toBe(4);
+  });
+
+  it("does not create a visual call while reconciling a hold that has no durable call intent", async () => {
+    const visual = await executeSyntheticScenario("p2_pass", undefined, false, {
+      visual: true,
+      visualFrozenReadHold: true,
+    });
+    expect(visual.result).toMatchObject({ state: "needs_action" });
+    expect(visual.projection).toMatchObject({
+      state: "needs_action",
+      error_code: "external_side_effect_unknown",
+      next_action: "reconcile_external_side_effect",
+    });
+    expect(visual.visualCalls).toBe(0);
+    expect(visual.visualExecuteCalls).toBe(0);
+    expect(visual.visualProviderOperations).toBe(0);
+    expect(visual.visualReconcileCalls).toBe(0);
+    const coordinator = runtimeEnv.EDITORIAL_COORDINATOR.getByName(await coordinatorShardName(visual.userId, visual.workspaceId, visual.articleId, visual.runId));
+    const calls = await coordinator.listFiveAgentCallAttempts(visual.runId, visual.userId, visual.workspaceId);
+    expect(calls.filter(call => call.call_kind.startsWith("visual_"))).toHaveLength(0);
+  });
+
+  it("reconciles an adapter-stored image result on whole-Workflow re-entry and reaches visual_ready", async () => {
+    const visual = await executeSyntheticScenario("p2_pass", undefined, false, {
+      visual: true,
+      visualWholeRunSuccessfulReconcile: true,
+    });
+    expect(visual.result).toMatchObject({ state: "visual_ready" });
+    expect(visual.projection).toMatchObject({ state: "visual_ready", progress_percent: 80, error_code: null });
+    expect(visual.visualCalls).toBe(5);
+    expect(visual.visualExecuteCalls).toBe(4);
+    expect(visual.visualProviderOperations).toBe(3);
+    expect(visual.visualReconcileCalls).toBe(1);
+    const coordinator = runtimeEnv.EDITORIAL_COORDINATOR.getByName(await coordinatorShardName(visual.userId, visual.workspaceId, visual.articleId, visual.runId));
+    const ledger = await coordinator.getFiveAgentVisualLedger(visual.runId, visual.userId, visual.workspaceId);
+    expect(ledger.artifacts).toHaveLength(5);
+    expect(ledger.receipt_ids).toHaveLength(5);
+    expect(ledger.event_ids).toHaveLength(5);
+    const publicationEvents = await runtimeEnv.DB.prepare(`SELECT payload_hash, created_at FROM publication_run_events WHERE run_id = ? ORDER BY revision`).bind(visual.runId).all<{ payload_hash: string; created_at: string }>();
+    const publicationTimes = (publicationEvents.results || []).map(event => Date.parse(event.created_at));
+    expect(publicationTimes.every((time, index) => index === 0 || time > publicationTimes[index - 1])).toBe(true);
+    const stateEvents = await coordinator.listFiveAgentEvents(visual.runId, visual.userId, visual.workspaceId);
+    const durableEvents = [...stateEvents, ...ledger.visual_events].sort((left, right) => Date.parse(left.created_at) - Date.parse(right.created_at));
+    const durableTimes = durableEvents.map(event => Date.parse(event.created_at));
+    expect(durableTimes.every((time, index) => index === 0 || time > durableTimes[index - 1])).toBe(true);
+    const publicationTimeByPayload = new Map((publicationEvents.results || []).map(event => [event.payload_hash, event.created_at]));
+    const eventTimeMismatches = durableEvents
+      .filter(event => !event.payload_hash || publicationTimeByPayload.get(event.payload_hash) !== event.created_at)
+      .map(event => ({ event_type: event.event_type, state_revision: event.state_revision, payload_hash: event.payload_hash, do_created_at: event.created_at, d1_created_at: event.payload_hash ? publicationTimeByPayload.get(event.payload_hash) : null }));
+    expect(eventTimeMismatches).toEqual([]);
+  });
+
+  it("recovers a post-QA exact-set hold locally without another adapter or provider call", async () => {
+    const visual = await executeSyntheticScenario("p2_pass", undefined, false, {
+      visual: true,
+      visualQaWholeRunRecovery: true,
+    });
+    expect(visual.projection).toMatchObject({ state: "visual_ready", progress_percent: 80, error_code: null, next_action: null });
+    expect(visual.result).toMatchObject({ state: "visual_ready" });
+    expect(visual.visualCalls).toBe(4);
+    expect(visual.visualExecuteCalls).toBe(4);
+    expect(visual.visualProviderOperations).toBe(3);
+    expect(visual.visualReconcileCalls).toBe(0);
+    const coordinator = runtimeEnv.EDITORIAL_COORDINATOR.getByName(await coordinatorShardName(visual.userId, visual.workspaceId, visual.articleId, visual.runId));
+    const ledger = await coordinator.getFiveAgentVisualLedger(visual.runId, visual.userId, visual.workspaceId);
+    expect(ledger.artifacts).toHaveLength(5);
+    expect(ledger.receipt_ids).toHaveLength(5);
+    expect(ledger.event_ids).toHaveLength(5);
+    expect(ledger.artifacts.filter(item => item.kind === "visual_qa_report")).toHaveLength(1);
+  });
+
+  it("writes the visual asset intent before binary storage and recovers that checkpoint without another provider operation", async () => {
+    const visual = await executeSyntheticScenario("p2_pass", undefined, false, {
+      visual: true,
+      visualAssetIntentRestart: true,
+    });
+    expect(visual.visualIntentCheckpoint).toEqual({ asset_intents: 1, binary_objects: 0 });
+    expect(visual.result).toMatchObject({ state: "visual_ready" });
+    expect(visual.visualExecuteCalls).toBe(4);
+    expect(visual.visualProviderOperations).toBe(3);
+    expect(visual.visualReconcileCalls).toBe(1);
+    const coordinator = runtimeEnv.EDITORIAL_COORDINATOR.getByName(await coordinatorShardName(visual.userId, visual.workspaceId, visual.articleId, visual.runId));
+    const ledger = await coordinator.getFiveAgentVisualLedger(visual.runId, visual.userId, visual.workspaceId);
+    expect(ledger.artifacts).toHaveLength(5);
+    expect(ledger.receipt_ids).toHaveLength(5);
+    expect(ledger.event_ids).toHaveLength(5);
+  });
+
+  it("replays after the main visual call ledger success response is lost", async () => {
+    const visual = await executeSyntheticScenario("p2_pass", undefined, false, { visual: true, visualResponseLoss: true });
+    expect(visual.result).toMatchObject({ state: "visual_ready" });
+    expect(visual.result.artifact_ids).toHaveLength(9);
+    expect(visual.visualReconcileCalls).toBe(0);
+    expect(visual.visualCalls).toBe(4);
+    expect(visual.visualExecuteCalls).toBe(4);
+    expect(visual.visualProviderOperations).toBe(3);
+    expect(visual.artifactCount).toBe(4);
+  });
+
+  it("reconciles an adapter execute response loss without another provider operation", async () => {
+    const visual = await executeSyntheticScenario("p2_pass", undefined, false, { visual: true, visualAdapterResponseLoss: true });
+    expect(visual.result).toMatchObject({ state: "visual_ready" });
+    expect(visual.visualCalls).toBe(5);
+    expect(visual.visualExecuteCalls).toBe(4);
+    expect(visual.visualProviderOperations).toBe(3);
+    expect(visual.visualReconcileCalls).toBe(1);
+    expect(visual.artifactCount).toBe(4);
+  });
+
+  it.each([
+    ["visual JSON", { visualJsonResponseLoss: true }],
+    ["visual binary", { visualBinaryResponseLoss: true }],
+    ["publication projection", { visualProjectionResponseLoss: true }],
+    ["DO visual receipt", { visualReceiptResponseLoss: true }],
+  ])("reconciles %s response loss without an additional provider operation", async (_label, fault) => {
+    const visual = await executeSyntheticScenario("p2_pass", undefined, false, { visual: true, ...fault });
+    expect(visual.result).toMatchObject({ state: "visual_ready" });
+    expect(visual.result.artifact_ids).toHaveLength(9);
+    expect(visual.visualCalls).toBe(5);
+    expect(visual.visualExecuteCalls).toBe(4);
+    expect(visual.visualProviderOperations).toBe(3);
+    expect(visual.visualReconcileCalls).toBeGreaterThanOrEqual(1);
+    if (_label === "publication projection") expect(visual.projectionFaultTriggered).toBe(true);
+    expect(visual.artifactCount).toBe(4);
+  });
+
+  it("rejects an extra object in the current frozen/plan scope while preserving completed artifacts", async () => {
+    const visual = await executeSyntheticScenario("p2_pass", undefined, false, { visual: true, visualReplay: true, visualExtraScope: true });
+    expect(visual.result).toMatchObject({ state: "visual_reconciliation_required" });
+    expect(visual.visualReplayError).toBe("visual_artifact_reconciliation_required");
+    expect(visual.visualCalls).toBe(4);
+    expect(visual.artifactCount).toBe(4);
+  });
+
+  it("recomputes a completed plan instead of trusting a self-rehashed plan payload", async () => {
+    const visual = await executeSyntheticScenario("p2_pass", undefined, false, { visual: true, visualReplay: true, visualPlanTamper: true });
+    expect(visual.result).toMatchObject({ state: "visual_reconciliation_required" });
+    expect(["visual_artifact_identity_conflict", "visual_artifact_reconciliation_required"]).toContain(visual.visualReplayError);
+    expect(visual.visualCalls).toBe(4);
+    expect(visual.visualReplayDelta).toMatchObject({ adapter_calls: 0, do_artifacts: 0, do_receipts: 0, do_events: 0, d1_rows: 0, publication_events: 0, binary_objects: 0 });
+  });
+
+  it("allows an older frozen scope to remain beside the current visual execution", async () => {
+    const visual = await executeSyntheticScenario("p2_pass", undefined, false, { visual: true, visualReplay: true, visualHistoricalScope: true });
+    expect(visual.result).toMatchObject({ state: "visual_ready" });
+    expect(visual.visualReplayError).toBeUndefined();
+    expect(visual.visualCalls).toBe(4);
+    expect(visual.visualReplayDelta).toMatchObject({ adapter_calls: 0, do_artifacts: 0, do_receipts: 0, do_events: 0, d1_rows: 0, publication_events: 0, binary_objects: 0 });
+    expect(visual.visualReplayDelta?.json_objects).toBe(1);
+  });
+
+  it.each([
+    ["cover transparency", { visualCoverTransparent: true }],
+    ["body non-white", { visualBodyNonWhite: true }],
+  ])("persists a complete QA failure report for %s", async (_label, fault) => {
+    const visual = await executeSyntheticScenario("p2_pass", undefined, false, { visual: true, ...fault });
+    expect(visual.result).toMatchObject({ state: "needs_action" });
+    expect(visual.projection).toMatchObject({ state: "needs_action", error_code: "visual_qa_failed", next_action: "review_visual_assets" });
+    expect(visual.visualCalls).toBe(4);
+    expect(visual.artifactCount).toBe(4);
+    expect(visual.receiptCount).toBe(4);
+    const coordinator = runtimeEnv.EDITORIAL_COORDINATOR.getByName(await coordinatorShardName(visual.userId, visual.workspaceId, visual.articleId, visual.runId));
+    const ledger = await coordinator.getFiveAgentVisualLedger(visual.runId, visual.userId, visual.workspaceId);
+    expect(ledger.artifacts).toHaveLength(5);
+    expect(ledger.receipt_ids).toHaveLength(5);
+    expect(ledger.artifacts.filter(item => item.kind === "visual_qa_report")).toHaveLength(1);
+    const qa = ledger.artifacts.find(item => item.kind === "visual_qa_report");
+    expect(qa?.payload_summary.qa_decision).toBe("failed");
+    expect(qa?.payload_summary.qa_version).toBe("visual_qa_report.v2");
+    const plan = ledger.artifacts.find(item => item.kind === "visual_plan")!;
+    const jsonPrefix = plan.artifact_key.split("/visual/")[0] + "/visual/";
+    expect((await runtimeEnv.FILES_BUCKET.list({ prefix: jsonPrefix })).objects.filter((item: { key: string }) => item.key.endsWith(".json"))).toHaveLength(5);
+    const binaryRef = ledger.artifacts.find(item => item.kind === "visual_asset")!.binary_storage_ref!;
+    const binaryPrefix = binaryRef.replace(/^r2:\/\//, "").replace(/\/[^/]+\/[^/]+$/, "/");
+    expect((await runtimeEnv.FILES_BUCKET.list({ prefix: binaryPrefix })).objects).toHaveLength(3);
+    const qaObject = await runtimeEnv.FILES_BUCKET.get(qa!.artifact_key);
+    expect(qaObject).toBeTruthy();
+    const qaPayload = JSON.parse(await qaObject!.text()).payload;
+    expect(qaPayload).toMatchObject({ passed: false, asset_artifact_ids: expect.any(Array), asset_byte_hashes: expect.any(Array) });
+    expect(qaPayload.asset_artifact_ids).toHaveLength(3);
+    expect(qaPayload.asset_byte_hashes).toHaveLength(3);
+  });
+
+  it("returns the persisted QA artifact when post-QA exact-set reconciliation holds", async () => {
+    const visual = await executeSyntheticScenario("p2_pass", undefined, false, { visual: true, visualQaExactSetFailure: true });
+    expect(visual.result).toMatchObject({ state: "needs_action", artifact_ids: expect.any(Array) });
+    expect(visual.result.artifact_ids).toHaveLength(9);
+    const coordinator = runtimeEnv.EDITORIAL_COORDINATOR.getByName(await coordinatorShardName(visual.userId, visual.workspaceId, visual.articleId, visual.runId));
+    const ledger = await coordinator.getFiveAgentVisualLedger(visual.runId, visual.userId, visual.workspaceId);
+    const qa = ledger.artifacts.find(item => item.kind === "visual_qa_report");
+    expect(qa).toBeDefined();
+    expect(visual.result.artifact_ids).toContain(qa!.artifact_id);
+  });
+
+  it("holds after visual planning when there are not enough unique blocks", async () => {
+    const visual = await executeSyntheticScenario("p2_pass", undefined, false, { visual: true, visualInsufficientBlocks: true });
+    expect(visual.result).toMatchObject({ state: "needs_action" });
+    expect(visual.projection).toMatchObject({ state: "needs_action", error_code: "visual_plan_insufficient_unique_blocks", next_action: "revise_content_before_visuals" });
+    expect(visual.visualCalls).toBe(0);
+    expect(visual.visualExecuteCalls).toBe(0);
+    expect(visual.visualProviderOperations).toBe(0);
+    expect(visual.artifactCount).toBe(4);
+    expect(visual.receiptCount).toBe(4);
+    const coordinator = runtimeEnv.EDITORIAL_COORDINATOR.getByName(await coordinatorShardName(visual.userId, visual.workspaceId, visual.articleId, visual.runId));
+    await expect(coordinator.getFiveAgentVisualLedger(visual.runId, visual.userId, visual.workspaceId)).resolves.toMatchObject({ artifacts: [], receipt_ids: [], event_ids: [] });
+  });
+
+  it("keeps the completed freeze and stops after a known body image failure", async () => {
+    const visual = await executeSyntheticScenario("p2_pass", undefined, false, { visual: true, visualFailure: "nonretry" });
+    expect(visual.result).toMatchObject({ state: "failed" });
+    expect(visual.projection).toMatchObject({ state: "failed", error_code: "visual_generation_non_retryable", retry_count: 1 });
+    expect(visual.visualExecuteCalls).toBe(3);
+    expect(visual.visualProviderOperations).toBe(2);
+    const coordinator = runtimeEnv.EDITORIAL_COORDINATOR.getByName(await coordinatorShardName(visual.userId, visual.workspaceId, visual.articleId, visual.runId));
+    const ledger = await coordinator.getFiveAgentVisualLedger(visual.runId, visual.userId, visual.workspaceId);
+    expect(ledger.artifacts.filter(item => item.kind === "visual_plan")).toHaveLength(1);
+    expect(ledger.artifacts.filter(item => item.kind === "visual_asset")).toHaveLength(1);
+    expect(ledger.artifacts.some(item => item.payload_summary.slot_id === "body_02")).toBe(false);
+    expect(visual.artifactCount).toBe(4);
+  });
+
+  it("exhausts exactly three body image attempts and stops before the next slot", async () => {
+    const visual = await executeSyntheticScenario("p2_pass", undefined, false, { visual: true, visualFailure: "retryable" });
+    expect(visual.result).toMatchObject({ state: "failed" });
+    expect(visual.projection).toMatchObject({ state: "failed", error_code: "visual_generation_retry_exhausted", retry_count: 3, next_action: "retry" });
+    expect(visual.visualExecuteCalls).toBe(5);
+    expect(visual.visualProviderOperations).toBe(4);
+    expect(visual.artifactCount).toBe(4);
+    const coordinator = runtimeEnv.EDITORIAL_COORDINATOR.getByName(await coordinatorShardName(visual.userId, visual.workspaceId, visual.articleId, visual.runId));
+    const calls = await coordinator.listFiveAgentCallAttempts(visual.runId, visual.userId, visual.workspaceId);
+    const imageCalls = calls.filter(call => call.call_kind === "visual_image");
+    expect(imageCalls).toHaveLength(4);
+    expect(imageCalls.map(call => call.attempt).sort((left, right) => left - right)).toEqual([1, 1, 2, 3]);
+    const attemptsByOperation = new Map<string, number[]>();
+    for (const call of imageCalls) {
+      const attempts = attemptsByOperation.get(call.idempotency_key) || [];
+      attempts.push(call.attempt);
+      attemptsByOperation.set(call.idempotency_key, attempts);
+    }
+    expect([...attemptsByOperation.values()].map(attempts => attempts.sort((left, right) => left - right)).sort((left, right) => left.length - right.length)).toEqual([[1], [1, 2, 3]]);
+    expect(imageCalls.some(call => call.attempt > 3)).toBe(false);
+  });
+
+  it("holds unknown body image side effects and never executes a later slot", async () => {
+    const visual = await executeSyntheticScenario("p2_pass", undefined, false, { visual: true, visualFailure: "unknown" });
+    expect(visual.result).toMatchObject({ state: "needs_action" });
+    expect(visual.projection).toMatchObject({ state: "needs_action", error_code: "external_side_effect_unknown", next_action: "reconcile_external_side_effect" });
+    expect(visual.visualExecuteCalls).toBe(3);
+    expect(visual.visualProviderOperations).toBe(2);
+    expect(visual.visualReconcileCalls).toBeGreaterThanOrEqual(1);
+    expect(visual.artifactCount).toBe(4);
+    const coordinator = runtimeEnv.EDITORIAL_COORDINATOR.getByName(await coordinatorShardName(visual.userId, visual.workspaceId, visual.articleId, visual.runId));
+    const ledger = await coordinator.getFiveAgentVisualLedger(visual.runId, visual.userId, visual.workspaceId);
+    expect(ledger.artifacts.filter(item => item.kind === "visual_asset")).toHaveLength(1);
+    expect(ledger.artifacts.some(item => item.payload_summary.slot_id === "body_02")).toBe(false);
+  });
+
+  it("stops visual work after a content_frozen cancel without writing visual artifacts", async () => {
+    const visual = await executeSyntheticScenario("p2_pass", undefined, false, { visual: true, visualPreCancelled: true });
+    expect(visual.result).toMatchObject({ state: "cancelled" });
+    expect(visual.projection).toMatchObject({ state: "cancelled" });
+    expect(visual.visualCalls).toBe(0);
+    expect(visual.visualExecuteCalls).toBe(0);
+    expect(visual.visualProviderOperations).toBe(0);
+    expect(visual.visualReconcileCalls).toBe(0);
+    const coordinator = runtimeEnv.EDITORIAL_COORDINATOR.getByName(await coordinatorShardName(visual.userId, visual.workspaceId, visual.articleId, visual.runId));
+    await expect(coordinator.getFiveAgentVisualLedger(visual.runId, visual.userId, visual.workspaceId)).resolves.toMatchObject({ artifacts: [], receipt_ids: [], event_ids: [] });
+    const d1 = await runtimeEnv.DB.prepare("SELECT count(*) AS count FROM editorial_artifacts WHERE run_id = ? AND kind IN ('visual_plan', 'visual_asset', 'visual_qa_report')").bind(visual.runId).first<{ count: number }>();
+    expect(Number(d1?.count || 0)).toBe(0);
+  });
+
+  it("fails closed when the cancellation projection read is unavailable", async () => {
+    const visual = await executeSyntheticScenario("p2_pass", undefined, false, { visual: true, visualCancellationReadFailure: true });
+    expect(visual.workflowError).toBe("external_side_effect_unknown");
+    expect(visual.visualCalls).toBe(0);
+    expect(visual.visualExecuteCalls).toBe(0);
+    expect(visual.visualProviderOperations).toBe(0);
+    expect(visual.artifactCount).toBe(4);
+    expect(visual.projection).toMatchObject({ state: "content_frozen" });
+  });
+
+  it("keeps content_frozen when the visual flag is on but the tenant is not allowlisted", async () => {
+    const visual = await executeSyntheticScenario("p2_pass", undefined, false, { visual: true, visualAllowlistMismatch: true });
+    expect(visual.result).toMatchObject({ state: "content_frozen" });
+    expect(visual.visualCalls).toBe(0);
+    expect(visual.visualExecuteCalls).toBe(0);
+    expect(visual.visualProviderOperations).toBe(0);
+    expect(visual.visualReconcileCalls).toBe(0);
+    expect(visual.artifactCount).toBe(4);
+    expect(visual.receiptCount).toBe(4);
+    const coordinator = runtimeEnv.EDITORIAL_COORDINATOR.getByName(await coordinatorShardName(visual.userId, visual.workspaceId, visual.articleId, visual.runId));
+    await expect(coordinator.getFiveAgentVisualLedger(visual.runId, visual.userId, visual.workspaceId)).resolves.toMatchObject({ artifacts: [], receipt_ids: [], event_ids: [] });
+    const d1 = await runtimeEnv.DB.prepare("SELECT count(*) AS count FROM editorial_artifacts WHERE run_id = ? AND kind IN ('visual_plan', 'visual_asset', 'visual_qa_report')").bind(visual.runId).first<{ count: number }>();
+    expect(Number(d1?.count || 0)).toBe(0);
+    const r2 = await runtimeEnv.FILES_BUCKET.list({ prefix: "editorial/" });
+    expect(r2.objects.filter((item: { key: string }) => item.key.includes(visual.runId) && (item.key.includes("/visual/") || item.key.includes("/visual-binary/")))).toHaveLength(0);
+  });
+
+  it("keeps the Wave2B freeze result and performs no visual adapter call when the visual gate is off", async () => {
+    const baseline = await executeSyntheticScenario("p2_pass");
+    expect(baseline.result).toMatchObject({ state: "content_frozen" });
+    expect(baseline.projection).toMatchObject({ state: "content_frozen", progress_percent: 62 });
+    expect(baseline.artifactIds).toHaveLength(4);
+    expect(baseline.visualCalls).toBe(0);
+  });
+
   it("rejects a review response from the wrong round before immutable persistence", async () => {
     const firstRound = await executeSyntheticScenario("p2_pass", undefined, false, {
       reviewRoundOverride: { 1: 2 },
@@ -1213,6 +2093,31 @@ describe("Wave2B publishing runtime boundary", () => {
     }
     const exhaustedReplay = await coordinator.prepareFiveAgentCall({ run_id: runId, call_kind: "writing_initial", idempotency_key: exhaustedKey, attempt: 1, created_at: "2026-07-20T00:01:20.000Z" });
     expect(exhaustedReplay).toMatchObject({ status: "failed", error_code: "writing_adapter_retry_exhausted", retryable: false, attempt: 3 });
+
+    const reentryKey = `visual:reentry:${runId}`;
+    const attemptOne = await coordinator.prepareFiveAgentCall({ run_id: runId, call_kind: "visual_image", idempotency_key: reentryKey, attempt: 1, created_at: "2026-07-20T00:01:24.000Z" });
+    await coordinator.completeFiveAgentCall({ call_id: attemptOne.call_id, run_id: runId, status: "failed", error_code: "upstream_retryable", retryable: true, recorded_at: "2026-07-20T00:01:25.000Z" });
+    const attemptTwo = await coordinator.prepareFiveAgentCall({ run_id: runId, call_kind: "visual_image", idempotency_key: reentryKey, attempt: 2, created_at: "2026-07-20T00:01:26.000Z" });
+    await coordinator.completeFiveAgentCall({ call_id: attemptTwo.call_id, run_id: runId, status: "failed", error_code: "upstream_retryable", retryable: true, recorded_at: "2026-07-20T00:01:27.000Z" });
+    const lowerAttemptReplay = await coordinator.prepareFiveAgentCall({ run_id: runId, call_kind: "visual_image", idempotency_key: reentryKey, attempt: 1, created_at: "2026-07-20T00:01:28.000Z" });
+    expect(lowerAttemptReplay).toMatchObject({ status: "failed", retryable: true, attempt: 2 });
+    const resumedAttempt = await coordinator.prepareFiveAgentCall({ run_id: runId, call_kind: "visual_image", idempotency_key: reentryKey, attempt: 3, created_at: "2026-07-20T00:01:29.000Z" });
+    expect(resumedAttempt.status).toBe("prepared");
+    expect(resumedAttempt.call_id).toContain(":attempt:3");
+
+    const skippedKey = `draft:skipped:${runId}`;
+    const skipped = await coordinator.prepareFiveAgentCall({
+      run_id: runId, call_kind: "visual_image", idempotency_key: skippedKey, attempt: 2, created_at: "2026-07-20T00:01:21.000Z",
+    });
+    expect(skipped).toMatchObject({ status: "failed", error_code: "attempt_order_invalid", retryable: false, attempt: 2 });
+    const intent = await coordinator.prepareFiveAgentCall({
+      run_id: runId, call_kind: "visual_image", idempotency_key: skippedKey, attempt: 1, created_at: "2026-07-20T00:01:22.000Z",
+    });
+    const intentReplay = await coordinator.prepareFiveAgentCall({
+      run_id: runId, call_kind: "visual_image", idempotency_key: skippedKey, attempt: 2, created_at: "2026-07-20T00:01:23.000Z",
+    });
+    expect(intent).toMatchObject({ status: "prepared" });
+    expect(intentReplay).toMatchObject({ status: "needs_action", call_id: intent.call_id, attempt: 1, error_code: "external_side_effect_unknown" });
 
     const current: PublicationRunRow = {
       run_id: "projection-failure", user_id: "u", workspace_id: "w", article_id: "a", recording_id: 1,

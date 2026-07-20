@@ -13,6 +13,7 @@
 
 | 时间 | 功能更新 |
 | --- | --- |
+| 2026-07-20 20:51 CST | Wave 2C 在冻结正文后增加默认关闭的可恢复视觉规划、逐槽图片与确定性 QA 链，并以专用适配器和 DO/R2/D1 exact-set 对账阻止重复 provider 调用。 |
 | 2026-07-20 12:11 CST | Wave 2B 将首审与二审 Review 的 reviewer/rules pin 漂移纳入统一不可重试失败账本，并保证重放不重复调用服务。 |
 | 2026-07-20 10:26 CST | Wave 2B 将写作与审核的预持久化完整性失败记录为不可重试的 durable call result，并在 Workflow 重放时复用失败状态而不重复调用服务。 |
 | 2026-07-20 10:08 CST | Wave 2B 将 Review 轮次、Draft 运行 pins 与完整 DO/D1 事件集合在不可变工件写入前 fail-closed 校验，并统一公开 run projection 字段。 |
