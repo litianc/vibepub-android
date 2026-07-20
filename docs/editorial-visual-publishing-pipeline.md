@@ -147,14 +147,15 @@ own SQLite storage. Article text, prompts, tokens, image bytes, and external
 payloads are never written by this phase.
 
 The `editorial-workflow-v2` AgentWorkflow uses stable step names and keys with
-finite exponential retries. It writes synthetic `ArticleBrief`, `ArticleDraft`,
-`ReviewReport`, `FrozenArticleVersion`, `IllustrationPlan`, and `CoverPlan`
-envelopes. Duplicate step/artifact keys replay the original result; a different
-payload returns an idempotency conflict. Artifact parents must already exist or
-be created in the same step. `transactionSync()` first atomically prepares the
-DO artifact, durable outbox, and immutable step. The stable Workflow step then
-mirrors the outbox to the existing Phase 1 `editorial_runs`/`editorial_artifacts`
-D1 tables and only after that succeeds performs the state CAS and event append.
+finite exponential retries. Its historical synthetic fixtures remain test-only;
+production Wave2B uses the Wave2A Writing and Review service adapters and
+persists only redacted metadata. Duplicate step/artifact keys replay the
+original result; a different payload returns an idempotency conflict. Artifact
+parents must already exist or be created in the same step. `transactionSync()`
+first atomically prepares the DO artifact, durable outbox, and immutable step.
+The stable Workflow step then mirrors the outbox to the existing Phase 1
+`editorial_runs`/`editorial_artifacts` D1 tables and only after that succeeds
+performs the state CAS and event append.
 Append-only triggers protect artifacts, steps, events, human-action history,
 outbox rows, and D1 receipt metadata. A step or human confirmation is never
 edited in place; retries create no replacement row.
@@ -222,11 +223,69 @@ WechatPublishing; old namespaces are not renamed or deleted. These local
 configuration changes have not been applied remotely.
 
 Rollback is a stop-write/flag-off operation followed by Worker version rollback;
-DO histories are retained for forward-fix and are never deleted. No GLM, ASR,
-image, WeChat, CDN, R2, or other network call is made by the Phase 2 synthetic
-workflow. Production enablement requires a later detached review of the
-bindings, allowlist, workflow retries, and evidence before any migration or
-deployment.
+DO histories are retained for forward-fix and are never deleted. Production
+enablement requires a later detached review of the bindings, allowlist,
+workflow retries, and evidence before any migration or deployment.
+
+## Wave 2B Text Workflow
+
+Wave2B adds the isolated `FiveAgentPublishingWorkflow` behind the existing
+`FIVE_AGENT_PUBLISHING_V3` flag and owner/workspace allowlist. The workflow
+reads the owner-scoped transcript and Brief from private R2, then calls the
+existing Writing and Editorial Review service adapters; it never synthesizes
+production article text. Agents do not directly hold model/provider secrets;
+tests and unauthorized environments do not send real model calls. Adapter responses are normalized and persisted
+through the outbox -> immutable R2 readback -> redacted D1 mirror -> publication
+projection CAS -> DO receipt/event sequence.
+
+The review path has explicit durable commit steps. Initial progress is
+`writing -> draft_generated -> reviewing`; a first-round P1 uses
+`reviewing -> revising -> writing -> draft_generated -> reviewing` before the
+second review. Phase and round are part of system event idempotency keys, so the
+second Writing/Review pass cannot collide with the first pass. Each commit step
+reads the complete artifact back from R2 before advancing the projection; it
+never increments a revision by assumption. A P0 or second-round finding is
+written as `needs_action` with a stable error and next action. An unknown or
+unreconciled adapter result is also durably held as
+`external_side_effect_unknown` / `reconcile_external_side_effect`; it is not
+retried or turned into a fabricated artifact.
+
+In the second-round path the DO records `revising -> writing ->
+draft_generated -> reviewing`; the publication projection remains at `revising`
+and records the writing and draft-generated milestones as same-state events
+until the final review transition.
+
+Workflow step results contain only artifact references, hashes, decisions, and
+bounded metadata. Full draft/review payloads are read inside the step that needs
+them and are not returned as durable step results. This wave remains synthetic
+in tests, flag-off by default, and has no production migration or deployment.
+The V3 route accepts only the dedicated `FIVE_AGENT_PUBLISHING_TOKEN`; legacy
+`FILES_TOKEN`, the old internal token, and user sessions are not credentials for
+this route. The five-agent adapter does not directly hold provider secrets;
+tests and unauthorized environments do not send real model requests.
+Successful terminal sets are exact: pass/P2 has 4 artifacts, first-round P0
+has 3, a single P1 revision followed by a passing second review has 7, and a
+second-round P0/P1 hold has 6. Known non-retryable adapter errors end in
+`failed` with retry count 1; controlled retryable failures end in `failed` at
+count 3, and the App projection retains the last successful stage/progress.
+Before any Draft is prepared, the coordinator rechecks the response round and
+the exact run-manifest adapter/model/style/formatting pins (including custom
+style-body hash); before any Review is prepared it rechecks the bound round and
+review pins. Run responses use one fixed redacted projection field set for
+start, hold, repeat, and GET, while complete DO and publication event histories
+are checked for contiguous revisions, explicit event allowlists, and exact
+artifact identities.
+
+Before any Workflow business step, the coordinator must confirm the immutable
+`workflow_start_confirmed` event/receipt for the exact run, workflow, owner,
+manifest, and payload identity. An unconfirmed Workflow stops before transcript,
+R2, provider, artifact, or business D1 access. Pre-start unknown outcomes keep
+the main DO run queued while the start ledger records the hold; reconciliation
+persists its receipt first, then replays the three server-owned D1 CAS steps
+(`needs_action` same-state reconciliation, `retrying`, and `queued`). Each step
+has an independent event identity and may be retried after a lost response.
+Only the known-existing Workflow path writes the single confirmation event and
+then continues the same run; it never creates a second Workflow instance.
 
 ## Wave 1 Five-Agent Publishing Projection
 

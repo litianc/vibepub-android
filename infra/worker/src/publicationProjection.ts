@@ -1,5 +1,7 @@
 import {
   canonicalJson,
+  isExactWave1PublicationSkillPins,
+  isExactWave2PublicationSkillPins,
   PUBLICATION_AGENT_VERSIONS,
   PUBLICATION_SKILL_PINS,
 } from "./editorialContracts";
@@ -198,14 +200,14 @@ const SUCCESSFUL_STATES = new Set<PublicationState>(PUBLICATION_STATES.filter((s
 ));
 
 const ALLOWED_PROJECTION_TRANSITIONS: Record<PublicationState, readonly PublicationState[]> = {
-  queued: ["transcribing", "failed", "cancelled"],
+  queued: ["transcribing", "needs_action", "failed", "cancelled"],
   transcribing: ["transcript_ready", "failed", "cancelled"],
   transcript_ready: ["writing", "failed", "cancelled"],
-  writing: ["draft_generated", "failed", "cancelled"],
+  writing: ["draft_generated", "needs_action", "failed", "cancelled"],
   draft_generated: ["reviewing", "failed", "cancelled"],
   reviewing: ["revising", "reviewed", "needs_action", "failed", "cancelled"],
   revising: ["reviewing", "needs_action", "failed", "cancelled"],
-  reviewed: ["content_frozen", "failed", "cancelled"],
+  reviewed: ["content_frozen", "needs_action", "failed", "cancelled"],
   content_frozen: ["visual_planning", "failed", "cancelled"],
   visual_planning: ["visual_generating", "failed", "cancelled"],
   visual_generating: ["visual_ready", "needs_action", "failed", "cancelled"],
@@ -263,6 +265,7 @@ export type PublicationProjectionTransitionOptions = {
   nextAction?: string | null;
   errorCode?: string | null;
   retryCount?: number;
+  allowSameState?: boolean;
 };
 
 /**
@@ -275,7 +278,9 @@ export function projectPublicationTransition(
   targetState: PublicationState,
   options: PublicationProjectionTransitionOptions,
 ): PublicationRunRow {
-  const allowed = targetState === "retrying"
+  const allowed = options.allowSameState && targetState === current.state
+    ? true
+    : targetState === "retrying"
     ? (current.state === "failed" || current.state === "needs_action")
     : current.state === "retrying"
       ? targetState === current.resume_state || targetState === "cancelled"
@@ -328,6 +333,99 @@ export function projectPublicationTransition(
     last_event_payload_hash: options.eventPayloadHash,
     last_event_created_at: options.eventCreatedAt,
   };
+}
+
+export type SystemPublicationTransitionInput = {
+  runId: string;
+  auth: PublicationAuthContext;
+  targetState: PublicationState;
+  expectedStateRevision?: number;
+  options: PublicationProjectionTransitionOptions;
+};
+
+/**
+ * Server-owned CAS for durable Workflow/artifact progress. It intentionally
+ * has no human-action fields and writes the projection plus matching event in
+ * one D1 batch so a stale workflow cannot leave an orphan event.
+ */
+export async function applySystemPublicationTransition(
+  db: D1Database,
+  input: SystemPublicationTransitionInput,
+): Promise<{ run: PublicationRunRow; replayed: boolean }> {
+  const current = await first<PublicationRunRow>(db, `
+    SELECT * FROM publication_runs
+    WHERE run_id = ? AND user_id = ? AND workspace_id = ? LIMIT 1
+  `, [input.runId, input.auth.userId, input.auth.workspaceId]);
+  if (!current) throw new PublicationProjectionError("publication_run_not_found", "publication run not found", 404);
+
+  const expectedRevision = input.expectedStateRevision ?? current.state_revision;
+  if (current.state_revision !== expectedRevision) {
+    if (current.last_event_id === input.options.eventId &&
+        current.last_event_idempotency_key === input.options.eventIdempotencyKey &&
+        current.last_event_payload_hash === input.options.eventPayloadHash) {
+      return { run: current, replayed: true };
+    }
+    throw new PublicationProjectionError("publication_revision_conflict", "publication run revision is stale", 409);
+  }
+  if (current.last_event_id === input.options.eventId &&
+      current.last_event_idempotency_key === input.options.eventIdempotencyKey &&
+      current.last_event_payload_hash === input.options.eventPayloadHash) {
+    return { run: current, replayed: true };
+  }
+
+  const currentEventTime = Date.parse(current.last_event_created_at || current.updated_at || current.created_at);
+  const requestedEventTime = Date.parse(input.options.eventCreatedAt);
+  const eventCreatedAt = Number.isFinite(currentEventTime) && (!Number.isFinite(requestedEventTime) || requestedEventTime <= currentEventTime)
+    ? new Date(currentEventTime + 1).toISOString()
+    : input.options.eventCreatedAt;
+  const projected = projectPublicationTransition(current, input.targetState, { ...input.options, eventCreatedAt });
+  const eventStage = publicationStage(projected.last_successful_state);
+  let batch: D1Result[];
+  try {
+    batch = await db.batch([
+      db.prepare(`UPDATE publication_runs
+        SET state = ?, run_status = ?, state_revision = ?, progress_percent = ?, resume_state = ?,
+            last_successful_state = ?, last_successful_progress_percent = ?, retry_count = ?,
+            next_action = ?, error_code = ?, updated_at = ?, last_event_id = ?, last_event_type = ?,
+            last_event_idempotency_key = ?, last_event_payload_hash = ?, last_event_created_at = ?
+        WHERE run_id = ? AND user_id = ? AND workspace_id = ? AND state_revision = ?`)
+        .bind(
+          projected.state, projected.run_status, projected.state_revision, projected.progress_percent,
+          projected.resume_state, projected.last_successful_state, projected.last_successful_progress_percent,
+          projected.retry_count, projected.next_action, projected.error_code, projected.updated_at,
+          projected.last_event_id, projected.last_event_type, projected.last_event_idempotency_key,
+          projected.last_event_payload_hash, projected.last_event_created_at,
+          input.runId, input.auth.userId, input.auth.workspaceId, expectedRevision,
+        ),
+      db.prepare(`INSERT INTO publication_run_events
+        (event_id, run_id, user_id, workspace_id, recording_id, revision, event_type, state,
+         publication_stage, progress_percent, retry_count, next_action, error_code,
+         idempotency_key, payload_hash, created_at)
+        SELECT ?, run_id, user_id, workspace_id, recording_id, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        FROM publication_runs
+        WHERE run_id = ? AND user_id = ? AND workspace_id = ? AND state_revision = ?`)
+        .bind(
+          projected.last_event_id, projected.state_revision, projected.last_event_type, projected.state,
+          eventStage, projected.progress_percent, projected.retry_count, projected.next_action,
+          projected.error_code, projected.last_event_idempotency_key, projected.last_event_payload_hash,
+          projected.last_event_created_at, input.runId, input.auth.userId, input.auth.workspaceId,
+          projected.state_revision,
+        ),
+    ]);
+  } catch (error) {
+    if (/UNIQUE constraint failed: publication_run_events/i.test(String((error as { message?: unknown })?.message || error))) {
+      throw new PublicationProjectionError("publication_revision_conflict", "publication run changed during transition", 409);
+    }
+    throw error;
+  }
+  if (Number(batch[0]?.meta?.changes || 0) !== 1) {
+    throw new PublicationProjectionError("publication_revision_conflict", "publication run changed during transition", 409);
+  }
+  const after = await first<PublicationRunRow>(db, `
+    SELECT * FROM publication_runs WHERE run_id = ? AND user_id = ? AND workspace_id = ? LIMIT 1
+  `, [input.runId, input.auth.userId, input.auth.workspaceId]);
+  if (!after) throw new PublicationProjectionError("publication_run_unavailable", "publication run disappeared", 503);
+  return { run: after, replayed: false };
 }
 
 function parseJson<T>(value: string | null | undefined, fallback: T): T {
@@ -574,14 +672,16 @@ async function sourceRun(
     LIMIT 1
   `, [input.sourceRunId, input.userId, input.workspaceId, input.articleId, input.recordingId]);
   if (!row) return null;
-  const agentVersions = parseJson(row.agent_versions_json, {});
-  const skillPins = parseJson(row.skill_pins_json, {});
+  const agentVersions = parseJson<Record<string, unknown>>(row.agent_versions_json, {});
+  const skillPins = parseJson<Record<string, unknown>>(row.skill_pins_json, {});
+  const wave1SkillPins = isExactWave1PublicationSkillPins(skillPins);
+  const wave2SkillPins = isExactWave2PublicationSkillPins(skillPins);
   if (
     row.schema_version !== CANONICAL_EDITORIAL_SCHEMA_VERSION ||
     row.workflow_version !== CANONICAL_EDITORIAL_WORKFLOW_VERSION ||
     row.policy_version !== CANONICAL_EDITORIAL_POLICY_VERSION ||
     canonicalJson(agentVersions) !== canonicalJson(PUBLICATION_AGENT_VERSIONS) ||
-    canonicalJson(skillPins) !== canonicalJson(PUBLICATION_SKILL_PINS)
+    !wave1SkillPins && !wave2SkillPins
   ) {
     throw new PublicationProjectionError(
       "publication_source_not_v3",
@@ -609,6 +709,8 @@ async function sourceRun(
       policy_version: row.policy_version,
       agent_versions: agentVersions,
       skill_pins: skillPins,
+      adapter_pins: skillPins.adapter_pins,
+      model_pins: skillPins.model_pins,
       idempotency_key: row.idempotency_key,
       payload_hash: row.payload_hash,
     }),
@@ -649,8 +751,9 @@ export async function createPublicationRun(
     return { run: publicationResponse(existing), replayed: true };
   }
   const now = new Date().toISOString();
-  const agents = JSON.stringify(publicationAgentVersions());
-  const skills = JSON.stringify(publicationSkillPins());
+  const sourceManifest = parseJson<Record<string, unknown>>(canonical.manifest_json, {});
+  const agents = canonicalJson(sourceManifest.agent_versions);
+  const skills = canonicalJson(sourceManifest.skill_pins);
   await db.batch([
     db.prepare(`INSERT INTO publication_runs
       (run_id, source_run_id, user_id, workspace_id, article_id, recording_id,

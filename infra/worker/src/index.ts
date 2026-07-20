@@ -10,7 +10,9 @@ import {
   EditorialWritingAgent,
   handleEditorialOrchestrationInternalRoute,
 } from "./editorialAgents";
-import type { EditorialWorkflowParams } from "./editorialAgents";
+import type { EditorialRuntimeEnv, EditorialWorkflowParams } from "./editorialAgents";
+import { FiveAgentPublishingWorkflow, handleFiveAgentPublishingInternalRoute } from "./fiveAgentPublishing";
+import type { FiveAgentWorkflowParams } from "./fiveAgentPublishing";
 import {
   assertPublicationAction,
   getPublicationRun,
@@ -31,6 +33,7 @@ export {
   EditorialVisualProductionAgent,
   EditorialWechatPublishingAgent,
   EditorialWorkflow,
+  FiveAgentPublishingWorkflow,
 };
 
 export interface Env {
@@ -68,7 +71,9 @@ export interface Env {
   EDITORIAL_WORKFLOW_V2_ALLOWLIST?: string;
   FIVE_AGENT_PUBLISHING_V3?: string;
   FIVE_AGENT_PUBLISHING_V3_ALLOWLIST?: string;
+  FIVE_AGENT_PUBLISHING_TOKEN?: string;
   EDITORIAL_WORKFLOW: Workflow<EditorialWorkflowParams>;
+  FIVE_AGENT_PUBLISHING_WORKFLOW: Workflow<FiveAgentWorkflowParams>;
   EDITORIAL_COORDINATOR: DurableObjectNamespace<EditorialCoordinatorAgent>;
   EDITORIAL_WRITING: DurableObjectNamespace<EditorialWritingAgent>;
   EDITORIAL_REVIEW: DurableObjectNamespace<EditorialReviewAgent>;
@@ -178,9 +183,17 @@ export default {
         return json({ error: "unauthorized" }, 401);
       }
       if (url.pathname.startsWith("/api/internal/editorial/runs")) {
-        return handleEditorialOrchestrationInternalRoute(request, env, url);
+        const editorialEnv = env as unknown as EditorialRuntimeEnv;
+        return handleEditorialOrchestrationInternalRoute(request, editorialEnv, url);
       }
       return handleEditorialInternalRoute(request, env, url);
+    }
+
+    if (url.pathname.startsWith("/api/internal/v3/publishing/")) {
+      if (!(await isFiveAgentPublishingAuthorized(request, env))) {
+        return json({ error: "unauthorized" }, 401);
+      }
+      return handleFiveAgentPublishingInternalRoute(request, env, url);
     }
 
     if (!url.pathname.startsWith("/api/")) {
@@ -772,6 +785,14 @@ async function isInternalAuthorized(request: Request, env: Env): Promise<boolean
   if (internal && await secureTokenEquals(internal, token)) return true;
   const legacy = env.FILES_TOKEN?.trim();
   return Boolean(legacy && await secureTokenEquals(legacy, token));
+}
+
+async function isFiveAgentPublishingAuthorized(request: Request, env: Env): Promise<boolean> {
+  const configured = env.FIVE_AGENT_PUBLISHING_TOKEN?.trim();
+  if (!configured) return false;
+  const authorization = request.headers.get("Authorization") || "";
+  const bearer = authorization.match(/^Bearer\s+(.+)$/i)?.[1] || request.headers.get("X-Five-Agent-Publishing-Token") || "";
+  return Boolean(bearer) && await secureTokenEquals(configured, bearer);
 }
 
 function requireVerifiedEmail(auth: AuthContext): Response | null {

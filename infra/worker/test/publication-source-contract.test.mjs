@@ -43,6 +43,31 @@ test("publication creation accepts only the strict five-agent v3 source contract
   assert.equal(db.batchCalled, true);
 });
 
+test("publication creation accepts the Wave2B nested pin manifest without changing its canonical pins", async () => {
+  const dynamicPins = {
+    ...projectionModule.publicationSkillPins(),
+    style: { id: "style_litianc_default", version: "2026-07-05" },
+    adapter_pins: {
+      writing: "writing-v3.adapter.1.0.0",
+      editorial_review: "editorial-review.adapter.1.0.0",
+    },
+    model_pins: { writing: "glm-5.2", editorial_review: "rules-only" },
+  };
+  const v3 = sourceRow({
+    schema_version: projectionModule.CANONICAL_EDITORIAL_SCHEMA_VERSION,
+    workflow_version: projectionModule.CANONICAL_EDITORIAL_WORKFLOW_VERSION,
+    policy_version: projectionModule.CANONICAL_EDITORIAL_POLICY_VERSION,
+    agent_versions_json: JSON.stringify(projectionModule.publicationAgentVersions()),
+    skill_pins_json: JSON.stringify(dynamicPins),
+  });
+  const db = mockDb(v3, publicationRow());
+  const result = await projectionModule.createPublicationRun(db, input());
+  assert.equal(result.replayed, false);
+  assert.equal(db.batchCalled, true);
+  const publicationInsert = db.batchStatements[0];
+  assert.deepEqual(JSON.parse(publicationInsert.values[13]), dynamicPins);
+});
+
 test("projection helper keeps revision progress in the review step", () => {
   const current = {
     ...publicationRow(),
@@ -131,10 +156,12 @@ function publicationRow() {
 function mockDb(source, created = null) {
   const db = {
     batchCalled: false,
+    batchStatements: [],
     prepare(sql) {
       return {
         bind(...values) {
           return {
+            values,
             first: async () => {
               if (sql.includes("FROM editorial_runs")) return source;
               if (sql.includes("FROM publication_runs")) return db.batchCalled ? created : null;
@@ -146,8 +173,9 @@ function mockDb(source, created = null) {
         },
       };
     },
-    async batch() {
+    async batch(statements) {
       db.batchCalled = true;
+      db.batchStatements = statements;
       return [];
     },
   };

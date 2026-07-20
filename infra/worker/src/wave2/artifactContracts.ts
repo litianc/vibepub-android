@@ -76,7 +76,7 @@ export type ArticleDraft = {
   model_version: string;
   formatting_skill: VersionPin;
   profile_pins: Record<string, VersionPin>;
-  style_profile_body_hash: string;
+  style_profile_body_hash?: string;
   content_hash: string;
   claim_ledger: ClaimLedgerEntry[];
   changed_block_ids: string[];
@@ -392,7 +392,7 @@ async function normalizePayload(kind: Wave2ArtifactKind, value: unknown): Promis
       parent_dispatch_artifact_id: record.parent_dispatch_artifact_id === null ? null : id(record.parent_dispatch_artifact_id, "parent_dispatch_artifact_id"),
       title, body, blocks, title_candidates: stringArray(record.title_candidates, "title_candidates", 20), selected_title: text(record.selected_title, "selected_title", 2_000), cover_title: stringArray(record.cover_title, "cover_title", 4),
       adapter_version: text(record.adapter_version, "adapter_version", 120), model_version: text(record.model_version, "model_version", 120), formatting_skill: pin(record.formatting_skill, "formatting_skill"),
-      profile_pins: pinMap(record.profile_pins, "profile_pins"), style_profile_body_hash: hash(record.style_profile_body_hash, "style_profile_body_hash"), content_hash: hash(record.content_hash, "content_hash"),
+      profile_pins: pinMap(record.profile_pins, "profile_pins"), ...(record.style_profile_body_hash === undefined ? {} : { style_profile_body_hash: hash(record.style_profile_body_hash, "style_profile_body_hash") }), content_hash: hash(record.content_hash, "content_hash"),
       claim_ledger: normalizeClaimLedger(record.claim_ledger, blocks),
       changed_block_ids: stringArray(record.changed_block_ids, "changed_block_ids"), source_hash: hash(record.source_hash, "source_hash"),
     };
@@ -474,7 +474,10 @@ async function normalizePayload(kind: Wave2ArtifactKind, value: unknown): Promis
 
 function pinHashMap(value: unknown): Record<string, string> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Wave2ContractError("invalid_pin_map", "protected hashes are invalid");
-  return Object.fromEntries(Object.entries(value).map(([name, value]) => [id(name, "protected_block_hashes.name"), hash(value, `protected_block_hashes.${name}`)]));
+  return Object.fromEntries(Object.entries(value).map(([name, value]) => {
+    if (name !== "@title" && !/^block_v1_\d+$/.test(name)) throw new Wave2ContractError("invalid_pin_map", "protected hashes must target @title or stable blocks");
+    return [name, hash(value, `protected_block_hashes.${name}`)];
+  }));
 }
 
 export async function normalizeArtifactEnvelope(input: {

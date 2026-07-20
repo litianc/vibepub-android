@@ -36,7 +36,7 @@ type DraftPayload = Record<string, unknown> & {
   model_version: string;
   formatting_skill: { id: string; version: string };
   profile_pins: Record<string, { id: string; version: string }>;
-  style_profile_body_hash: string;
+  style_profile_body_hash?: string;
 };
 
 type CurrentDraft = ArtifactRef & { payload: DraftPayload };
@@ -110,7 +110,7 @@ export type V3ArticleDraft = {
   model_version: string;
   formatting_skill: typeof V3_FORMATTING_SKILL;
   profile_pins: Record<string, { id: string; version: string }>;
-  style_profile_body_hash: string;
+  style_profile_body_hash?: string;
   content_hash: string;
   claim_ledger: Array<{
     claim_id: string;
@@ -282,7 +282,7 @@ async function normalizeModelDraft(value: unknown, request: V3WriteRequest, styl
     model_version: modelVersion,
     formatting_skill: V3_FORMATTING_SKILL,
     profile_pins: { style: { id: style.id, version: style.version }, formatting: V3_FORMATTING_SKILL },
-    style_profile_body_hash: style.bodyHash,
+    ...(style.id === V3_DEFAULT_STYLE_PROFILE.id ? {} : { style_profile_body_hash: style.bodyHash }),
     content_hash: await contentHash(title, body, blocks),
     claim_ledger: normalizeClaims(record.claim_ledger, blocks),
     changed_block_ids: [],
@@ -329,7 +329,10 @@ async function validateRevisionInputs(request: V3WriteRequest, style: ResolvedSt
   if (draftPayload.article_id !== request.article_id || draftPayload.run_id !== request.run_id || draftPayload.recording_id !== request.recording_id || draftPayload.revision !== 1 || typeof draftPayload.title !== "string" || typeof draftPayload.body !== "string" || !validHash(draftPayload.source_hash) || !validHash(draftPayload.content_hash) || !Array.isArray(draftPayload.blocks) || draftPayload.blocks.some(block => !isRecord(block)) || !Array.isArray(draftPayload.claim_ledger) || !isRecord(draftPayload.formatting_skill) || !isRecord(draftPayload.profile_pins)) fail("revision_input_invalid", 409);
   if (!Array.isArray(draftPayload.title_candidates) || draftPayload.title_candidates.length === 0 || draftPayload.title_candidates.length > 20 || draftPayload.title_candidates.some(candidate => typeof candidate !== "string" || candidate.length === 0 || candidate.length > 2_000) || typeof draftPayload.selected_title !== "string" || !Array.isArray(draftPayload.cover_title) || draftPayload.cover_title.length < 1 || draftPayload.cover_title.length > 4 || draftPayload.cover_title.some(candidate => typeof candidate !== "string" || candidate.length === 0 || candidate.length > 2_000)) fail("revision_input_invalid", 409);
   validateTitleMetadata(draftPayload.title, draftPayload.title_candidates as string[], draftPayload.selected_title, draftPayload.cover_title as string[], "revision_input_invalid", 409);
-  if (draftPayload.adapter_version !== V3_WRITING_ADAPTER_VERSION || draftPayload.model_version !== modelVersion || draftPayload.formatting_skill.id !== V3_FORMATTING_SKILL.id || draftPayload.formatting_skill.version !== V3_FORMATTING_SKILL.version || !isRecord(draftPayload.profile_pins.style) || draftPayload.profile_pins.style.id !== style.id || draftPayload.profile_pins.style.version !== style.version || !isRecord(draftPayload.profile_pins.formatting) || draftPayload.profile_pins.formatting.id !== V3_FORMATTING_SKILL.id || draftPayload.profile_pins.formatting.version !== V3_FORMATTING_SKILL.version || draftPayload.style_profile_body_hash !== style.bodyHash) fail("style_profile_pin_conflict", 409);
+  const styleBodyHashMatches = style.id === V3_DEFAULT_STYLE_PROFILE.id
+    ? draftPayload.style_profile_body_hash === undefined
+    : draftPayload.style_profile_body_hash === style.bodyHash;
+  if (draftPayload.adapter_version !== V3_WRITING_ADAPTER_VERSION || draftPayload.model_version !== modelVersion || draftPayload.formatting_skill.id !== V3_FORMATTING_SKILL.id || draftPayload.formatting_skill.version !== V3_FORMATTING_SKILL.version || !isRecord(draftPayload.profile_pins.style) || draftPayload.profile_pins.style.id !== style.id || draftPayload.profile_pins.style.version !== style.version || !isRecord(draftPayload.profile_pins.formatting) || draftPayload.profile_pins.formatting.id !== V3_FORMATTING_SKILL.id || draftPayload.profile_pins.formatting.version !== V3_FORMATTING_SKILL.version || !styleBodyHashMatches) fail("style_profile_pin_conflict", 409);
   if (request.source_hash !== undefined && request.source_hash !== draftPayload.source_hash) fail("source_hash_mismatch", 409);
   const currentBlocks = await normalizeBlocks(draftPayload.blocks, undefined, true, "revision_input_invalid", 409);
   normalizeClaims(draftPayload.claim_ledger, currentBlocks, "revision_input_invalid", 409);

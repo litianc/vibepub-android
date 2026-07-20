@@ -1847,7 +1847,16 @@ async function loadWorker() {
         'const handleEditorialOrchestrationInternalRoute = async () => new Response(JSON.stringify({ error: "editorial_workflow_disabled" }), { status: 404 });',
       ].join("\n"),
     );
-  return (await import(moduleDataUrl(source))).default;
+  // The legacy data-URL harness does not load the Agents SDK or the V3
+  // workflow module. Keep the module boundary explicit so HTTP contract tests
+  // can still import index.ts without resolving a relative data-URL import.
+  const fiveAgentStub = [
+    "class FiveAgentPublishingWorkflow {}",
+    'const handleFiveAgentPublishingInternalRoute = async () => new Response(JSON.stringify({ error: "editorial_workflow_disabled" }), { status: 404 });',
+  ].join("\n");
+  const withFiveAgentStub = source
+    .replace(/import\s+\{\s*FiveAgentPublishingWorkflow,\s*handleFiveAgentPublishingInternalRoute\s*\}\s+from\s+"\.\/fiveAgentPublishing";/, fiveAgentStub);
+  return (await import(moduleDataUrl(withFiveAgentStub))).default;
 }
 
 function transpile(source, fileName) {

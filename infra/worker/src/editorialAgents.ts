@@ -8,13 +8,66 @@ import {
   EDITORIAL_AGENT_IDS,
   PUBLICATION_AGENT_IDS,
   PUBLICATION_AGENT_VERSIONS as CONTRACT_PUBLICATION_AGENT_VERSIONS,
+  isExactWave2PublicationSkillPins,
+  PUBLICATION_WAVE2_ADAPTER_PINS,
+  PUBLICATION_SKILL_PINS,
   canonicalJson,
 } from "./editorialContracts";
 import type { EditorialAgentId } from "./editorialContracts";
+import { artifactKey, WAVE2_ARTIFACT_KINDS, WAVE2_SCHEMA_VERSION, validateArtifactKey } from "./wave2/artifactContracts";
 
 export const EDITORIAL_WORKFLOW_VERSION = "editorial-workflow.v2";
 export const EDITORIAL_POLICY_VERSION = "editorial-policy.v2";
 export const EDITORIAL_SCHEMA_VERSION = "editorial-orchestration.v2";
+const WAVE2B_OPAQUE_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/;
+const WAVE2B_STATES = ["queued", "transcribing", "transcript_ready", "writing", "draft_generated", "reviewing", "revising", "reviewed", "content_frozen", "needs_action", "failed"] as const;
+const WAVE2B_EVENT_TYPES = ["run_queued", "transcription_started", "transcript_ready", "writing_started", "draft_generated", "review_started", "reviewed", "revision_requested", "content_frozen", "needs_action", "failed", "artifact_committed"] as const;
+const WAVE2B_PROGRESS: Record<string, number> = {
+  queued: 0,
+  transcribing: 10,
+  transcript_ready: 20,
+  writing: 28,
+  draft_generated: 38,
+  reviewing: 45,
+  revising: 50,
+  reviewed: 55,
+  content_frozen: 62,
+};
+
+function deriveWave2BProjection(current: Record<string, unknown>, state: string, nextAction?: string | null, errorCode?: string | null): {
+  runStatus: "active" | "needs_action" | "failed";
+  progress: number;
+  resumeState: string | null;
+  lastSuccessfulState: string;
+  lastSuccessfulProgress: number;
+} {
+  const oldLastSuccessfulState = String(current.last_successful_state || "queued");
+  const oldLastSuccessfulProgress = Number(current.last_successful_progress_percent || 0);
+  const exceptional = state === "needs_action" || state === "failed";
+  const progress = exceptional
+    ? oldLastSuccessfulProgress
+    : Math.max(oldLastSuccessfulProgress, WAVE2B_PROGRESS[state] ?? 0);
+  return {
+    runStatus: state === "needs_action" ? "needs_action" : state === "failed" ? "failed" : "active",
+    progress,
+    resumeState: null,
+    lastSuccessfulState: exceptional ? oldLastSuccessfulState : state,
+    lastSuccessfulProgress: progress,
+  };
+}
+const WAVE2B_TRANSITIONS: Record<string, readonly string[]> = {
+  queued: ["transcribing", "needs_action", "failed"],
+  transcribing: ["transcript_ready", "failed"],
+  transcript_ready: ["writing", "failed"],
+  writing: ["draft_generated", "needs_action", "failed"],
+  draft_generated: ["reviewing", "failed"],
+  reviewing: ["revising", "reviewed", "needs_action", "failed"],
+  revising: ["writing", "needs_action", "failed"],
+  reviewed: ["content_frozen", "needs_action"],
+  content_frozen: [],
+  needs_action: ["writing", "reviewing", "failed"],
+  failed: [],
+};
 
 export const EDITORIAL_AGENT_VERSIONS: Record<EditorialAgentId, string> = {
   editorial_coordinator: "editorial-coordinator.agent.v2",
@@ -62,7 +115,20 @@ export type EditorialAgentState = {
 };
 
 export type EditorialRuntimeEnv = Cloudflare.Env & {
+  DB: D1Database;
+  FILES_BUCKET: R2Bucket;
+  EDITORIAL_COORDINATOR: DurableObjectNamespace<EditorialCoordinatorAgent>;
+  FIVE_AGENT_PUBLISHING_V3?: string;
+  FIVE_AGENT_PUBLISHING_V3_ALLOWLIST?: string;
   EDITORIAL_WORKFLOW: Workflow<EditorialWorkflowParams>;
+  FIVE_AGENT_PUBLISHING_WORKFLOW?: Workflow<FiveAgentRunInput>;
+  WRITING_AGENT?: Fetcher;
+  REVIEW_AGENT?: Fetcher;
+  WRITING_AGENT_BASE_URL?: string;
+  REVIEW_AGENT_BASE_URL?: string;
+  WRITING_AGENT_TOKEN?: string;
+  REVIEW_AGENT_TOKEN?: string;
+  GLM_MODEL?: string;
 };
 
 type RunRow = {
@@ -218,8 +284,71 @@ type HumanActionRow = {
   result_json: string;
 };
 
+export type FiveAgentRunInput = {
+  run_id: string;
+  article_id: string;
+  recording_id: number;
+  user_id: string;
+  workspace_id: string;
+  payload_hash: string;
+  manifest_hash: string;
+  manifest_json: string;
+  workflow_id: string;
+  created_at: string;
+};
+
+export type FiveAgentStartStatus = "brief_storage_unknown" | "workflow_create_unknown";
+
+export type FiveAgentWorkflowStartHold = {
+  code: "workflow_create_unknown" | "five_agent_workflow_reconciliation_required";
+  status: 503;
+  start_status: "workflow_create_unknown";
+};
+
+export type FiveAgentWorkflowStartResult = {
+  run: Record<string, unknown> | null;
+  replayed: boolean;
+  workflow_status: string;
+  start_hold?: FiveAgentWorkflowStartHold;
+};
+
+type FiveAgentStartLedgerRow = {
+  workflow_id: string;
+  run_id: string;
+  status: "intent" | "needs_action" | "started" | "reconciled";
+  start_status: FiveAgentStartStatus | null;
+  error_code: string | null;
+  next_action: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type FiveAgentEnvelopeMetadata = {
+  schema_version: string;
+  artifact_id: string;
+  artifact_key: string;
+  kind: string;
+  run_id: string;
+  article_id: string;
+  recording_id: number;
+  user_id: string;
+  workspace_id: string;
+  producer_role: string;
+  producer_version: string;
+  workflow_version: string;
+  policy_version: string;
+  input_artifact_ids_json: string;
+  payload_hash: string;
+  payload_length: number;
+  idempotency_key: string;
+  storage_ref: string;
+  created_at: string;
+  skill_pins_hash: string;
+  envelope_identity_hash: string;
+};
+
 export class EditorialRuntimeError extends Error {
-  constructor(public readonly code: string, message: string, public readonly status = 409) {
+  constructor(public readonly code: string, message: string, public readonly status = 409, public readonly retryCount = 1) {
     super(message);
     this.name = "EditorialRuntimeError";
   }
@@ -273,6 +402,45 @@ function parseJson<T>(value: string): T {
 
 function safeJson(value: unknown): string {
   return canonicalJson(value);
+}
+
+function envelopeIdentityMaterial(metadata: FiveAgentEnvelopeMetadata): Record<string, unknown> {
+  return {
+    schema_version: metadata.schema_version,
+    artifact_id: metadata.artifact_id,
+    artifact_key: metadata.artifact_key,
+    kind: metadata.kind,
+    run_id: metadata.run_id,
+    article_id: metadata.article_id,
+    recording_id: metadata.recording_id,
+    user_id: metadata.user_id,
+    workspace_id: metadata.workspace_id,
+    producer_role: metadata.producer_role,
+    producer_version: metadata.producer_version,
+    workflow_version: metadata.workflow_version,
+    policy_version: metadata.policy_version,
+    input_artifact_ids_json: metadata.input_artifact_ids_json,
+    payload_hash: metadata.payload_hash,
+    payload_length: metadata.payload_length,
+    idempotency_key: metadata.idempotency_key,
+    storage_ref: metadata.storage_ref,
+    created_at: metadata.created_at,
+    skill_pins_hash: metadata.skill_pins_hash,
+  };
+}
+
+function expectedArtifactSkillPins(kind: string, manifest: Record<string, unknown>): Record<string, unknown> {
+  const pins = manifest.skill_pins;
+  if (!pins || typeof pins !== "object" || Array.isArray(pins)) {
+    throw new EditorialRuntimeError("manifest_pin_conflict", "Wave2B run manifest skill pins are invalid", 409);
+  }
+  const skillPins = pins as Record<string, unknown>;
+  if (kind === "article_brief" || kind === "article_draft" || kind === "frozen_article_version") {
+    return { style: skillPins.style, formatting: skillPins.formatting };
+  }
+  if (kind === "review_report") return { review: skillPins.review };
+  if (kind === "revision_dispatch") return { writing: skillPins.writing, review: skillPins.review };
+  throw new EditorialRuntimeError("artifact_metadata_invalid", "Wave2B artifact kind is not allowed", 409);
 }
 
 function runManifestPins(run: RunRow): {
@@ -381,6 +549,28 @@ function laterTimestamp(previous: string): string {
   if (candidate > previous) return candidate;
   const parsed = Date.parse(previous);
   return Number.isFinite(parsed) ? new Date(parsed + 1).toISOString() : candidate;
+}
+
+function timestampAtOrAfter(previous: string, candidate: string): string {
+  const previousMs = Date.parse(previous);
+  const candidateMs = Date.parse(candidate);
+  if (!Number.isFinite(previousMs)) return candidate;
+  if (!Number.isFinite(candidateMs) || candidateMs <= previousMs) return new Date(previousMs + 1).toISOString();
+  return candidate;
+}
+
+function isStructuredWorkflowNotFound(error: unknown): boolean {
+  let current: unknown = error;
+  for (let depth = 0; depth < 3 && current; depth += 1) {
+    if (typeof current !== "object") return false;
+    const record = current as Record<string, unknown>;
+    const status = record.status;
+    const code = record.code;
+    if (status === 404 || status === "404" || code === 404 || code === "404" ||
+        code === "NOT_FOUND" || code === "WORKFLOW_NOT_FOUND") return true;
+    current = record.cause;
+  }
+  return false;
 }
 
 /**
@@ -736,6 +926,139 @@ export class EditorialCoordinatorAgent extends Agent<EditorialRuntimeEnv, Editor
       mirrored_at TEXT NOT NULL,
       FOREIGN KEY(intent_id) REFERENCES editorial_phase2_terminal_intents(intent_id)
     )`;
+    this.sql`CREATE TABLE IF NOT EXISTS editorial_wave2b_runs (
+      run_id TEXT PRIMARY KEY,
+      article_id TEXT NOT NULL,
+      recording_id INTEGER NOT NULL,
+      user_id TEXT NOT NULL,
+      workspace_id TEXT NOT NULL,
+      payload_hash TEXT NOT NULL,
+      manifest_hash TEXT NOT NULL,
+      manifest_json TEXT NOT NULL,
+      workflow_id TEXT,
+      state TEXT NOT NULL,
+      run_status TEXT NOT NULL DEFAULT 'active',
+      progress_percent INTEGER NOT NULL DEFAULT 0,
+      resume_state TEXT,
+      last_successful_state TEXT NOT NULL DEFAULT 'queued',
+      last_successful_progress_percent INTEGER NOT NULL DEFAULT 0,
+      retry_count INTEGER NOT NULL DEFAULT 0,
+      state_revision INTEGER NOT NULL DEFAULT 0,
+      revision_count INTEGER NOT NULL DEFAULT 0,
+      approval_state TEXT NOT NULL DEFAULT 'not_required',
+      next_action TEXT,
+      error_code TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(user_id, workspace_id, article_id, run_id)
+    )`;
+    // Older V2 DO instances may already have the Wave2B table. Add only the
+    // redacted projection columns needed for restart-safe reconciliation.
+    try { this.sql`ALTER TABLE editorial_wave2b_runs ADD COLUMN run_status TEXT NOT NULL DEFAULT 'active'`; } catch {}
+    try { this.sql`ALTER TABLE editorial_wave2b_runs ADD COLUMN progress_percent INTEGER NOT NULL DEFAULT 0`; } catch {}
+    try { this.sql`ALTER TABLE editorial_wave2b_runs ADD COLUMN resume_state TEXT`; } catch {}
+    try { this.sql`ALTER TABLE editorial_wave2b_runs ADD COLUMN last_successful_state TEXT NOT NULL DEFAULT 'queued'`; } catch {}
+    try { this.sql`ALTER TABLE editorial_wave2b_runs ADD COLUMN last_successful_progress_percent INTEGER NOT NULL DEFAULT 0`; } catch {}
+    try { this.sql`ALTER TABLE editorial_wave2b_runs ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0`; } catch {}
+    this.sql`CREATE TABLE IF NOT EXISTS editorial_wave2b_outbox (
+      artifact_id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      workspace_id TEXT NOT NULL,
+      envelope_json TEXT NOT NULL,
+      payload_hash TEXT NOT NULL,
+      storage_ref TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      UNIQUE(run_id, artifact_id),
+      FOREIGN KEY(run_id) REFERENCES editorial_wave2b_runs(run_id)
+    )`;
+    this.sql`CREATE TABLE IF NOT EXISTS editorial_wave2b_receipts (
+      artifact_id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      payload_hash TEXT NOT NULL,
+      mirrored_at TEXT NOT NULL,
+      FOREIGN KEY(artifact_id) REFERENCES editorial_wave2b_outbox(artifact_id)
+    )`;
+    this.sql`CREATE TABLE IF NOT EXISTS editorial_wave2b_calls (
+      call_id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      call_kind TEXT NOT NULL,
+      idempotency_key TEXT NOT NULL,
+      attempt INTEGER NOT NULL,
+      created_at TEXT NOT NULL,
+      UNIQUE(run_id, call_kind, idempotency_key, attempt),
+      FOREIGN KEY(run_id) REFERENCES editorial_wave2b_runs(run_id)
+    )`;
+    this.sql`CREATE TABLE IF NOT EXISTS editorial_wave2b_workflow_starts (
+      workflow_id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      status TEXT NOT NULL CHECK(status IN ('intent', 'started', 'reconciled', 'unknown')),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY(run_id) REFERENCES editorial_wave2b_runs(run_id)
+    )`;
+    this.sql`CREATE TABLE IF NOT EXISTS editorial_wave2b_start_ledger (
+      workflow_id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      status TEXT NOT NULL CHECK(status IN ('intent', 'needs_action', 'started', 'reconciled')),
+      start_status TEXT CHECK(start_status IN ('brief_storage_unknown', 'workflow_create_unknown') OR start_status IS NULL),
+      error_code TEXT,
+      next_action TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY(run_id) REFERENCES editorial_wave2b_runs(run_id)
+    )`;
+    this.sql`CREATE TABLE IF NOT EXISTS editorial_wave2b_start_receipts (
+      receipt_id TEXT PRIMARY KEY,
+      workflow_id TEXT NOT NULL,
+      run_id TEXT NOT NULL,
+      start_status TEXT NOT NULL CHECK(start_status IN ('brief_storage_unknown', 'workflow_create_unknown')),
+      reconciliation_key TEXT NOT NULL,
+      evidence_hash TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      UNIQUE(workflow_id, reconciliation_key),
+      FOREIGN KEY(workflow_id) REFERENCES editorial_wave2b_start_ledger(workflow_id),
+      FOREIGN KEY(run_id) REFERENCES editorial_wave2b_runs(run_id)
+    )`;
+    this.sql`CREATE TABLE IF NOT EXISTS editorial_wave2b_start_events (
+      event_id TEXT PRIMARY KEY,
+      workflow_id TEXT NOT NULL,
+      run_id TEXT NOT NULL,
+      event_type TEXT NOT NULL CHECK(event_type IN ('start_reconciliation_required', 'start_reconciled', 'workflow_start_confirmed')),
+      idempotency_key TEXT NOT NULL UNIQUE,
+      evidence_hash TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY(workflow_id) REFERENCES editorial_wave2b_start_ledger(workflow_id),
+      FOREIGN KEY(run_id) REFERENCES editorial_wave2b_runs(run_id)
+    )`;
+    this.sql`CREATE TABLE IF NOT EXISTS editorial_wave2b_call_results (
+      call_id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      response_hash TEXT,
+      artifact_id TEXT,
+      error_code TEXT,
+      retryable INTEGER NOT NULL DEFAULT 0,
+      recorded_at TEXT NOT NULL,
+      FOREIGN KEY(call_id) REFERENCES editorial_wave2b_calls(call_id)
+    )`;
+    this.sql`CREATE TABLE IF NOT EXISTS editorial_wave2b_events (
+      seq INTEGER PRIMARY KEY AUTOINCREMENT,
+      run_id TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      state TEXT NOT NULL,
+      state_revision INTEGER NOT NULL,
+      artifact_id TEXT,
+      payload_hash TEXT,
+      summary_json TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      UNIQUE(run_id, event_type, state_revision),
+      FOREIGN KEY(run_id) REFERENCES editorial_wave2b_runs(run_id)
+    )`;
+    this.sql`CREATE TRIGGER IF NOT EXISTS editorial_wave2b_runs_insert_guard
+      BEFORE INSERT ON editorial_wave2b_runs
+      WHEN NEW.state <> 'queued' OR NEW.state_revision <> 0 OR NEW.revision_count <> 0
+      BEGIN SELECT RAISE(ABORT, 'editorial_wave2b_run_must_start_queued'); END`;
     // CREATE TABLE IF NOT EXISTS does not retrofit constraints on an older
     // DO instance. The unique index keeps one terminal intent per run across
     // eviction/restart while preserving the append-only table contract.
@@ -773,6 +1096,91 @@ export class EditorialCoordinatorAgent extends Agent<EditorialRuntimeEnv, Editor
       BEFORE UPDATE ON editorial_phase2_terminal_receipts BEGIN SELECT RAISE(ABORT, 'editorial_phase2_terminal_receipts_are_append_only'); END`;
     this.sql`CREATE TRIGGER IF NOT EXISTS editorial_phase2_terminal_receipts_append_only_delete
       BEFORE DELETE ON editorial_phase2_terminal_receipts BEGIN SELECT RAISE(ABORT, 'editorial_phase2_terminal_receipts_are_append_only'); END`;
+    this.sql`CREATE TRIGGER IF NOT EXISTS editorial_wave2b_runs_identity_guard
+      BEFORE UPDATE ON editorial_wave2b_runs
+      WHEN NEW.run_id <> OLD.run_id OR NEW.article_id <> OLD.article_id OR NEW.recording_id <> OLD.recording_id
+        OR NEW.user_id <> OLD.user_id OR NEW.workspace_id <> OLD.workspace_id
+        OR NEW.payload_hash <> OLD.payload_hash OR NEW.manifest_hash <> OLD.manifest_hash
+        OR NEW.manifest_json <> OLD.manifest_json OR NEW.created_at <> OLD.created_at
+        OR NEW.state_revision <= OLD.state_revision
+      BEGIN SELECT RAISE(ABORT, 'editorial_wave2b_run_identity_is_immutable'); END`;
+    // Recreate this guard on every DO schema check so evicted instances pick
+    // up additive state-machine fixes without changing the table contract.
+    this.sql`DROP TRIGGER IF EXISTS editorial_wave2b_runs_state_guard`;
+    this.sql`CREATE TRIGGER editorial_wave2b_runs_state_guard
+      BEFORE UPDATE ON editorial_wave2b_runs
+      WHEN NEW.state_revision <> OLD.state_revision + 1 OR NEW.revision_count < OLD.revision_count OR
+        NEW.progress_percent < OLD.progress_percent OR
+        NEW.last_successful_progress_percent < OLD.last_successful_progress_percent OR NOT (
+        NEW.state = OLD.state OR
+        (OLD.state = 'queued' AND NEW.state IN ('transcribing', 'needs_action', 'failed')) OR
+        (OLD.state = 'transcribing' AND NEW.state IN ('transcript_ready', 'failed')) OR
+        (OLD.state = 'transcript_ready' AND NEW.state IN ('writing', 'failed')) OR
+        (OLD.state = 'writing' AND NEW.state IN ('draft_generated', 'needs_action', 'failed')) OR
+        (OLD.state = 'draft_generated' AND NEW.state IN ('reviewing', 'failed')) OR
+        (OLD.state = 'reviewing' AND NEW.state IN ('revising', 'reviewed', 'needs_action', 'failed')) OR
+        (OLD.state = 'revising' AND NEW.state IN ('writing', 'needs_action', 'failed')) OR
+        (OLD.state = 'reviewed' AND NEW.state IN ('content_frozen', 'needs_action')) OR
+        (OLD.state = 'needs_action' AND NEW.state IN ('writing', 'reviewing', 'failed'))
+      ) OR
+        (NEW.state = 'needs_action' AND NEW.run_status <> 'needs_action') OR
+        (NEW.state = 'failed' AND NEW.run_status <> 'failed') OR
+        (NEW.state NOT IN ('needs_action', 'failed') AND NEW.run_status <> 'active') OR
+        (NEW.state = 'needs_action' AND NEW.progress_percent <> NEW.last_successful_progress_percent)
+      BEGIN SELECT RAISE(ABORT, 'editorial_wave2b_state_transition_invalid'); END`;
+    this.sql`CREATE TRIGGER IF NOT EXISTS editorial_wave2b_runs_append_only_delete
+      BEFORE DELETE ON editorial_wave2b_runs BEGIN SELECT RAISE(ABORT, 'editorial_wave2b_runs_are_append_only'); END`;
+    this.sql`CREATE TRIGGER IF NOT EXISTS editorial_wave2b_outbox_append_only_update
+      BEFORE UPDATE ON editorial_wave2b_outbox BEGIN SELECT RAISE(ABORT, 'editorial_wave2b_outbox_is_append_only'); END`;
+    this.sql`CREATE TRIGGER IF NOT EXISTS editorial_wave2b_outbox_append_only_delete
+      BEFORE DELETE ON editorial_wave2b_outbox BEGIN SELECT RAISE(ABORT, 'editorial_wave2b_outbox_is_append_only'); END`;
+    this.sql`CREATE TRIGGER IF NOT EXISTS editorial_wave2b_receipts_append_only_update
+      BEFORE UPDATE ON editorial_wave2b_receipts BEGIN SELECT RAISE(ABORT, 'editorial_wave2b_receipts_are_append_only'); END`;
+    this.sql`CREATE TRIGGER IF NOT EXISTS editorial_wave2b_receipts_append_only_delete
+      BEFORE DELETE ON editorial_wave2b_receipts BEGIN SELECT RAISE(ABORT, 'editorial_wave2b_receipts_are_append_only'); END`;
+    this.sql`CREATE TRIGGER IF NOT EXISTS editorial_wave2b_calls_append_only_update
+      BEFORE UPDATE ON editorial_wave2b_calls BEGIN SELECT RAISE(ABORT, 'editorial_wave2b_calls_are_append_only'); END`;
+    this.sql`CREATE TRIGGER IF NOT EXISTS editorial_wave2b_workflow_starts_identity_guard
+      BEFORE UPDATE ON editorial_wave2b_workflow_starts
+      WHEN NEW.workflow_id <> OLD.workflow_id OR NEW.run_id <> OLD.run_id OR NEW.created_at <> OLD.created_at
+      BEGIN SELECT RAISE(ABORT, 'editorial_wave2b_workflow_start_identity_is_immutable'); END`;
+    this.sql`CREATE TRIGGER IF NOT EXISTS editorial_wave2b_start_ledger_identity_guard
+      BEFORE UPDATE ON editorial_wave2b_start_ledger
+      WHEN NEW.workflow_id <> OLD.workflow_id OR NEW.run_id <> OLD.run_id OR NEW.created_at <> OLD.created_at
+      BEGIN SELECT RAISE(ABORT, 'editorial_wave2b_start_ledger_identity_is_immutable'); END`;
+    this.sql`CREATE TRIGGER IF NOT EXISTS editorial_wave2b_start_receipts_append_only_update
+      BEFORE UPDATE ON editorial_wave2b_start_receipts BEGIN SELECT RAISE(ABORT, 'editorial_wave2b_start_receipts_are_append_only'); END`;
+    this.sql`CREATE TRIGGER IF NOT EXISTS editorial_wave2b_start_receipts_append_only_delete
+      BEFORE DELETE ON editorial_wave2b_start_receipts BEGIN SELECT RAISE(ABORT, 'editorial_wave2b_start_receipts_are_append_only'); END`;
+    this.sql`CREATE TRIGGER IF NOT EXISTS editorial_wave2b_start_events_append_only_update
+      BEFORE UPDATE ON editorial_wave2b_start_events BEGIN SELECT RAISE(ABORT, 'editorial_wave2b_start_events_are_append_only'); END`;
+    this.sql`CREATE TRIGGER IF NOT EXISTS editorial_wave2b_start_events_append_only_delete
+      BEFORE DELETE ON editorial_wave2b_start_events BEGIN SELECT RAISE(ABORT, 'editorial_wave2b_start_events_are_append_only'); END`;
+    this.sql`CREATE TRIGGER IF NOT EXISTS editorial_wave2b_call_results_append_only_update
+      BEFORE UPDATE ON editorial_wave2b_call_results BEGIN SELECT RAISE(ABORT, 'editorial_wave2b_call_results_are_append_only'); END`;
+    this.sql`CREATE TRIGGER IF NOT EXISTS editorial_wave2b_call_results_append_only_delete
+      BEFORE DELETE ON editorial_wave2b_call_results BEGIN SELECT RAISE(ABORT, 'editorial_wave2b_call_results_are_append_only'); END`;
+    this.sql`CREATE TRIGGER IF NOT EXISTS editorial_wave2b_events_append_only_update
+      BEFORE UPDATE ON editorial_wave2b_events BEGIN SELECT RAISE(ABORT, 'editorial_wave2b_events_are_append_only'); END`;
+    this.sql`CREATE TRIGGER IF NOT EXISTS editorial_wave2b_events_append_only_delete
+      BEFORE DELETE ON editorial_wave2b_events BEGIN SELECT RAISE(ABORT, 'editorial_wave2b_events_are_append_only'); END`;
+    this.sql`CREATE TRIGGER IF NOT EXISTS editorial_wave2b_calls_append_only_delete
+      BEFORE DELETE ON editorial_wave2b_calls BEGIN SELECT RAISE(ABORT, 'editorial_wave2b_calls_are_append_only'); END`;
+    this.sql`CREATE TRIGGER IF NOT EXISTS editorial_wave2b_call_results_run_guard
+      BEFORE INSERT ON editorial_wave2b_call_results
+      WHEN NEW.run_id <> (SELECT run_id FROM editorial_wave2b_calls WHERE call_id = NEW.call_id)
+      BEGIN SELECT RAISE(ABORT, 'editorial_wave2b_call_result_run_mismatch'); END`;
+    this.sql`CREATE TRIGGER IF NOT EXISTS editorial_wave2b_events_contract_guard
+      BEFORE INSERT ON editorial_wave2b_events
+      WHEN NOT (
+        NEW.event_type IN ('run_queued', 'transcription_started', 'transcript_ready', 'writing_started', 'draft_generated',
+          'review_started', 'reviewed', 'revision_requested', 'content_frozen', 'needs_action', 'failed', 'artifact_committed')
+        AND (NEW.state_revision = 0 OR NEW.state_revision = (
+          SELECT state_revision FROM editorial_wave2b_runs WHERE run_id = NEW.run_id
+        ))
+        AND NEW.state = (SELECT state FROM editorial_wave2b_runs WHERE run_id = NEW.run_id)
+      )
+      BEGIN SELECT RAISE(ABORT, 'editorial_wave2b_event_contract_invalid'); END`;
   }
 
   private transactionSync<T>(callback: () => T): T {
@@ -853,6 +1261,874 @@ export class EditorialCoordinatorAgent extends Agent<EditorialRuntimeEnv, Editor
     return Number(this.sql<{ count: number }>`SELECT count(*) AS count FROM editorial_phase2_outbox o
       LEFT JOIN editorial_phase2_outbox_receipts r ON r.outbox_id = o.outbox_id
       WHERE o.run_id = ${runId} AND r.outbox_id IS NULL`[0]?.count || 0);
+  }
+
+  private wave2bRun(runId: string, userId?: string, workspaceId?: string): Record<string, unknown> | null {
+    const row = userId === undefined || workspaceId === undefined
+      ? this.sql<Record<string, unknown>>`
+          SELECT run_id, article_id, recording_id, user_id, workspace_id, payload_hash, manifest_hash,
+                 manifest_json, workflow_id, state, run_status, progress_percent, resume_state,
+                 last_successful_state, last_successful_progress_percent, retry_count,
+                 state_revision, revision_count, approval_state, next_action, error_code, created_at, updated_at
+          FROM editorial_wave2b_runs WHERE run_id = ${runId} LIMIT 1`[0]
+      : this.sql<Record<string, unknown>>`
+          SELECT run_id, article_id, recording_id, user_id, workspace_id, payload_hash, manifest_hash,
+                 manifest_json, workflow_id, state, run_status, progress_percent, resume_state,
+                 last_successful_state, last_successful_progress_percent, retry_count,
+                 state_revision, revision_count, approval_state, next_action, error_code, created_at, updated_at
+          FROM editorial_wave2b_runs
+          WHERE run_id = ${runId} AND user_id = ${userId} AND workspace_id = ${workspaceId}
+          LIMIT 1`[0];
+    return row || null;
+  }
+
+  private wave2bStartLedger(workflowId: string, runId?: string): FiveAgentStartLedgerRow | null {
+    const row = runId === undefined
+      ? this.sql<FiveAgentStartLedgerRow>`
+          SELECT workflow_id, run_id, status, start_status, error_code, next_action, created_at, updated_at
+          FROM editorial_wave2b_start_ledger WHERE workflow_id = ${workflowId} LIMIT 1`[0]
+      : this.sql<FiveAgentStartLedgerRow>`
+          SELECT workflow_id, run_id, status, start_status, error_code, next_action, created_at, updated_at
+          FROM editorial_wave2b_start_ledger
+          WHERE workflow_id = ${workflowId} AND run_id = ${runId} LIMIT 1`[0];
+    return row || null;
+  }
+
+  private ensureFiveAgentStartLedger(input: FiveAgentRunInput): void {
+    this.sql`INSERT OR IGNORE INTO editorial_wave2b_start_ledger
+      (workflow_id, run_id, status, start_status, error_code, next_action, created_at, updated_at)
+      VALUES (${input.workflow_id}, ${input.run_id}, 'intent', NULL, NULL, NULL, ${input.created_at}, ${input.created_at})`;
+  }
+
+  private appendFiveAgentStartEvent(input: {
+    workflow_id: string; run_id: string;
+    event_type: "start_reconciliation_required" | "start_reconciled" | "workflow_start_confirmed";
+    idempotency_key: string; evidence_hash: string; created_at: string;
+  }): void {
+    const existing = this.sql<{ event_id: string; evidence_hash: string }>`
+      SELECT event_id, evidence_hash FROM editorial_wave2b_start_events
+      WHERE idempotency_key = ${input.idempotency_key} LIMIT 1`[0];
+    if (existing) {
+      if (existing.evidence_hash !== input.evidence_hash) throw new EditorialRuntimeError("idempotency_conflict", "Wave2B start event conflicts", 409);
+      return;
+    }
+    this.sql`INSERT INTO editorial_wave2b_start_events
+      (event_id, workflow_id, run_id, event_type, idempotency_key, evidence_hash, created_at)
+      VALUES (${`${input.workflow_id}:start-event:${input.idempotency_key}`}, ${input.workflow_id}, ${input.run_id},
+        ${input.event_type}, ${input.idempotency_key}, ${input.evidence_hash}, ${input.created_at})`;
+  }
+
+  public async startFiveAgentRun(input: FiveAgentRunInput, startWorkflow = true): Promise<Record<string, unknown>> {
+    this.ensureSchema();
+    if (!WAVE2B_OPAQUE_RE.test(input.run_id) || !WAVE2B_OPAQUE_RE.test(input.workflow_id) ||
+        !WAVE2B_OPAQUE_RE.test(input.user_id) || !WAVE2B_OPAQUE_RE.test(input.workspace_id) ||
+        !WAVE2B_OPAQUE_RE.test(input.article_id) || !Number.isSafeInteger(input.recording_id) || input.recording_id < 1) {
+      throw new EditorialRuntimeError("invalid_opaque_id", "Wave2B run identity is invalid", 400);
+    }
+    let manifest: Record<string, unknown>;
+    try { manifest = JSON.parse(input.manifest_json) as Record<string, unknown>; } catch { throw new EditorialRuntimeError("manifest_invalid", "Wave2B manifest is invalid", 400); }
+    const manifestKeys = ["schema_version", "run_id", "article_id", "recording_id", "user_id", "workspace_id", "workflow_version", "policy_version", "agent_versions", "skill_pins", "adapter_pins", "model_pins", "idempotency_key"];
+    const agentVersions = manifest.agent_versions as Record<string, unknown> | undefined;
+    const skillPins = manifest.skill_pins as Record<string, unknown> | undefined;
+    const adapterPins = manifest.adapter_pins as Record<string, unknown> | undefined;
+    const modelPins = manifest.model_pins as Record<string, unknown> | undefined;
+    const expectedAgentVersions = canonicalJson(PUBLICATION_AGENT_VERSIONS);
+    const stylePin = skillPins?.style as Record<string, unknown> | undefined;
+    const manifestPinsValid = isExactWave2PublicationSkillPins(skillPins) &&
+      canonicalJson(skillPins?.adapter_pins) === canonicalJson(adapterPins) && canonicalJson(skillPins?.model_pins) === canonicalJson(modelPins);
+    if (safeJson(manifest) !== input.manifest_json || await hashText(input.manifest_json) !== input.manifest_hash ||
+        manifest.run_id !== input.run_id || manifest.article_id !== input.article_id ||
+        manifest.user_id !== input.user_id || manifest.workspace_id !== input.workspace_id ||
+        manifest.recording_id !== input.recording_id || manifest.workflow_version !== "editorial-workflow.v3" ||
+        manifest.policy_version !== "editorial-policy.v3" || Object.keys(manifest).some(key => !manifestKeys.includes(key)) ||
+        canonicalJson(agentVersions) !== expectedAgentVersions || !manifestPinsValid ||
+        canonicalJson(adapterPins) !== canonicalJson(PUBLICATION_WAVE2_ADAPTER_PINS) ||
+        !modelPins || typeof modelPins.writing !== "string" || modelPins.writing.length === 0 || modelPins.writing.length > 120 || modelPins.editorial_review !== "rules-only") {
+      throw new EditorialRuntimeError("manifest_invalid", "Wave2B manifest is not an allowlisted canonical identity", 409);
+    }
+    const existing = this.wave2bRun(input.run_id, input.user_id, input.workspace_id);
+    if (existing) {
+      if (existing.manifest_hash !== input.manifest_hash || existing.payload_hash !== input.payload_hash ||
+          existing.workflow_id !== input.workflow_id || existing.manifest_json !== input.manifest_json) {
+        throw new EditorialRuntimeError("idempotency_conflict", "Wave2B run identity conflicts", 409);
+      }
+      this.ensureFiveAgentStartLedger(input);
+      if (!startWorkflow) return { run: existing, replayed: true };
+      return await this.startFiveAgentWorkflowInternal(input, true);
+    }
+    this.transactionSync(() => {
+      this.sql`INSERT INTO editorial_wave2b_runs
+        (run_id, article_id, recording_id, user_id, workspace_id, payload_hash,
+         manifest_hash, manifest_json, workflow_id, state, run_status, progress_percent,
+         resume_state, last_successful_state, last_successful_progress_percent, retry_count, state_revision,
+         revision_count, approval_state, next_action, error_code, created_at, updated_at)
+        VALUES (${input.run_id}, ${input.article_id}, ${input.recording_id}, ${input.user_id},
+          ${input.workspace_id}, ${input.payload_hash}, ${input.manifest_hash}, ${input.manifest_json},
+          ${input.workflow_id}, 'queued', 'active', 0, NULL, 'queued', 0, 0, 0,
+          0, 'not_required', NULL, NULL,
+          ${input.created_at}, ${input.created_at})`;
+      this.sql`INSERT INTO editorial_wave2b_workflow_starts
+        (workflow_id, run_id, status, created_at, updated_at)
+        VALUES (${input.workflow_id}, ${input.run_id}, 'intent', ${input.created_at}, ${input.created_at})`;
+      this.sql`INSERT INTO editorial_wave2b_start_ledger
+        (workflow_id, run_id, status, start_status, error_code, next_action, created_at, updated_at)
+        VALUES (${input.workflow_id}, ${input.run_id}, 'intent', NULL, NULL, NULL, ${input.created_at}, ${input.created_at})`;
+      this.sql`INSERT INTO editorial_wave2b_events
+        (run_id, event_type, state, state_revision, artifact_id, payload_hash, summary_json, created_at)
+        VALUES (${input.run_id}, 'run_queued', 'queued', 0, NULL, ${input.payload_hash},
+          ${safeJson({ workflow_version: "editorial-workflow.v3" })}, ${input.created_at})`;
+    });
+    if (!startWorkflow) return { run: this.wave2bRun(input.run_id, input.user_id, input.workspace_id), replayed: false };
+    return await this.startFiveAgentWorkflowInternal(input, false);
+  }
+
+  public async startFiveAgentWorkflow(input: FiveAgentRunInput & {
+    transcript_ref: string; transcript_hash: string; source_hash: string;
+    brief_artifact_id: string; brief_artifact_key: string; brief_payload_hash: string;
+  }): Promise<FiveAgentWorkflowStartResult> {
+    return await this.startFiveAgentWorkflowInternal(input, false);
+  }
+
+  private async startFiveAgentWorkflowInternal(input: FiveAgentRunInput & Partial<{
+    transcript_ref: string; transcript_hash: string; source_hash: string;
+    brief_artifact_id: string; brief_artifact_key: string; brief_payload_hash: string;
+  }>, replayed: boolean): Promise<FiveAgentWorkflowStartResult> {
+    if (!input.transcript_ref || !input.transcript_hash || !input.source_hash ||
+        !input.brief_artifact_id || !input.brief_artifact_key || !input.brief_payload_hash) {
+      throw new EditorialRuntimeError("workflow_input_incomplete", "V3 workflow requires redacted artifact references", 409);
+    }
+    const start = this.wave2bStartLedger(input.workflow_id, input.run_id);
+    const known = await this.reconcileFiveAgentWorkflow(input.workflow_id);
+    if (known.state === "exists") {
+      await this.markFiveAgentWorkflowStarted(input.workflow_id, input.run_id, input.created_at);
+      return { run: this.wave2bRun(input.run_id, input.user_id, input.workspace_id), replayed: true, workflow_status: known.status };
+    }
+    if (known.state === "unknown") {
+      await this.recordFiveAgentStartHold({
+        run_id: input.run_id, workflow_id: input.workflow_id,
+        start_status: "workflow_create_unknown", created_at: input.created_at,
+      });
+      return {
+        run: this.wave2bRun(input.run_id, input.user_id, input.workspace_id),
+        replayed: true,
+        workflow_status: "unknown",
+        start_hold: { code: "workflow_create_unknown", status: 503, start_status: "workflow_create_unknown" },
+      };
+    }
+    if (known.state === "not_found" && start?.status !== "intent" && start?.status !== "reconciled" && start?.start_status !== "workflow_create_unknown") {
+      return {
+        run: this.wave2bRun(input.run_id, input.user_id, input.workspace_id),
+        replayed: true,
+        workflow_status: "unknown",
+        start_hold: { code: "five_agent_workflow_reconciliation_required", status: 503, start_status: "workflow_create_unknown" },
+      };
+    }
+    try {
+      await this.runWorkflow("FIVE_AGENT_PUBLISHING_WORKFLOW", input as FiveAgentRunInput & {
+        transcript_ref: string; transcript_hash: string; source_hash: string;
+        brief_artifact_id: string; brief_artifact_key: string; brief_payload_hash: string;
+      }, {
+        id: input.workflow_id,
+        agentBinding: "EDITORIAL_COORDINATOR",
+        metadata: {
+          run_id: input.run_id,
+          article_id: input.article_id,
+          recording_id: input.recording_id,
+          user_id: input.user_id,
+          workspace_id: input.workspace_id,
+          manifest_hash: input.manifest_hash,
+          },
+        });
+    } catch (error) {
+      const afterCreate = await this.reconcileFiveAgentWorkflow(input.workflow_id);
+      if (afterCreate.state === "exists") {
+        await this.markFiveAgentWorkflowStarted(input.workflow_id, input.run_id, input.created_at);
+        return { run: this.wave2bRun(input.run_id, input.user_id, input.workspace_id), replayed: true, workflow_status: afterCreate.status };
+      }
+      if (afterCreate.state === "not_found") throw error;
+      this.markFiveAgentWorkflowUnknown(input.workflow_id, input.created_at);
+      return {
+        run: this.wave2bRun(input.run_id, input.user_id, input.workspace_id),
+        replayed: true,
+        workflow_status: "unknown",
+        start_hold: { code: "workflow_create_unknown", status: 503, start_status: "workflow_create_unknown" },
+      };
+    }
+    await this.markFiveAgentWorkflowStarted(input.workflow_id, input.run_id, input.created_at);
+    return { run: this.wave2bRun(input.run_id, input.user_id, input.workspace_id), replayed, workflow_status: "queued" };
+  }
+
+  private async reconcileFiveAgentWorkflow(workflowId: string): Promise<
+    { state: "exists"; status: string } | { state: "not_found" } | { state: "unknown" }
+  > {
+    const binding = this.env.FIVE_AGENT_PUBLISHING_WORKFLOW;
+    if (!binding) return { state: "unknown" };
+    try {
+      const response = await (await binding.get(workflowId)).status() as { status?: unknown };
+      if (response?.status === "unknown" || typeof response?.status !== "string") return { state: "unknown" };
+      return { state: "exists", status: response.status };
+    } catch (error) {
+      if (isStructuredWorkflowNotFound(error)) return { state: "not_found" };
+      return { state: "unknown" };
+    }
+  }
+
+  public async getFiveAgentWorkflowStatus(runId: string, workflowId: string): Promise<"exists" | "not_found" | "unknown"> {
+    this.ensureSchema();
+    const run = this.wave2bStartLedger(workflowId, runId);
+    if (!run) throw new EditorialRuntimeError("workflow_start_not_found", "Wave2B start intent not found", 404);
+    const result = await this.reconcileFiveAgentWorkflow(workflowId);
+    return result.state;
+  }
+
+  private async markFiveAgentWorkflowStarted(workflowId: string, runId: string, updatedAt: string): Promise<void> {
+    const run = this.wave2bRun(runId);
+    if (!run || run.workflow_id !== workflowId) {
+      throw new EditorialRuntimeError("workflow_start_identity_conflict", "Wave2B workflow start identity is invalid", 409);
+    }
+    const evidenceHash = await hashJson({
+      workflow_id: workflowId,
+      run_id: runId,
+      article_id: run.article_id,
+      recording_id: run.recording_id,
+      user_id: run.user_id,
+      workspace_id: run.workspace_id,
+      payload_hash: run.payload_hash,
+      manifest_hash: run.manifest_hash,
+      event_type: "workflow_start_confirmed",
+    });
+    const currentLedger = this.wave2bStartLedger(workflowId, runId);
+    const existingEvent = this.sql<{ event_id: string; evidence_hash: string; created_at: string }>`
+      SELECT event_id, evidence_hash, created_at FROM editorial_wave2b_start_events
+      WHERE workflow_id = ${workflowId} AND run_id = ${runId} AND event_type = 'workflow_start_confirmed'
+      LIMIT 1`[0];
+    if (existingEvent && existingEvent.evidence_hash !== evidenceHash) {
+      throw new EditorialRuntimeError("idempotency_conflict", "Wave2B workflow confirmation conflicts", 409);
+    }
+    if (existingEvent && currentLedger?.status === "started") return;
+    const eventCreatedAt = existingEvent?.created_at ||
+      (currentLedger ? timestampAtOrAfter(currentLedger.updated_at, updatedAt) : updatedAt);
+    this.transactionSync(() => {
+      this.appendFiveAgentStartEvent({
+        workflow_id: workflowId, run_id: runId, event_type: "workflow_start_confirmed",
+        idempotency_key: `workflow-start-confirmed:${workflowId}`, evidence_hash: evidenceHash, created_at: eventCreatedAt,
+      });
+      this.sql`UPDATE editorial_wave2b_workflow_starts SET status = 'started', updated_at = ${eventCreatedAt} WHERE workflow_id = ${workflowId}`;
+      this.sql`UPDATE editorial_wave2b_start_ledger SET status = 'started', start_status = NULL, error_code = NULL, next_action = NULL, updated_at = ${eventCreatedAt} WHERE workflow_id = ${workflowId}`;
+    });
+  }
+
+  private markFiveAgentWorkflowUnknown(workflowId: string, updatedAt: string): void {
+    this.sql`UPDATE editorial_wave2b_workflow_starts SET status = 'unknown', updated_at = ${updatedAt} WHERE workflow_id = ${workflowId}`;
+  }
+
+  public async recordFiveAgentStartHold(input: {
+    run_id: string; workflow_id: string; start_status: FiveAgentStartStatus; created_at: string;
+  }): Promise<{ replayed: boolean }> {
+    this.ensureSchema();
+    const current = this.wave2bStartLedger(input.workflow_id, input.run_id);
+    if (!current) throw new EditorialRuntimeError("workflow_start_not_found", "Wave2B start intent not found", 404);
+    if (current.status === "needs_action") {
+      if (current.start_status === input.start_status) return { replayed: true };
+      throw new EditorialRuntimeError("workflow_start_conflict", "Wave2B start hold conflicts", 409);
+    }
+    if (current.status !== "intent" && current.status !== "reconciled") {
+      throw new EditorialRuntimeError("workflow_start_conflict", "Wave2B start is no longer holdable", 409);
+    }
+    const evidenceHash = await hashJson({
+      workflow_id: input.workflow_id, run_id: input.run_id,
+      event_type: "start_reconciliation_required", start_status: input.start_status,
+      error_code: "external_side_effect_unknown", next_action: "reconcile_external_side_effect",
+    });
+    this.transactionSync(() => {
+      this.appendFiveAgentStartEvent({
+        workflow_id: input.workflow_id, run_id: input.run_id,
+        event_type: "start_reconciliation_required",
+        idempotency_key: `start-required:${input.workflow_id}:${input.start_status}`,
+        evidence_hash: evidenceHash, created_at: input.created_at,
+      });
+      this.sql`UPDATE editorial_wave2b_start_ledger
+        SET status = 'needs_action', start_status = ${input.start_status},
+            error_code = 'external_side_effect_unknown', next_action = 'reconcile_external_side_effect', updated_at = ${input.created_at}
+        WHERE workflow_id = ${input.workflow_id} AND run_id = ${input.run_id}
+          AND status IN ('intent', 'reconciled')`;
+      this.sql`UPDATE editorial_wave2b_workflow_starts
+        SET status = 'unknown', updated_at = ${input.created_at}
+        WHERE workflow_id = ${input.workflow_id}`;
+    });
+    return { replayed: false };
+  }
+
+  public async getFiveAgentStartLedger(runId: string, workflowId: string): Promise<Record<string, unknown> | null> {
+    this.ensureSchema();
+    const row = this.wave2bStartLedger(workflowId, runId);
+    return row ? { ...row } : null;
+  }
+
+  public async getFiveAgentStartEvidence(runId: string, workflowId: string): Promise<{
+    events: Array<{ event_type: string; idempotency_key: string; evidence_hash: string; created_at: string }>;
+    receipts: Array<{ receipt_id: string; reconciliation_key: string; evidence_hash: string }>;
+  }> {
+    this.ensureSchema();
+    const current = this.wave2bStartLedger(workflowId, runId);
+    if (!current) throw new EditorialRuntimeError("workflow_start_not_found", "Wave2B start intent not found", 404);
+    return {
+      events: this.sql<{ event_type: string; idempotency_key: string; evidence_hash: string; created_at: string }>`
+        SELECT event_type, idempotency_key, evidence_hash, created_at FROM editorial_wave2b_start_events
+        WHERE run_id = ${runId} AND workflow_id = ${workflowId} ORDER BY created_at, event_id`,
+      receipts: this.sql<{ receipt_id: string; reconciliation_key: string; evidence_hash: string }>`
+        SELECT receipt_id, reconciliation_key, evidence_hash FROM editorial_wave2b_start_receipts
+        WHERE run_id = ${runId} AND workflow_id = ${workflowId} ORDER BY created_at, receipt_id`,
+    };
+  }
+
+  public async getFiveAgentWorkflowStartConfirmation(input: {
+    run_id: string;
+    workflow_id: string;
+    article_id: string;
+    recording_id: number;
+    user_id: string;
+    workspace_id: string;
+    payload_hash: string;
+    manifest_hash: string;
+  }): Promise<{ confirmed: boolean; event_id: string | null }> {
+    this.ensureSchema();
+    const run = this.wave2bRun(input.run_id);
+    if (!run || run.workflow_id !== input.workflow_id ||
+        run.article_id !== input.article_id || Number(run.recording_id) !== input.recording_id ||
+        run.user_id !== input.user_id || run.workspace_id !== input.workspace_id ||
+        run.payload_hash !== input.payload_hash || run.manifest_hash !== input.manifest_hash) {
+      throw new EditorialRuntimeError("workflow_start_identity_conflict", "Wave2B workflow start identity is invalid", 409);
+    }
+    const ledger = this.wave2bStartLedger(input.workflow_id, input.run_id);
+    const workflow = this.sql<{ status: string }>`
+      SELECT status FROM editorial_wave2b_workflow_starts
+      WHERE workflow_id = ${input.workflow_id} AND run_id = ${input.run_id} LIMIT 1`[0];
+    const event = this.sql<{ event_id: string; evidence_hash: string }>`
+      SELECT event_id, evidence_hash FROM editorial_wave2b_start_events
+      WHERE workflow_id = ${input.workflow_id} AND run_id = ${input.run_id}
+        AND event_type = 'workflow_start_confirmed'
+      LIMIT 1`[0];
+    if (!ledger || !workflow || ledger.status !== "started" || workflow.status !== "started" || !event) {
+      return { confirmed: false, event_id: event?.event_id || null };
+    }
+    const expectedEvidenceHash = await hashJson({
+      workflow_id: input.workflow_id,
+      run_id: input.run_id,
+      article_id: input.article_id,
+      recording_id: input.recording_id,
+      user_id: input.user_id,
+      workspace_id: input.workspace_id,
+      payload_hash: input.payload_hash,
+      manifest_hash: input.manifest_hash,
+      event_type: "workflow_start_confirmed",
+    });
+    if (event.evidence_hash !== expectedEvidenceHash) {
+      throw new EditorialRuntimeError("workflow_start_identity_conflict", "Wave2B workflow confirmation evidence conflicts", 409);
+    }
+    return { confirmed: true, event_id: event.event_id };
+  }
+
+  public async prepareFiveAgentStartReconciliation(input: {
+    run_id: string; workflow_id: string; start_status: FiveAgentStartStatus;
+    reconciliation_key: string; evidence_hash: string; created_at: string;
+  }): Promise<{ replayed: boolean; receipt_id: string }> {
+    this.ensureSchema();
+    const current = this.wave2bStartLedger(input.workflow_id, input.run_id);
+    if (!current || current.status !== "needs_action" || current.start_status !== input.start_status) {
+      throw new EditorialRuntimeError("workflow_start_reconciliation_required", "Wave2B start is not in the requested hold", 409);
+    }
+    const otherReceipt = this.sql<{ reconciliation_key: string; evidence_hash: string }>`
+      SELECT reconciliation_key, evidence_hash FROM editorial_wave2b_start_receipts
+      WHERE workflow_id = ${input.workflow_id} AND run_id = ${input.run_id}
+        AND start_status = ${input.start_status} AND reconciliation_key <> ${input.reconciliation_key}
+      LIMIT 1`[0];
+    if (otherReceipt) {
+      throw new EditorialRuntimeError("idempotency_conflict", "Wave2B start reconciliation key conflicts", 409);
+    }
+    const existing = this.sql<{ receipt_id: string; start_status: FiveAgentStartStatus; evidence_hash: string }>`
+      SELECT receipt_id, start_status, evidence_hash FROM editorial_wave2b_start_receipts
+      WHERE workflow_id = ${input.workflow_id} AND reconciliation_key = ${input.reconciliation_key} LIMIT 1`[0];
+    if (existing) {
+      if (existing.start_status !== input.start_status || existing.evidence_hash !== input.evidence_hash) {
+        throw new EditorialRuntimeError("idempotency_conflict", "Wave2B start reconciliation conflicts", 409);
+      }
+      return { replayed: true, receipt_id: existing.receipt_id };
+    }
+    const receiptId = `${input.workflow_id}:start-reconcile:${input.reconciliation_key}`;
+    const reconciledEvidenceHash = await hashJson({
+      workflow_id: input.workflow_id, run_id: input.run_id,
+      event_type: "start_reconciled", start_status: input.start_status,
+      reconciliation_key: input.reconciliation_key, evidence_hash: input.evidence_hash,
+    });
+    this.transactionSync(() => {
+      this.appendFiveAgentStartEvent({
+        workflow_id: input.workflow_id, run_id: input.run_id,
+        event_type: "start_reconciled",
+        idempotency_key: `start-reconciled:${input.workflow_id}:${input.reconciliation_key}`,
+        evidence_hash: reconciledEvidenceHash, created_at: input.created_at,
+      });
+      this.sql`INSERT INTO editorial_wave2b_start_receipts
+        (receipt_id, workflow_id, run_id, start_status, reconciliation_key, evidence_hash, created_at)
+        VALUES (${receiptId}, ${input.workflow_id}, ${input.run_id}, ${input.start_status}, ${input.reconciliation_key}, ${input.evidence_hash}, ${input.created_at})`;
+    });
+    return { replayed: false, receipt_id: receiptId };
+  }
+
+  public async finalizeFiveAgentStartReconciliation(input: {
+    run_id: string; workflow_id: string; start_status: FiveAgentStartStatus;
+    reconciliation_key: string; evidence_hash: string; created_at: string;
+  }): Promise<{ replayed: boolean; receipt_id: string }> {
+    this.ensureSchema();
+    const receipt = this.sql<{ receipt_id: string; start_status: FiveAgentStartStatus; evidence_hash: string }>`
+      SELECT receipt_id, start_status, evidence_hash FROM editorial_wave2b_start_receipts
+      WHERE workflow_id = ${input.workflow_id} AND reconciliation_key = ${input.reconciliation_key} LIMIT 1`[0];
+    if (!receipt || receipt.start_status !== input.start_status || receipt.evidence_hash !== input.evidence_hash) {
+      throw new EditorialRuntimeError("workflow_start_reconciliation_required", "Wave2B reconciliation receipt is missing or conflicts", 409);
+    }
+    const current = this.wave2bStartLedger(input.workflow_id, input.run_id);
+    if (!current) throw new EditorialRuntimeError("workflow_start_not_found", "Wave2B start intent not found", 404);
+    if (current.status === "reconciled" && current.start_status === input.start_status) {
+      return { replayed: true, receipt_id: receipt.receipt_id };
+    }
+    if (current.status !== "needs_action" || current.start_status !== input.start_status) {
+      throw new EditorialRuntimeError("workflow_start_reconciliation_required", "Wave2B start is not in the requested hold", 409);
+    }
+    this.transactionSync(() => {
+      this.sql`UPDATE editorial_wave2b_start_ledger
+        SET status = 'reconciled', start_status = ${input.start_status}, error_code = NULL, next_action = NULL, updated_at = ${input.created_at}
+        WHERE workflow_id = ${input.workflow_id} AND run_id = ${input.run_id} AND status = 'needs_action'`;
+      this.sql`UPDATE editorial_wave2b_workflow_starts SET status = 'reconciled', updated_at = ${input.created_at}
+        WHERE workflow_id = ${input.workflow_id}`;
+    });
+    return { replayed: false, receipt_id: receipt.receipt_id };
+  }
+
+  public async reconcileFiveAgentStart(input: {
+    run_id: string; workflow_id: string; start_status: FiveAgentStartStatus;
+    reconciliation_key: string; evidence_hash: string; created_at: string;
+  }): Promise<{ replayed: boolean; receipt_id: string }> {
+    const prepared = await this.prepareFiveAgentStartReconciliation(input);
+    const finalized = await this.finalizeFiveAgentStartReconciliation(input);
+    return { replayed: prepared.replayed && finalized.replayed, receipt_id: prepared.receipt_id };
+  }
+
+  public async getFiveAgentRun(runId: string, userId: string, workspaceId: string): Promise<Record<string, unknown>> {
+    this.ensureSchema();
+    const row = this.wave2bRun(runId, userId, workspaceId);
+    if (!row) throw new EditorialRuntimeError("run_not_found", "Wave2B run not found", 404);
+    const artifacts = this.sql<{ count: number }>`SELECT count(*) AS count FROM editorial_wave2b_outbox WHERE run_id = ${runId}`[0]?.count || 0;
+    const receipts = this.sql<{ count: number }>`SELECT count(*) AS count FROM editorial_wave2b_receipts WHERE run_id = ${runId}`[0]?.count || 0;
+    const calls = this.sql<{ count: number }>`SELECT count(*) AS count FROM editorial_wave2b_calls WHERE run_id = ${runId}`[0]?.count || 0;
+    const start = this.wave2bStartLedger(String(row.workflow_id), runId);
+    const derivedStartStatus = start?.status === "reconciled"
+      ? "reconciled_resuming"
+      : start?.status === "started"
+        ? "workflow_started"
+        : start?.start_status || null;
+    return {
+      ...row,
+      start_status: derivedStartStatus,
+      start_ledger_status: start?.status || null,
+      start_error_code: start?.error_code || null,
+      start_next_action: start?.next_action || null,
+      artifact_count: Number(artifacts), receipt_count: Number(receipts), call_intent_count: Number(calls),
+    };
+  }
+
+  public async prepareFiveAgentCall(input: {
+    run_id: string; call_kind: string; idempotency_key: string; attempt: number; created_at: string;
+  }): Promise<{ status: "prepared" | "completed" | "failed" | "needs_action"; call_id: string; artifact_id?: string; response_hash?: string; error_code?: string; retryable?: boolean; attempt?: number }> {
+    this.ensureSchema();
+    if (!Number.isInteger(input.attempt) || input.attempt < 1 || input.attempt > 3) {
+      throw new EditorialRuntimeError("retry_limit_exceeded", "adapter call attempt must be between 1 and 3", 409);
+    }
+    const callId = `${input.run_id}:call:${input.call_kind}:${input.idempotency_key}:attempt:${input.attempt}`;
+    const latest = this.sql<{
+      call_id: string; attempt: number; status: "succeeded" | "failed" | "needs_action";
+      artifact_id: string | null; response_hash: string | null; error_code: string | null; retryable: number;
+    }>`
+      SELECT c.call_id, c.attempt, r.status, r.artifact_id, r.response_hash, r.error_code, r.retryable
+      FROM editorial_wave2b_calls c JOIN editorial_wave2b_call_results r ON r.call_id = c.call_id
+      WHERE c.run_id = ${input.run_id} AND c.call_kind = ${input.call_kind}
+        AND c.idempotency_key = ${input.idempotency_key} ORDER BY c.attempt DESC LIMIT 1`[0];
+    if (latest?.status === "succeeded") {
+      return { status: "completed", call_id: latest.call_id, artifact_id: latest.artifact_id || undefined, response_hash: latest.response_hash || undefined };
+    }
+    if (latest?.status === "needs_action") {
+      return { status: "needs_action", call_id: latest.call_id, artifact_id: latest.artifact_id || undefined, response_hash: latest.response_hash || undefined, error_code: latest.error_code || undefined, retryable: false, attempt: latest.attempt };
+    }
+    if (latest?.status === "failed" && !latest.retryable) {
+      const role = input.call_kind.startsWith("editorial_review") ? "review" : "writing";
+      return { status: "failed", call_id: latest.call_id, artifact_id: latest.artifact_id || undefined, response_hash: latest.response_hash || undefined, error_code: `${role}_adapter_non_retryable`, retryable: false, attempt: latest.attempt };
+    }
+    if (latest?.status === "failed" && latest.retryable && latest.attempt >= 3) {
+      const role = input.call_kind.startsWith("editorial_review") ? "review" : "writing";
+      return { status: "failed", call_id: latest.call_id, artifact_id: latest.artifact_id || undefined, response_hash: latest.response_hash || undefined, error_code: `${role}_adapter_retry_exhausted`, retryable: false, attempt: latest.attempt };
+    }
+    if (latest?.status === "failed" && input.attempt === latest.attempt) {
+      return { status: "failed", call_id: latest.call_id, artifact_id: latest.artifact_id || undefined, response_hash: latest.response_hash || undefined, error_code: latest.error_code || undefined, retryable: true, attempt: latest.attempt };
+    }
+    if (latest && input.attempt <= latest.attempt) {
+      throw new EditorialRuntimeError("retry_attempt_conflict", "a retryable adapter attempt already has a durable result", 409);
+    }
+    const inflight = this.sql<{ call_id: string }>`
+      SELECT c.call_id FROM editorial_wave2b_calls c
+      LEFT JOIN editorial_wave2b_call_results r ON r.call_id = c.call_id
+      WHERE c.run_id = ${input.run_id} AND c.call_kind = ${input.call_kind}
+        AND c.idempotency_key = ${input.idempotency_key} AND r.call_id IS NULL LIMIT 1`[0];
+    if (inflight) throw new EditorialRuntimeError("external_side_effect_unknown", "an adapter call has no durable result", 409);
+    const row = this.wave2bRun(input.run_id);
+    if (!row) throw new EditorialRuntimeError("run_not_found", "Wave2B run not found", 404);
+    this.transactionSync(() => {
+      this.sql`INSERT INTO editorial_wave2b_calls
+        (call_id, run_id, call_kind, idempotency_key, attempt, created_at)
+        VALUES (${callId}, ${input.run_id}, ${input.call_kind}, ${input.idempotency_key}, ${input.attempt}, ${input.created_at})`;
+    });
+    return { status: "prepared", call_id: callId };
+  }
+
+  public async completeFiveAgentCall(input: {
+    call_id: string; run_id: string; status: "succeeded" | "failed" | "needs_action";
+    response_hash?: string; artifact_id?: string; error_code?: string; retryable?: boolean; recorded_at: string;
+  }): Promise<void> {
+    this.ensureSchema();
+    this.transactionSync(() => {
+      const call = this.sql<{ run_id: string }>`SELECT run_id FROM editorial_wave2b_calls WHERE call_id = ${input.call_id} LIMIT 1`[0];
+      if (!call || call.run_id !== input.run_id) throw new EditorialRuntimeError("call_identity_conflict", "call result does not match its call intent", 409);
+      const existing = this.sql<{
+        call_id: string; run_id: string; status: "succeeded" | "failed" | "needs_action";
+        response_hash: string | null; artifact_id: string | null; error_code: string | null; retryable: number;
+      }>`
+        SELECT call_id, run_id, status, response_hash, artifact_id, error_code, retryable
+        FROM editorial_wave2b_call_results WHERE call_id = ${input.call_id}`[0];
+      if (existing) {
+        if (existing.run_id !== input.run_id || existing.status !== input.status ||
+            existing.response_hash !== (input.response_hash || null) ||
+            existing.artifact_id !== (input.artifact_id || null) ||
+            existing.error_code !== (input.error_code || null) ||
+            Boolean(existing.retryable) !== Boolean(input.retryable)) {
+          throw new EditorialRuntimeError("idempotency_conflict", "call result conflicts", 409);
+        }
+        return;
+      }
+      this.sql`INSERT INTO editorial_wave2b_call_results
+        (call_id, run_id, status, response_hash, artifact_id, error_code, retryable, recorded_at)
+        VALUES (${input.call_id}, ${input.run_id}, ${input.status}, ${input.response_hash || null},
+          ${input.artifact_id || null}, ${input.error_code || null}, ${input.retryable ? 1 : 0}, ${input.recorded_at})`;
+    });
+  }
+
+  public async prepareFiveAgentArtifact(input: {
+    run_id: string; metadata: FiveAgentEnvelopeMetadata; envelope_json: string;
+  }): Promise<{ status: "prepared" | "replayed" }> {
+    this.ensureSchema();
+    if (input.run_id !== input.metadata.run_id) {
+      throw new EditorialRuntimeError("artifact_scope_mismatch", "Wave2B artifact run does not match", 409);
+    }
+    if (!WAVE2B_OPAQUE_RE.test(input.metadata.artifact_id) || !WAVE2B_OPAQUE_RE.test(input.metadata.run_id) ||
+        !WAVE2B_OPAQUE_RE.test(input.metadata.article_id) || !WAVE2B_OPAQUE_RE.test(input.metadata.user_id) ||
+        !WAVE2B_OPAQUE_RE.test(input.metadata.workspace_id) || !WAVE2B_OPAQUE_RE.test(input.metadata.idempotency_key) ||
+        !WAVE2B_OPAQUE_RE.test(input.metadata.producer_role) || !WAVE2B_OPAQUE_RE.test(input.metadata.producer_version) ||
+        !WAVE2B_OPAQUE_RE.test(input.metadata.kind) || !WAVE2B_OPAQUE_RE.test(input.metadata.workflow_version) ||
+        !WAVE2B_OPAQUE_RE.test(input.metadata.policy_version) || !WAVE2B_OPAQUE_RE.test(input.metadata.payload_hash) ||
+        input.metadata.schema_version !== WAVE2_SCHEMA_VERSION ||
+        !/^sha256:[a-f0-9]{64}$/.test(input.metadata.skill_pins_hash) ||
+        !/^sha256:[a-f0-9]{64}$/.test(input.metadata.envelope_identity_hash)) {
+      throw new EditorialRuntimeError("artifact_metadata_invalid", "Wave2B artifact metadata identity is invalid", 400);
+    }
+    if (!WAVE2_ARTIFACT_KINDS.includes(input.metadata.kind as typeof WAVE2_ARTIFACT_KINDS[number])) {
+      throw new EditorialRuntimeError("artifact_metadata_invalid", "Wave2B artifact kind is not allowed", 409);
+    }
+    try { validateArtifactKey(input.metadata.artifact_key); } catch { throw new EditorialRuntimeError("artifact_metadata_invalid", "Wave2B artifact key is invalid", 400); }
+    if (input.metadata.storage_ref !== `r2://${input.metadata.artifact_key}`) {
+      throw new EditorialRuntimeError("artifact_metadata_invalid", "Wave2B storage reference is not canonical", 409);
+    }
+    let inputIds: unknown;
+    try { inputIds = JSON.parse(input.metadata.input_artifact_ids_json); } catch { throw new EditorialRuntimeError("artifact_metadata_invalid", "Wave2B input ids are invalid", 400); }
+    if (!Array.isArray(inputIds) || inputIds.some(value => typeof value !== "string" || !WAVE2B_OPAQUE_RE.test(value)) || safeJson(inputIds) !== input.metadata.input_artifact_ids_json) {
+      throw new EditorialRuntimeError("artifact_metadata_invalid", "Wave2B input ids are not canonical", 400);
+    }
+    const run = this.wave2bRun(input.run_id);
+    if (!run || run.user_id !== input.metadata.user_id || run.workspace_id !== input.metadata.workspace_id) {
+      throw new EditorialRuntimeError("artifact_scope_mismatch", "Wave2B artifact owner is not bound to the run", 403);
+    }
+    if (String(run.article_id) !== input.metadata.article_id || Number(run.recording_id) !== Number(input.metadata.recording_id) ||
+        run.workflow_id === null || run.state === "failed") {
+      throw new EditorialRuntimeError("artifact_scope_mismatch", "Wave2B artifact identity is not bound to the run", 409);
+    }
+    let manifest: Record<string, unknown>;
+    try { manifest = parseJson<Record<string, unknown>>(String(run.manifest_json)); } catch {
+      throw new EditorialRuntimeError("manifest_invalid", "Wave2B run manifest is invalid", 409);
+    }
+    if (manifest.workflow_version !== "editorial-workflow.v3" || manifest.policy_version !== "editorial-policy.v3" ||
+        input.metadata.workflow_version !== manifest.workflow_version || input.metadata.policy_version !== manifest.policy_version ||
+        await hashJson(expectedArtifactSkillPins(input.metadata.kind, manifest)) !== input.metadata.skill_pins_hash) {
+      throw new EditorialRuntimeError("artifact_pin_conflict", "Wave2B artifact skill pins are not bound to the run manifest", 409);
+    }
+    const expectedProducer: Record<string, { role: string; version: string }> = {
+      article_brief: { role: "editorial_coordinator", version: PUBLICATION_AGENT_VERSIONS.editorial_coordinator },
+      article_draft: { role: "writing", version: PUBLICATION_AGENT_VERSIONS.writing },
+      review_report: { role: "editorial_review", version: PUBLICATION_AGENT_VERSIONS.editorial_review },
+      revision_dispatch: { role: "editorial_coordinator", version: PUBLICATION_AGENT_VERSIONS.editorial_coordinator },
+      frozen_article_version: { role: "editorial_coordinator", version: PUBLICATION_AGENT_VERSIONS.editorial_coordinator },
+    };
+    const producer = expectedProducer[input.metadata.kind];
+    if (!producer || input.metadata.producer_role !== producer.role || input.metadata.producer_version !== producer.version) {
+      throw new EditorialRuntimeError("artifact_producer_conflict", "Wave2B artifact producer is not active for its kind", 409);
+    }
+    let canonicalKey: string;
+    try { canonicalKey = artifactKey(input.metadata.user_id, input.metadata.workspace_id, input.run_id, input.metadata.kind as typeof WAVE2_ARTIFACT_KINDS[number], input.metadata.artifact_id); } catch {
+      throw new EditorialRuntimeError("artifact_metadata_invalid", "Wave2B artifact key cannot be derived", 400);
+    }
+    if (input.metadata.artifact_key !== canonicalKey || input.metadata.storage_ref !== `r2://${canonicalKey}`) {
+      throw new EditorialRuntimeError("artifact_metadata_invalid", "Wave2B artifact storage identity is not canonical", 409);
+    }
+    const allowlistedMetadata: FiveAgentEnvelopeMetadata = {
+      schema_version: input.metadata.schema_version,
+      artifact_id: input.metadata.artifact_id,
+      artifact_key: input.metadata.artifact_key,
+      kind: input.metadata.kind,
+      run_id: input.metadata.run_id,
+      article_id: input.metadata.article_id,
+      recording_id: input.metadata.recording_id,
+      user_id: input.metadata.user_id,
+      workspace_id: input.metadata.workspace_id,
+      producer_role: input.metadata.producer_role,
+      producer_version: input.metadata.producer_version,
+      workflow_version: input.metadata.workflow_version,
+      policy_version: input.metadata.policy_version,
+      input_artifact_ids_json: input.metadata.input_artifact_ids_json,
+      payload_hash: input.metadata.payload_hash,
+      payload_length: input.metadata.payload_length,
+      idempotency_key: input.metadata.idempotency_key,
+      storage_ref: input.metadata.storage_ref,
+      created_at: input.metadata.created_at,
+      skill_pins_hash: input.metadata.skill_pins_hash,
+      envelope_identity_hash: input.metadata.envelope_identity_hash,
+    };
+    if (await hashJson(envelopeIdentityMaterial(allowlistedMetadata)) !== input.metadata.envelope_identity_hash) {
+      throw new EditorialRuntimeError("artifact_metadata_invalid", "Wave2B envelope identity hash is invalid", 409);
+    }
+    let parsedMetadata: unknown;
+    try {
+      parsedMetadata = JSON.parse(input.envelope_json);
+    } catch {
+      throw new EditorialRuntimeError("artifact_metadata_invalid", "Wave2B envelope metadata is invalid", 400);
+    }
+    if (safeJson(parsedMetadata) !== safeJson(allowlistedMetadata)) {
+      throw new EditorialRuntimeError("artifact_metadata_invalid", "Wave2B envelope contains non-redacted fields", 400);
+    }
+    const existing = this.sql<{ payload_hash: string; envelope_json: string }>`
+      SELECT payload_hash, envelope_json FROM editorial_wave2b_outbox WHERE artifact_id = ${input.metadata.artifact_id}`[0];
+    if (existing) {
+      if (existing.payload_hash !== input.metadata.payload_hash || existing.envelope_json !== input.envelope_json) throw new EditorialRuntimeError("artifact_conflict", "Wave2B artifact identity conflicts", 409);
+      return { status: "replayed" };
+    }
+    this.transactionSync(() => {
+      this.sql`INSERT INTO editorial_wave2b_outbox
+        (artifact_id, run_id, user_id, workspace_id, envelope_json, payload_hash, storage_ref, created_at)
+        VALUES (${input.metadata.artifact_id}, ${input.run_id}, ${input.metadata.user_id}, ${input.metadata.workspace_id},
+          ${input.envelope_json}, ${input.metadata.payload_hash}, ${input.metadata.storage_ref}, ${input.metadata.created_at})`;
+    });
+    return { status: "prepared" };
+  }
+
+  public async listFiveAgentArtifacts(runId: string, userId: string, workspaceId: string): Promise<FiveAgentEnvelopeMetadata[]> {
+    this.ensureSchema();
+    const rows = this.sql<{ envelope_json: string }>`
+      SELECT envelope_json FROM editorial_wave2b_outbox
+      WHERE run_id = ${runId} AND user_id = ${userId} AND workspace_id = ${workspaceId}
+      ORDER BY created_at, artifact_id`;
+    return rows.map(row => parseJson<FiveAgentEnvelopeMetadata>(row.envelope_json));
+  }
+
+  public async getFiveAgentArtifactLedger(runId: string, userId: string, workspaceId: string): Promise<{
+    artifacts: FiveAgentEnvelopeMetadata[];
+    receipt_ids: string[];
+  }> {
+    this.ensureSchema();
+    const rows = this.sql<{ envelope_json: string; artifact_id: string; receipt_artifact_id: string | null }>`
+      SELECT o.envelope_json, o.artifact_id, r.artifact_id AS receipt_artifact_id
+      FROM editorial_wave2b_outbox o
+      LEFT JOIN editorial_wave2b_receipts r ON r.artifact_id = o.artifact_id
+      WHERE o.run_id = ${runId} AND o.user_id = ${userId} AND o.workspace_id = ${workspaceId}
+      ORDER BY o.created_at, o.artifact_id`;
+    return {
+      artifacts: rows.map(row => parseJson<FiveAgentEnvelopeMetadata>(row.envelope_json)),
+      receipt_ids: rows.filter(row => row.receipt_artifact_id !== null).map(row => row.artifact_id),
+    };
+  }
+
+  public async listFiveAgentEvents(runId: string, userId: string, workspaceId: string): Promise<Array<{
+    event_type: string;
+    state: string;
+    state_revision: number;
+    artifact_id: string | null;
+    payload_hash: string | null;
+  }>> {
+    this.ensureSchema();
+    const current = this.wave2bRun(runId);
+    if (!current || current.user_id !== userId || current.workspace_id !== workspaceId) {
+      throw new EditorialRuntimeError("run_not_found", "Wave2B run is not in the requested scope", 404);
+    }
+    return this.sql<{
+      event_type: string;
+      state: string;
+      state_revision: number;
+      artifact_id: string | null;
+      payload_hash: string | null;
+    }>`SELECT event_type, state, state_revision, artifact_id, payload_hash
+      FROM editorial_wave2b_events WHERE run_id = ${runId} ORDER BY state_revision, event_type`;
+  }
+
+  public async completeFiveAgentArtifact(input: {
+    run_id: string; artifact_id: string; payload_hash: string; state: string; state_revision: number;
+    event_type: string; created_at: string; summary: Record<string, unknown>;
+    next_action?: string | null; error_code?: string | null; revision_count?: number;
+  }): Promise<{ replayed: boolean }> {
+    this.ensureSchema();
+    const current = this.wave2bRun(input.run_id);
+    if (!current) throw new EditorialRuntimeError("run_not_found", "Wave2B run not found", 404);
+    if (!WAVE2B_STATES.includes(input.state as typeof WAVE2B_STATES[number]) || !WAVE2B_EVENT_TYPES.includes(input.event_type as typeof WAVE2B_EVENT_TYPES[number])) {
+      throw new EditorialRuntimeError("state_or_event_not_allowed", "Wave2B artifact state or event is not allowed", 409);
+    }
+    if (input.state !== current.state && !WAVE2B_TRANSITIONS[String(current.state)]?.includes(input.state)) {
+      throw new EditorialRuntimeError("state_transition_invalid", "Wave2B artifact state transition is not allowed", 409);
+    }
+    if ((input.state === "needs_action" || input.state === "failed") && (!input.next_action || !input.error_code)) {
+      throw new EditorialRuntimeError("exceptional_state_metadata_required", "Wave2B exceptional states require a stable error and next action", 409);
+    }
+    if (input.state !== "needs_action" && input.state !== "failed" && (input.next_action || input.error_code)) {
+      throw new EditorialRuntimeError("state_metadata_invalid", "Wave2B action metadata is only valid for exceptional states", 409);
+    }
+    const outbox = this.sql<{
+      run_id: string; user_id: string; workspace_id: string; payload_hash: string; storage_ref: string; envelope_json: string;
+    }>`SELECT run_id, user_id, workspace_id, payload_hash, storage_ref, envelope_json
+      FROM editorial_wave2b_outbox WHERE artifact_id = ${input.artifact_id} LIMIT 1`[0];
+    if (!outbox || outbox.run_id !== input.run_id || outbox.user_id !== current.user_id ||
+        outbox.workspace_id !== current.workspace_id || outbox.payload_hash !== input.payload_hash ||
+        !outbox.storage_ref.startsWith("r2://")) {
+      throw new EditorialRuntimeError("artifact_identity_conflict", "Wave2B artifact outbox identity does not match", 409);
+    }
+    let envelope: FiveAgentEnvelopeMetadata;
+    try { envelope = parseJson<FiveAgentEnvelopeMetadata>(outbox.envelope_json); } catch {
+      throw new EditorialRuntimeError("artifact_identity_conflict", "Wave2B artifact envelope is invalid", 409);
+    }
+    if (envelope.artifact_id !== input.artifact_id || envelope.run_id !== input.run_id || envelope.user_id !== current.user_id ||
+        envelope.workspace_id !== current.workspace_id || envelope.payload_hash !== input.payload_hash || envelope.storage_ref !== outbox.storage_ref ||
+        !WAVE2B_OPAQUE_RE.test(envelope.kind) || !WAVE2B_OPAQUE_RE.test(envelope.producer_role) ||
+        !WAVE2B_OPAQUE_RE.test(envelope.producer_version) || !WAVE2B_OPAQUE_RE.test(envelope.workflow_version) ||
+        !WAVE2B_OPAQUE_RE.test(envelope.policy_version) || !WAVE2B_OPAQUE_RE.test(envelope.idempotency_key) ||
+        envelope.schema_version !== WAVE2_SCHEMA_VERSION ||
+        !/^sha256:[a-f0-9]{64}$/.test(envelope.skill_pins_hash) ||
+        !/^sha256:[a-f0-9]{64}$/.test(envelope.envelope_identity_hash)) {
+      throw new EditorialRuntimeError("artifact_identity_conflict", "Wave2B artifact envelope identity does not match", 409);
+    }
+    let runManifest: Record<string, unknown>;
+    try { runManifest = parseJson<Record<string, unknown>>(String(current.manifest_json)); } catch {
+      throw new EditorialRuntimeError("manifest_invalid", "Wave2B run manifest is invalid", 409);
+    }
+    if (await hashJson(expectedArtifactSkillPins(envelope.kind, runManifest)) !== envelope.skill_pins_hash ||
+        await hashJson(envelopeIdentityMaterial(envelope)) !== envelope.envelope_identity_hash) {
+      throw new EditorialRuntimeError("artifact_identity_conflict", "Wave2B artifact envelope hashes do not reconcile", 409);
+    }
+    const db = (this.env as EditorialRuntimeEnv & { DB?: D1Database }).DB;
+    if (db) {
+      const mirror = await db.prepare(`SELECT run_id, user_id, workspace_id, article_id, recording_id, kind,
+        producer_agent_role, producer_agent_version, workflow_version, policy_version, input_artifact_ids_json,
+        payload_hash, storage_ref, created_at
+        FROM editorial_artifacts WHERE artifact_id = ? LIMIT 1`).bind(input.artifact_id).first<{
+          run_id: string; user_id: string; workspace_id: string; article_id: string; recording_id: number; kind: string;
+          producer_agent_role: string; producer_agent_version: string; workflow_version: string; policy_version: string;
+          input_artifact_ids_json: string; payload_hash: string; storage_ref: string; created_at: string;
+        }>();
+      if (!mirror || mirror.run_id !== input.run_id || mirror.user_id !== current.user_id ||
+          mirror.workspace_id !== current.workspace_id || mirror.article_id !== envelope.article_id ||
+          Number(mirror.recording_id) !== Number(envelope.recording_id) || mirror.kind !== envelope.kind ||
+          mirror.producer_agent_role !== envelope.producer_role || mirror.producer_agent_version !== envelope.producer_version ||
+          mirror.workflow_version !== envelope.workflow_version || mirror.policy_version !== envelope.policy_version ||
+          mirror.input_artifact_ids_json !== envelope.input_artifact_ids_json || mirror.payload_hash !== input.payload_hash ||
+          mirror.storage_ref !== outbox.storage_ref || mirror.created_at !== envelope.created_at) {
+        throw new EditorialRuntimeError("artifact_mirror_unavailable", "Wave2B artifact mirror is not reconciled", 503);
+      }
+    } else {
+      throw new EditorialRuntimeError("artifact_mirror_unavailable", "Wave2B artifact mirror is not configured", 503);
+    }
+    if (Number(current.state_revision) === input.state_revision && current.state === input.state) {
+      const event = this.sql<{ artifact_id: string | null; payload_hash: string | null; event_type: string }>`
+        SELECT artifact_id, payload_hash, event_type FROM editorial_wave2b_events
+        WHERE run_id = ${input.run_id} AND state_revision = ${input.state_revision} LIMIT 1`[0];
+      if (event?.artifact_id === input.artifact_id && event.payload_hash === input.payload_hash && event.event_type === input.event_type) {
+        return { replayed: true };
+      }
+      throw new EditorialRuntimeError("idempotency_conflict", "Wave2B artifact completion conflicts", 409);
+    }
+    if (input.revision_count !== undefined && (input.revision_count < Number(current.revision_count) || input.revision_count > 1)) {
+      throw new EditorialRuntimeError("revision_count_invalid", "Wave2B revision count must be monotonic and at most one", 409);
+    }
+    const projected = deriveWave2BProjection(current, input.state, input.next_action, input.error_code);
+    if (Number(current.state_revision) !== input.state_revision - 1) throw new EditorialRuntimeError("stale_workflow_step", "Wave2B state CAS failed", 409);
+    this.transactionSync(() => {
+      const updated = this.sql<{ run_id: string }>`UPDATE editorial_wave2b_runs
+        SET state = ${input.state}, state_revision = ${input.state_revision},
+            run_status = ${projected.runStatus}, progress_percent = ${projected.progress},
+            resume_state = ${projected.resumeState}, last_successful_state = ${projected.lastSuccessfulState},
+            last_successful_progress_percent = ${projected.lastSuccessfulProgress},
+            next_action = ${input.next_action || null}, error_code = ${input.error_code || null},
+            revision_count = COALESCE(${input.revision_count ?? null}, revision_count),
+            updated_at = ${input.created_at}
+        WHERE run_id = ${input.run_id} AND state_revision = ${input.state_revision - 1}
+        RETURNING run_id`;
+      if (updated.length !== 1) throw new EditorialRuntimeError("stale_workflow_step", "Wave2B state CAS failed", 409);
+      this.sql`INSERT INTO editorial_wave2b_receipts
+        (artifact_id, run_id, payload_hash, mirrored_at)
+        VALUES (${input.artifact_id}, ${input.run_id}, ${input.payload_hash}, ${input.created_at})`;
+      this.sql`INSERT INTO editorial_wave2b_events
+        (run_id, event_type, state, state_revision, artifact_id, payload_hash, summary_json, created_at)
+        VALUES (${input.run_id}, ${input.event_type}, ${input.state}, ${input.state_revision}, ${input.artifact_id}, ${input.payload_hash}, ${safeJson(input.summary)}, ${input.created_at})`;
+    });
+    return { replayed: false };
+  }
+
+  public async recordFiveAgentState(input: {
+    run_id: string; state: string; state_revision: number; event_type: string; created_at: string;
+    next_action?: string | null; error_code?: string | null; revision_count?: number; retry_count?: number; payload_hash?: string | null;
+  }): Promise<{ replayed: boolean }> {
+    this.ensureSchema();
+    const current = this.wave2bRun(input.run_id);
+    if (!current) throw new EditorialRuntimeError("run_not_found", "Wave2B run not found", 404);
+    if (!WAVE2B_STATES.includes(input.state as typeof WAVE2B_STATES[number]) || !WAVE2B_EVENT_TYPES.includes(input.event_type as typeof WAVE2B_EVENT_TYPES[number])) {
+      throw new EditorialRuntimeError("state_or_event_not_allowed", "Wave2B state or event is not allowed", 409);
+    }
+    if (Number(current.state_revision) === input.state_revision && current.state === input.state) {
+      const event = this.sql<{ event_type: string; payload_hash: string | null }>`SELECT event_type, payload_hash
+        FROM editorial_wave2b_events WHERE run_id = ${input.run_id} AND state_revision = ${input.state_revision} LIMIT 1`[0];
+      if (event?.event_type === input.event_type && event.payload_hash === (input.payload_hash || null)) return { replayed: true };
+      throw new EditorialRuntimeError("idempotency_conflict", "Wave2B state replay conflicts", 409);
+    }
+    if (Number(current.state_revision) !== input.state_revision - 1) throw new EditorialRuntimeError("stale_workflow_step", "Wave2B state CAS failed", 409);
+    if (input.revision_count !== undefined && (input.revision_count < Number(current.revision_count) || input.revision_count > 1)) throw new EditorialRuntimeError("revision_count_invalid", "Wave2B revision count must be monotonic and at most one", 409);
+    if ((input.state === "needs_action" || input.state === "failed") && (!input.next_action || !input.error_code)) throw new EditorialRuntimeError("exceptional_state_metadata_required", "Wave2B exceptional states require a stable error and next action", 409);
+    if (input.state !== "needs_action" && input.state !== "failed" && (input.next_action || input.error_code)) throw new EditorialRuntimeError("state_metadata_invalid", "Wave2B action metadata is only valid for exceptional states", 409);
+    if (input.state === "queued" && input.state !== current.state) throw new EditorialRuntimeError("state_transition_invalid", "queued is reserved for the initial run state", 409);
+    if (input.state !== current.state && !WAVE2B_TRANSITIONS[String(current.state)]?.includes(input.state)) throw new EditorialRuntimeError("state_transition_invalid", "Wave2B state transition is not allowed", 409);
+    const projected = deriveWave2BProjection(current, input.state, input.next_action, input.error_code);
+    this.transactionSync(() => {
+      const updated = this.sql<{ run_id: string }>`UPDATE editorial_wave2b_runs SET state = ${input.state}, state_revision = ${input.state_revision},
+        run_status = ${projected.runStatus}, progress_percent = ${projected.progress}, resume_state = ${projected.resumeState},
+        last_successful_state = ${projected.lastSuccessfulState}, last_successful_progress_percent = ${projected.lastSuccessfulProgress},
+        retry_count = COALESCE(${input.retry_count ?? null}, retry_count),
+        next_action = ${input.next_action || null}, error_code = ${input.error_code || null},
+        revision_count = COALESCE(${input.revision_count ?? null}, revision_count), updated_at = ${input.created_at}
+        WHERE run_id = ${input.run_id} AND state_revision = ${input.state_revision - 1}
+        RETURNING run_id`;
+      if (updated.length !== 1) throw new EditorialRuntimeError("stale_workflow_step", "Wave2B state CAS failed", 409);
+      this.sql`INSERT INTO editorial_wave2b_events
+        (run_id, event_type, state, state_revision, artifact_id, payload_hash, summary_json, created_at)
+        VALUES (${input.run_id}, ${input.event_type}, ${input.state}, ${input.state_revision}, NULL, ${input.payload_hash || null}, ${safeJson({ next_action: input.next_action || null, error_code: input.error_code || null })}, ${input.created_at})`;
+    });
+    return { replayed: false };
   }
 
   public async startRun(input: EditorialWorkflowParams): Promise<Record<string, unknown>> {
@@ -1285,8 +2561,14 @@ export class EditorialWorkflow extends AgentWorkflow<EditorialCoordinatorAgent, 
   }
 }
 
-export type OrchestrationEnv = EditorialRuntimeEnv & {
-  EDITORIAL_COORDINATOR: DurableObjectNamespace<any>;
+type OrchestrationResult = Record<string, unknown> & { replayed?: boolean };
+type OrchestrationCoordinator = {
+  startRun(input: Record<string, unknown>): Promise<OrchestrationResult>;
+  getRun(runId: string): Promise<Record<string, unknown>>;
+  recordHumanAction(input: Record<string, unknown>): Promise<OrchestrationResult>;
+};
+export type OrchestrationEnv = {
+  EDITORIAL_COORDINATOR: { getByName(name: string): OrchestrationCoordinator };
   EDITORIAL_WORKFLOW_V2?: string;
   EDITORIAL_WORKFLOW_V2_ALLOWLIST?: string;
 };
@@ -1356,8 +2638,8 @@ export async function handleEditorialOrchestrationInternalRoute(
       const scenario = validateScenario(String(body.scenario || "happy"));
       const payload = { run_id: runId, article_id: articleId, recording_id: recordingId, user_id: userId, workspace_id: workspaceId, scenario };
       const payloadHash = await hashJson(payload);
-      const namespace = (env as unknown as { EDITORIAL_COORDINATOR: { getByName(name: string): any } }).EDITORIAL_COORDINATOR;
-      const coordinator: any = namespace.getByName(await shardName(articleId, runId));
+      const namespace = env.EDITORIAL_COORDINATOR;
+      const coordinator = namespace.getByName(await shardName(articleId, runId));
       const result = await coordinator.startRun({ ...payload, payload_hash: payloadHash });
       return Response.json({ run: result }, { status: result.replayed ? 200 : 202 });
     }
@@ -1365,8 +2647,8 @@ export async function handleEditorialOrchestrationInternalRoute(
       const runId = validateOpaque(parts[4], "run_id");
       const body = url.searchParams;
       const articleId = validateOpaque(body.get("article_id") || "", "article_id");
-      const namespace = (env as unknown as { EDITORIAL_COORDINATOR: { getByName(name: string): any } }).EDITORIAL_COORDINATOR;
-      const coordinator: any = namespace.getByName(await shardName(articleId, runId));
+      const namespace = env.EDITORIAL_COORDINATOR;
+      const coordinator = namespace.getByName(await shardName(articleId, runId));
       return Response.json({ run: await coordinator.getRun(runId) });
     }
     if (request.method === "POST" && parts.length === 6 && parts[5] === "human") {
@@ -1378,8 +2660,8 @@ export async function handleEditorialOrchestrationInternalRoute(
       }
       const articleId = validateOpaque(String(body.article_id || ""), "article_id");
       const idempotencyKey = validateOpaque(String(body.idempotency_key || request.headers.get("Idempotency-Key") || ""), "idempotency_key");
-      const namespace = (env as unknown as { EDITORIAL_COORDINATOR: { getByName(name: string): any } }).EDITORIAL_COORDINATOR;
-      const coordinator: any = namespace.getByName(await shardName(articleId, runId));
+      const namespace = env.EDITORIAL_COORDINATOR;
+      const coordinator = namespace.getByName(await shardName(articleId, runId));
       const run = await coordinator.getRun(runId);
       const payloadHash = await hashJson({ action, reason: body.reason === undefined ? null : String(body.reason) });
       const result = await coordinator.recordHumanAction({

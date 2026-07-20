@@ -13,6 +13,13 @@
 
 | 时间 | 功能更新 |
 | --- | --- |
+| 2026-07-20 12:11 CST | Wave 2B 将首审与二审 Review 的 reviewer/rules pin 漂移纳入统一不可重试失败账本，并保证重放不重复调用服务。 |
+| 2026-07-20 10:26 CST | Wave 2B 将写作与审核的预持久化完整性失败记录为不可重试的 durable call result，并在 Workflow 重放时复用失败状态而不重复调用服务。 |
+| 2026-07-20 10:08 CST | Wave 2B 将 Review 轮次、Draft 运行 pins 与完整 DO/D1 事件集合在不可变工件写入前 fail-closed 校验，并统一公开 run projection 字段。 |
+| 2026-07-20 09:32 CST | Wave 2B 统一启动接口与 GET 的脱敏 run projection 响应形状，并将已知 Workflow hold 改为无未处理异常的结构化结果。 |
+| 2026-07-20 09:09 CST | Wave 2B 为同一 run 增加不可伪造的 Workflow 启动确认与三段可重放未知结果恢复，并验证确认后继续到 content_frozen。 |
+| 2026-07-20 05:49 CST | Wave 2B 补齐专用 V3 认证、四类终态 exact-set 对账与 adapter 失败 attempt/retry_count 投影，保持失败进度不回退。 |
+| 2026-07-20 03:25 CST | Wave 2B 将五 Agent 文本审核编排接入真实 Writing/Review 服务与分阶段 Artifact 提交，二轮修文保持状态进度单调且未知副作用停在可对账人工动作。 |
 | 2026-07-20 03:18 CST | Wave 2A 要求 Review 输入的 claim ledger 与 block claim_ids 精确一致，并将 Writing 供应商 5xx 重试收敛到受控 502/503/504。 |
 | 2026-07-20 03:14 CST | Wave 2A 将 content_frozen 快照限制为有效 style/formatting pins 与空 HTML hash，避免把后续渲染产物误当冻结内容。 |
 | 2026-07-20 03:08 CST | Wave 2A 将 Writing 修文输入改为受保护 Draft 白名单提示，并由 adapter 计算 body 与 block 哈希，模型无需承担密码学字段生成。 |
@@ -27,10 +34,10 @@
 | 2026-07-19 17:06 CST | 图文发布流水线 Phase 2 follow-up-v3 将 D1/DO 产物收敛为含 schema pin 的 exact-set 对账，D1 实际镜像计数与 DO receipt 分离，并补孤儿恢复。 |
 | 2026-07-19 15:31 CST | 图文发布流水线 Phase 2 增加 DO 审计步骤/人工确认不可变保护、D1 脱敏 outbox 镜像与故障恢复，非法人工等待不会改变编排状态。 |
 | 2026-07-19 14:47 CST | 图文发布流水线 Phase 2 接入五角色 Cloudflare Agents/Workflow 可恢复编排，默认关闭并按用户工作区 allowlist 隔离，合成审核与人工确认不产生外部发布副作用。 |
-| 2026-07-19 13:27 CST | 图文发布流水线 Phase 1 follow-up 将版本/审核写入收敛到受信 Agent 内部路由，新增不可伪造的 RunManifest/ArtifactEnvelope、状态 CAS 与可重跑的旧录音 scope 迁移兼容。 |
-| 2026-07-19 13:47 CST | 图文发布流水线 Phase 1 follow-up-v2 为状态 CAS 写入增加事务内 transition marker，阻止陈旧并发请求留下孤儿 transition。 |
-| 2026-07-19 13:55 CST | 图文发布流水线 Phase 1 follow-up-v2 补齐录音删除后的审计墓碑策略、0010/canonical trigger parity 与状态 CAS 三语句完整性校验。 |
 | 2026-07-19 14:10 CST | 图文发布流水线 Phase 1 follow-up-v3 让文字提交复用音频上传的 editorial scope 回填，兼容 canonical 与旧 schema。 |
+| 2026-07-19 13:55 CST | 图文发布流水线 Phase 1 follow-up-v2 补齐录音删除后的审计墓碑策略、0010/canonical trigger parity 与状态 CAS 三语句完整性校验。 |
+| 2026-07-19 13:47 CST | 图文发布流水线 Phase 1 follow-up-v2 为状态 CAS 写入增加事务内 transition marker，阻止陈旧并发请求留下孤儿 transition。 |
+| 2026-07-19 13:27 CST | 图文发布流水线 Phase 1 follow-up 将版本/审核写入收敛到受信 Agent 内部路由，新增不可伪造的 RunManifest/ArtifactEnvelope、状态 CAS 与可重跑的旧录音 scope 迁移兼容。 |
 | 2026-07-17 16:53 CST | 新增图文发布流水线 Phase 1 的不可变文章版本、独立审核 finding、按 block 绑定的 VisualPlan、统一状态机和认证用户幂等 API，为后续安全审核与视觉生成保留可追溯快照。 |
 | 2026-07-13 22:53 CST | WritingAgent 安全规范化支持完整 HTML5 命名字符引用及嵌套实体恢复，避免版权符号、标点和重音字符显示为实体字面量。 |
 | 2026-07-13 22:32 CST | WritingAgent 排版注册表升级为可替换的完整 Skill adapter，并修复合法 HTML 实体在安全规范化时被重复转义的问题。 |

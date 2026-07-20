@@ -74,6 +74,11 @@ name = "editorial-workflow-v2"
 binding = "EDITORIAL_WORKFLOW"
 class_name = "EditorialWorkflow"
 
+[[workflows]]
+name = "five-agent-publishing-workflow"
+binding = "FIVE_AGENT_PUBLISHING_WORKFLOW"
+class_name = "FiveAgentPublishingWorkflow"
+
 [[migrations]]
 tag = "v2-editorial-agents"
 new_sqlite_classes = [

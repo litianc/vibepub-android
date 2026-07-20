@@ -68,6 +68,44 @@ export const PUBLICATION_SKILL_PINS = {
   formatting: { id: "md_to_wechat", version: "1.0.0" },
 } as const;
 
+export const PUBLICATION_WAVE2_ADAPTER_PINS = {
+  writing: "writing-v3.adapter.1.0.0",
+  editorial_review: "editorial-review.adapter.1.0.0",
+} as const;
+
+export function isExactWave1PublicationSkillPins(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const pins = value as Record<string, unknown>;
+  const keys = Object.keys(pins).sort();
+  const expectedKeys = Object.keys(PUBLICATION_SKILL_PINS).sort();
+  return JSON.stringify(keys) === JSON.stringify(expectedKeys) &&
+    expectedKeys.every((key) => canonicalJson(pins[key]) === canonicalJson(PUBLICATION_SKILL_PINS[key as keyof typeof PUBLICATION_SKILL_PINS]));
+}
+
+export function isExactWave2PublicationSkillPins(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const pins = value as Record<string, unknown>;
+  const style = pins.style as Record<string, unknown> | undefined;
+  const adapterPins = pins.adapter_pins as Record<string, unknown> | undefined;
+  const modelPins = pins.model_pins as Record<string, unknown> | undefined;
+  const keys = Object.keys(pins).filter((key) => key !== "style_profile_body_hash").sort();
+  const expectedKeys = [...Object.keys(PUBLICATION_SKILL_PINS), "style", "adapter_pins", "model_pins"].sort();
+  const styleBodyHash = pins.style_profile_body_hash;
+  const styleValid = Boolean(style && JSON.stringify(Object.keys(style).sort()) === JSON.stringify(["id", "version"]) &&
+    typeof style.id === "string" && typeof style.version === "string" &&
+    (style.id === "style_litianc_default"
+      ? style.version === "2026-07-05" && styleBodyHash === undefined
+      : typeof styleBodyHash === "string" && /^sha256:[a-f0-9]{64}$/.test(styleBodyHash)));
+  const modelValid = Boolean(modelPins &&
+    JSON.stringify(Object.keys(modelPins).sort()) === JSON.stringify(["editorial_review", "writing"]) &&
+    typeof modelPins.writing === "string" && modelPins.writing.length > 0 && modelPins.writing.length <= 120 &&
+    modelPins.editorial_review === "rules-only");
+  return JSON.stringify(keys) === JSON.stringify(expectedKeys) &&
+    Object.keys(PUBLICATION_SKILL_PINS).every((key) => canonicalJson(pins[key]) === canonicalJson(PUBLICATION_SKILL_PINS[key as keyof typeof PUBLICATION_SKILL_PINS])) &&
+    canonicalJson(adapterPins) === canonicalJson(PUBLICATION_WAVE2_ADAPTER_PINS) &&
+    modelValid && styleValid;
+}
+
 export type TrustedProducerContext = {
   role: EditorialAgentId | PublicationAgentId;
   version: string;
