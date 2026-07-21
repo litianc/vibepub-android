@@ -78,6 +78,18 @@ export default defineConfig({
               : { adapter_version: "visual-generation.adapter.1.0.0", model_version: "gpt-image-2", prompt_hash: await sha256(String(body.prompt || "")), b64_json: await syntheticPng(...(typeof body.size === "string" && /^\d+x\d+$/.test(body.size) ? body.size.split("x").map(Number) as [number, number] : [1536, 864])) },
           });
         },
+        WECHAT_PUBLISHING_ADAPTER: async (request: Request) => {
+          if (request.headers.get("authorization") !== "Bearer test-wechat-token") return Response.json({ error: { code: "unauthorized", retryable: false } }, { status: 401 });
+          let body: Record<string, unknown>;
+          try { body = await request.json() as Record<string, unknown>; } catch { return Response.json({ error: { code: "invalid_json", retryable: false } }, { status: 400 }); }
+          const operation = typeof body.operation === "string" ? body.operation : "";
+          const operationId = typeof body.operation_id === "string" ? body.operation_id : "synthetic-wechat-operation";
+          if (operation === "resolve_account") return Response.json({ protocol_version: "vibepub.wechat.v3", operation, operation_id: operationId, attempt: 1, result: { account_binding_id: "wab_synthetic", config_hash: "sha256:" + "a".repeat(64), credential_hash: "sha256:" + "b".repeat(64), receipt_hash: "sha256:" + "c".repeat(64), version: "wechat-account-resolution.v1" } });
+          if (operation === "upload_image") return Response.json({ protocol_version: "vibepub.wechat.v3", operation, operation_id: operationId, attempt: body.attempt || 1, result: { media_id: `media-${operationId}`, media_url: `https://wechat.example/${operationId}.png` } });
+          if (operation === "write_draft") return Response.json({ protocol_version: "vibepub.wechat.v3", operation, operation_id: operationId, attempt: body.attempt || 1, result: { media_id: "draft-synthetic", mutation: "add" } });
+          if (operation === "get_draft") return Response.json({ protocol_version: "vibepub.wechat.v3", operation, operation_id: operationId, attempt: body.attempt || 1, result: { media_id: "draft-synthetic", title: "", html_hash: "", body_urls: [], thumb_media_id: "" } });
+          return Response.json({ error: { code: "external_side_effect_unknown", retryable: false } }, { status: 503 });
+        },
       },
     },
     wrangler: { configPath: "./wrangler.toml" },

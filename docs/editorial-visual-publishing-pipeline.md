@@ -483,3 +483,94 @@ lines, while body assets require an empty visible-text list; this wave does not
 claim OCR. The visual chain never edits the frozen title, body, blocks, claims, or
 HTML hash, and it does not enter formatting, WeChat, Android, or real-provider
 production paths.
+
+## Wave 2D WeChat Draft Preparation
+
+Wave 2D is a second, independently gated continuation from `visual_ready`. It
+is enabled only when `WECHAT_DRAFT_SYNC_V3=true`, the exact
+`user_id:workspace_id` pair is allowlisted, and the opaque account binding is
+also listed in `WECHAT_PUBLISHING_ACCOUNT_ALLOWLIST`. With the flag off or a
+tenant miss, Wave 2B/2C returns at `visual_ready` and does not resolve the
+WeChat adapter, create a Wave 2D artifact, or issue an external operation.
+
+The private `wechat-publishing-adapter` service binding is the only Wave 2D
+provider boundary. It accepts only `WECHAT_PUBLISHING_TOKEN`, looks up and
+decrypts the account locally, and owns its private operation Durable Object
+and R2 evidence. The main Worker never reads account credentials, proxy URLs,
+or provider response bodies. A read-only account-resolution receipt is pinned
+before formatting. An unavailable or unallowlisted account moves directly
+from `visual_ready` to
+`needs_action/wechat_publishing_account_unavailable/repair_publishing_account`
+or
+`needs_action/wechat_publishing_account_not_allowed/request_account_enablement`;
+it does not synthesize formatting, QA, or draft-sync progress.
+
+The adapter accepts only a deployment-owned provider base that exactly matches
+the normalized `WECHAT_PROVIDER_BASE_URL_ALLOWLIST` HTTPS/443 origin and base
+path; an empty allowlist, hostname/path lookalike, credential-bearing URL, or
+private-like or trailing-dot alias is rejected before decryption, Durable Object selection,
+R2, or provider access. It repeats the feature owner allowlist, account
+binding, and receipt checks at the Durable Object boundary, then uses the
+fixed WeChat token, material-upload, image-upload, draft add/update/get, and
+bounded batch-get paths. The currently configured HTTP gateway remains a production blocker
+until a TLS front is in place and the exposed account credential is rotated.
+Provider-returned media is independently restricted by the deployment-owned,
+exact `WECHAT_MEDIA_URL_HOST_ALLOWLIST`; an empty list, lookalike subdomain,
+private/IP host, credentials, non-HTTPS scheme, or non-443 port fails closed
+before the main Worker accepts a package, readback, or replay evidence.
+
+After a valid receipt, the fixed state path is `formatting` (84), `visual_qa`
+(90), `draft_syncing` (96), `draft_verifying` (98), and `draft_ready` (100).
+The Coordinator records `draft_syncing` in both its durable state and the
+publication projection before the first cover or body-image upload crosses
+the adapter boundary. A repaired Wave 2D hold resumes through the server-owned
+projection retry transition and returns the Coordinator to its recorded local
+checkpoint; it never manufactures visual work or a new public resume action.
+The deterministic formatter accepts the exact frozen article, visual plan,
+ordered visual assets, and visual QA inputs; it emits inline-only WeChat HTML
+with ordered HTTPS body images and a thumb-only cover. It never publishes.
+The immutable `editorial-wave2d.v1` graph contains a template, render QA,
+one upload receipt per visual slot, rendered package, prepublish QA, draft
+receipt, and readback QA: nine logical artifacts for normal content and
+twelve for long content. Every payload repeats and validates its ordered
+parent chain, while Coordinator/D1 mirrors retain only redacted identities,
+hashes, references, slots, operations, account receipt hashes, and versioned
+pin metadata.
+
+Each account receipt/configuration repair or reconciled readback hold creates
+a hash-only immutable execution scope. Failed or partial scopes remain
+historical audit evidence and cannot be overwritten; the sole passing
+readback selects the active scope, whose terminal graph is exactly nine or
+twelve artifacts. Global Coordinator, R2, and D1 checks require every
+historical scope to be a valid no-hole parent graph tied to its own recovery
+evidence, and reject duplicate passing scopes, cross-scope parents, or orphan
+initial prefixes; an unresolved add remains confined to its original write
+intent and bounded read-only fingerprint reconciliation.
+Every non-initial scope maps one-to-one to a complete reconciled, retrying,
+and resumed recovery triplet, whose resumed publication event strictly
+precedes that scope's first artifact event. The source hold and its three
+recovery events occupy four contiguous revisions and restore the hold's exact
+preceding checkpoint. Every historical scope, including
+one that reached `draft_syncing`, must be followed by the canonical hold that
+anchors a later complete recovery triplet; an old checkpoint alone cannot
+make an abandoned scope replayable.
+There is at most one unbound initial scope; an account gate that fails before
+the first artifact legitimately begins later with a recovery-bound scope.
+
+Adapter operations use deterministic operation and attempt identities. The
+adapter writes an intent before provider access and stores a verified immutable
+terminal result before responding; a main-side response loss is reconciled by
+the same operation rather than regenerated. Only explicit provider HTTP
+responses with a durable delivery proof of
+`not_forwarded` or `rejected_before_commit` may retry on 408, 429, 502,
+503, or 504; transport exceptions are never retried blindly. A verified draft
+mapping is scoped to the opaque account and stable article identity. A legacy
+recording draft ID is read and validated before it is reused, and identical
+content performs only that validation read without another draft mutation.
+At verified completion, the owner-bound `recordings.wechat_draft_id` and an
+optional verified HTTPS cover URL are committed in the same guarded D1 batch
+as the `draft_ready` projection event. No credential, HTML, media ID, provider
+body, or publishing request is written into the main Coordinator/D1 mirror.
+The private draft receipt and pass readback QA retain the verified media and
+cover evidence solely for exact replay comparison; a completed run fails
+closed if either recording field differs from that immutable evidence.

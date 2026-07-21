@@ -27,6 +27,10 @@ FIVE_AGENT_PUBLISHING_V3 = "false"
 FIVE_AGENT_PUBLISHING_V3_ALLOWLIST = ""
 VISUAL_PRODUCTION_V3 = "false"
 VISUAL_PRODUCTION_V3_ALLOWLIST = ""
+WECHAT_DRAFT_SYNC_V3 = "false"
+WECHAT_DRAFT_SYNC_V3_ALLOWLIST = ""
+WECHAT_PUBLISHING_ACCOUNT_ALLOWLIST = ""
+WECHAT_MEDIA_URL_HOST_ALLOWLIST = ""
 
 [[services]]
 binding = "WRITING_AGENT"
@@ -39,6 +43,10 @@ service = "editorial-review-agent"
 [[services]]
 binding = "IMAGE_GENERATION_ADAPTER"
 service = "image-generation-adapter"
+
+[[services]]
+binding = "WECHAT_PUBLISHING_ADAPTER"
+service = "wechat-publishing-adapter"
 
 [[d1_databases]]
 binding = "DB"

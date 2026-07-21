@@ -54,6 +54,7 @@ export interface Env {
   WRITING_AGENT?: Fetcher;
   REVIEW_AGENT?: Fetcher;
   IMAGE_GENERATION_ADAPTER?: Fetcher;
+  WECHAT_PUBLISHING_ADAPTER?: Fetcher;
   CREDENTIAL_ENCRYPTION_KEY?: string;
   EMAIL?: {
     send(message: {
@@ -76,6 +77,11 @@ export interface Env {
   VISUAL_PRODUCTION_V3?: string;
   VISUAL_PRODUCTION_V3_ALLOWLIST?: string;
   VISUAL_PRODUCTION_TOKEN?: string;
+  WECHAT_DRAFT_SYNC_V3?: string;
+  WECHAT_DRAFT_SYNC_V3_ALLOWLIST?: string;
+  WECHAT_PUBLISHING_ACCOUNT_ALLOWLIST?: string;
+  WECHAT_MEDIA_URL_HOST_ALLOWLIST?: string;
+  WECHAT_PUBLISHING_TOKEN?: string;
   EDITORIAL_WORKFLOW: Workflow<EditorialWorkflowParams>;
   FIVE_AGENT_PUBLISHING_WORKFLOW: Workflow<FiveAgentWorkflowParams>;
   EDITORIAL_COORDINATOR: DurableObjectNamespace<EditorialCoordinatorAgent>;

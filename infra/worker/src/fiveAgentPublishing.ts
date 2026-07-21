@@ -66,6 +66,35 @@ import {
 import { putImmutableVisualArtifact, readImmutableVisualArtifact, VisualArtifactStoreError } from "./wave2/visualArtifactStore";
 import { BinaryImageStoreError, describeImmutableBinaryImage, putImmutableBinaryImage, readExistingImmutableBinaryImage, readImmutableBinaryImage, verifyPngOpaqueCoverage, verifyPngWhiteBackground } from "./wave2/binaryImageStore";
 import { callVisualImageService, callVisualPlanService, reconcileVisualImageService, reconcileVisualPlanService } from "./wave2/visualServiceClients";
+import {
+  WAVE2D_SCHEMA_VERSION,
+  WECHAT_ACTIVE_PINS,
+  activeWechatPinSnapshot,
+  normalizeWechatHtml,
+  validateWechatHtml,
+  deriveWechatArtifactId,
+  deriveWechatDraftIdentity,
+  finalizeWechatPackage,
+  makeWechatArtifact,
+  normalizeWechatArtifact,
+  renderWechatPackage,
+  toWechatArtifactMetadata,
+  wechatScopeHash,
+  canonicalWechatHtml,
+  type WechatArtifactMetadata,
+  type WechatArtifactObject,
+  type WechatOwner,
+  type WechatRenderTemplatePayload,
+  type WechatImageUploadReceiptPayload,
+  type RenderedArticlePackagePayload,
+  type WechatDraftReceiptPayload,
+  type WechatDraftReadbackQAPayload,
+  type WechatPrepublishQAReportPayload,
+  type WechatRenderQAReportPayload,
+  WechatContractError,
+} from "./wave2/wechatContracts";
+import { putImmutableWechatArtifact, readExactWechatArtifact, WechatArtifactStoreError } from "./wave2/wechatArtifactStore";
+import { callWechatPublishingAdapter, isWechatAccountAllowed, isWechatMediaUrlAllowed, wechatDraftFeatureEnabled, wechatOperationId, WechatPublishingServiceError } from "./wave2/wechatServiceClients";
 
 export const FIVE_AGENT_PUBLISHING_WORKFLOW_NAME = "FIVE_AGENT_PUBLISHING_WORKFLOW";
 export const FIVE_AGENT_PUBLISHING_WORKFLOW_VERSION = "editorial-workflow.v3";
@@ -740,8 +769,8 @@ async function applySystemState(
   env: EditorialRuntimeEnv,
   coordinator: DurableObjectStub<EditorialCoordinatorAgent>,
   params: FiveAgentWorkflowParams,
-  targetState: "transcribing" | "writing" | "reviewing" | "visual_planning" | "visual_generating" | "visual_ready" | "needs_action" | "failed",
-  eventType: "transcription_started" | "writing_started" | "review_started" | "visual_planning" | "visual_generating" | "visual_ready" | "needs_action" | "failed",
+  targetState: "transcribing" | "writing" | "reviewing" | "visual_planning" | "visual_generating" | "visual_ready" | "formatting" | "visual_qa" | "draft_syncing" | "needs_action" | "failed",
+  eventType: "transcription_started" | "writing_started" | "review_started" | "visual_planning" | "visual_generating" | "visual_ready" | "formatting" | "visual_qa" | "draft_syncing" | "needs_action" | "failed",
   doStateRevision: number,
   projectionRevision: number,
   offsetMs: number,
@@ -753,6 +782,7 @@ async function applySystemState(
     retryCount?: number;
     projectionTargetState?: PublicationState;
     projectionAllowSameState?: boolean;
+    eventIdempotencyKey?: string;
   } = {},
 ): Promise<{ doStateRevision: number; projectionRevision: number }> {
   const createdAt = workflowTimestamp(params.created_at, offsetMs);
@@ -775,7 +805,7 @@ async function applySystemState(
     options: {
       eventId: `${params.run_id}:event:${projectionRevision + 1}`,
       eventType,
-      eventIdempotencyKey: `${eventType}:${phase}:${params.run_id}`,
+      eventIdempotencyKey: transition.eventIdempotencyKey || `${eventType}:${phase}:${params.run_id}`,
       eventPayloadHash,
       eventCreatedAt: createdAt,
       errorCode: transition.errorCode,
@@ -797,6 +827,185 @@ async function applySystemState(
     retry_count: transition.retryCount,
   });
   return { doStateRevision: doStateRevision + 1, projectionRevision: projection.run.state_revision };
+}
+
+const WECHAT_DRAFT_SYNCING_PHASE = 220;
+
+async function wechatDraftSyncingPayloadHash(params: FiveAgentWorkflowParams): Promise<string> {
+  return hashJson({
+    run_payload_hash: params.payload_hash,
+    event_type: "draft_syncing",
+    phase: WECHAT_DRAFT_SYNCING_PHASE,
+    target_state: "draft_syncing",
+    error_code: null,
+    next_action: null,
+    revision_count: null,
+    retry_count: null,
+  });
+}
+
+type WechatDraftSyncingCheckpoint = {
+  doStateRevision: number;
+  projectionRevision: number;
+  createdAt: string;
+};
+
+/**
+ * Upload is the first external WeChat side effect. Keep its local checkpoint
+ * recoverable when D1 commits before the Coordinator RPC response arrives.
+ */
+async function ensureWechatDraftSyncingCheckpoint(
+  env: EditorialRuntimeEnv,
+  coordinator: DurableObjectStub<EditorialCoordinatorAgent>,
+  params: FiveAgentWorkflowParams,
+  executionScope: string,
+): Promise<WechatDraftSyncingCheckpoint> {
+  const key = `wave2d:draft-syncing:${executionScope.slice(7, 39)}:${params.run_id}`;
+  const payloadHash = await hashJson({
+    run_payload_hash: params.payload_hash,
+    event_type: "draft_syncing",
+    execution_scope: executionScope,
+    phase: 220,
+    target_state: "draft_syncing",
+    error_code: null,
+    next_action: null,
+    revision_count: null,
+    retry_count: null,
+  });
+  const projection = await env.DB.prepare(`SELECT state, state_revision, last_event_id, last_event_type,
+      last_event_idempotency_key, last_event_payload_hash, last_event_created_at
+    FROM publication_runs WHERE run_id = ? AND user_id = ? AND workspace_id = ? LIMIT 1`)
+    .bind(params.run_id, params.user_id, params.workspace_id)
+    .first<Pick<PublicationRunRow, "state" | "state_revision" | "last_event_id" | "last_event_type" | "last_event_idempotency_key" | "last_event_payload_hash" | "last_event_created_at">>();
+  if (!projection) throw new EditorialRuntimeError("publication_run_not_found", "publication run is unavailable", 404);
+
+  const existingEvent = await env.DB.prepare(`SELECT event_id, revision, event_type, state, idempotency_key, payload_hash, created_at
+    FROM publication_run_events WHERE run_id = ? AND user_id = ? AND workspace_id = ? AND idempotency_key = ? LIMIT 1`)
+    .bind(params.run_id, params.user_id, params.workspace_id, key)
+    .first<{ event_id: string; revision: number; event_type: string; state: string; idempotency_key: string; payload_hash: string; created_at: string }>();
+
+  let projected: { state_revision: number; created_at: string };
+  if (projection.state === "draft_syncing") {
+    if (existingEvent) {
+      if (existingEvent.event_id !== `${params.run_id}:event:${existingEvent.revision}` ||
+          existingEvent.event_type !== "draft_syncing" || existingEvent.state !== "draft_syncing" ||
+          existingEvent.idempotency_key !== key || existingEvent.payload_hash !== payloadHash ||
+          existingEvent.revision > projection.state_revision) {
+        throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "draft syncing checkpoint identity is not exact", 503);
+      }
+      projected = { state_revision: existingEvent.revision, created_at: existingEvent.created_at };
+    } else {
+      const applied = await applySystemPublicationTransition(env.DB, {
+        runId: params.run_id,
+        auth: { userId: params.user_id, workspaceId: params.workspace_id },
+        targetState: "draft_syncing",
+        expectedStateRevision: projection.state_revision,
+        options: {
+          eventId: `${params.run_id}:event:${projection.state_revision + 1}`,
+          eventType: "draft_syncing",
+          eventIdempotencyKey: key,
+          eventPayloadHash: payloadHash,
+          eventCreatedAt: workflowTimestamp(params.created_at, 22_250),
+          allowSameState: true,
+        },
+      });
+      projected = { state_revision: applied.run.state_revision, created_at: projectionEventCreatedAt(applied.run) };
+    }
+  } else {
+    if (projection.state !== "visual_qa" || existingEvent) {
+      throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "draft syncing checkpoint is not resumable", 503);
+    }
+    const applied = await applySystemPublicationTransition(env.DB, {
+      runId: params.run_id,
+      auth: { userId: params.user_id, workspaceId: params.workspace_id },
+      targetState: "draft_syncing",
+      expectedStateRevision: projection.state_revision,
+      options: {
+        eventId: `${params.run_id}:event:${projection.state_revision + 1}`,
+        eventType: "draft_syncing",
+        eventIdempotencyKey: key,
+        eventPayloadHash: payloadHash,
+        eventCreatedAt: workflowTimestamp(params.created_at, 22_250),
+      },
+    });
+    projected = { state_revision: applied.run.state_revision, created_at: projectionEventCreatedAt(applied.run) };
+  }
+
+  const currentDo = await coordinator.getFiveAgentRun(params.run_id, params.user_id, params.workspace_id) as Record<string, unknown>;
+  let doRevision = Number(currentDo.state_revision);
+  if (currentDo.state === "draft_syncing") {
+    const events = await coordinator.listFiveAgentEvents(params.run_id, params.user_id, params.workspace_id);
+    const event = events.find(item => item.event_type === "draft_syncing" && item.payload_hash === payloadHash && item.created_at === projected.created_at);
+    if (event) {
+      doRevision = Number(event.state_revision);
+    } else {
+      const expectedRevision = doRevision + 1;
+      try {
+        await coordinator.recordFiveAgentState({
+          run_id: params.run_id,
+          state: "draft_syncing",
+          state_revision: expectedRevision,
+          event_type: "draft_syncing",
+          payload_hash: payloadHash,
+          created_at: projected.created_at,
+        });
+      } catch {
+        const settled = await coordinator.getFiveAgentRun(params.run_id, params.user_id, params.workspace_id) as Record<string, unknown>;
+        const settledEvents = await coordinator.listFiveAgentEvents(params.run_id, params.user_id, params.workspace_id);
+        const settledEvent = settledEvents.find(item => Number(item.state_revision) === expectedRevision);
+        if (settled.state !== "draft_syncing" || Number(settled.state_revision) !== expectedRevision ||
+            !settledEvent || settledEvent.event_type !== "draft_syncing" || settledEvent.payload_hash !== payloadHash || settledEvent.created_at !== projected.created_at) {
+          throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "Coordinator draft syncing checkpoint is unresolved", 503);
+        }
+      }
+      doRevision = expectedRevision;
+    }
+  } else if (currentDo.state === "visual_qa") {
+    const expectedRevision = doRevision + 1;
+    try {
+      await coordinator.recordFiveAgentState({
+        run_id: params.run_id,
+        state: "draft_syncing",
+        state_revision: expectedRevision,
+        event_type: "draft_syncing",
+        payload_hash: payloadHash,
+        created_at: projected.created_at,
+      });
+    } catch {
+      const reconciled = await coordinator.getFiveAgentRun(params.run_id, params.user_id, params.workspace_id) as Record<string, unknown>;
+      const events = await coordinator.listFiveAgentEvents(params.run_id, params.user_id, params.workspace_id);
+      const event = events.find(item => Number(item.state_revision) === expectedRevision);
+      if (reconciled.state === "visual_qa" && Number(reconciled.state_revision) === doRevision && !event) {
+        // D1 is already authoritative. A lost DO request has no external
+        // side effect and can safely replay the same state CAS once.
+        try {
+          await coordinator.recordFiveAgentState({
+            run_id: params.run_id,
+            state: "draft_syncing",
+            state_revision: expectedRevision,
+            event_type: "draft_syncing",
+            payload_hash: payloadHash,
+            created_at: projected.created_at,
+          });
+        } catch {
+          // The final exact read below distinguishes a committed response-loss
+          // from an unresolved Coordinator operation.
+        }
+      }
+      const settled = await coordinator.getFiveAgentRun(params.run_id, params.user_id, params.workspace_id) as Record<string, unknown>;
+      const settledEvents = await coordinator.listFiveAgentEvents(params.run_id, params.user_id, params.workspace_id);
+      const settledEvent = settledEvents.find(item => Number(item.state_revision) === expectedRevision);
+      if (settled.state !== "draft_syncing" || Number(settled.state_revision) !== expectedRevision ||
+          !settledEvent || settledEvent.event_type !== "draft_syncing" || settledEvent.payload_hash !== payloadHash || settledEvent.created_at !== projected.created_at) {
+        throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "Coordinator draft syncing checkpoint is unresolved", 503);
+      }
+    }
+    doRevision = expectedRevision;
+  } else {
+    throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "Coordinator draft syncing checkpoint is not resumable", 503);
+  }
+
+  return { doStateRevision: doRevision, projectionRevision: projected.state_revision, createdAt: projected.created_at };
 }
 
 export async function reconcilePreStartHold(
@@ -1833,9 +2042,16 @@ async function visualFailure(
   nextAction: string,
   phase: number,
   retryCount = 1,
+  replayCommittedVisualReady = true,
 ): Promise<FiveAgentWorkflowResult> {
   const currentDo = await coordinator.getFiveAgentRun(params.run_id, params.user_id, params.workspace_id) as Record<string, unknown>;
-  const currentProjection = await env.DB.prepare(`SELECT state_revision FROM publication_runs WHERE run_id = ? AND user_id = ? AND workspace_id = ? LIMIT 1`).bind(params.run_id, params.user_id, params.workspace_id).first<{ state_revision: number }>();
+  const currentProjection = await env.DB.prepare(`SELECT state, state_revision FROM publication_runs WHERE run_id = ? AND user_id = ? AND workspace_id = ? LIMIT 1`).bind(params.run_id, params.user_id, params.workspace_id).first<{ state: string; state_revision: number }>();
+  // A concurrent Workflow may already have committed the same visual
+  // execution. A stale losing closure must replay that terminal result rather
+  // than turn it into a failure after the fact.
+  if (replayCommittedVisualReady && currentDo.state === "visual_ready" && currentProjection?.state === "visual_ready") {
+    return { run_id: params.run_id, state: "visual_ready", state_revision: Number(currentDo.state_revision), transcript_ref: transcript.ref, transcript_hash: transcript.hash, artifact_ids: artifactIds };
+  }
   const failed = await applySystemState(env, coordinator, params, "failed", "failed", Number(currentDo.state_revision), Number(currentProjection?.state_revision || 0), phase * 1_000, phase, { errorCode, nextAction, retryCount });
   return { run_id: params.run_id, state: "failed", state_revision: failed.doStateRevision, transcript_ref: transcript.ref, transcript_hash: transcript.hash, artifact_ids: artifactIds };
 }
@@ -1862,10 +2078,32 @@ async function visualHoldWithCode(
   nextAction: string,
   phase: number,
   retryCount = 1,
+  replayCommittedVisualReady = true,
 ): Promise<FiveAgentWorkflowResult> {
   const currentDo = await coordinator.getFiveAgentRun(params.run_id, params.user_id, params.workspace_id) as Record<string, unknown>;
-  const currentProjection = await env.DB.prepare(`SELECT state_revision FROM publication_runs WHERE run_id = ? AND user_id = ? AND workspace_id = ? LIMIT 1`).bind(params.run_id, params.user_id, params.workspace_id).first<{ state_revision: number }>();
-  const held = await applySystemState(env, coordinator, params, "needs_action", "needs_action", Number(currentDo.state_revision), Number(currentProjection?.state_revision || 0), phase * 1_000, phase, { errorCode, nextAction, retryCount });
+  const currentProjection = await env.DB.prepare(`SELECT state, state_revision FROM publication_runs WHERE run_id = ? AND user_id = ? AND workspace_id = ? LIMIT 1`).bind(params.run_id, params.user_id, params.workspace_id).first<{ state: string; state_revision: number }>();
+  if (replayCommittedVisualReady && currentDo.state === "visual_ready" && currentProjection?.state === "visual_ready") {
+    return { run_id: params.run_id, state: "visual_ready", state_revision: Number(currentDo.state_revision), transcript_ref: transcript.ref, transcript_hash: transcript.hash, artifact_ids: artifactIds };
+  }
+  const held = await applySystemState(
+    env,
+    coordinator,
+    params,
+    "needs_action",
+    "needs_action",
+    Number(currentDo.state_revision),
+    Number(currentProjection?.state_revision || 0),
+    phase * 1_000,
+    phase,
+    {
+      errorCode,
+      nextAction,
+      retryCount,
+      // A repaired checkpoint can later hold again for a different local
+      // evidence gap. The event must not collide with the original hold.
+      eventIdempotencyKey: `wave2d:needs-action:${phase}:${errorCode}:${Number(currentProjection?.state_revision || 0)}:${params.run_id}`,
+    },
+  );
   return { run_id: params.run_id, state: "needs_action", state_revision: held.doStateRevision, transcript_ref: transcript.ref, transcript_hash: transcript.hash, artifact_ids: artifactIds };
 }
 
@@ -2369,7 +2607,10 @@ export async function runVisualProductionPhase(input: {
       await verifyCompletedVisualExecution(env, coordinator, params, frozen, [planMeta, ...assetMetadata, committedQa]);
       if (await isPublicationCancelled(env, params)) throw new VisualCancelledError();
       const currentDo = await coordinator.getFiveAgentRun(params.run_id, params.user_id, params.workspace_id) as Record<string, unknown>;
-      const currentProjection = await env.DB.prepare(`SELECT state_revision FROM publication_runs WHERE run_id = ? AND user_id = ? AND workspace_id = ? LIMIT 1`).bind(params.run_id, params.user_id, params.workspace_id).first<{ state_revision: number }>();
+      const currentProjection = await env.DB.prepare(`SELECT state, state_revision FROM publication_runs WHERE run_id = ? AND user_id = ? AND workspace_id = ? LIMIT 1`).bind(params.run_id, params.user_id, params.workspace_id).first<{ state: string; state_revision: number }>();
+      if (currentDo.state === "visual_ready" && currentProjection?.state === "visual_ready") {
+        return { run_id: params.run_id, state: "visual_ready", state_revision: Number(currentDo.state_revision), transcript_ref: transcript.ref, transcript_hash: transcript.hash, artifact_ids: [...priorArtifactIds, planMeta.artifact_id, ...assetMetadata.map(asset => asset.artifact_id), committedQa.artifact_id] };
+      }
       const ready = await applySystemState(env, coordinator, params, "visual_ready", "visual_ready", Number(currentDo.state_revision), Number(currentProjection?.state_revision || 0), 21_000, 21);
       return { run_id: params.run_id, state: "visual_ready", state_revision: ready.doStateRevision, transcript_ref: transcript.ref, transcript_hash: transcript.hash, artifact_ids: [...priorArtifactIds, planMeta.artifact_id, ...assetMetadata.map(asset => asset.artifact_id), committedQa.artifact_id] };
     }
@@ -2402,7 +2643,10 @@ export async function runVisualProductionPhase(input: {
     await verifyExactVisualArtifactSet(env, coordinator, params, [planMeta, ...assetMetadata, qa]);
     if (!whiteBackgroundPassed) return visualHoldWithCode(env, coordinator, params, transcript, [...priorArtifactIds, planMeta.artifact_id, ...assetMetadata.map(asset => asset.artifact_id), qa.artifact_id], "visual_qa_failed", "review_visual_assets", 20);
     const currentDo = await coordinator.getFiveAgentRun(params.run_id, params.user_id, params.workspace_id) as Record<string, unknown>;
-    const currentProjection = await env.DB.prepare(`SELECT state_revision FROM publication_runs WHERE run_id = ? AND user_id = ? AND workspace_id = ? LIMIT 1`).bind(params.run_id, params.user_id, params.workspace_id).first<{ state_revision: number }>();
+    const currentProjection = await env.DB.prepare(`SELECT state, state_revision FROM publication_runs WHERE run_id = ? AND user_id = ? AND workspace_id = ? LIMIT 1`).bind(params.run_id, params.user_id, params.workspace_id).first<{ state: string; state_revision: number }>();
+    if (currentDo.state === "visual_ready" && currentProjection?.state === "visual_ready") {
+      return { run_id: params.run_id, state: "visual_ready", state_revision: Number(currentDo.state_revision), transcript_ref: transcript.ref, transcript_hash: transcript.hash, artifact_ids: [...priorArtifactIds, planMeta.artifact_id, ...assetMetadata.map(asset => asset.artifact_id), qa.artifact_id] };
+    }
     const ready = await applySystemState(env, coordinator, params, "visual_ready", "visual_ready", Number(currentDo.state_revision), Number(currentProjection?.state_revision || 0), 21_000, 21);
     return { run_id: params.run_id, state: "visual_ready", state_revision: ready.doStateRevision, transcript_ref: transcript.ref, transcript_hash: transcript.hash, artifact_ids: [...priorArtifactIds, planMeta.artifact_id, ...assetMetadata.map(asset => asset.artifact_id), qa.artifact_id] };
   } catch (error) {
@@ -2411,6 +2655,2174 @@ export async function runVisualProductionPhase(input: {
     if (isVisualReconciliationHold(error)) return visualHold(env, coordinator, params, transcript, ids, 20, error instanceof EditorialRuntimeError ? error.retryCount : 1);
     if (visualIntegrityError(error)) return visualFailure(env, coordinator, params, transcript, ids, "visual_asset_contract_invalid", "retry_after_service_fix", 20);
     return visualFailure(env, coordinator, params, transcript, ids, "visual_qa_failed", "review_visual_assets", 20);
+  }
+}
+
+type WechatPersistedMetadata = WechatArtifactMetadata & { doStateRevision: number; projectionRevision: number };
+
+async function readWechatArtifactFromR2(env: EditorialRuntimeEnv, metadata: WechatArtifactMetadata): Promise<WechatArtifactObject> {
+  let body: R2ObjectBody | null;
+  try { body = await env.FILES_BUCKET.get(metadata.artifact_key); } catch { throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "wechat artifact read is unknown", 503); }
+  if (!body) throw new EditorialRuntimeError("wechat_artifact_not_found", "wechat artifact is unavailable", 404);
+  let raw: unknown;
+  try { raw = JSON.parse(await body.text()); } catch { throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "wechat artifact is unreadable", 503); }
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "wechat artifact is invalid", 503);
+  const record = raw as Record<string, unknown>;
+  const envelope = record.envelope && typeof record.envelope === "object" ? record.envelope as Record<string, unknown> : {};
+  let object: WechatArtifactObject;
+  try { object = await normalizeWechatArtifact({ ...envelope, payload: record.payload }); }
+  catch (error) {
+    if (error instanceof WechatContractError) throw new EditorialRuntimeError("wechat_artifact_identity_conflict", "wechat artifact contract conflicts", 409);
+    throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "wechat artifact cannot be normalized", 503);
+  }
+  const expectedMetadata = { ...metadata } as Record<string, unknown>;
+  delete expectedMetadata.doStateRevision;
+  delete expectedMetadata.projectionRevision;
+  if (artifactCanonicalJson(toWechatArtifactMetadata(object)) !== artifactCanonicalJson(expectedMetadata)) throw new EditorialRuntimeError("wechat_artifact_identity_conflict", "wechat artifact metadata conflicts", 409);
+  try { await readExactWechatArtifact(env.FILES_BUCKET, object); }
+  catch (error) {
+    if (error instanceof WechatArtifactStoreError && error.code === "wechat_artifact_conflict") throw new EditorialRuntimeError("wechat_artifact_identity_conflict", "wechat artifact bytes conflict", 409);
+    throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "wechat artifact readback is unknown", 503);
+  }
+  return object;
+}
+
+async function mirrorWechatArtifactToD1(db: D1Database, object: WechatArtifactObject): Promise<void> {
+  const metadata = toWechatArtifactMetadata(object);
+  const mirror = {
+    artifact_id: metadata.artifact_id, run_id: metadata.run_id, user_id: metadata.user_id, workspace_id: metadata.workspace_id,
+    article_id: metadata.article_id, recording_id: metadata.recording_id, schema_version: metadata.schema_version, kind: metadata.kind,
+    producer_agent_role: metadata.producer.role, producer_agent_version: metadata.producer.version,
+    skill_id: "wechat-pin-snapshot",
+    // Existing D1 columns are sufficient for a decodable, redacted per-epoch
+    // snapshot. The account receipt remains a hash in the R2 payload only.
+    skill_version: artifactCanonicalJson({
+      pins: WECHAT_ACTIVE_PINS,
+      execution_scope: (object.payload as { execution_scope: string }).execution_scope,
+      recovery_cycle: (object.payload as { recovery_cycle: string | null }).recovery_cycle,
+    }),
+    workflow_version: FIVE_AGENT_PUBLISHING_WORKFLOW_VERSION, policy_version: FIVE_AGENT_PUBLISHING_POLICY_VERSION,
+    input_artifact_ids_json: artifactCanonicalJson(metadata.input_artifact_ids), payload_hash: metadata.payload_hash,
+    storage_ref: metadata.storage_ref, created_at: metadata.created_at,
+  };
+  const get = () => db.prepare(`SELECT artifact_id, run_id, user_id, workspace_id, article_id, recording_id, schema_version, kind,
+    producer_agent_role, producer_agent_version, skill_id, skill_version, workflow_version, policy_version,
+    input_artifact_ids_json, payload_hash, storage_ref, created_at FROM editorial_artifacts WHERE artifact_id = ? LIMIT 1`).bind(mirror.artifact_id).first<Record<string, unknown>>();
+  const matches = (row: Record<string, unknown> | null): boolean => Boolean(row && Object.entries(mirror).every(([key, value]) => String(row[key] ?? "") === String(value)));
+  let existing = await get();
+  if (existing && !matches(existing)) throw new EditorialRuntimeError("wechat_artifact_mirror_conflict", "wechat D1 artifact mirror conflicts", 409);
+  if (!existing) {
+    try {
+      await db.prepare(`INSERT INTO editorial_artifacts (artifact_id, run_id, user_id, workspace_id, article_id, recording_id,
+        schema_version, kind, producer_agent_role, producer_agent_version, skill_id, skill_version, workflow_version,
+        policy_version, input_artifact_ids_json, payload_hash, storage_ref, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .bind(mirror.artifact_id, mirror.run_id, mirror.user_id, mirror.workspace_id, mirror.article_id, mirror.recording_id,
+          mirror.schema_version, mirror.kind, mirror.producer_agent_role, mirror.producer_agent_version, mirror.skill_id,
+          mirror.skill_version, mirror.workflow_version, mirror.policy_version, mirror.input_artifact_ids_json,
+          mirror.payload_hash, mirror.storage_ref, mirror.created_at).run();
+    } catch {
+      existing = await get();
+      if (!existing) throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "wechat D1 mirror outcome is unknown", 503);
+      if (!matches(existing)) throw new EditorialRuntimeError("wechat_artifact_mirror_conflict", "wechat D1 mirror conflicts", 409);
+    }
+  }
+  if (!matches(await get())) throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "wechat D1 mirror cannot be verified", 503);
+}
+
+async function persistWechatArtifact(
+  env: EditorialRuntimeEnv,
+  coordinator: DurableObjectStub<EditorialCoordinatorAgent>,
+  params: FiveAgentWorkflowParams,
+  object: WechatArtifactObject,
+  state: "formatting" | "visual_qa" | "draft_syncing" | "draft_verifying" | "draft_ready" | "needs_action" | "failed",
+  eventType: "wechat_artifact_committed" | "wechat_needs_action" | "wechat_failed",
+  compatibilityProjection?: { recordingId: number; wechatDraftId: string; verifiedCoverImageUrl?: string },
+): Promise<WechatPersistedMetadata> {
+  const metadata = toWechatArtifactMetadata(object);
+  await coordinator.prepareFiveAgentWechatArtifact({ run_id: params.run_id, metadata, envelope_json: artifactCanonicalJson(metadata) });
+  try {
+    await putImmutableWechatArtifact(env.FILES_BUCKET, object);
+    await readExactWechatArtifact(env.FILES_BUCKET, object);
+    await mirrorWechatArtifactToD1(env.DB, object);
+  } catch (error) {
+    if (error instanceof WechatArtifactStoreError && error.code === "wechat_artifact_conflict") throw new EditorialRuntimeError("wechat_artifact_identity_conflict", "wechat artifact persistence conflicts", 409);
+    if (error instanceof EditorialRuntimeError && error.status === 409) throw error;
+    throw new EditorialRuntimeError("external_side_effect_unknown", "wechat artifact persistence outcome is unknown", 503);
+  }
+  const ledger = await coordinator.getFiveAgentWechatLedger(params.run_id, params.user_id, params.workspace_id);
+  const completedEvent = ledger.wechat_events.find(event =>
+    event.idempotency_key === metadata.idempotency_key &&
+    event.artifact_id === metadata.artifact_id &&
+    event.payload_hash === metadata.payload_hash &&
+    event.state === state && event.event_type === eventType,
+  );
+  const currentDo = await coordinator.getFiveAgentRun(params.run_id, params.user_id, params.workspace_id) as Record<string, unknown>;
+  const projection = await env.DB.prepare(`SELECT state, state_revision, last_event_idempotency_key, last_event_payload_hash FROM publication_runs WHERE run_id = ? AND user_id = ? AND workspace_id = ? LIMIT 1`).bind(params.run_id, params.user_id, params.workspace_id).first<{ state: PublicationState; state_revision: number; last_event_idempotency_key: string | null; last_event_payload_hash: string | null }>();
+  if (!projection) throw new EditorialRuntimeError("publication_run_not_found", "publication run is unavailable", 404);
+  const projectedReceipt = await env.DB.prepare(`SELECT revision, state, event_type, created_at FROM publication_run_events
+    WHERE run_id = ? AND user_id = ? AND workspace_id = ? AND idempotency_key = ? AND payload_hash = ? LIMIT 1`)
+    .bind(params.run_id, params.user_id, params.workspace_id, metadata.idempotency_key, metadata.payload_hash)
+    .first<{ revision: number; state: string; event_type: string; created_at: string }>();
+  const projectedReceiptIdentity = await env.DB.prepare(`SELECT payload_hash, state, event_type FROM publication_run_events
+    WHERE run_id = ? AND user_id = ? AND workspace_id = ? AND idempotency_key = ? LIMIT 1`)
+    .bind(params.run_id, params.user_id, params.workspace_id, metadata.idempotency_key)
+    .first<{ payload_hash: string; state: string; event_type: string }>();
+  if (projectedReceiptIdentity && (!projectedReceipt ||
+      projectedReceiptIdentity.state !== state || projectedReceiptIdentity.event_type !== eventType)) {
+    throw new EditorialRuntimeError("wechat_artifact_identity_conflict", "wechat artifact event identity conflicts", 409);
+  }
+  if (completedEvent) {
+    const mirroredEvent = await env.DB.prepare(`SELECT revision FROM publication_run_events
+      WHERE run_id = ? AND user_id = ? AND workspace_id = ? AND idempotency_key = ? AND payload_hash = ? LIMIT 1`)
+      .bind(params.run_id, params.user_id, params.workspace_id, metadata.idempotency_key, metadata.payload_hash)
+      .first<{ revision: number }>();
+    // Publication and Coordinator revisions are deliberately independent:
+    // recovery can add local reconciliation events to either ledger. The
+    // stable artifact idempotency key and payload hash are the cross-ledger
+    // receipt identity, not a coincident revision number.
+    if (!mirroredEvent) {
+      throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "wechat artifact DO receipt is ahead of projection", 503);
+    }
+    return { ...metadata, doStateRevision: completedEvent.state_revision, projectionRevision: projection.state_revision };
+  }
+  if (projectedReceipt) {
+    if (projectedReceipt.state !== state || projectedReceipt.event_type !== eventType) {
+      throw new EditorialRuntimeError("wechat_artifact_identity_conflict", "wechat D1 receipt conflicts with the artifact completion", 409);
+    }
+    const doRevision = Number(currentDo.state_revision) + 1;
+    try {
+      const completion = await coordinator.completeFiveAgentWechatArtifact({
+        artifact_id: metadata.artifact_id,
+        run_id: params.run_id,
+        payload_hash: metadata.payload_hash,
+        state,
+        state_revision: doRevision,
+        event_type: eventType,
+        event_idempotency_key: metadata.idempotency_key,
+        created_at: projectedReceipt.created_at,
+      });
+      return { ...metadata, doStateRevision: completion.state_revision, projectionRevision: projection.state_revision };
+    } catch {
+      const reconciledLedger = await coordinator.getFiveAgentWechatLedger(params.run_id, params.user_id, params.workspace_id);
+      const reconciledEvent = reconciledLedger.wechat_events.find(event =>
+        event.idempotency_key === metadata.idempotency_key &&
+        event.artifact_id === metadata.artifact_id &&
+        event.payload_hash === metadata.payload_hash &&
+        event.state === state && event.event_type === eventType,
+      );
+      if (reconciledEvent) {
+        return { ...metadata, doStateRevision: reconciledEvent.state_revision, projectionRevision: projection.state_revision };
+      }
+      // The D1 event is already durable. A prior local recovery event can
+      // advance only the DO revision between the first RPC read and its CAS;
+      // re-read and retry the same receipt identity once, never the provider.
+      const refreshedDo = await coordinator.getFiveAgentRun(params.run_id, params.user_id, params.workspace_id) as Record<string, unknown>;
+      try {
+        const completion = await coordinator.completeFiveAgentWechatArtifact({
+          artifact_id: metadata.artifact_id,
+          run_id: params.run_id,
+          payload_hash: metadata.payload_hash,
+          state,
+          state_revision: Number(refreshedDo.state_revision) + 1,
+          event_type: eventType,
+          event_idempotency_key: metadata.idempotency_key,
+          created_at: projectedReceipt.created_at,
+        });
+        return { ...metadata, doStateRevision: completion.state_revision, projectionRevision: projection.state_revision };
+      } catch {
+        const settledLedger = await coordinator.getFiveAgentWechatLedger(params.run_id, params.user_id, params.workspace_id);
+        const settledEvent = settledLedger.wechat_events.find(event =>
+          event.idempotency_key === metadata.idempotency_key &&
+          event.artifact_id === metadata.artifact_id &&
+          event.payload_hash === metadata.payload_hash &&
+          event.state === state && event.event_type === eventType,
+        );
+        if (settledEvent) return { ...metadata, doStateRevision: settledEvent.state_revision, projectionRevision: projection.state_revision };
+      }
+      throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "wechat D1 receipt is awaiting Durable Object completion", 503);
+    }
+  }
+  const applied = await applySystemPublicationTransition(env.DB, {
+    runId: params.run_id,
+    auth: { userId: params.user_id, workspaceId: params.workspace_id },
+    targetState: state,
+    expectedStateRevision: projection.state_revision,
+    ...(compatibilityProjection ? { compatibilityProjection } : {}),
+    options: {
+      eventId: `${params.run_id}:wechat:event:${metadata.idempotency_key}`,
+      eventType,
+      eventIdempotencyKey: metadata.idempotency_key,
+      eventPayloadHash: metadata.payload_hash,
+      eventCreatedAt: metadata.created_at,
+      allowSameState: projection.state === state,
+    },
+  });
+  const doRevision = Number(currentDo.state_revision) + 1;
+  try {
+    const completion = await coordinator.completeFiveAgentWechatArtifact({ artifact_id: metadata.artifact_id, run_id: params.run_id, payload_hash: metadata.payload_hash, state, state_revision: doRevision, event_type: eventType, event_idempotency_key: metadata.idempotency_key, created_at: projectionEventCreatedAt(applied.run) });
+    return { ...metadata, doStateRevision: completion.state_revision, projectionRevision: applied.run.state_revision };
+  } catch {
+    // The Coordinator transaction can commit before an RPC response is lost.
+    // Only a complete matching DO receipt plus its D1 projection event proves
+    // that this is a replay; any other outcome remains a reconciliation hold.
+    const reconciledLedger = await coordinator.getFiveAgentWechatLedger(params.run_id, params.user_id, params.workspace_id);
+    const reconciledEvent = reconciledLedger.wechat_events.find(event =>
+      event.idempotency_key === metadata.idempotency_key &&
+      event.artifact_id === metadata.artifact_id &&
+      event.payload_hash === metadata.payload_hash &&
+      event.state === state && event.event_type === eventType,
+    );
+    const reconciledProjectionEvent = reconciledEvent
+      ? await env.DB.prepare(`SELECT revision FROM publication_run_events
+          WHERE run_id = ? AND user_id = ? AND workspace_id = ? AND idempotency_key = ? AND payload_hash = ? LIMIT 1`)
+        .bind(params.run_id, params.user_id, params.workspace_id, metadata.idempotency_key, metadata.payload_hash)
+        .first<{ revision: number }>()
+      : null;
+    if (reconciledEvent && reconciledProjectionEvent) {
+      return { ...metadata, doStateRevision: reconciledEvent.state_revision, projectionRevision: applied.run.state_revision };
+    }
+    throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "wechat artifact completion outcome is unknown", 503);
+  }
+}
+
+// This preserves the production Coordinator -> R2 -> D1 -> projection -> DO
+// order for adversarial runtime fixtures without adding a second write path.
+export async function persistWechatArtifactForVerification(
+  env: EditorialRuntimeEnv,
+  coordinator: DurableObjectStub<EditorialCoordinatorAgent>,
+  params: FiveAgentWorkflowParams,
+  object: WechatArtifactObject,
+  state: "formatting" | "visual_qa" | "draft_syncing" | "draft_verifying" | "draft_ready" | "needs_action" | "failed",
+  eventType: "wechat_artifact_committed" | "wechat_needs_action" | "wechat_failed",
+): Promise<WechatPersistedMetadata> {
+  return persistWechatArtifact(env, coordinator, params, object, state, eventType);
+}
+
+type WechatScopeTopology = {
+  scope: string;
+  recoveryCycle: string | null;
+  artifacts: WechatArtifactObject[];
+  template: WechatArtifactObject;
+  templatePayload: WechatRenderTemplatePayload;
+  slots: string[];
+  uploads: WechatArtifactObject[];
+  readbacks: WechatArtifactObject[];
+};
+
+type WechatRecoveryGroup = {
+  target: string;
+  holdRevision: number;
+  reconciledRevision: number;
+  retryingRevision: number;
+  resumedRevision: number;
+};
+
+type WechatRecoveryProjectionEvent = {
+  revision: number;
+  event_id: string;
+  event_type: string;
+  state: string;
+  error_code: string | null;
+  next_action: string | null;
+  retry_count: number;
+};
+
+function wechatTopologyFailure(message: string): never {
+  throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", message, 503);
+}
+
+// A recovery group is written synchronously by the Coordinator-owned D1
+// state machine. No other Wave2D event is permitted between the source hold
+// and its three server-owned recovery steps.
+function validateWechatRecoveryRevisionOrder(group: WechatRecoveryGroup): void {
+  if (group.reconciledRevision !== group.holdRevision + 1 ||
+      group.retryingRevision !== group.reconciledRevision + 1 ||
+      group.resumedRevision !== group.retryingRevision + 1) {
+    wechatTopologyFailure("wechat recovery group revisions are not contiguous");
+  }
+}
+
+function validateWechatHoldRevision(stateRevision: number, holdRevision: number): void {
+  if (stateRevision + 1 !== holdRevision) {
+    wechatTopologyFailure("wechat hold revision does not match its embedded predecessor");
+  }
+}
+
+function validateWechatRecoveryProjectionFields(input: {
+  runId: string;
+  target: string;
+  checkpointState: string;
+  hold: Pick<WechatRecoveryProjectionEvent, "revision" | "retry_count">;
+  reconciled: WechatRecoveryProjectionEvent;
+  retrying: WechatRecoveryProjectionEvent;
+  resumed: WechatRecoveryProjectionEvent;
+}): void {
+  if (!WECHAT_RESUMABLE_STATES.has(input.checkpointState) || input.target !== input.checkpointState) {
+    wechatTopologyFailure("wechat recovery target does not match the held checkpoint");
+  }
+  validateWechatRecoveryRevisionOrder({
+    target: input.target,
+    holdRevision: input.hold.revision,
+    reconciledRevision: input.reconciled.revision,
+    retryingRevision: input.retrying.revision,
+    resumedRevision: input.resumed.revision,
+  });
+  for (const event of [input.reconciled, input.retrying, input.resumed]) {
+    if (event.event_id !== `${input.runId}:event:${event.revision}`) {
+      wechatTopologyFailure("wechat recovery event id is not canonical");
+    }
+  }
+  if (input.reconciled.event_type !== "wechat_side_effect_reconciled" || input.reconciled.state !== "needs_action" ||
+      input.reconciled.error_code !== "wechat_side_effect_reconciled" || input.reconciled.next_action !== "resume_reconciled_wechat" ||
+      input.retrying.event_type !== "wechat_reconciliation_retrying" || input.retrying.state !== "retrying" ||
+      input.retrying.error_code !== null || input.retrying.next_action !== null ||
+      input.resumed.event_type !== "wechat_reconciliation_resumed" || input.resumed.state !== input.target ||
+      input.resumed.error_code !== null || input.resumed.next_action !== null ||
+      input.reconciled.retry_count !== input.hold.retry_count ||
+      input.retrying.retry_count !== input.hold.retry_count || input.resumed.retry_count !== input.hold.retry_count) {
+    wechatTopologyFailure("wechat recovery projection fields are not exact");
+  }
+}
+
+function wechatPayloadScope(object: WechatArtifactObject): { scope: string; cycle: string | null } {
+  const payload = object.payload as { execution_scope?: unknown; recovery_cycle?: unknown };
+  if (typeof payload.execution_scope !== "string" || !/^sha256:[a-f0-9]{64}$/.test(payload.execution_scope) ||
+      (payload.recovery_cycle !== null && (typeof payload.recovery_cycle !== "string" || !/^[a-f0-9]{32}$/.test(payload.recovery_cycle)))) {
+    wechatTopologyFailure("wechat artifact epoch evidence is invalid");
+  }
+  return { scope: payload.execution_scope, cycle: payload.recovery_cycle };
+}
+
+/**
+ * Validates every retained Wave2D epoch, not just the active terminal graph.
+ * The envelopes already duplicate the typed inputs; this resolver additionally
+ * proves each typed parent is a real object in the same immutable epoch.
+ */
+function validateWechatScopeTopologies(objects: Map<string, WechatArtifactObject>): Map<string, WechatScopeTopology> {
+  const grouped = new Map<string, WechatArtifactObject[]>();
+  const cycles = new Map<string, string | null>();
+  for (const object of objects.values()) {
+    const { scope, cycle } = wechatPayloadScope(object);
+    const previous = cycles.get(scope);
+    if (previous !== undefined && previous !== cycle) wechatTopologyFailure("wechat execution scope has conflicting recovery evidence");
+    cycles.set(scope, cycle);
+    const group = grouped.get(scope) || [];
+    group.push(object);
+    grouped.set(scope, group);
+  }
+  // Account resolution can fail before the first Wave2D artifact exists. Its
+  // repaired execution is then the first persisted epoch and is deliberately
+  // recovery-bound rather than an invented initial scope. What remains
+  // forbidden is more than one unbound initial epoch.
+  if ([...cycles.values()].filter(value => value === null).length > 1) {
+    wechatTopologyFailure("wechat initial execution scope is not unique");
+  }
+
+  const topologies = new Map<string, WechatScopeTopology>();
+  for (const [scope, artifacts] of grouped) {
+    const byKind = new Map<string, WechatArtifactObject[]>();
+    for (const object of artifacts) {
+      const values = byKind.get(object.envelope.kind) || [];
+      values.push(object);
+      byKind.set(object.envelope.kind, values);
+    }
+    const one = <T extends WechatArtifactObject>(kind: string): T | undefined => {
+      const values = byKind.get(kind) || [];
+      if (values.length > 1) wechatTopologyFailure(`wechat execution scope duplicates ${kind}`);
+      return values[0] as T | undefined;
+    };
+    const template = one<WechatArtifactObject>("wechat_render_template");
+    if (!template) wechatTopologyFailure("wechat execution scope is missing its template root");
+    const templatePayload = template.payload as WechatRenderTemplatePayload;
+    const slots = [templatePayload.cover_slot_id, ...templatePayload.body_slots.map(slot => slot.slot_id)];
+    if (new Set(slots).size !== slots.length || slots[0] !== "cover_01") {
+      wechatTopologyFailure("wechat template slot topology is invalid");
+    }
+    const renderQa = one<WechatArtifactObject>("wechat_render_qa_report");
+    const packageObject = one<WechatArtifactObject>("rendered_article_package");
+    const preQa = one<WechatArtifactObject>("wechat_prepublish_qa_report");
+    const draftReceipt = one<WechatArtifactObject>("wechat_draft_receipt");
+    const readback = one<WechatArtifactObject>("wechat_draft_readback_qa");
+    const uploads = byKind.get("wechat_image_upload_receipt") || [];
+    const requireEarlier = (condition: boolean, message: string) => { if (!condition) wechatTopologyFailure(message); };
+    requireEarlier(!renderQa || renderQa.envelope.input_artifact_ids.length === 1, "wechat render QA has invalid parent topology");
+    if (renderQa) {
+      const payload = renderQa.payload as WechatRenderQAReportPayload;
+      requireEarlier(payload.template_artifact_id === template.envelope.artifact_id && payload.template_payload_hash === template.envelope.payload_hash &&
+        renderQa.envelope.input_artifact_ids[0] === template.envelope.artifact_id, "wechat render QA parent conflicts");
+    }
+    const renderPassed = renderQa && (renderQa.payload as WechatRenderQAReportPayload).decision === "pass";
+    if (!renderQa && (uploads.length || packageObject || preQa || draftReceipt || readback)) wechatTopologyFailure("wechat scope has a topology hole before render QA");
+    if (renderQa && !renderPassed && (uploads.length || packageObject || preQa || draftReceipt || readback)) wechatTopologyFailure("wechat failed render QA has descendants");
+
+    const bySlot = new Map<string, WechatArtifactObject>();
+    for (const upload of uploads) {
+      const payload = upload.payload as WechatImageUploadReceiptPayload;
+      const slotIndex = slots.indexOf(payload.slot_id);
+      if (slotIndex < 0 || bySlot.has(payload.slot_id) || payload.order !== slotIndex ||
+          payload.purpose !== (slotIndex === 0 ? "cover" : "body") ||
+          payload.media_kind !== (slotIndex === 0 ? "thumb" : "body") ||
+          payload.frozen_artifact_id !== templatePayload.frozen_artifact_id || payload.frozen_payload_hash !== templatePayload.frozen_payload_hash ||
+          payload.visual_plan_artifact_id !== templatePayload.visual_plan_artifact_id || payload.visual_plan_payload_hash !== templatePayload.visual_plan_payload_hash ||
+          payload.visual_qa_artifact_id !== templatePayload.visual_qa_artifact_id || payload.visual_qa_payload_hash !== templatePayload.visual_qa_payload_hash ||
+          payload.visual_asset_artifact_id !== templatePayload.asset_artifact_ids[slotIndex] ||
+          payload.account_binding_id !== templatePayload.account_binding_id) {
+        wechatTopologyFailure("wechat upload receipt slot topology conflicts");
+      }
+      bySlot.set(payload.slot_id, upload);
+    }
+    const orderedUploads = slots.map(slot => bySlot.get(slot)).filter((value): value is WechatArtifactObject => Boolean(value));
+    const completeUploads = orderedUploads.length === slots.length;
+    if ((packageObject || preQa || draftReceipt || readback) && (!renderPassed || !completeUploads)) {
+      wechatTopologyFailure("wechat scope has a topology hole before package");
+    }
+    if (!packageObject && (preQa || draftReceipt || readback)) wechatTopologyFailure("wechat scope has a topology hole before prepublish QA");
+    if (!preQa && (draftReceipt || readback)) wechatTopologyFailure("wechat scope has a topology hole before draft receipt");
+    if (!draftReceipt && readback) wechatTopologyFailure("wechat scope has a topology hole before readback");
+
+    const sameParent = (id: string, hash: string, expected: WechatArtifactObject | undefined, kind: string): boolean =>
+      Boolean(expected && expected.envelope.kind === kind && expected.envelope.artifact_id === id && expected.envelope.payload_hash === hash &&
+        wechatPayloadScope(expected).scope === scope);
+    if (packageObject) {
+      const payload = packageObject.payload as RenderedArticlePackagePayload;
+      requireEarlier(sameParent(payload.template_artifact_id, payload.template_payload_hash, template, "wechat_render_template") &&
+        sameParent(payload.render_qa_artifact_id, payload.render_qa_payload_hash, renderQa, "wechat_render_qa_report") &&
+        artifactCanonicalJson(payload.upload_receipt_ids) === artifactCanonicalJson(orderedUploads.map(object => object.envelope.artifact_id)) &&
+        artifactCanonicalJson(packageObject.envelope.input_artifact_ids) === artifactCanonicalJson([template.envelope.artifact_id, renderQa!.envelope.artifact_id, ...orderedUploads.map(object => object.envelope.artifact_id)]),
+      "wechat package parents conflict across execution scopes");
+    }
+    if (preQa) {
+      const payload = preQa.payload as WechatPrepublishQAReportPayload;
+      requireEarlier(sameParent(payload.package_artifact_id, payload.package_payload_hash, packageObject, "rendered_article_package") &&
+        artifactCanonicalJson(payload.ordered_upload_receipt_ids) === artifactCanonicalJson(orderedUploads.map(object => object.envelope.artifact_id)) &&
+        artifactCanonicalJson(preQa.envelope.input_artifact_ids) === artifactCanonicalJson([packageObject!.envelope.artifact_id, ...orderedUploads.map(object => object.envelope.artifact_id)]),
+      "wechat prepublish QA parents conflict across execution scopes");
+    }
+    if (draftReceipt) {
+      const payload = draftReceipt.payload as WechatDraftReceiptPayload;
+      requireEarlier(sameParent(payload.package_artifact_id, payload.package_payload_hash, packageObject, "rendered_article_package") &&
+        sameParent(payload.prepublish_qa_artifact_id, payload.prepublish_qa_payload_hash, preQa, "wechat_prepublish_qa_report") &&
+        artifactCanonicalJson(payload.upload_receipt_ids) === artifactCanonicalJson(orderedUploads.map(object => object.envelope.artifact_id)) &&
+        artifactCanonicalJson(draftReceipt.envelope.input_artifact_ids) === artifactCanonicalJson([packageObject!.envelope.artifact_id, preQa!.envelope.artifact_id, ...orderedUploads.map(object => object.envelope.artifact_id)]),
+      "wechat draft receipt parents conflict across execution scopes");
+    }
+    if (readback) {
+      const payload = readback.payload as WechatDraftReadbackQAPayload;
+      requireEarlier(sameParent(payload.package_artifact_id, payload.package_payload_hash, packageObject, "rendered_article_package") &&
+        sameParent(payload.prepublish_qa_artifact_id, payload.prepublish_qa_payload_hash, preQa, "wechat_prepublish_qa_report") &&
+        sameParent(payload.draft_receipt_artifact_id, payload.draft_receipt_payload_hash, draftReceipt, "wechat_draft_receipt") &&
+        artifactCanonicalJson(payload.upload_receipt_ids) === artifactCanonicalJson(orderedUploads.map(object => object.envelope.artifact_id)) &&
+        artifactCanonicalJson(readback.envelope.input_artifact_ids) === artifactCanonicalJson([packageObject!.envelope.artifact_id, preQa!.envelope.artifact_id, draftReceipt!.envelope.artifact_id, ...orderedUploads.map(object => object.envelope.artifact_id)]),
+      "wechat readback parents conflict across execution scopes");
+    }
+    topologies.set(scope, { scope, recoveryCycle: cycles.get(scope) || null, artifacts, template, templatePayload, slots, uploads: orderedUploads, readbacks: readback ? [readback] : [] });
+  }
+  return topologies;
+}
+
+function validateWechatScopeRecoveryBindings(
+  topologies: Map<string, WechatScopeTopology>,
+  selectedScope: string,
+  artifactRevisions: Map<string, number[]>,
+  recoveryGroups: Map<string, WechatRecoveryGroup>,
+): void {
+  for (const recovery of recoveryGroups.values()) validateWechatRecoveryRevisionOrder(recovery);
+  const scopeByRecoveryCycle = new Map<string, string>();
+  for (const topology of topologies.values()) {
+    if (topology.recoveryCycle === null) continue;
+    const existingScope = scopeByRecoveryCycle.get(topology.recoveryCycle);
+    if (existingScope !== undefined && existingScope !== topology.scope) {
+      wechatTopologyFailure("wechat recovery cycle is bound to multiple execution scopes");
+    }
+    scopeByRecoveryCycle.set(topology.recoveryCycle, topology.scope);
+  }
+  for (const topology of topologies.values()) {
+    const revisions = artifactRevisions.get(topology.scope) || [];
+    if (revisions.length === 0) wechatTopologyFailure("wechat execution scope has no projection evidence");
+    const first = Math.min(...revisions);
+    const last = Math.max(...revisions);
+    if (topology.recoveryCycle !== null) {
+      const recovery = recoveryGroups.get(topology.recoveryCycle);
+      if (!recovery || recovery.resumedRevision >= first) {
+        wechatTopologyFailure("wechat recovered execution scope is not ordered after its recovery evidence");
+      }
+    }
+    if (topology.scope === selectedScope) continue;
+    // A retained historical prefix or failed graph is valid only when the
+    // next complete recovery cycle is anchored by a canonical hold after its
+    // final artifact receipt. A draft-syncing checkpoint alone cannot make a
+    // stale epoch eligible for terminal replay.
+    if (![...recoveryGroups.values()].some(group => group.holdRevision > last)) {
+      wechatTopologyFailure("wechat historical execution scope lacks a following hold/recovery");
+    }
+  }
+}
+
+// Kept as a narrow testable boundary: completed replay calls the same
+// resolver below, while contract fixtures can prove hash-self-consistent
+// malicious graphs reach topology validation instead of a storage mismatch.
+export function assertWechatScopeTopologyForVerification(objects: Map<string, WechatArtifactObject>): void {
+  validateWechatScopeTopologies(objects);
+}
+
+function uniquePassingWechatExecutionScope(objects: Iterable<WechatArtifactObject>): string {
+  const passing = [...objects].filter(object => object.envelope.kind === "wechat_draft_readback_qa" &&
+    (object.payload as WechatDraftReadbackQAPayload).decision === "pass");
+  if (passing.length !== 1) wechatTopologyFailure("wechat terminal execution scope is ambiguous");
+  return wechatPayloadScope(passing[0]).scope;
+}
+
+export function assertUniquePassingWechatExecutionScopeForVerification(objects: Map<string, WechatArtifactObject>): void {
+  uniquePassingWechatExecutionScope(objects.values());
+}
+
+// Narrow read-only fixture boundary for recovery-event topology. Production
+// exact-set verification calls the same resolver below.
+export function assertWechatScopeRecoveryBindingsForVerification(input: {
+  objects: Map<string, WechatArtifactObject>;
+  selectedScope: string;
+  artifactRevisions: Record<string, number[]>;
+  recoveryGroups: Record<string, WechatRecoveryGroup>;
+}): void {
+  validateWechatScopeRecoveryBindings(
+    validateWechatScopeTopologies(input.objects),
+    input.selectedScope,
+    new Map(Object.entries(input.artifactRevisions)),
+    new Map(Object.entries(input.recoveryGroups)),
+  );
+}
+
+// Narrow read-only fixture boundary. Production exact-set verification invokes
+// this same field validator after it derives the source hold from D1.
+export function assertWechatRecoveryProjectionFieldsForVerification(input: {
+  runId: string;
+  target: string;
+  checkpointState: string;
+  hold: Pick<WechatRecoveryProjectionEvent, "revision" | "retry_count">;
+  reconciled: WechatRecoveryProjectionEvent;
+  retrying: WechatRecoveryProjectionEvent;
+  resumed: WechatRecoveryProjectionEvent;
+}): void {
+  validateWechatRecoveryProjectionFields(input);
+}
+
+export function assertWechatHoldRevisionForVerification(stateRevision: number, holdRevision: number): void {
+  validateWechatHoldRevision(stateRevision, holdRevision);
+}
+
+function uniquePassingWechatReadback(
+  artifacts: WechatArtifactMetadata[],
+  receiptIds: readonly string[],
+): WechatArtifactMetadata | undefined {
+  const values = artifacts.filter(item => item.kind === "wechat_draft_readback_qa" &&
+    item.payload_summary.decision === "pass" && receiptIds.includes(item.artifact_id));
+  if (values.length > 1) {
+    throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "wechat terminal readback evidence is ambiguous", 503);
+  }
+  return values[0];
+}
+
+async function verifyExactWechatArtifactSet(
+  env: EditorialRuntimeEnv,
+  coordinator: DurableObjectStub<EditorialCoordinatorAgent>,
+  params: FiveAgentWorkflowParams,
+  expectedSlots: readonly string[],
+  executionScope?: string,
+): Promise<void> {
+  const ledger = await coordinator.getFiveAgentWechatLedger(params.run_id, params.user_id, params.workspace_id);
+  const allCommitted = ledger.artifacts.filter(item => ledger.receipt_ids.includes(item.artifact_id));
+  // The coordinator ledger remains globally exact: a historical epoch can be
+  // retained for audit, but it must still have a matching receipt and event.
+  if (allCommitted.length !== ledger.artifacts.length ||
+      new Set(allCommitted.map(item => item.artifact_id)).size !== allCommitted.length ||
+      artifactCanonicalJson([...ledger.receipt_ids].sort()) !== artifactCanonicalJson(allCommitted.map(item => item.artifact_id).sort()) ||
+      artifactCanonicalJson([...ledger.event_artifacts].sort()) !== artifactCanonicalJson(allCommitted.map(item => item.artifact_id).sort())) {
+    throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "wechat artifact receipt/event set is not globally exact", 503);
+  }
+  const rawScopes = allCommitted.map(item => item.payload_summary.execution_scope);
+  if (rawScopes.some(scope => typeof scope !== "string" || !/^sha256:[a-f0-9]{64}$/.test(scope))) {
+    throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "wechat artifact execution scope is invalid", 503);
+  }
+  const scopes = new Set(rawScopes as string[]);
+  // A completed run is defined by exactly one immutable passing readback.
+  // Callers may supply the expected scope only as an assertion, never as a
+  // selector that could hide a second terminal epoch.
+  const passing = allCommitted.filter(item => item.kind === "wechat_draft_readback_qa" && item.payload_summary.decision === "pass");
+  const selectedScope = passing.length === 1 ? passing[0].payload_summary.execution_scope : null;
+  if (typeof selectedScope !== "string" || !scopes.has(selectedScope) || (executionScope !== undefined && executionScope !== selectedScope)) {
+    throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "wechat active execution scope is unavailable", 503);
+  }
+  const committed = allCommitted.filter(item => item.payload_summary.execution_scope === selectedScope);
+  const expectedCount = expectedSlots.length + 6;
+  if (committed.length !== expectedCount ||
+      new Set(committed.map(item => item.artifact_id)).size !== expectedCount ||
+      new Set(committed.map(item => item.kind === "wechat_image_upload_receipt" ? `${item.payload_summary.slot_id}:${item.payload_summary.operation_id}` : item.kind)).size !== expectedCount) {
+    throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "wechat artifact receipt/event set is not exact", 503);
+  }
+  const byKind = (kind: WechatArtifactMetadata["kind"]) => committed.filter(item => item.kind === kind);
+  if (byKind("wechat_render_template").length !== 1 || byKind("wechat_render_qa_report").length !== 1 ||
+      byKind("wechat_image_upload_receipt").length !== expectedSlots.length || byKind("rendered_article_package").length !== 1 ||
+      byKind("wechat_prepublish_qa_report").length !== 1 || byKind("wechat_draft_receipt").length !== 1 ||
+      byKind("wechat_draft_readback_qa").length !== 1) {
+    throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "wechat artifact kinds are not exact", 503);
+  }
+  const uploads = byKind("wechat_image_upload_receipt");
+  if (artifactCanonicalJson(uploads.map(item => item.payload_summary.slot_id)) !== artifactCanonicalJson(expectedSlots) ||
+      new Set(uploads.map(item => item.payload_summary.operation_id)).size !== uploads.length) {
+    throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "wechat upload slots are not exact", 503);
+  }
+  const expectedById = new Map(allCommitted.map(item => [item.artifact_id, item]));
+  const objects = new Map<string, WechatArtifactObject>();
+  for (const metadata of allCommitted) {
+    const object = await readWechatArtifactFromR2(env, metadata);
+    if (artifactCanonicalJson(toWechatArtifactMetadata(object)) !== artifactCanonicalJson(metadata)) {
+      throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "wechat artifact metadata does not exactly read back", 503);
+    }
+    objects.set(metadata.artifact_id, object);
+  }
+  if (uniquePassingWechatExecutionScope(objects.values()) !== selectedScope) {
+    throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "wechat terminal readback identity conflicts", 503);
+  }
+  const topologies = validateWechatScopeTopologies(objects);
+  const selectedTopology = topologies.get(selectedScope);
+  if (!selectedTopology || selectedTopology.readbacks.length !== 1 ||
+      (selectedTopology.readbacks[0].payload as WechatDraftReadbackQAPayload).decision !== "pass") {
+    throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "wechat active execution topology is unavailable", 503);
+  }
+  // Every retained epoch renders the same accepted frozen/visual execution
+  // input. Account receipt rotation may create a new epoch, but it may not
+  // splice in a different frozen/visual parent graph.
+  for (const topology of topologies.values()) {
+    const value = topology.templatePayload;
+    const active = selectedTopology.templatePayload;
+    if (value.frozen_artifact_id !== active.frozen_artifact_id || value.frozen_payload_hash !== active.frozen_payload_hash ||
+        value.visual_plan_artifact_id !== active.visual_plan_artifact_id || value.visual_plan_payload_hash !== active.visual_plan_payload_hash ||
+        value.visual_qa_artifact_id !== active.visual_qa_artifact_id || value.visual_qa_payload_hash !== active.visual_qa_payload_hash ||
+        artifactCanonicalJson(value.asset_artifact_ids) !== artifactCanonicalJson(active.asset_artifact_ids)) {
+      throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "wechat execution scope splices visual parents", 503);
+    }
+    if (topology.scope !== selectedScope && topology.readbacks.some(object =>
+      (object.payload as WechatDraftReadbackQAPayload).decision === "pass")) {
+      throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "wechat historical execution scope passes readback", 503);
+    }
+  }
+  const scopeRecoveryCycles = new Map<string, string | null>([...topologies.values()].map(topology => [topology.scope, topology.recoveryCycle]));
+  const only = (kind: WechatArtifactMetadata["kind"]): WechatArtifactObject => {
+    const values = [...objects.values()].filter(object => object.envelope.kind === kind &&
+      (object.payload as { execution_scope?: string }).execution_scope === selectedScope);
+    if (values.length !== 1) throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "wechat artifact kind is not unique", 503);
+    return values[0];
+  };
+  const sameIds = (actual: readonly string[], expected: readonly string[]): boolean =>
+    artifactCanonicalJson(actual) === artifactCanonicalJson(expected);
+  const template = only("wechat_render_template");
+  const templatePayload = template.payload as WechatRenderTemplatePayload;
+  const coreArtifacts = await coordinator.listFiveAgentArtifacts(params.run_id, params.user_id, params.workspace_id);
+  const frozen = coreArtifacts.find(item => item.kind === "frozen_article_version" && item.artifact_id === templatePayload.frozen_artifact_id) as StoredArtifactMetadata | undefined;
+  if (!frozen || frozen.payload_hash !== templatePayload.frozen_payload_hash) {
+    throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "wechat template is not bound to the accepted frozen artifact", 503);
+  }
+  const frozenObject = await readArtifactFromR2(env, params, frozen.artifact_id, frozen.artifact_key, frozen.payload_hash);
+  const frozenPayload = frozenObject.payload as FrozenArticleVersion;
+  const frozenSlotCount = Array.from(frozenPayload.body).length >= 5000 ? 6 : 3;
+  const frozenSlots = ["cover_01", ...Array.from({ length: frozenSlotCount - 1 }, (_, index) => `body_${String(index + 1).padStart(2, "0")}`)];
+  if (!sameIds(expectedSlots, frozenSlots) || templatePayload.asset_artifact_ids.length !== frozenSlotCount ||
+      templatePayload.body_slots.length !== frozenSlotCount - 1) {
+    throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "wechat slot set is not independently bound to frozen content", 503);
+  }
+  const renderQa = only("wechat_render_qa_report");
+  const renderQaPayload = renderQa.payload as WechatRenderQAReportPayload;
+  const packageObject = only("rendered_article_package");
+  const packagePayload = packageObject.payload as RenderedArticlePackagePayload;
+  const preQa = only("wechat_prepublish_qa_report");
+  const preQaPayload = preQa.payload as WechatPrepublishQAReportPayload;
+  const draftReceipt = only("wechat_draft_receipt");
+  const draftReceiptPayload = draftReceipt.payload as WechatDraftReceiptPayload;
+  const readback = only("wechat_draft_readback_qa");
+  const readbackPayload = readback.payload as WechatDraftReadbackQAPayload;
+  const orderedUploads = uploads.sort((left, right) => Number(left.payload_summary.order || 0) - Number(right.payload_summary.order || 0));
+  const orderedUploadIds = orderedUploads.map(item => item.artifact_id);
+  const uploadPayloads = orderedUploads.map(item => objects.get(item.artifact_id)?.payload as WechatImageUploadReceiptPayload | undefined);
+  let packageBodyUrls: string[] = [];
+  try {
+    packageBodyUrls = validateWechatHtml(packagePayload.canonical_html, uploadPayloads.slice(1).map(payload => payload?.media_url || "")).body_urls;
+    if (packageBodyUrls.some(url => !isWechatMediaUrlAllowed(env.WECHAT_MEDIA_URL_HOST_ALLOWLIST, url))) throw new Error("media host");
+  } catch {
+    throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "wechat package HTML does not bind upload receipts", 503);
+  }
+  const visualLedger = await coordinator.getFiveAgentVisualLedger(params.run_id, params.user_id, params.workspace_id);
+  const visualAssets = new Map(visualLedger.artifacts.filter(item => item.kind === "visual_asset" && visualLedger.receipt_ids.includes(item.artifact_id)).map(item => [item.artifact_id, item]));
+  const uploadEvidenceValid = await Promise.all(uploadPayloads.map(async (payload, index) => {
+    const providerEvidencePrefix = payload ? `wechat-adapter/v1/result/${payload.operation_id}/` : "";
+    if (!payload || typeof payload.provider_result_ref !== "string" ||
+        !payload.provider_result_ref.startsWith(providerEvidencePrefix) ||
+        !/^[1-3]\.json$/.test(payload.provider_result_ref.slice(providerEvidencePrefix.length)) ||
+        !/^sha256:[a-f0-9]{64}$/.test(payload.provider_result_hash) ||
+        !isWechatMediaUrlAllowed(env.WECHAT_MEDIA_URL_HOST_ALLOWLIST, payload.media_url)) return false;
+    const visual = visualAssets.get(payload.visual_asset_artifact_id);
+    if (!visual || visual.payload_hash !== payload.visual_asset_payload_hash) return false;
+    const visualObject = await readVisualArtifactFromR2(env, visual);
+    const visualPayload = visualObject.payload as VisualAssetPayload;
+    if (visualPayload.byte_hash !== payload.asset_byte_hash || visualPayload.slot_id !== payload.slot_id) return false;
+    if (index === 0) return payload.purpose === "cover" && payload.media_kind === "thumb" && typeof payload.cover_media_id === "string" && OPAQUE_ID.test(payload.cover_media_id);
+    return payload.purpose === "body" && payload.media_kind === "body" && payload.cover_media_id === null;
+  }));
+  const graphValid =
+    sameIds(template.envelope.input_artifact_ids, [templatePayload.frozen_artifact_id, templatePayload.visual_plan_artifact_id, ...templatePayload.asset_artifact_ids, templatePayload.visual_qa_artifact_id]) &&
+    templatePayload.asset_artifact_ids.length === expectedSlots.length &&
+    renderQaPayload.template_artifact_id === template.envelope.artifact_id && renderQaPayload.template_payload_hash === template.envelope.payload_hash &&
+    sameIds(renderQa.envelope.input_artifact_ids, [template.envelope.artifact_id]) &&
+    sameIds(templatePayload.asset_artifact_ids, uploadPayloads.map(payload => payload?.visual_asset_artifact_id || "")) &&
+    uploadPayloads.every((payload, index) => Boolean(payload) && uploadEvidenceValid[index] &&
+      payload!.frozen_artifact_id === templatePayload.frozen_artifact_id && payload!.frozen_payload_hash === templatePayload.frozen_payload_hash &&
+      payload!.visual_plan_artifact_id === templatePayload.visual_plan_artifact_id && payload!.visual_plan_payload_hash === templatePayload.visual_plan_payload_hash &&
+      payload!.visual_qa_artifact_id === templatePayload.visual_qa_artifact_id && payload!.visual_qa_payload_hash === templatePayload.visual_qa_payload_hash &&
+      payload!.slot_id === expectedSlots[index] && payload!.order === index &&
+      sameIds(orderedUploads[index].artifact_id ? objects.get(orderedUploads[index].artifact_id)!.envelope.input_artifact_ids : [],
+        [payload!.frozen_artifact_id, payload!.visual_plan_artifact_id, payload!.visual_asset_artifact_id, payload!.visual_qa_artifact_id])) &&
+    packagePayload.template_artifact_id === template.envelope.artifact_id && packagePayload.template_payload_hash === template.envelope.payload_hash &&
+    packagePayload.render_qa_artifact_id === renderQa.envelope.artifact_id && packagePayload.render_qa_payload_hash === renderQa.envelope.payload_hash &&
+    sameIds(packagePayload.upload_receipt_ids, orderedUploadIds) &&
+    sameIds(packagePayload.body_image_slots, uploadPayloads.slice(1).map(payload => payload?.slot_id || "")) &&
+    packagePayload.thumb_slot_id === uploadPayloads[0]?.slot_id &&
+    sameIds(packageBodyUrls, uploadPayloads.slice(1).map(payload => payload?.media_url || "")) &&
+    sameIds(packageObject.envelope.input_artifact_ids, [template.envelope.artifact_id, renderQa.envelope.artifact_id, ...orderedUploadIds]) &&
+    preQaPayload.package_artifact_id === packageObject.envelope.artifact_id && preQaPayload.package_payload_hash === packageObject.envelope.payload_hash &&
+    sameIds(preQaPayload.ordered_upload_receipt_ids, orderedUploadIds) && sameIds(preQa.envelope.input_artifact_ids, [packageObject.envelope.artifact_id, ...orderedUploadIds]) &&
+    draftReceiptPayload.package_artifact_id === packageObject.envelope.artifact_id && draftReceiptPayload.package_payload_hash === packageObject.envelope.payload_hash &&
+    draftReceiptPayload.prepublish_qa_artifact_id === preQa.envelope.artifact_id && draftReceiptPayload.prepublish_qa_payload_hash === preQa.envelope.payload_hash &&
+    sameIds(draftReceiptPayload.upload_receipt_ids, orderedUploadIds) && sameIds(draftReceipt.envelope.input_artifact_ids, [packageObject.envelope.artifact_id, preQa.envelope.artifact_id, ...orderedUploadIds]) &&
+    readbackPayload.draft_receipt_artifact_id === draftReceipt.envelope.artifact_id && readbackPayload.draft_receipt_payload_hash === draftReceipt.envelope.payload_hash &&
+    readbackPayload.package_artifact_id === packageObject.envelope.artifact_id && readbackPayload.package_payload_hash === packageObject.envelope.payload_hash &&
+    readbackPayload.prepublish_qa_artifact_id === preQa.envelope.artifact_id && readbackPayload.prepublish_qa_payload_hash === preQa.envelope.payload_hash &&
+    renderQaPayload.decision === "pass" && preQaPayload.decision === "pass" &&
+    readbackPayload.decision === "pass" && readbackPayload.checks.media && readbackPayload.checks.title &&
+    readbackPayload.checks.html && readbackPayload.checks.urls && readbackPayload.checks.thumb &&
+    readbackPayload.checks.article_index === 0 &&
+    draftReceiptPayload.verified_thumb_media_id === uploadPayloads[0]?.cover_media_id &&
+    draftReceiptPayload.verified_cover_image_url === uploadPayloads[0]?.media_url &&
+    readbackPayload.verified_draft_media_id === draftReceiptPayload.verified_draft_media_id &&
+    readbackPayload.verified_thumb_media_id === draftReceiptPayload.verified_thumb_media_id &&
+    readbackPayload.verified_cover_image_url === draftReceiptPayload.verified_cover_image_url &&
+    sameIds(readbackPayload.upload_receipt_ids, orderedUploadIds) && sameIds(readback.envelope.input_artifact_ids, [packageObject.envelope.artifact_id, preQa.envelope.artifact_id, draftReceipt.envelope.artifact_id, ...orderedUploadIds]);
+  if (!graphValid) {
+    throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "wechat artifact graph is not exact", 503);
+  }
+  const firstKey = allCommitted[0]?.artifact_key;
+  const marker = "/wechat/";
+  const markerIndex = firstKey?.indexOf(marker) ?? -1;
+  if (markerIndex < 0) throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "wechat artifact prefix is invalid", 503);
+  const prefix = firstKey!.slice(0, markerIndex + marker.length);
+  const keys: string[] = [];
+  let cursor: string | undefined;
+  do {
+    const page = await env.FILES_BUCKET.list({ prefix, ...(cursor ? { cursor } : {}) });
+    keys.push(...page.objects.map(item => item.key));
+    cursor = page.truncated ? page.cursor : undefined;
+  } while (cursor);
+  if (artifactCanonicalJson(keys.sort()) !== artifactCanonicalJson(allCommitted.map(item => item.artifact_key).sort())) {
+    throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "wechat R2 artifact set is not exact", 503);
+  }
+  const mirrored = await env.DB.prepare(`SELECT artifact_id, run_id, article_id, recording_id, user_id, workspace_id,
+      schema_version, kind, producer_agent_role, producer_agent_version, skill_id, skill_version, workflow_version,
+      policy_version, input_artifact_ids_json, payload_hash, storage_ref, created_at
+      FROM editorial_artifacts WHERE run_id = ? AND user_id = ? AND workspace_id = ? AND schema_version = ?`)
+    .bind(params.run_id, params.user_id, params.workspace_id, WAVE2D_SCHEMA_VERSION).all<Record<string, unknown>>();
+  if ((mirrored.results || []).length !== allCommitted.length) throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "wechat D1 artifact set is not exact", 503);
+  for (const row of mirrored.results || []) {
+    const metadata = expectedById.get(String(row.artifact_id));
+    if (!metadata || String(row.run_id) !== metadata.run_id || String(row.article_id) !== metadata.article_id ||
+        Number(row.recording_id) !== metadata.recording_id || String(row.user_id) !== metadata.user_id ||
+        String(row.workspace_id) !== metadata.workspace_id || String(row.schema_version) !== metadata.schema_version ||
+        String(row.kind) !== metadata.kind || String(row.producer_agent_role) !== metadata.producer.role ||
+        String(row.producer_agent_version) !== metadata.producer.version || String(row.workflow_version) !== "editorial-workflow.v3" ||
+        String(row.policy_version) !== "editorial-policy.v3" || String(row.input_artifact_ids_json) !== artifactCanonicalJson(metadata.input_artifact_ids) ||
+        String(row.payload_hash) !== metadata.payload_hash || String(row.storage_ref) !== metadata.storage_ref ||
+        String(row.created_at) !== metadata.created_at || String(row.skill_id) !== "wechat-pin-snapshot" ||
+        String(row.skill_version) !== artifactCanonicalJson({
+          pins: WECHAT_ACTIVE_PINS,
+          execution_scope: metadata.payload_summary.execution_scope,
+          recovery_cycle: metadata.payload_summary.recovery_cycle,
+        })) {
+      throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "wechat D1 artifact identity is not exact", 503);
+    }
+  }
+  const projection = await env.DB.prepare(`SELECT state FROM publication_runs WHERE run_id = ? AND user_id = ? AND workspace_id = ? LIMIT 1`)
+    .bind(params.run_id, params.user_id, params.workspace_id).first<{ state: PublicationState }>();
+  if (!projection) throw new EditorialRuntimeError("publication_run_not_found", "publication run is unavailable", 404);
+  const expectedEvents = allCommitted.map(item => ({ idempotency_key: item.idempotency_key, payload_hash: item.payload_hash }));
+  // Uploads are gated by this separately persisted local state checkpoint; it
+  // is part of the terminal evidence even though it has no artifact receipt.
+  for (const scope of scopes) {
+    const hasUploads = allCommitted.some(item => item.payload_summary.execution_scope === scope && item.kind === "wechat_image_upload_receipt");
+    const recoveryCycle = scopeRecoveryCycles.get(scope);
+    if (recoveryCycle === undefined) {
+      throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "wechat execution scope is missing epoch evidence", 503);
+    }
+    // A historical recovery epoch must be tied to the unique, complete
+    // recovery triplet for its source hold. The detailed triplet validation
+    // below verifies the event hash and hold identity; this early lookup binds
+    // an artifact graph to that exact cycle before accepting it as a prefix.
+    if (recoveryCycle !== null) {
+      const resumedRows = await env.DB.prepare(`SELECT idempotency_key FROM publication_run_events
+        WHERE run_id = ? AND user_id = ? AND workspace_id = ? AND event_type = 'wechat_reconciliation_resumed'`)
+        .bind(params.run_id, params.user_id, params.workspace_id)
+        .all<{ idempotency_key: string }>();
+      const resumed = (resumedRows.results || []).some(row =>
+        /^wave2d:resumed:[a-f0-9]{32}:[^:]+:[A-Za-z0-9._:-]+$/.test(row.idempotency_key) &&
+        row.idempotency_key.startsWith(`wave2d:resumed:${recoveryCycle}:`) &&
+        row.idempotency_key.endsWith(`:${params.run_id}`),
+      );
+      if (!resumed) {
+        throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "wechat recovery epoch has no matching resume evidence", 503);
+      }
+    }
+    const scopePrefix = `wave2d:draft-syncing:${scope.slice(7, 39)}:${params.run_id}`;
+    const checkpoint = (await env.DB.prepare(`SELECT idempotency_key, payload_hash, event_type, state FROM publication_run_events
+      WHERE run_id = ? AND user_id = ? AND workspace_id = ? AND idempotency_key = ? LIMIT 1`)
+      .bind(params.run_id, params.user_id, params.workspace_id, scopePrefix).first<{ idempotency_key: string; payload_hash: string; event_type: string; state: string }>()) || null;
+    if (!checkpoint) {
+      // A corrected readback may create a complete, immutable audit epoch at
+      // draft_verifying without reissuing already-confirmed upload writes.
+      // Its trusted recovery triplet is the equivalent side-effect boundary.
+      const passReadback = allCommitted.some(item => item.payload_summary.execution_scope === scope &&
+        item.kind === "wechat_draft_readback_qa" && item.payload_summary.decision === "pass");
+      const recoveredDraftVerifying = recoveryCycle === null ? null : await env.DB.prepare(`SELECT 1 FROM publication_run_events
+        WHERE run_id = ? AND user_id = ? AND workspace_id = ?
+          AND idempotency_key = ? AND event_type = 'wechat_reconciliation_resumed' AND state = 'draft_verifying'
+        LIMIT 1`).bind(params.run_id, params.user_id, params.workspace_id,
+          `wave2d:resumed:${recoveryCycle}:draft_verifying:${params.run_id}`).first<{ 1: number }>();
+      if (passReadback && recoveredDraftVerifying) continue;
+      // A failed prefix may legitimately stop before an upload. It remains
+      // auditable only if a later hold/recovery event proves why this scope
+      // was abandoned; that ordering check runs after all recovery triplets
+      // are parsed below.
+      if (!hasUploads) {
+        continue;
+      }
+      throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "wechat draft-syncing checkpoint is not exact", 503);
+    }
+    if (checkpoint.event_type !== "draft_syncing" || checkpoint.state !== "draft_syncing" || checkpoint.payload_hash !== await hashJson({
+      run_payload_hash: params.payload_hash, event_type: "draft_syncing", execution_scope: scope,
+      phase: 220, target_state: "draft_syncing", error_code: null, next_action: null,
+      revision_count: null, retry_count: null,
+    })) {
+      throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "wechat draft-syncing checkpoint is not exact", 503);
+    }
+    expectedEvents.push({ idempotency_key: checkpoint.idempotency_key, payload_hash: checkpoint.payload_hash });
+  }
+  if (projection.state === "draft_ready") {
+    const readyHash = await hashJson({
+      event: "draft_ready",
+      readback_artifact_id: readback.envelope.artifact_id,
+      readback_payload_hash: readback.envelope.payload_hash,
+    });
+    expectedEvents.push({
+      idempotency_key: `wave2d:draft-ready:${readback.envelope.artifact_id}:${readback.envelope.payload_hash}`,
+      payload_hash: readyHash,
+    });
+  }
+  const publicationEvents = await env.DB.prepare(`SELECT revision, event_id, idempotency_key, payload_hash, event_type, state, error_code, next_action, retry_count, created_at
+    FROM publication_run_events WHERE run_id = ? AND user_id = ? AND workspace_id = ? AND idempotency_key LIKE 'wave2d:%'`)
+    .bind(params.run_id, params.user_id, params.workspace_id).all<{ revision: number; event_id: string; idempotency_key: string; payload_hash: string; event_type: string; state: string; error_code: string | null; next_action: string | null; retry_count: number; created_at: string }>();
+  const rows = publicationEvents.results || [];
+  const wave2dHolds = rows.filter(event => event.idempotency_key.startsWith("wave2d:needs-action:"));
+  const holdStateRevisions = new Map<string, number>();
+  for (const hold of wave2dHolds) {
+    const prefix = "wave2d:needs-action:";
+    const suffix = `:${params.run_id}`;
+    const parts = hold.idempotency_key.startsWith(prefix) && hold.idempotency_key.endsWith(suffix)
+      ? hold.idempotency_key.slice(prefix.length, -suffix.length).split(":")
+      : [];
+    const phase = Number(parts[0]);
+    const stateRevision = Number(parts.at(-1));
+    const errorCode = parts.slice(1, -1).join(":");
+    const expectedAction = errorCode === "draft_readback_mismatch" || errorCode === "draft_readback_unavailable" ? "reconcile_draft" :
+      errorCode === "draft_identity_unresolved" ? "reconcile_draft_identity" :
+      errorCode === "wechat_publishing_account_not_allowed" ? "request_account_enablement" :
+      errorCode === "wechat_publishing_account_unavailable" || errorCode === "wechat_publishing_account_rejected" || errorCode === "wechat_access_token_rejected"
+        ? "repair_publishing_account"
+        : "reconcile_external_side_effect";
+    if (!Number.isInteger(phase) || phase < 0 || !Number.isInteger(stateRevision) || stateRevision < 0 ||
+        !WECHAT_RESUMABLE_HOLDS.has(errorCode) || hold.state !== "needs_action" || hold.event_type !== "needs_action" ||
+        hold.error_code !== errorCode || hold.next_action !== expectedAction || hold.retry_count < 1 ||
+        hold.payload_hash !== await hashJson({
+          run_payload_hash: params.payload_hash,
+          event_type: "needs_action",
+          phase,
+          target_state: "needs_action",
+          error_code: errorCode,
+          next_action: expectedAction,
+          revision_count: null,
+          retry_count: hold.retry_count,
+        })) {
+      throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "wechat hold event is not exact", 503);
+    }
+    validateWechatHoldRevision(stateRevision, hold.revision);
+    holdStateRevisions.set(hold.idempotency_key, stateRevision);
+    expectedEvents.push({ idempotency_key: hold.idempotency_key, payload_hash: hold.payload_hash });
+  }
+  const recoveryRows = rows.filter(event => /^(wave2d:reconciled:|wave2d:retrying:|wave2d:resumed:)/.test(event.idempotency_key));
+  const recoveryGroups = new Map<string, WechatRecoveryGroup>();
+  if (recoveryRows.length > 0) {
+    type RecoveryRow = typeof recoveryRows[number];
+    const cycles = new Map<string, Partial<Record<"reconciled" | "retrying" | "resumed", RecoveryRow>> & { target?: string }>();
+    const suffix = `:${params.run_id}`;
+    for (const event of recoveryRows) {
+      const match = /^wave2d:(reconciled|retrying|resumed):([a-f0-9]{32}):([^:]+):/.exec(event.idempotency_key);
+      if (!match || !event.idempotency_key.endsWith(suffix)) {
+        throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "wechat recovery event key is invalid", 503);
+      }
+      const [, phase, cycle, target] = match;
+      const expectedKey = `wave2d:${phase}:${cycle}:${target}:${params.run_id}`;
+      if (event.idempotency_key !== expectedKey || !WECHAT_RESUMABLE_STATES.has(target)) {
+        throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "wechat recovery event key is not canonical", 503);
+      }
+      const group = cycles.get(cycle) || { target };
+      if (group.target !== target || group[phase as "reconciled" | "retrying" | "resumed"]) {
+        throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "wechat recovery cycle is duplicated", 503);
+      }
+      group[phase as "reconciled" | "retrying" | "resumed"] = event;
+      cycles.set(cycle, group);
+    }
+    for (const [cycle, group] of cycles) {
+      const target = group.target;
+      const reconciled = group.reconciled;
+      const retrying = group.retrying;
+      const resumed = group.resumed;
+      if (!target || !reconciled || !retrying || !resumed ||
+          reconciled.event_type !== "wechat_side_effect_reconciled" || reconciled.state !== "needs_action" ||
+          retrying.event_type !== "wechat_reconciliation_retrying" || retrying.state !== "retrying" ||
+          resumed.event_type !== "wechat_reconciliation_resumed" || resumed.state !== target ||
+          retrying.revision !== reconciled.revision + 1 || resumed.revision !== retrying.revision + 1) {
+        throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "wechat recovery cycle is incomplete", 503);
+      }
+      let matchedHold: typeof wave2dHolds[number] | undefined;
+      for (const hold of wave2dHolds) {
+        const candidate = (await hashJson({
+          run_id: params.run_id,
+          target,
+          hold_revision: hold.revision,
+          hold_idempotency_key: hold.idempotency_key,
+          hold_payload_hash: hold.payload_hash,
+        })).slice(7, 39);
+        if (candidate === cycle) {
+          if (matchedHold) throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "wechat recovery cycle has ambiguous hold evidence", 503);
+          matchedHold = hold;
+        }
+      }
+      if (!matchedHold) throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "wechat recovery cycle has no hold evidence", 503);
+      const checkpointRevision = holdStateRevisions.get(matchedHold.idempotency_key);
+      if (checkpointRevision === undefined) {
+        throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "wechat recovery hold revision is unavailable", 503);
+      }
+      const checkpoint = await env.DB.prepare(`SELECT state FROM publication_run_events
+        WHERE run_id = ? AND user_id = ? AND workspace_id = ? AND revision = ? LIMIT 1`)
+        .bind(params.run_id, params.user_id, params.workspace_id, checkpointRevision).first<{ state: string }>();
+      if (!checkpoint) throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "wechat held checkpoint is unavailable", 503);
+      const expectedHash = (event: string) => hashJson({
+        run_payload_hash: params.payload_hash,
+        event,
+        target,
+        recovery_cycle: cycle,
+        recovered_hold: { revision: matchedHold!.revision, idempotency_key: matchedHold!.idempotency_key, payload_hash: matchedHold!.payload_hash },
+      });
+      const reconciledHash = await expectedHash("wechat_side_effect_reconciled");
+      const retryHash = await expectedHash("wechat_reconciliation_retrying");
+      const resumeHash = await expectedHash("wechat_reconciliation_resumed");
+      if (reconciled.payload_hash !== reconciledHash || retrying.payload_hash !== retryHash || resumed.payload_hash !== resumeHash) {
+        throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "wechat recovery payload identity is not exact", 503);
+      }
+      validateWechatRecoveryProjectionFields({
+        runId: params.run_id,
+        target,
+        checkpointState: checkpoint.state,
+        hold: matchedHold,
+        reconciled,
+        retrying,
+        resumed,
+      });
+      const recoveryGroup = {
+        target,
+        holdRevision: matchedHold.revision,
+        reconciledRevision: reconciled.revision,
+        retryingRevision: retrying.revision,
+        resumedRevision: resumed.revision,
+      };
+      validateWechatRecoveryRevisionOrder(recoveryGroup);
+      recoveryGroups.set(cycle, recoveryGroup);
+      expectedEvents.push(
+        { idempotency_key: reconciled.idempotency_key, payload_hash: reconciledHash },
+        { idempotency_key: retrying.idempotency_key, payload_hash: retryHash },
+        { idempotency_key: resumed.idempotency_key, payload_hash: resumeHash },
+      );
+    }
+  }
+  // Bind retained epoch graphs to the recovery cycle that precedes them. The
+  // initial epoch is unique and may only be historical when a later verified
+  // hold/recovery sequence follows its own artifact receipts; recovered
+  // epochs must begin after their exact resumed event.
+  const artifactRevisions = new Map<string, number[]>();
+  for (const topology of topologies.values()) {
+    const identities = new Set(topology.artifacts.map(object => `${object.envelope.idempotency_key}:${object.envelope.payload_hash}`));
+    const revisions = rows.filter(event => identities.has(`${event.idempotency_key}:${event.payload_hash}`)).map(event => event.revision);
+    if (revisions.length !== topology.artifacts.length) {
+      throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "wechat execution scope artifacts lack projection evidence", 503);
+    }
+    artifactRevisions.set(topology.scope, revisions);
+  }
+  try {
+    validateWechatScopeRecoveryBindings(topologies, selectedScope, artifactRevisions, recoveryGroups);
+  } catch (error) {
+    if (error instanceof EditorialRuntimeError) throw error;
+    throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "wechat execution scope recovery evidence is invalid", 503);
+  }
+  if (artifactCanonicalJson((publicationEvents.results || []).map(event => ({ idempotency_key: event.idempotency_key, payload_hash: event.payload_hash })).sort((left, right) => left.idempotency_key.localeCompare(right.idempotency_key))) !==
+      artifactCanonicalJson(expectedEvents.sort((left, right) => left.idempotency_key.localeCompare(right.idempotency_key)))) {
+    throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "wechat publication event set is not exact", 503);
+  }
+}
+
+async function finalizeWechatDraft(
+  env: EditorialRuntimeEnv,
+  coordinator: DurableObjectStub<EditorialCoordinatorAgent>,
+  params: FiveAgentWorkflowParams,
+  readback: WechatArtifactMetadata,
+  draftId: string,
+  verifiedCoverImageUrl: string | undefined,
+): Promise<{ doStateRevision: number; projectionRevision: number }> {
+  const readbackObject = await readWechatArtifactFromR2(env, readback);
+  if (readbackObject.envelope.kind !== "wechat_draft_readback_qa") {
+    throw new EditorialRuntimeError("wechat_artifact_identity_conflict", "draft-ready evidence is not a readback QA artifact", 409);
+  }
+  const readbackPayload = readbackObject.payload as WechatDraftReadbackQAPayload;
+  if (readbackPayload.decision !== "pass" || !readbackPayload.checks.media || !readbackPayload.checks.title ||
+      !readbackPayload.checks.html || !readbackPayload.checks.urls || !readbackPayload.checks.thumb ||
+      readbackPayload.checks.article_index !== 0 ||
+      readbackPayload.verified_draft_media_id !== draftId ||
+      !OPAQUE_ID.test(readbackPayload.verified_thumb_media_id) ||
+      readbackPayload.verified_cover_image_url !== (verifiedCoverImageUrl || null)) {
+    throw new EditorialRuntimeError("draft_readback_mismatch", "draft-ready evidence is not a verified readback", 409);
+  }
+  const coreArtifacts = await coordinator.listFiveAgentArtifacts(params.run_id, params.user_id, params.workspace_id);
+  const frozen = coreArtifacts.find(item => item.kind === "frozen_article_version") as StoredArtifactMetadata | undefined;
+  if (!frozen) throw new EditorialRuntimeError("frozen_artifact_not_found", "draft-ready evidence cannot find frozen input", 503);
+  const frozenObject = await readArtifactFromR2(env, params, frozen.artifact_id, frozen.artifact_key, frozen.payload_hash);
+  const expectedSlots = Array.from((frozenObject.payload as FrozenArticleVersion).body).length >= 5000 ? 6 : 3;
+  if (readbackPayload.upload_receipt_ids.length !== expectedSlots || new Set(readbackPayload.upload_receipt_ids).size !== expectedSlots) {
+    throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "draft-ready receipt slot count is not bound to frozen input", 503);
+  }
+  const currentDo = await coordinator.getFiveAgentRun(params.run_id, params.user_id, params.workspace_id) as Record<string, unknown>;
+  const projection = await env.DB.prepare(`SELECT state, state_revision FROM publication_runs WHERE run_id = ? AND user_id = ? AND workspace_id = ? LIMIT 1`)
+    .bind(params.run_id, params.user_id, params.workspace_id).first<{ state: PublicationState; state_revision: number }>();
+  if (!projection) throw new EditorialRuntimeError("publication_run_not_found", "publication run is unavailable", 404);
+  if (projection.state === "draft_ready") {
+    const recording = await env.DB.prepare(`SELECT wechat_draft_id, cover_image_url FROM recordings
+      WHERE id = ? AND user_id = ? AND workspace_id = ? LIMIT 1`)
+      .bind(params.recording_id, params.user_id, params.workspace_id)
+      .first<{ wechat_draft_id: string | null; cover_image_url: string | null }>();
+    if (!recording || recording.wechat_draft_id !== draftId ||
+        (verifiedCoverImageUrl !== undefined && recording.cover_image_url !== verifiedCoverImageUrl)) {
+      throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "draft-ready replay recording evidence conflicts", 503);
+    }
+  }
+  const idempotencyKey = `wave2d:draft-ready:${readback.artifact_id}:${readback.payload_hash}`;
+  // The projection trigger requires every event to carry distinct canonical
+  // evidence. A draft-ready event is not the readback-artifact receipt, even
+  // though it is derived from that receipt.
+  const finalEventPayloadHash = await hashJson({
+    event: "draft_ready",
+    readback_artifact_id: readback.artifact_id,
+    readback_payload_hash: readback.payload_hash,
+  });
+  const applied = await applySystemPublicationTransition(env.DB, {
+    runId: params.run_id,
+    auth: { userId: params.user_id, workspaceId: params.workspace_id },
+    targetState: "draft_ready",
+    expectedStateRevision: projection.state_revision,
+    compatibilityProjection: { recordingId: params.recording_id, wechatDraftId: draftId, ...(verifiedCoverImageUrl ? { verifiedCoverImageUrl } : {}) },
+    options: {
+      eventId: `${params.run_id}:wechat:ready:${readback.artifact_id}`,
+      eventType: "draft_ready",
+      eventIdempotencyKey: idempotencyKey,
+      eventPayloadHash: finalEventPayloadHash,
+      eventCreatedAt: readback.created_at,
+    },
+  });
+  const doRevision = Number(currentDo.state_revision) + 1;
+  await coordinator.recordFiveAgentState({
+    run_id: params.run_id,
+    state: "draft_ready",
+    state_revision: doRevision,
+    event_type: "draft_ready",
+    payload_hash: finalEventPayloadHash,
+    created_at: projectionEventCreatedAt(applied.run),
+  });
+  return { doStateRevision: doRevision, projectionRevision: applied.run.state_revision };
+}
+
+async function assertVerifiedWechatDraftReadyEvidence(
+  env: EditorialRuntimeEnv,
+  coordinator: DurableObjectStub<EditorialCoordinatorAgent>,
+  params: FiveAgentWorkflowParams,
+  readback: WechatArtifactMetadata,
+): Promise<{ draftId: string; coverUrl?: string }> {
+  const object = await readWechatArtifactFromR2(env, readback);
+  if (object.envelope.kind !== "wechat_draft_readback_qa") throw new EditorialRuntimeError("wechat_artifact_identity_conflict", "draft-ready evidence is not readback QA", 409);
+  const payload = object.payload as WechatDraftReadbackQAPayload;
+  if (payload.decision !== "pass" || !payload.checks.media || !payload.checks.title || !payload.checks.html ||
+      !payload.checks.urls || !payload.checks.thumb || payload.checks.article_index !== 0) {
+    throw new EditorialRuntimeError("draft_readback_mismatch", "draft-ready readback does not pass", 409);
+  }
+  const frozen = (await coordinator.listFiveAgentArtifacts(params.run_id, params.user_id, params.workspace_id))
+    .find(item => item.kind === "frozen_article_version") as StoredArtifactMetadata | undefined;
+  if (!frozen) throw new EditorialRuntimeError("frozen_artifact_not_found", "draft-ready evidence cannot find frozen input", 503);
+  const frozenObject = await readArtifactFromR2(env, params, frozen.artifact_id, frozen.artifact_key, frozen.payload_hash);
+  const expectedSlotCount = Array.from((frozenObject.payload as FrozenArticleVersion).body).length >= 5000 ? 6 : 3;
+  if (payload.upload_receipt_ids.length !== expectedSlotCount || new Set(payload.upload_receipt_ids).size !== expectedSlotCount) {
+    throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "draft-ready evidence has the wrong slot set", 503);
+  }
+  const visualLedger = await coordinator.getFiveAgentVisualLedger(params.run_id, params.user_id, params.workspace_id);
+  const visualSlots = visualLedger.artifacts
+    .filter(item => item.kind === "visual_asset" && visualLedger.receipt_ids.includes(item.artifact_id))
+    .sort((left, right) => Number(left.payload_summary.order || 0) - Number(right.payload_summary.order || 0))
+    .map(item => String(item.payload_summary.slot_id));
+  const expectedSlots = ["cover_01", ...Array.from({ length: expectedSlotCount - 1 }, (_, index) => `body_${String(index + 1).padStart(2, "0")}`)];
+  if (artifactCanonicalJson(visualSlots) !== artifactCanonicalJson(expectedSlots)) {
+    throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "draft-ready visual slot provenance is not exact", 503);
+  }
+  return { draftId: payload.verified_draft_media_id, ...(payload.verified_cover_image_url ? { coverUrl: payload.verified_cover_image_url } : {}) };
+}
+
+async function requireWechatAccount(
+  env: EditorialRuntimeEnv,
+  params: FiveAgentWorkflowParams,
+  createdAt: string,
+): Promise<{ account_binding_id: string; account_receipt_hash: string; config_hash: string }> {
+  const operationId = await wechatOperationId("resolve_account", { run_id: params.run_id, user_id: params.user_id, workspace_id: params.workspace_id, article_id: params.article_id });
+  const response = await callWechatPublishingAdapter(env, "resolve_account", {
+    operation_id: operationId, attempt: 1, user_id: params.user_id, workspace_id: params.workspace_id, article_id: params.article_id, payload: { created_at: createdAt },
+  });
+  const result = response.result && typeof response.result === "object" ? response.result as Record<string, unknown> : null;
+  if (!result || result.version !== "wechat-account-resolution.v1" ||
+      typeof result.account_binding_id !== "string" || typeof result.config_hash !== "string" ||
+      !/^sha256:[a-f0-9]{64}$/.test(result.config_hash) || typeof result.receipt_hash !== "string" ||
+      !/^sha256:[a-f0-9]{64}$/.test(result.receipt_hash)) {
+    throw new EditorialRuntimeError("wechat_account_receipt_invalid", "wechat account receipt is invalid", 502);
+  }
+  if (!isWechatAccountAllowed(env.WECHAT_PUBLISHING_ACCOUNT_ALLOWLIST, result.account_binding_id)) throw new EditorialRuntimeError("wechat_publishing_account_not_allowed", "wechat account is not allowlisted", 409);
+  const expectedReceiptHash = await hashJson({
+    version: "wechat-account-resolution.v1",
+    user_id: params.user_id,
+    workspace_id: params.workspace_id,
+    article_id: params.article_id,
+    account_binding_id: result.account_binding_id,
+    config_hash: result.config_hash,
+  });
+  if (result.receipt_hash !== expectedReceiptHash) {
+    throw new EditorialRuntimeError("wechat_account_receipt_invalid", "wechat account receipt does not bind its configuration", 502);
+  }
+  return { account_binding_id: result.account_binding_id, account_receipt_hash: result.receipt_hash, config_hash: result.config_hash };
+}
+
+function base64(bytes: Uint8Array): string {
+  let value = "";
+  const chunk = 0x8000;
+  for (let offset = 0; offset < bytes.byteLength; offset += chunk) {
+    value += String.fromCharCode(...bytes.subarray(offset, Math.min(bytes.byteLength, offset + chunk)));
+  }
+  return btoa(value);
+}
+
+// Envelope idempotency keys must remain opaque identifiers. Preserve the
+// complete canonical operation identity in the digest instead of truncating
+// a raw tuple that can include several SHA-256 values.
+async function wechatArtifactIdempotencyKey(kind: string, identity: Record<string, unknown>): Promise<string> {
+  return `wave2d:${kind}:${await hashJson(identity)}`;
+}
+
+async function existingWechatDraftClue(
+  env: EditorialRuntimeEnv,
+  params: FiveAgentWorkflowParams,
+): Promise<string | null> {
+  const row = await env.DB.prepare(`SELECT wechat_draft_id FROM recordings
+    WHERE id = ? AND user_id = ? AND workspace_id = ? LIMIT 1`)
+    .bind(params.recording_id, params.user_id, params.workspace_id)
+    .first<{ wechat_draft_id: string | null }>();
+  if (!row || row.wechat_draft_id === null || row.wechat_draft_id === "") return null;
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/.test(row.wechat_draft_id)) {
+    throw new EditorialRuntimeError("draft_identity_unresolved", "stored WeChat draft identity is invalid", 409);
+  }
+  return row.wechat_draft_id;
+}
+
+async function isValidWechatDraftReadback(env: EditorialRuntimeEnv, value: unknown): Promise<boolean> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const draft = value as Record<string, unknown>;
+  if (typeof draft.media_id !== "string" || !OPAQUE_ID.test(draft.media_id) ||
+      typeof draft.title !== "string" || draft.title.length === 0 || typeof draft.thumb_media_id !== "string" || !OPAQUE_ID.test(draft.thumb_media_id) ||
+      Number(draft.article_index) !== 0 || typeof draft.canonical_html !== "string" || typeof draft.html_hash !== "string") return false;
+  try {
+    const canonical = normalizeWechatHtml(draft.canonical_html);
+    const urls = Array.isArray(draft.body_urls) && draft.body_urls.every(url => typeof url === "string")
+      ? draft.body_urls as string[]
+      : [];
+    const validation = validateWechatHtml(canonical, urls);
+    if (validation.body_urls.some(url => !isWechatMediaUrlAllowed(env.WECHAT_MEDIA_URL_HOST_ALLOWLIST, url))) return false;
+    return validation.canonical_html === canonical && draft.html_hash === await sha256(new TextEncoder().encode(canonical));
+  } catch {
+    return false;
+  }
+}
+
+async function isExactWechatDraftReadback(
+  env: EditorialRuntimeEnv,
+  value: unknown,
+  fingerprint: {
+    title: string;
+    canonical_html: string;
+    html_hash: string;
+    thumb_media_id: string;
+  },
+): Promise<boolean> {
+  if (!await isValidWechatDraftReadback(env, value)) return false;
+  const draft = value as Record<string, unknown>;
+  try {
+    const canonical = normalizeWechatHtml(String(draft.canonical_html));
+    if (canonical !== fingerprint.canonical_html || draft.html_hash !== fingerprint.html_hash ||
+        draft.title !== fingerprint.title || draft.thumb_media_id !== fingerprint.thumb_media_id ||
+        draft.html_hash !== await sha256(new TextEncoder().encode(canonical))) return false;
+    const urls = Array.isArray(draft.body_urls) && draft.body_urls.every(url => typeof url === "string")
+      ? draft.body_urls as string[]
+      : [];
+    const expectedUrls = [...fingerprint.canonical_html.matchAll(/<img\b[^>]*\bsrc="([^"]+)"/g)].map(match => match[1]);
+    return artifactCanonicalJson(urls) === artifactCanonicalJson(expectedUrls);
+  } catch {
+    return false;
+  }
+}
+
+async function completeWechatReadOnlyCall(
+  coordinator: DurableObjectStub<EditorialCoordinatorAgent>,
+  params: FiveAgentWorkflowParams,
+  call: { call_id: string; response: Record<string, unknown> },
+  createdAt: string,
+): Promise<void> {
+  await coordinator.completeFiveAgentCall({
+    call_id: call.call_id,
+    run_id: params.run_id,
+    status: "succeeded",
+    response_hash: await hashJson(call.response.result || {}),
+    recorded_at: createdAt,
+  });
+}
+
+async function callWechatOperation(
+  env: EditorialRuntimeEnv,
+  coordinator: DurableObjectStub<EditorialCoordinatorAgent>,
+  params: FiveAgentWorkflowParams,
+  operation: "upload_image" | "write_draft" | "get_draft" | "find_draft",
+  request: Record<string, unknown>,
+  createdAt: string,
+): Promise<{ call_id: string; response: Record<string, unknown> }> {
+  if (!wechatDraftFeatureEnabled(env, params.user_id, params.workspace_id)) {
+    throw new EditorialRuntimeError("wechat_publishing_disabled", "WeChat draft sync is not enabled for this owner", 404);
+  }
+  if (typeof request.account_binding_id !== "string" ||
+      typeof request.account_receipt_hash !== "string" || !/^sha256:[a-f0-9]{64}$/.test(request.account_receipt_hash) ||
+      !isWechatAccountAllowed(env.WECHAT_PUBLISHING_ACCOUNT_ALLOWLIST, request.account_binding_id)) {
+    throw new EditorialRuntimeError("wechat_publishing_account_not_allowed", "WeChat account binding is not allowlisted", 409);
+  }
+  const requestPayload = request.payload && typeof request.payload === "object" && !Array.isArray(request.payload)
+    ? request.payload as Record<string, unknown>
+    : {};
+  const suppliedOperationId = requestPayload.operation_id;
+  const operationId = typeof suppliedOperationId === "string"
+    ? suppliedOperationId
+    : await wechatOperationId(operation, request);
+  let attemptNumber = 1;
+  while (attemptNumber <= 3) {
+    const prepared = await coordinator.prepareFiveAgentCall({ run_id: params.run_id, call_kind: `wechat_${operation}`, idempotency_key: operationId, attempt: attemptNumber, created_at: createdAt });
+    const durableAttempt = Number(prepared.attempt || attemptNumber);
+    if (prepared.status === "failed") {
+      if (!prepared.retryable) throw new EditorialRuntimeError(prepared.error_code || "wechat_operation_non_retryable", "wechat operation has a durable failure", 409);
+      if (durableAttempt >= 3) throw new EditorialRuntimeError("wechat_operation_retry_exhausted", "wechat operation retry limit reached", 503);
+      attemptNumber = durableAttempt + 1;
+      continue;
+    }
+    const reconcileOnly = prepared.status === "needs_action" || prepared.status === "completed";
+    try {
+      const response = await callWechatPublishingAdapter(env, operation, {
+        operation_id: operationId,
+        attempt: durableAttempt,
+        user_id: params.user_id,
+        workspace_id: params.workspace_id,
+        article_id: params.article_id,
+        account_binding_id: request.account_binding_id,
+        account_receipt_hash: request.account_receipt_hash,
+        payload: requestPayload,
+      }, { reconcileOnly });
+      if (response.account_binding_id !== request.account_binding_id ||
+          response.account_receipt_hash !== request.account_receipt_hash) {
+        throw new EditorialRuntimeError("wechat_account_receipt_invalid", "wechat operation account receipt conflicts", 502);
+      }
+      const expectedResultRef = `wechat-adapter/v1/result/${operationId}/${durableAttempt}.json`;
+      if (typeof response.result_ref !== "string" || response.result_ref !== expectedResultRef ||
+          typeof response.result_hash !== "string" || !/^sha256:[a-f0-9]{64}$/.test(response.result_hash)) {
+        throw new EditorialRuntimeError("wechat_adapter_protocol_invalid", "wechat operation evidence is invalid", 502);
+      }
+      return { call_id: prepared.call_id, response };
+    } catch (error) {
+      if (!(error instanceof WechatPublishingServiceError)) throw error;
+      if (error.code === "external_side_effect_unknown") {
+        // No result is recorded here. The existing intent is the durable proof
+        // that a subsequent run may only query the adapter for this attempt.
+        const held = new EditorialRuntimeError("external_side_effect_unknown", "wechat operation has unknown side effect", 503) as EditorialRuntimeError & {
+          call_id?: string;
+          operation_id?: string;
+          attempt?: number;
+        };
+        held.call_id = prepared.call_id;
+        held.operation_id = operationId;
+        held.attempt = durableAttempt;
+        throw held;
+      }
+      await coordinator.completeFiveAgentCall({ call_id: prepared.call_id, run_id: params.run_id, status: "failed", error_code: error.code, retryable: error.retryable, recorded_at: createdAt });
+      if (error.retryable && durableAttempt < 3) {
+        attemptNumber = durableAttempt + 1;
+        continue;
+      }
+      throw new EditorialRuntimeError(error.retryable ? "wechat_operation_retry_exhausted" : error.code, "wechat operation failed", error.status);
+    }
+  }
+  throw new EditorialRuntimeError("wechat_operation_retry_exhausted", "wechat operation retry limit reached", 503);
+}
+
+function wechatAccountHold(error: unknown): { errorCode: string; nextAction: string } | null {
+  const code = error instanceof WechatPublishingServiceError || error instanceof EditorialRuntimeError ? error.code : "";
+  if (code === "wechat_publishing_account_not_allowed") return { errorCode: code, nextAction: "request_account_enablement" };
+  if (code === "wechat_publishing_account_unavailable" || code === "wechat_account_receipt_invalid" || code === "service_unconfigured") {
+    return { errorCode: "wechat_publishing_account_unavailable", nextAction: "repair_publishing_account" };
+  }
+  if (code === "external_side_effect_unknown") return { errorCode: code, nextAction: "reconcile_external_side_effect" };
+  return null;
+}
+
+const WECHAT_RESUMABLE_STATES = new Set(["visual_ready", "formatting", "visual_qa", "draft_syncing", "draft_verifying"]);
+const WECHAT_RESUMABLE_HOLDS = new Set([
+  "wechat_publishing_account_unavailable",
+  "wechat_publishing_account_not_allowed",
+  "wechat_publishing_account_rejected",
+  "wechat_access_token_rejected",
+  "external_side_effect_unknown",
+  "wechat_artifact_reconciliation_required",
+  "draft_identity_unresolved",
+  "draft_readback_mismatch",
+  "draft_readback_unavailable",
+]);
+const WECHAT_RESUME_EVENT_TYPE: Record<string, "visual_ready" | "formatting" | "visual_qa" | "draft_syncing" | "draft_verifying"> = {
+  visual_ready: "visual_ready",
+  formatting: "formatting",
+  visual_qa: "visual_qa",
+  draft_syncing: "draft_syncing",
+  draft_verifying: "draft_verifying",
+};
+
+type WechatRecoveryTransition = {
+  targetState: PublicationState;
+  eventType: string;
+  idempotencyKey: string;
+  payloadHash: string;
+  createdAt: string;
+  errorCode?: string;
+  nextAction?: string;
+  allowSameState?: boolean;
+};
+
+type WechatRecoveryEvent = {
+  revision: number;
+  event_id: string;
+  event_type: string;
+  state: string;
+  idempotency_key: string;
+  payload_hash: string;
+  created_at: string;
+};
+
+async function readExactWechatRecoveryTransition(
+  env: EditorialRuntimeEnv,
+  params: FiveAgentWorkflowParams,
+  transition: WechatRecoveryTransition,
+  requireCurrentLastEvent: boolean,
+): Promise<PublicationRunRow | null> {
+  const [run, event] = await Promise.all([
+    env.DB.prepare(`SELECT * FROM publication_runs WHERE run_id = ? AND user_id = ? AND workspace_id = ? LIMIT 1`)
+      .bind(params.run_id, params.user_id, params.workspace_id).first<PublicationRunRow>(),
+    env.DB.prepare(`SELECT revision, event_id, event_type, state, idempotency_key, payload_hash, created_at
+      FROM publication_run_events WHERE run_id = ? AND user_id = ? AND workspace_id = ? AND idempotency_key = ? LIMIT 1`)
+      .bind(params.run_id, params.user_id, params.workspace_id, transition.idempotencyKey).first<WechatRecoveryEvent>(),
+  ]);
+  if (!event) return null;
+  if (!run || event.event_id !== `${params.run_id}:event:${event.revision}` ||
+      event.event_type !== transition.eventType || event.state !== transition.targetState ||
+      event.idempotency_key !== transition.idempotencyKey || event.payload_hash !== transition.payloadHash ||
+      !Number.isFinite(Date.parse(event.created_at))) {
+    throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "wechat recovery event identity conflicts", 503);
+  }
+  if (requireCurrentLastEvent &&
+      (run.state !== transition.targetState || run.state_revision !== event.revision ||
+       run.last_event_id !== event.event_id || run.last_event_type !== event.event_type ||
+       run.last_event_idempotency_key !== event.idempotency_key ||
+       run.last_event_payload_hash !== event.payload_hash ||
+       run.last_event_created_at !== event.created_at)) {
+    throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "wechat recovery projection is not exact", 503);
+  }
+  return run;
+}
+
+async function applyOrReconcileWechatRecoveryTransition(
+  env: EditorialRuntimeEnv,
+  params: FiveAgentWorkflowParams,
+  current: PublicationRunRow,
+  transition: WechatRecoveryTransition,
+): Promise<PublicationRunRow> {
+  try {
+    const applied = await applySystemPublicationTransition(env.DB, {
+      runId: params.run_id,
+      auth: { userId: params.user_id, workspaceId: params.workspace_id },
+      targetState: transition.targetState,
+      expectedStateRevision: current.state_revision,
+      options: {
+        eventId: `${params.run_id}:event:${current.state_revision + 1}`,
+        eventType: transition.eventType,
+        eventIdempotencyKey: transition.idempotencyKey,
+        eventPayloadHash: transition.payloadHash,
+        eventCreatedAt: transition.createdAt,
+        errorCode: transition.errorCode,
+        nextAction: transition.nextAction,
+        allowSameState: transition.allowSameState,
+      },
+    });
+    return applied.run;
+  } catch (error) {
+    const reconciled = await readExactWechatRecoveryTransition(env, params, transition, true);
+    if (reconciled) return reconciled;
+    throw error;
+  }
+}
+
+async function reconcileProjectedWechatArtifactReceipts(
+  env: EditorialRuntimeEnv,
+  coordinator: DurableObjectStub<EditorialCoordinatorAgent>,
+  params: FiveAgentWorkflowParams,
+): Promise<void> {
+  const ledger = await coordinator.getFiveAgentWechatLedger(params.run_id, params.user_id, params.workspace_id);
+  const pending = ledger.artifacts.filter(metadata => !ledger.receipt_ids.includes(metadata.artifact_id));
+  if (!pending.length) return;
+  const candidates = await Promise.all(pending.map(async metadata => {
+    const event = await env.DB.prepare(`SELECT revision, state, event_type, created_at
+      FROM publication_run_events
+      WHERE run_id = ? AND user_id = ? AND workspace_id = ? AND idempotency_key = ? AND payload_hash = ? LIMIT 1`)
+      .bind(params.run_id, params.user_id, params.workspace_id, metadata.idempotency_key, metadata.payload_hash)
+      .first<{ revision: number; state: string; event_type: string; created_at: string }>();
+    if (!event) {
+      throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "prepared WeChat artifact has no D1 projection evidence", 503);
+    }
+    if (event.event_type !== "wechat_artifact_committed" || !["formatting", "visual_qa", "draft_syncing", "draft_verifying", "draft_ready"].includes(event.state)) {
+      throw new EditorialRuntimeError("wechat_artifact_identity_conflict", "prepared WeChat artifact projection identity conflicts", 409);
+    }
+    return { metadata, event };
+  }));
+  candidates.sort((left, right) => left.event.revision - right.event.revision);
+  for (const { metadata, event } of candidates) {
+    const current = await coordinator.getFiveAgentRun(params.run_id, params.user_id, params.workspace_id) as Record<string, unknown>;
+    try {
+      await coordinator.completeFiveAgentWechatArtifact({
+        artifact_id: metadata.artifact_id,
+        run_id: params.run_id,
+        payload_hash: metadata.payload_hash,
+        state: event.state,
+        state_revision: Number(current.state_revision) + 1,
+        event_type: "wechat_artifact_committed",
+        event_idempotency_key: metadata.idempotency_key,
+        created_at: event.created_at,
+      });
+    } catch {
+      const settled = await coordinator.getFiveAgentWechatLedger(params.run_id, params.user_id, params.workspace_id);
+      const receipt = settled.wechat_events.find(item =>
+        item.artifact_id === metadata.artifact_id &&
+        item.payload_hash === metadata.payload_hash &&
+        item.idempotency_key === metadata.idempotency_key &&
+        item.state === event.state && item.event_type === "wechat_artifact_committed",
+      );
+      if (!receipt) throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "WeChat artifact receipt cannot be reconciled", 503);
+    }
+  }
+}
+
+async function resumeWechatNeedsAction(
+  env: EditorialRuntimeEnv,
+  coordinator: DurableObjectStub<EditorialCoordinatorAgent>,
+  params: FiveAgentWorkflowParams,
+): Promise<{ target: string; recoveryCycle: string; freshExecutionEpoch: boolean }> {
+  let doRun = await coordinator.getFiveAgentRun(params.run_id, params.user_id, params.workspace_id) as Record<string, unknown>;
+  const projection = await env.DB.prepare(`SELECT * FROM publication_runs WHERE run_id = ? AND user_id = ? AND workspace_id = ? LIMIT 1`)
+    .bind(params.run_id, params.user_id, params.workspace_id).first<PublicationRunRow>();
+  const originalError = String(doRun.error_code);
+  const originalAction = String(doRun.next_action);
+  if (!projection || doRun.state !== "needs_action" || !WECHAT_RESUMABLE_HOLDS.has(originalError)) {
+    throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "wechat hold is not eligible for trusted recovery", 503);
+  }
+  // A D1-first artifact event is durable evidence, not an unknown provider
+  // effect. Reconstruct its missing Coordinator receipt before resolving the
+  // hold, so the recovery triplet never strands a valid artifact checkpoint.
+  await reconcileProjectedWechatArtifactReceipts(env, coordinator, params);
+  doRun = await coordinator.getFiveAgentRun(params.run_id, params.user_id, params.workspace_id) as Record<string, unknown>;
+  // The D1 projection owns the externally visible transition. It can be one
+  // checkpoint ahead of the Coordinator when its response was lost, so a
+  // stale DO last-successful state must not manufacture a second upload.
+  const target = String(projection.last_successful_state || doRun.last_successful_state);
+  if (!WECHAT_RESUMABLE_STATES.has(target) ||
+      !["needs_action", "retrying", target].includes(projection.state)) {
+    throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "wechat hold has no valid local checkpoint", 503);
+  }
+  const holds = await env.DB.prepare(`SELECT revision, idempotency_key, payload_hash, event_type, state, error_code, next_action
+    FROM publication_run_events WHERE run_id = ? AND user_id = ? AND workspace_id = ? AND event_type = 'needs_action'
+    ORDER BY revision DESC`).bind(params.run_id, params.user_id, params.workspace_id)
+    .all<{ revision: number; idempotency_key: string; payload_hash: string; event_type: string; state: string; error_code: string | null; next_action: string | null }>();
+  const hold = (holds.results || []).find(event =>
+    event.state === "needs_action" && event.error_code === originalError &&
+    event.next_action === originalAction && WECHAT_RESUMABLE_HOLDS.has(String(event.error_code))
+  );
+  if (!hold) throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "wechat hold event is unavailable", 503);
+  const cycle = (await hashJson({
+    run_id: params.run_id,
+    target,
+    hold_revision: hold.revision,
+    hold_idempotency_key: hold.idempotency_key,
+    hold_payload_hash: hold.payload_hash,
+  })).slice(7, 39);
+  const key = (phase: "reconciled" | "retrying" | "resumed") => `wave2d:${phase}:${cycle}:${target}:${params.run_id}`;
+  const eventHash = (event: string) => hashJson({
+    run_payload_hash: params.payload_hash,
+    event,
+    target,
+    recovery_cycle: cycle,
+    recovered_hold: { revision: hold.revision, idempotency_key: hold.idempotency_key, payload_hash: hold.payload_hash },
+  });
+  const reconciledHash = await eventHash("wechat_side_effect_reconciled");
+  const retryHash = await eventHash("wechat_reconciliation_retrying");
+  const resumeHash = await eventHash("wechat_reconciliation_resumed");
+
+  const reconciledTransition: WechatRecoveryTransition = {
+    targetState: "needs_action", eventType: "wechat_side_effect_reconciled", idempotencyKey: key("reconciled"),
+    payloadHash: reconciledHash, createdAt: workflowTimestamp(params.created_at, 24_000),
+    errorCode: "wechat_side_effect_reconciled", nextAction: "resume_reconciled_wechat", allowSameState: true,
+  };
+  const retryTransition: WechatRecoveryTransition = {
+    targetState: "retrying", eventType: "wechat_reconciliation_retrying", idempotencyKey: key("retrying"),
+    payloadHash: retryHash, createdAt: workflowTimestamp(params.created_at, 24_001),
+  };
+  const resumedTransition: WechatRecoveryTransition = {
+    targetState: target as PublicationState, eventType: "wechat_reconciliation_resumed", idempotencyKey: key("resumed"),
+    payloadHash: resumeHash, createdAt: workflowTimestamp(params.created_at, 24_002),
+  };
+  let current = projection;
+  if (current.state === "needs_action" && current.error_code === originalError && current.next_action === originalAction) {
+    current = await applyOrReconcileWechatRecoveryTransition(env, params, current, reconciledTransition);
+  } else if (!await readExactWechatRecoveryTransition(env, params, reconciledTransition, false)) {
+    throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "wechat recovery cannot prove its reconciled checkpoint", 503);
+  }
+
+  if (current.state === "needs_action" && current.error_code === "wechat_side_effect_reconciled" && current.next_action === "resume_reconciled_wechat") {
+    current = await applyOrReconcileWechatRecoveryTransition(env, params, current, retryTransition);
+  } else if (!await readExactWechatRecoveryTransition(env, params, retryTransition, false)) {
+    throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "wechat recovery cannot prove its retrying checkpoint", 503);
+  }
+
+  if (current.state === "retrying") {
+    current = await applyOrReconcileWechatRecoveryTransition(env, params, current, resumedTransition);
+  } else if (current.state !== target || !await readExactWechatRecoveryTransition(env, params, resumedTransition, false)) {
+    throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "wechat recovery cannot prove its resumed checkpoint", 503);
+  }
+
+  const latestDo = await coordinator.getFiveAgentRun(params.run_id, params.user_id, params.workspace_id) as Record<string, unknown>;
+  if (latestDo.state === "needs_action") {
+    const stateRevision = Number(latestDo.state_revision) + 1;
+    const eventType = WECHAT_RESUME_EVENT_TYPE[target];
+    const identity = projectionEventIdentity(current);
+    try {
+      await coordinator.recordFiveAgentState({
+        run_id: params.run_id,
+        state: target,
+        state_revision: stateRevision,
+        event_type: eventType,
+        payload_hash: identity.payloadHash,
+        created_at: identity.createdAt,
+      });
+    } catch (error) {
+      const settled = await coordinator.getFiveAgentRun(params.run_id, params.user_id, params.workspace_id) as Record<string, unknown>;
+      const events = await coordinator.listFiveAgentEvents(params.run_id, params.user_id, params.workspace_id);
+      const event = events.find(item => Number(item.state_revision) === stateRevision);
+      if (settled.state !== target || Number(settled.state_revision) !== stateRevision ||
+          !event || event.event_type !== eventType || event.payload_hash !== identity.payloadHash || event.created_at !== identity.createdAt) {
+        throw error;
+      }
+    }
+  } else if (latestDo.state !== target) {
+    throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "Coordinator recovery checkpoint conflicts", 503);
+  }
+  // A local receipt/projection response loss must replay the original scope.
+  // Failed reads and repaired account credentials need a fresh immutable
+  // execution epoch so their old evidence remains append-only audit history.
+  const requiresFreshEpoch = [
+    "draft_readback_mismatch",
+    "draft_readback_unavailable",
+    "wechat_publishing_account_unavailable",
+    "wechat_publishing_account_not_allowed",
+    "wechat_publishing_account_rejected",
+    "wechat_access_token_rejected",
+  ].includes(originalError);
+  // Every reconciled hold gets a distinct read-only reconciliation identity.
+  // Only repairable read/account failures receive a new artifact epoch; an
+  // unresolved write remains in its original scope until its exact intent is
+  // proven by a fresh bounded lookup.
+  return { target, recoveryCycle: cycle, freshExecutionEpoch: requiresFreshEpoch };
+}
+
+async function runWechatDraftPhaseInner(input: {
+  env: EditorialRuntimeEnv;
+  coordinator: DurableObjectStub<EditorialCoordinatorAgent>;
+  params: FiveAgentWorkflowParams;
+  frozen: StoredArtifactMetadata;
+  visual: FiveAgentWorkflowResult;
+  transcript: { ref: string; hash: string };
+  account?: { account_binding_id: string; account_receipt_hash: string; config_hash: string };
+  recovery_cycle?: string;
+  reconciliation_cycle?: string;
+}): Promise<FiveAgentWorkflowResult> {
+  const { env, coordinator, params, frozen, visual, transcript } = input;
+  if (!WECHAT_RESUMABLE_STATES.has(String(visual.state)) || !wechatDraftFeatureEnabled(env, params.user_id, params.workspace_id)) return visual;
+  const currentWechatRun = await coordinator.getFiveAgentRun(params.run_id, params.user_id, params.workspace_id) as Record<string, unknown>;
+  // A readback artifact can be durably mirrored to D1 while the coordinator
+  // response is lost. At draft_verifying, resume only that local receipt and
+  // final compatibility projection. Replaying template/upload work here would
+  // manufacture a second route through draft_syncing and can never be safe.
+  if (currentWechatRun.state === "draft_verifying") {
+    const existingWechatLedger = await coordinator.getFiveAgentWechatLedger(params.run_id, params.user_id, params.workspace_id);
+    const readbackMetadata = uniquePassingWechatReadback(existingWechatLedger.artifacts, existingWechatLedger.receipt_ids);
+    if (readbackMetadata) {
+      const readbackObject = await readWechatArtifactFromR2(env, readbackMetadata);
+      const readbackPayload = readbackObject.payload as WechatDraftReadbackQAPayload;
+      // A failed readback QA is immutable audit evidence for its original
+      // execution epoch. It cannot be completed in place after an operator
+      // repairs the draft; that repair gets a fresh read-only epoch below.
+      if (readbackPayload.decision !== "pass" || !readbackPayload.checks.media || !readbackPayload.checks.title ||
+          !readbackPayload.checks.html || !readbackPayload.checks.urls || !readbackPayload.checks.thumb ||
+          readbackPayload.checks.article_index !== 0) {
+        // Continue through the normal graph with a recovery-scoped identity.
+      } else {
+      const restoredReadback = await persistWechatArtifact(
+        env,
+        coordinator,
+        params,
+        readbackObject,
+        "draft_verifying",
+        "wechat_artifact_committed",
+      );
+      const orderedSlots = existingWechatLedger.artifacts
+        .filter(item => item.kind === "wechat_image_upload_receipt" && readbackPayload.upload_receipt_ids.includes(item.artifact_id))
+        .sort((left, right) => Number(left.payload_summary.order || 0) - Number(right.payload_summary.order || 0))
+        .map(item => String(item.payload_summary.slot_id));
+      await verifyExactWechatArtifactSet(env, coordinator, params, orderedSlots, readbackPayload.execution_scope);
+      const finalized = await finalizeWechatDraft(
+        env,
+        coordinator,
+        params,
+        restoredReadback,
+        readbackPayload.verified_draft_media_id,
+        readbackPayload.verified_cover_image_url || undefined,
+      );
+      return {
+        run_id: params.run_id,
+        state: "draft_ready",
+        state_revision: finalized.doStateRevision,
+        transcript_ref: transcript.ref,
+        transcript_hash: transcript.hash,
+        artifact_ids: [...visual.artifact_ids, ...existingWechatLedger.receipt_ids, restoredReadback.artifact_id],
+      };
+      }
+    }
+  }
+  // A repaired epoch never regresses either ledger. Inputs that belong before
+  // the durable checkpoint are mirrored with same-state receipts; later
+  // stages still advance through the ordinary publishing sequence.
+  const recoveryState = Boolean(input.recovery_cycle) && ["formatting", "visual_qa", "draft_syncing", "draft_verifying"].includes(String(currentWechatRun.state))
+    ? String(currentWechatRun.state) as "formatting" | "visual_qa" | "draft_syncing" | "draft_verifying"
+    : null;
+  const stateRank: Record<"formatting" | "visual_qa" | "draft_syncing" | "draft_verifying", number> = {
+    formatting: 84,
+    visual_qa: 90,
+    draft_syncing: 96,
+    draft_verifying: 98,
+  };
+  const artifactState = <T extends "formatting" | "visual_qa" | "draft_syncing" | "draft_verifying">(state: T): T | "formatting" | "visual_qa" | "draft_syncing" | "draft_verifying" =>
+    recoveryState && stateRank[recoveryState] > stateRank[state] ? recoveryState : state;
+  const ledger = await coordinator.getFiveAgentVisualLedger(params.run_id, params.user_id, params.workspace_id);
+  const planMeta = ledger.artifacts.find(item => item.kind === "visual_plan" && ledger.receipt_ids.includes(item.artifact_id));
+  const qaMeta = ledger.artifacts.find(item => item.kind === "visual_qa_report" && ledger.receipt_ids.includes(item.artifact_id));
+  const assets = ledger.artifacts.filter(item => item.kind === "visual_asset" && ledger.receipt_ids.includes(item.artifact_id)).sort((left, right) => Number(left.payload_summary.order || 0) - Number(right.payload_summary.order || 0));
+  if (!planMeta || !qaMeta || new Set(assets.map(asset => asset.payload_summary.slot_id)).size !== assets.length) throw new EditorialRuntimeError("wechat_visual_input_invalid", "wechat publishing inputs are incomplete", 409);
+  const plan = await readVisualArtifactFromR2(env, planMeta);
+  const planPayload = plan.payload as VisualPlanPayload;
+  const expectedSlots = planPayload.slots.map(slot => slot.slot_id);
+  if (artifactCanonicalJson(expectedSlots) !== artifactCanonicalJson(assets.map(asset => asset.payload_summary.slot_id))) throw new EditorialRuntimeError("wechat_visual_input_invalid", "wechat visual input slots are not exact", 409);
+  const frozenObject = await readArtifactFromR2(env, params, frozen.artifact_id, frozen.artifact_key, frozen.payload_hash);
+  const frozenPayload = frozenObject.payload as FrozenArticleVersion;
+  const expectedSlotCount = Array.from(frozenPayload.body).length >= 5000 ? 6 : 3;
+  if (assets.length !== expectedSlotCount || expectedSlots.length !== expectedSlotCount || expectedSlots[0] !== "cover_01" ||
+      artifactCanonicalJson(expectedSlots) !== artifactCanonicalJson(["cover_01", ...Array.from({ length: expectedSlotCount - 1 }, (_, index) => `body_${String(index + 1).padStart(2, "0")}`)])) {
+    throw new EditorialRuntimeError("wechat_visual_input_invalid", "wechat visual slot set is not exact", 409);
+  }
+  let account: { account_binding_id: string; account_receipt_hash: string; config_hash: string };
+  try {
+    account = input.account || await requireWechatAccount(env, params, workflowTimestamp(params.created_at, 22_000));
+  } catch (error) {
+    const hold = wechatAccountHold(error);
+    if (hold) return visualHoldWithCode(env, coordinator, params, transcript, [...visual.artifact_ids], hold.errorCode, hold.nextAction, 22, 1, false);
+    throw error;
+  }
+  const owner: WechatOwner = { run_id: params.run_id, article_id: params.article_id, recording_id: params.recording_id, user_id: params.user_id, workspace_id: params.workspace_id };
+  const scopeHash = await wechatScopeHash({ owner, frozen: { id: frozen.artifact_id, hash: frozen.payload_hash }, plan: { id: planMeta.artifact_id, hash: planMeta.payload_hash }, assets: assets.map(asset => ({ id: asset.artifact_id, hash: asset.payload_hash, slot: String(asset.payload_summary.slot_id) })), visualQA: { id: qaMeta.artifact_id, hash: qaMeta.payload_hash }, pin_snapshot_id: "wechat-pin-snapshot.v1", account_binding_id: account.account_binding_id });
+  const executionScope = await hashJson({
+    version: "wave2d-execution.v1",
+    input_scope_hash: scopeHash,
+    account_binding_id: account.account_binding_id,
+    account_config_hash: account.config_hash,
+    account_receipt_hash: account.account_receipt_hash,
+    recovery_cycle: input.recovery_cycle || "initial",
+  });
+  const templateKey = `wave2d:template:${executionScope}`;
+  const templatePayload: WechatRenderTemplatePayload = {
+    protocol_version: "wechat_render_template.v1", execution_scope: executionScope, recovery_cycle: input.recovery_cycle || null, run_id: params.run_id, article_id: params.article_id, recording_id: params.recording_id,
+    frozen_artifact_id: frozen.artifact_id, frozen_payload_hash: frozen.payload_hash, visual_plan_artifact_id: planMeta.artifact_id, visual_plan_payload_hash: planMeta.payload_hash,
+    visual_qa_artifact_id: qaMeta.artifact_id, visual_qa_payload_hash: qaMeta.payload_hash, asset_artifact_ids: assets.map(asset => asset.artifact_id),
+    account_binding_id: account.account_binding_id, account_receipt_hash: account.account_receipt_hash, pin_snapshot: activeWechatPinSnapshot(),
+    title: frozenPayload.title, cover_slot_id: "cover_01", body_slots: planPayload.slots.filter(slot => slot.purpose === "body").map(slot => ({ slot_id: slot.slot_id, order: slot.order, block_id: slot.block_id || "", alt: slot.alt, caption: slot.caption })),
+    html_template: canonicalWechatHtml(frozenPayload.title, frozenPayload.blocks, planPayload.slots.filter(slot => slot.purpose === "body").map(slot => ({ slot_id: slot.slot_id, block_id: slot.block_id || "", alt: slot.alt, caption: slot.caption }))),
+    created_at: workflowTimestamp(params.created_at, 22_100),
+  };
+  let template = await makeWechatArtifact({ owner, kind: "wechat_render_template", payload: templatePayload, input_artifact_ids: [frozen.artifact_id, planMeta.artifact_id, ...assets.map(asset => asset.artifact_id), qaMeta.artifact_id], idempotency_key: templateKey, created_at: templatePayload.created_at });
+  const templateMeta = await persistWechatArtifact(env, coordinator, params, template, artifactState("formatting"), "wechat_artifact_committed");
+  const templatePlaceholderUrls = templatePayload.body_slots.map(slot => `https://wechat-placeholder.invalid/${slot.slot_id}`);
+  const renderedTemplateForQa = templatePayload.body_slots.reduce(
+    (html, slot) => html.replace(`{{wechat_image:${slot.slot_id}}}`, `https://wechat-placeholder.invalid/${slot.slot_id}`),
+    templatePayload.html_template,
+  );
+  const renderValidation = validateWechatHtml(renderedTemplateForQa, templatePlaceholderUrls);
+  const renderChecks = {
+    safe_html: renderValidation.safe_html,
+    placeholders: templatePlaceholderUrls.length === templatePayload.body_slots.length,
+    list_continuity: renderValidation.list_continuity,
+    preview_widths: renderValidation.preview_widths,
+  };
+  const renderQaPayload: WechatRenderQAReportPayload = {
+    protocol_version: "wechat_render_qa_report.v1", execution_scope: executionScope, recovery_cycle: input.recovery_cycle || null, template_artifact_id: templateMeta.artifact_id, template_payload_hash: templateMeta.payload_hash,
+    decision: renderChecks.safe_html && renderChecks.placeholders && renderChecks.list_continuity ? "pass" : "failed",
+    checks: renderChecks,
+    created_at: workflowTimestamp(params.created_at, 22_200),
+  };
+  const renderQa = await makeWechatArtifact({ owner, kind: "wechat_render_qa_report", payload: renderQaPayload, input_artifact_ids: [templateMeta.artifact_id], idempotency_key: `wave2d:render-qa:${templateMeta.payload_hash}`, created_at: renderQaPayload.created_at });
+  const renderQaMeta = await persistWechatArtifact(env, coordinator, params, renderQa, artifactState("visual_qa"), "wechat_artifact_committed");
+  if (renderQaPayload.decision !== "pass") {
+    // The failed report is audit evidence, but rendering never proceeds to an
+    // upload or draft side effect when deterministic HTML QA rejects it.
+    throw new EditorialRuntimeError("wechat_html_contract_invalid", "rendered HTML failed deterministic QA", 422);
+  }
+  // No upload is allowed to cross the service boundary until both durable
+  // projections have recorded this exact local checkpoint. It recognizes a
+  // D1-first response-loss window and completes only the missing DO event.
+  if (artifactState("draft_syncing") === "draft_syncing") await ensureWechatDraftSyncingCheckpoint(env, coordinator, params, executionScope);
+  const uploads: Array<{ metadata: WechatPersistedMetadata; url: string; media_id?: string }> = [];
+  for (const [index, assetMeta] of assets.entries()) {
+    // A concurrent cancellation or a prior response-loss recovery must never
+    // leave a later slot executing while either ledger is outside draft_syncing.
+    if (artifactState("draft_syncing") === "draft_syncing") await ensureWechatDraftSyncingCheckpoint(env, coordinator, params, executionScope);
+    const asset = await readVisualArtifactFromR2(env, assetMeta);
+    const payload = asset.payload as VisualAssetPayload;
+    const slot = planPayload.slots[index];
+    if (!slot || payload.slot_id !== slot.slot_id) throw new EditorialRuntimeError("wechat_visual_input_invalid", "visual asset order is invalid", 409);
+    const binaryKey = payload.binary_storage_ref.slice(5);
+    const binary = await readImmutableBinaryImage(env.FILES_BUCKET, binaryKey, {
+      storage_ref: payload.binary_storage_ref,
+      byte_hash: payload.byte_hash,
+      byte_length: payload.byte_length,
+      mime: payload.mime,
+      width: payload.width,
+      height: payload.height,
+      user_id: params.user_id,
+      workspace_id: params.workspace_id,
+      run_id: params.run_id,
+      frozen_payload_hash: planPayload.frozen_payload_hash,
+      slot_id: slot.slot_id,
+    });
+    const operationId = await wechatOperationId("upload_image", { execution_scope: executionScope, slot_id: slot.slot_id, purpose: slot.purpose, asset_byte_hash: payload.byte_hash, plan_payload_hash: planMeta.payload_hash });
+    const operation = await callWechatOperation(env, coordinator, params, "upload_image", { account_binding_id: account.account_binding_id, account_receipt_hash: account.account_receipt_hash, payload: { operation_id: operationId, byte_hash: payload.byte_hash, byte_length: payload.byte_length, mime: payload.mime, slot_id: slot.slot_id, purpose: slot.purpose, image_base64: base64(binary) } }, workflowTimestamp(params.created_at, 22_300 + index));
+    const result = operation.response.result && typeof operation.response.result === "object" ? operation.response.result as Record<string, unknown> : {};
+    if (!isWechatMediaUrlAllowed(env.WECHAT_MEDIA_URL_HOST_ALLOWLIST, result.media_url)) {
+      throw new EditorialRuntimeError("wechat_html_contract_invalid", "wechat image URL violates the HTML contract", 422);
+    }
+    if (slot.purpose === "cover" && typeof result.media_id !== "string") {
+      throw new EditorialRuntimeError("wechat_image_upload_non_retryable", "wechat image upload response is invalid", 502);
+    }
+    const uploadPayload: WechatImageUploadReceiptPayload = {
+      protocol_version: "wechat_image_upload_receipt.v1",
+      execution_scope: executionScope,
+      recovery_cycle: input.recovery_cycle || null,
+      frozen_artifact_id: frozen.artifact_id,
+      frozen_payload_hash: frozen.payload_hash,
+      visual_plan_artifact_id: planMeta.artifact_id,
+      visual_plan_payload_hash: planMeta.payload_hash,
+      visual_asset_artifact_id: assetMeta.artifact_id,
+      visual_asset_payload_hash: assetMeta.payload_hash,
+      visual_qa_artifact_id: qaMeta.artifact_id,
+      visual_qa_payload_hash: qaMeta.payload_hash,
+      account_binding_id: account.account_binding_id,
+      slot_id: slot.slot_id,
+      purpose: slot.purpose,
+      order: slot.order,
+      asset_byte_hash: payload.byte_hash,
+      operation_id: operationId,
+      provider_result_ref: String(operation.response.result_ref),
+      provider_result_hash: String(operation.response.result_hash),
+      media_url: String(result.media_url),
+      cover_media_id: slot.purpose === "cover" ? String(result.media_id) : null,
+      media_kind: slot.purpose === "cover" ? "thumb" : "body",
+      created_at: workflowTimestamp(params.created_at, 22_400 + index),
+    };
+    const uploadKey = await wechatArtifactIdempotencyKey("upload", { execution_scope: executionScope, slot_id: slot.slot_id, purpose: slot.purpose, asset_byte_hash: payload.byte_hash });
+    const upload = await makeWechatArtifact({ owner, kind: "wechat_image_upload_receipt", payload: uploadPayload, input_artifact_ids: [frozen.artifact_id, planMeta.artifact_id, assetMeta.artifact_id, qaMeta.artifact_id], idempotency_key: uploadKey, created_at: uploadPayload.created_at });
+    const uploadMeta = await persistWechatArtifact(env, coordinator, params, upload, artifactState("draft_syncing"), "wechat_artifact_committed");
+    await coordinator.completeFiveAgentCall({ call_id: operation.call_id, run_id: params.run_id, status: "succeeded", response_hash: uploadMeta.payload_hash, artifact_id: uploadMeta.artifact_id, recorded_at: uploadPayload.created_at });
+    uploads.push({ metadata: uploadMeta, url: result.media_url, ...(typeof result.media_id === "string" ? { media_id: result.media_id } : {}) });
+  }
+  const packageBase = renderWechatPackage(templatePayload, uploads.filter(upload => upload.metadata.payload_summary.purpose === "body").map(upload => ({ slot_id: String(upload.metadata.payload_summary.slot_id), url: upload.url })), workflowTimestamp(params.created_at, 22_600));
+  const packagePayload = await finalizeWechatPackage({ ...packageBase, template_artifact_id: templateMeta.artifact_id, template_payload_hash: templateMeta.payload_hash, render_qa_artifact_id: renderQaMeta.artifact_id, render_qa_payload_hash: renderQaMeta.payload_hash, upload_receipt_ids: uploads.map(upload => upload.metadata.artifact_id) });
+  const expectedBodyUrls = uploads.filter(upload => upload.metadata.payload_summary.purpose === "body").map(upload => upload.url);
+  const packageValidation = validateWechatHtml(packagePayload.canonical_html, expectedBodyUrls);
+  if (packageValidation.body_urls.some(url => !isWechatMediaUrlAllowed(env.WECHAT_MEDIA_URL_HOST_ALLOWLIST, url)) ||
+      !isWechatMediaUrlAllowed(env.WECHAT_MEDIA_URL_HOST_ALLOWLIST, uploads[0]?.url)) {
+    throw new EditorialRuntimeError("wechat_html_contract_invalid", "WeChat media URL is not allowlisted", 422);
+  }
+  if (packagePayload.html_hash !== await sha256(new TextEncoder().encode(packageValidation.canonical_html))) throw new EditorialRuntimeError("wechat_html_contract_invalid", "rendered HTML hash is invalid", 422);
+  const packageKey = await wechatArtifactIdempotencyKey("package", { template_payload_hash: templateMeta.payload_hash, ordered_upload_payload_hashes: uploads.map(upload => upload.metadata.payload_hash) });
+  const articlePackage = await makeWechatArtifact({ owner, kind: "rendered_article_package", payload: packagePayload, input_artifact_ids: [templateMeta.artifact_id, renderQaMeta.artifact_id, ...uploads.map(upload => upload.metadata.artifact_id)], idempotency_key: packageKey, created_at: packagePayload.created_at });
+  const packageMeta = await persistWechatArtifact(env, coordinator, params, articlePackage, artifactState("draft_syncing"), "wechat_artifact_committed");
+  const prepublishChecks = {
+    title: packagePayload.title === frozenPayload.title,
+    html_hash: packagePayload.html_hash === await sha256(new TextEncoder().encode(packageValidation.canonical_html)),
+    image_order: artifactCanonicalJson(packageValidation.body_urls) === artifactCanonicalJson(expectedBodyUrls),
+    safe_urls: packageValidation.safe_html,
+    preview_widths: packageValidation.preview_widths,
+  };
+  const preQaPayload: WechatPrepublishQAReportPayload = {
+    protocol_version: "wechat_prepublish_qa_report.v1", execution_scope: executionScope, recovery_cycle: input.recovery_cycle || null, package_artifact_id: packageMeta.artifact_id, package_payload_hash: packageMeta.payload_hash,
+    ordered_upload_receipt_ids: uploads.map(upload => upload.metadata.artifact_id),
+    decision: prepublishChecks.title && prepublishChecks.html_hash && prepublishChecks.image_order && prepublishChecks.safe_urls ? "pass" : "failed",
+    checks: prepublishChecks,
+    created_at: workflowTimestamp(params.created_at, 22_700),
+  };
+  const preQa = await makeWechatArtifact({ owner, kind: "wechat_prepublish_qa_report", payload: preQaPayload, input_artifact_ids: [packageMeta.artifact_id, ...uploads.map(upload => upload.metadata.artifact_id)], idempotency_key: `wave2d:prepublish-qa:${packageMeta.payload_hash}`, created_at: preQaPayload.created_at });
+  const preQaMeta = await persistWechatArtifact(env, coordinator, params, preQa, artifactState("draft_syncing"), "wechat_artifact_committed");
+  if (preQaPayload.decision !== "pass") {
+    // Preserve the complete deterministic prepublish report before refusing a
+    // provider write. This is a local HTML contract failure, not an unknown
+    // external side effect.
+    throw new EditorialRuntimeError("wechat_html_contract_invalid", "rendered package failed deterministic QA", 422);
+  }
+  if (!uploads[0]?.media_id) throw new EditorialRuntimeError("wechat_image_upload_non_retryable", "cover upload did not return a media id", 502);
+  const draftIdentity = await deriveWechatDraftIdentity(account.account_binding_id, owner);
+  const fingerprint = {
+    draft_identity_hash: draftIdentity,
+    title: packagePayload.title,
+    canonical_html: packagePayload.canonical_html,
+    html_hash: packagePayload.html_hash,
+    thumb_media_id: uploads[0].media_id,
+  };
+  let verifiedDraft: Record<string, unknown> | null = null;
+  let recoveredDraftCallId: string | null = null;
+  const legacyDraftId = await existingWechatDraftClue(env, params);
+  if (!legacyDraftId) {
+    const mappingOperationId = await wechatOperationId("get_draft", { phase: "verified-mapping", execution_scope: executionScope, draft_identity_hash: draftIdentity, package_payload_hash: packageMeta.payload_hash });
+    const mappingLookup = await callWechatOperation(env, coordinator, params, "get_draft", {
+      account_binding_id: account.account_binding_id,
+      account_receipt_hash: account.account_receipt_hash,
+      payload: { operation_id: mappingOperationId, ...fingerprint },
+    }, workflowTimestamp(params.created_at, 22_750));
+    const mappingResult = mappingLookup.response.result && typeof mappingLookup.response.result === "object" && !Array.isArray(mappingLookup.response.result)
+      ? mappingLookup.response.result as Record<string, unknown> : {};
+    await completeWechatReadOnlyCall(coordinator, params, mappingLookup, workflowTimestamp(params.created_at, 22_750));
+    // A mapping proves a stable draft identity. Its content may differ from
+    // this package, in which case the safe mutation is update, never add.
+    if (await isValidWechatDraftReadback(env, mappingResult)) verifiedDraft = mappingResult;
+  }
+  if (!verifiedDraft && legacyDraftId) {
+    const operationId = await wechatOperationId("get_draft", { phase: "legacy-identity", execution_scope: executionScope, draft_identity: draftIdentity, legacy_draft_id: legacyDraftId, package_payload_hash: packageMeta.payload_hash });
+    const lookup = await callWechatOperation(env, coordinator, params, "get_draft", {
+      account_binding_id: account.account_binding_id,
+      account_receipt_hash: account.account_receipt_hash,
+      payload: { operation_id: operationId, media_id: legacyDraftId, ...fingerprint },
+    }, workflowTimestamp(params.created_at, 22_760));
+    const result = lookup.response.result && typeof lookup.response.result === "object" && !Array.isArray(lookup.response.result)
+      ? lookup.response.result as Record<string, unknown> : null;
+    if (!result || result.media_id !== legacyDraftId || !await isValidWechatDraftReadback(env, result)) {
+      throw new EditorialRuntimeError("draft_identity_unresolved", "stored WeChat draft identity could not be verified", 409);
+    }
+    await completeWechatReadOnlyCall(coordinator, params, lookup, workflowTimestamp(params.created_at, 22_760));
+    verifiedDraft = result;
+  }
+  // A new recovery epoch may not manufacture a second add while an earlier
+  // write intent is unresolved. It may only use an independently durable,
+  // read-only exact fingerprint lookup to prove what the original add did.
+  if (!verifiedDraft) {
+    const priorUnknownWrite = (await coordinator.listFiveAgentCallAttempts(params.run_id, params.user_id, params.workspace_id))
+      .filter(item => item.call_kind === "wechat_write_draft" && (item.status === null || item.status === "needs_action"))
+      .sort((left, right) => right.attempt - left.attempt)[0];
+    if (priorUnknownWrite) {
+      const findOperationId = await wechatOperationId("find_draft", {
+        execution_scope: executionScope,
+        reconciliation_cycle: input.reconciliation_cycle || "initial",
+        recovery_of_call_id: priorUnknownWrite.call_id,
+        draft_identity_hash: draftIdentity,
+        title: packagePayload.title,
+        canonical_html: packagePayload.canonical_html,
+        html_hash: packagePayload.html_hash,
+        thumb_media_id: uploads[0].media_id,
+      });
+      const found = await callWechatOperation(env, coordinator, params, "find_draft", {
+        account_binding_id: account.account_binding_id,
+        account_receipt_hash: account.account_receipt_hash,
+        payload: { operation_id: findOperationId, ...fingerprint },
+      }, workflowTimestamp(params.created_at, 22_790));
+      const foundResult = found.response.result && typeof found.response.result === "object" && !Array.isArray(found.response.result)
+        ? found.response.result as Record<string, unknown> : null;
+      if (!await isExactWechatDraftReadback(env, foundResult, fingerprint)) {
+        throw new EditorialRuntimeError("draft_identity_unresolved", "unresolved draft write cannot be safely resumed", 409);
+      }
+      await completeWechatReadOnlyCall(coordinator, params, found, workflowTimestamp(params.created_at, 22_790));
+      recoveredDraftCallId = priorUnknownWrite.call_id;
+      verifiedDraft = foundResult;
+    }
+  }
+  // A uniquely recovered unresolved add is evidence for the original add
+  // operation. It is not a newly discovered mapping that authorizes an
+  // update, and it must never cause a second draft mutation.
+  const recoveredUnknownAdd = recoveredDraftCallId !== null;
+  const expectedMutation = recoveredUnknownAdd ? "add" : verifiedDraft ? "update" : "add";
+  const sameContent = verifiedDraft !== null &&
+    verifiedDraft.title === packagePayload.title && verifiedDraft.canonical_html === packagePayload.canonical_html &&
+    verifiedDraft.html_hash === packagePayload.html_hash && verifiedDraft.thumb_media_id === uploads[0].media_id &&
+    artifactCanonicalJson(verifiedDraft.body_urls || []) === artifactCanonicalJson(expectedBodyUrls);
+  const draftOperationId = await wechatOperationId("write_draft", {
+    execution_scope: executionScope, draft_identity: draftIdentity, package_hash: packageMeta.payload_hash, preqa_hash: preQaMeta.payload_hash,
+    mutation: recoveredUnknownAdd ? "add" : sameContent ? "noop" : expectedMutation,
+  });
+  let draft: { call_id: string; response: Record<string, unknown> } | null = null;
+  let draftResult: Record<string, unknown>;
+  if (sameContent && verifiedDraft) {
+    draftResult = { ...verifiedDraft, mutation: recoveredUnknownAdd ? "add" : "noop" };
+  } else {
+    try {
+      draft = await callWechatOperation(env, coordinator, params, "write_draft", {
+        account_binding_id: account.account_binding_id,
+        account_receipt_hash: account.account_receipt_hash,
+        payload: {
+          operation_id: draftOperationId,
+          draft_identity_hash: draftIdentity,
+          mutation: expectedMutation,
+          ...(verifiedDraft ? { media_id: verifiedDraft.media_id } : {}),
+          title: packagePayload.title,
+          canonical_html: packagePayload.canonical_html,
+          html_hash: packagePayload.html_hash,
+          thumb_media_id: uploads[0].media_id,
+        },
+      }, workflowTimestamp(params.created_at, 22_800));
+      draftResult = draft.response.result && typeof draft.response.result === "object" && !Array.isArray(draft.response.result)
+        ? draft.response.result as Record<string, unknown>
+        : {};
+    } catch (error) {
+      const unknown = error instanceof EditorialRuntimeError && error.code === "external_side_effect_unknown"
+        ? error as EditorialRuntimeError & { call_id?: string }
+        : null;
+      if (!unknown?.call_id || expectedMutation !== "add") throw error;
+      // A failed identity lookup is immutable evidence for that particular
+      // hold. A later operator-triggered reconciliation must use a fresh,
+      // read-only lookup identity; it may never manufacture a second add.
+      const reconciliationRun = await coordinator.getFiveAgentRun(params.run_id, params.user_id, params.workspace_id) as Record<string, unknown>;
+      const findOperationId = await wechatOperationId("find_draft", {
+        draft_identity_hash: draftIdentity,
+        title: packagePayload.title,
+        canonical_html: packagePayload.canonical_html,
+        html_hash: packagePayload.html_hash,
+        thumb_media_id: uploads[0].media_id,
+        reconciliation_state_revision: Number(reconciliationRun.state_revision),
+      });
+      const found = await callWechatOperation(env, coordinator, params, "find_draft", {
+        account_binding_id: account.account_binding_id,
+        account_receipt_hash: account.account_receipt_hash,
+        payload: { operation_id: findOperationId, ...fingerprint },
+      }, workflowTimestamp(params.created_at, 22_810));
+      const foundResult = found.response.result && typeof found.response.result === "object" && !Array.isArray(found.response.result)
+        ? found.response.result as Record<string, unknown> : null;
+      if (!await isExactWechatDraftReadback(env, foundResult, fingerprint)) {
+        throw new EditorialRuntimeError("draft_identity_unresolved", "unknown draft add could not be uniquely reconciled", 409);
+      }
+      await completeWechatReadOnlyCall(coordinator, params, found, workflowTimestamp(params.created_at, 22_810));
+      recoveredDraftCallId = unknown.call_id;
+      draftResult = { ...foundResult, mutation: "add" };
+    }
+  }
+  if (typeof draftResult.media_id !== "string") throw new EditorialRuntimeError("wechat_draft_write_non_retryable", "wechat draft receipt is invalid", 502);
+  const mutation = recoveredUnknownAdd ? "add" : sameContent ? "noop" : expectedMutation;
+  if (!sameContent && draftResult.mutation !== mutation) throw new EditorialRuntimeError("wechat_draft_write_non_retryable", "wechat draft mutation receipt is invalid", 502);
+  const verifiedCoverImageUrl = uploads[0]?.url;
+  const receiptPayload: WechatDraftReceiptPayload = { protocol_version: "wechat_draft_receipt.v1", execution_scope: executionScope, recovery_cycle: input.recovery_cycle || null, draft_identity_hash: draftIdentity, package_artifact_id: packageMeta.artifact_id, package_payload_hash: packageMeta.payload_hash, prepublish_qa_artifact_id: preQaMeta.artifact_id, prepublish_qa_payload_hash: preQaMeta.payload_hash, upload_receipt_ids: uploads.map(upload => upload.metadata.artifact_id), account_binding_id: account.account_binding_id, operation_id: draftOperationId, mutation, verified_draft_media_id: String(draftResult.media_id), verified_thumb_media_id: String(uploads[0]?.media_id || ""), verified_cover_image_url: uploads[0]?.url || null, created_at: workflowTimestamp(params.created_at, 22_900) };
+  const draftKey = await wechatArtifactIdempotencyKey("draft-mutation", { draft_identity_hash: draftIdentity, package_payload_hash: packageMeta.payload_hash, prepublish_qa_payload_hash: preQaMeta.payload_hash });
+  const draftReceipt = await makeWechatArtifact({ owner, kind: "wechat_draft_receipt", payload: receiptPayload, input_artifact_ids: [packageMeta.artifact_id, preQaMeta.artifact_id, ...uploads.map(upload => upload.metadata.artifact_id)], idempotency_key: draftKey, created_at: receiptPayload.created_at });
+  const receiptMeta = await persistWechatArtifact(env, coordinator, params, draftReceipt, artifactState("draft_verifying"), "wechat_artifact_committed");
+  if (draft || recoveredDraftCallId) await coordinator.completeFiveAgentCall({ call_id: draft?.call_id || recoveredDraftCallId!, run_id: params.run_id, status: "succeeded", response_hash: receiptMeta.payload_hash, artifact_id: receiptMeta.artifact_id, recorded_at: receiptPayload.created_at });
+  const readOperationId = await wechatOperationId("get_draft", { execution_scope: executionScope, draft_identity: draftIdentity, receipt_hash: receiptMeta.payload_hash, ...(sameContent ? { validation: "pre-read" } : {}) });
+  const read = sameContent ? null : await callWechatOperation(env, coordinator, params, "get_draft", {
+    account_binding_id: account.account_binding_id,
+    account_receipt_hash: account.account_receipt_hash,
+    payload: { operation_id: readOperationId, media_id: draftResult.media_id, ...fingerprint },
+  }, workflowTimestamp(params.created_at, 23_000));
+  const readResult = read?.response.result && typeof read.response.result === "object" ? read.response.result as Record<string, unknown> : draftResult;
+  let readbackHtml: string | null = null;
+  let readbackUrls: string[] = [];
+  let readbackHtmlHash: string | null = null;
+  try {
+    readbackHtml = normalizeWechatHtml(String(readResult.canonical_html || ""));
+    const validation = validateWechatHtml(readbackHtml, expectedBodyUrls);
+    if (validation.body_urls.some(url => !isWechatMediaUrlAllowed(env.WECHAT_MEDIA_URL_HOST_ALLOWLIST, url))) throw new Error("media host");
+    readbackHtml = validation.canonical_html;
+    readbackUrls = validation.body_urls;
+    readbackHtmlHash = await sha256(new TextEncoder().encode(readbackHtml));
+  } catch {
+    readbackHtml = null;
+  }
+  const matches = readResult.media_id === draftResult.media_id && readResult.title === packagePayload.title &&
+    readbackHtml === packagePayload.canonical_html && readbackHtmlHash === packagePayload.html_hash &&
+    readResult.thumb_media_id === uploads[0].media_id && Number(readResult.article_index) === 0 &&
+    artifactCanonicalJson(readbackUrls) === artifactCanonicalJson(expectedBodyUrls);
+  const readbackPayload: WechatDraftReadbackQAPayload = { protocol_version: "wechat_draft_readback_qa.v1", execution_scope: executionScope, recovery_cycle: input.recovery_cycle || null, draft_receipt_artifact_id: receiptMeta.artifact_id, draft_receipt_payload_hash: receiptMeta.payload_hash, package_artifact_id: packageMeta.artifact_id, package_payload_hash: packageMeta.payload_hash, prepublish_qa_artifact_id: preQaMeta.artifact_id, prepublish_qa_payload_hash: preQaMeta.payload_hash, upload_receipt_ids: uploads.map(upload => upload.metadata.artifact_id), decision: matches ? "pass" : "failed", checks: { media: readResult.media_id === draftResult.media_id, title: readResult.title === packagePayload.title, html: readbackHtml === packagePayload.canonical_html && readbackHtmlHash === packagePayload.html_hash, urls: artifactCanonicalJson(readbackUrls) === artifactCanonicalJson(expectedBodyUrls), thumb: readResult.thumb_media_id === uploads[0].media_id, article_index: 0 }, verified_draft_media_id: String(readResult.media_id || draftResult.media_id), verified_thumb_media_id: String(readResult.thumb_media_id || uploads[0]?.media_id || ""), verified_cover_image_url: verifiedCoverImageUrl || null, created_at: workflowTimestamp(params.created_at, 23_100) };
+  const readbackKey = await wechatArtifactIdempotencyKey("readback-qa", { draft_receipt_payload_hash: receiptMeta.payload_hash, package_payload_hash: packageMeta.payload_hash });
+  const readback = await makeWechatArtifact({ owner, kind: "wechat_draft_readback_qa", payload: readbackPayload, input_artifact_ids: [packageMeta.artifact_id, preQaMeta.artifact_id, receiptMeta.artifact_id, ...uploads.map(upload => upload.metadata.artifact_id)], idempotency_key: readbackKey, created_at: readbackPayload.created_at });
+  const readbackMeta = await persistWechatArtifact(env, coordinator, params, readback, artifactState("draft_verifying"), "wechat_artifact_committed");
+  if (read) await coordinator.completeFiveAgentCall({ call_id: read.call_id, run_id: params.run_id, status: "succeeded", response_hash: readbackMeta.payload_hash, artifact_id: readbackMeta.artifact_id, recorded_at: readbackPayload.created_at });
+  if (!matches) throw new EditorialRuntimeError("draft_readback_mismatch", "wechat draft readback does not match", 409);
+  await verifyExactWechatArtifactSet(env, coordinator, params, expectedSlots, executionScope);
+  const finalized = await finalizeWechatDraft(env, coordinator, params, readbackMeta, String(draftResult.media_id), verifiedCoverImageUrl);
+  return { run_id: params.run_id, state: "draft_ready", state_revision: finalized.doStateRevision, transcript_ref: transcript.ref, transcript_hash: transcript.hash, artifact_ids: [...visual.artifact_ids, templateMeta.artifact_id, renderQaMeta.artifact_id, ...uploads.map(upload => upload.metadata.artifact_id), packageMeta.artifact_id, preQaMeta.artifact_id, receiptMeta.artifact_id, readbackMeta.artifact_id] };
+}
+
+export async function runWechatDraftPhase(input: {
+  env: EditorialRuntimeEnv;
+  coordinator: DurableObjectStub<EditorialCoordinatorAgent>;
+  params: FiveAgentWorkflowParams;
+  frozen: StoredArtifactMetadata;
+  visual: FiveAgentWorkflowResult;
+  transcript: { ref: string; hash: string };
+}): Promise<FiveAgentWorkflowResult> {
+  const { env, coordinator, params, visual, transcript } = input;
+  if (!wechatDraftFeatureEnabled(env, params.user_id, params.workspace_id)) return visual;
+  const current = await coordinator.getFiveAgentRun(params.run_id, params.user_id, params.workspace_id) as Record<string, unknown>;
+  const wechatLedger = await coordinator.getFiveAgentWechatLedger(params.run_id, params.user_id, params.workspace_id);
+  const artifactIds = [...visual.artifact_ids, ...wechatLedger.receipt_ids];
+  const projection = await env.DB.prepare(`SELECT state FROM publication_runs WHERE run_id = ? AND user_id = ? AND workspace_id = ? LIMIT 1`)
+    .bind(params.run_id, params.user_id, params.workspace_id).first<{ state: PublicationState }>();
+  if (current.state === "draft_ready") {
+    const readback = uniquePassingWechatReadback(wechatLedger.artifacts, wechatLedger.receipt_ids);
+    if (!readback) throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "draft-ready receipt is missing", 503);
+    const activeSlots = wechatLedger.artifacts
+      .filter(item => item.kind === "wechat_image_upload_receipt" && item.payload_summary.execution_scope === readback.payload_summary.execution_scope && wechatLedger.receipt_ids.includes(item.artifact_id))
+      .sort((left, right) => Number(left.payload_summary.order || 0) - Number(right.payload_summary.order || 0))
+      .map(item => String(item.payload_summary.slot_id));
+    await verifyExactWechatArtifactSet(env, coordinator, params, activeSlots, readback.payload_summary.execution_scope);
+    const evidence = await assertVerifiedWechatDraftReadyEvidence(env, coordinator, params, readback);
+    const recording = await env.DB.prepare(`SELECT wechat_draft_id, cover_image_url FROM recordings WHERE id = ? AND user_id = ? AND workspace_id = ? LIMIT 1`)
+      .bind(params.recording_id, params.user_id, params.workspace_id).first<{ wechat_draft_id: string | null; cover_image_url: string | null }>();
+    if (projection?.state !== "draft_ready" || recording?.wechat_draft_id !== evidence.draftId ||
+        (evidence.coverUrl !== undefined && recording?.cover_image_url !== evidence.coverUrl)) {
+      throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "draft-ready evidence is incomplete", 503);
+    }
+    return { run_id: params.run_id, state: "draft_ready", state_revision: Number(current.state_revision), transcript_ref: transcript.ref, transcript_hash: transcript.hash, artifact_ids: artifactIds };
+  }
+  if (projection?.state === "draft_ready") {
+    const readback = uniquePassingWechatReadback(wechatLedger.artifacts, wechatLedger.receipt_ids);
+    const recording = await env.DB.prepare(`SELECT wechat_draft_id, cover_image_url FROM recordings WHERE id = ? AND user_id = ? AND workspace_id = ? LIMIT 1`)
+      .bind(params.recording_id, params.user_id, params.workspace_id).first<{ wechat_draft_id: string | null; cover_image_url: string | null }>();
+    if (!readback || !recording?.wechat_draft_id) throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "draft-ready receipt is missing", 503);
+    const evidence = await assertVerifiedWechatDraftReadyEvidence(env, coordinator, params, readback);
+    if (recording.wechat_draft_id !== evidence.draftId || (evidence.coverUrl !== undefined && recording.cover_image_url !== evidence.coverUrl)) {
+      throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "draft-ready recording evidence conflicts", 503);
+    }
+    const activeSlots = wechatLedger.artifacts
+      .filter(item => item.kind === "wechat_image_upload_receipt" && item.payload_summary.execution_scope === readback.payload_summary.execution_scope && wechatLedger.receipt_ids.includes(item.artifact_id))
+      .sort((left, right) => Number(left.payload_summary.order || 0) - Number(right.payload_summary.order || 0))
+      .map(item => String(item.payload_summary.slot_id));
+    await verifyExactWechatArtifactSet(env, coordinator, params, activeSlots, readback.payload_summary.execution_scope);
+    const finalized = await finalizeWechatDraft(env, coordinator, params, readback, evidence.draftId, evidence.coverUrl);
+    return { run_id: params.run_id, state: "draft_ready", state_revision: finalized.doStateRevision, transcript_ref: transcript.ref, transcript_hash: transcript.hash, artifact_ids: artifactIds };
+  }
+  try {
+    if (current.state === "needs_action") {
+      // Account repair is the only prerequisite for leaving a local Wave2D
+      // hold. Resolution is read-only; a failed repair preserves the existing
+      // hold and cannot manufacture publishing progress.
+      let account: { account_binding_id: string; account_receipt_hash: string; config_hash: string };
+      try {
+        account = await requireWechatAccount(env, params, workflowTimestamp(params.created_at, 23_900));
+      } catch {
+        return { run_id: params.run_id, state: "needs_action", state_revision: Number(current.state_revision), transcript_ref: transcript.ref, transcript_hash: transcript.hash, artifact_ids: artifactIds };
+      }
+      const recovery = await resumeWechatNeedsAction(env, coordinator, params);
+      return await runWechatDraftPhaseInner({
+        ...input,
+        account,
+        ...(recovery.freshExecutionEpoch ? { recovery_cycle: recovery.recoveryCycle } : {}),
+        reconciliation_cycle: recovery.recoveryCycle,
+        visual: { ...visual, state: recovery.target as FiveAgentWorkflowResult["state"] },
+      });
+    }
+    return await runWechatDraftPhaseInner(input);
+  } catch (error) {
+    // Scope, pin, identity, and parent-chain conflicts are caller-independent
+    // integrity errors. They must not be hidden as a provider failure.
+    if ((error instanceof WechatContractError && error.code !== "wechat_html_contract_invalid") ||
+        (error instanceof EditorialRuntimeError && ["wechat_visual_input_invalid", "wechat_artifact_identity_conflict", "wechat_artifact_mirror_conflict", "wechat_artifact_not_found"].includes(error.code))) {
+      throw error;
+    }
+    const code = error instanceof EditorialRuntimeError || error instanceof WechatPublishingServiceError || error instanceof WechatContractError
+      ? error.code
+      : "external_side_effect_unknown";
+    if (["external_side_effect_unknown", "wechat_artifact_reconciliation_required", "draft_readback_mismatch", "draft_readback_unavailable", "wechat_publishing_account_unavailable", "wechat_publishing_account_not_allowed", "wechat_publishing_account_rejected", "wechat_access_token_rejected", "draft_identity_unresolved"].includes(code)) {
+      const nextAction = code === "draft_readback_mismatch" || code === "draft_readback_unavailable" ? "reconcile_draft" :
+        code === "draft_identity_unresolved" ? "reconcile_draft_identity" :
+        code === "wechat_publishing_account_not_allowed" ? "request_account_enablement" :
+        code === "wechat_publishing_account_unavailable" || code === "wechat_publishing_account_rejected" || code === "wechat_access_token_rejected" ? "repair_publishing_account" :
+        "reconcile_external_side_effect";
+      return visualHoldWithCode(env, coordinator, params, transcript, artifactIds, code, nextAction, 25, 1, false);
+    }
+    const failedCode = code === "wechat_html_contract_invalid" ? code :
+      code === "wechat_operation_retry_exhausted" ? code :
+      code.startsWith("wechat_image_") ? "wechat_image_upload_non_retryable" :
+      code.startsWith("wechat_draft_") ? "wechat_draft_write_non_retryable" :
+      "wechat_draft_write_non_retryable";
+    const nextAction = failedCode === "wechat_html_contract_invalid" ? "retry_after_service_fix" :
+      failedCode === "wechat_operation_retry_exhausted" ? "retry" :
+      failedCode === "wechat_image_upload_non_retryable" ? "repair_publishing_account" : "repair_draft_payload";
+    return visualFailure(env, coordinator, params, transcript, artifactIds, failedCode, nextAction, 25, 1, false);
   }
 }
 
@@ -3264,7 +5676,7 @@ export class FiveAgentPublishingWorkflow extends AgentWorkflow<EditorialCoordina
     if (visualResumeState && visualProductionFeatureEnabled(this.env, params.user_id, params.workspace_id)) {
       const frozen = (await coordinator.listFiveAgentArtifacts(params.run_id, params.user_id, params.workspace_id)).find(item => item.kind === "frozen_article_version") as StoredArtifactMetadata | undefined;
       if (!frozen) throw new EditorialRuntimeError("frozen_artifact_not_found", "visual replay cannot find the frozen artifact", 503);
-      return await runVisualProductionPhase({
+      const visual = await runVisualProductionPhase({
         env: this.env,
         coordinator,
         params,
@@ -3272,6 +5684,32 @@ export class FiveAgentPublishingWorkflow extends AgentWorkflow<EditorialCoordina
         priorArtifactIds: (await coordinator.listFiveAgentArtifacts(params.run_id, params.user_id, params.workspace_id)).map(item => item.artifact_id),
         transcript: { ref: params.transcript_ref, hash: params.transcript_hash },
         step,
+      });
+      return runWechatDraftPhase({ env: this.env, coordinator, params, frozen, visual, transcript: { ref: params.transcript_ref, hash: params.transcript_hash } });
+    }
+    // Wave2D resume is intentionally separate from the visual resume path.
+    // The visual phase has already made its immutable inputs; replaying it here
+    // would risk invoking image work while only a local WeChat receipt is
+    // incomplete. Each downstream WeChat artifact is itself idempotent.
+    const wechatResumeState = ["visual_ready", "formatting", "visual_qa", "draft_syncing", "draft_verifying", "draft_ready", "needs_action"].includes(String(confirmedCurrentRun?.state));
+    if (wechatResumeState && wechatDraftFeatureEnabled(this.env, params.user_id, params.workspace_id)) {
+      const artifacts = await coordinator.listFiveAgentArtifacts(params.run_id, params.user_id, params.workspace_id);
+      const frozen = artifacts.find(item => item.kind === "frozen_article_version") as StoredArtifactMetadata | undefined;
+      if (!frozen) throw new EditorialRuntimeError("frozen_artifact_not_found", "wechat replay cannot find the frozen artifact", 503);
+      return runWechatDraftPhase({
+        env: this.env,
+        coordinator,
+        params,
+        frozen,
+        visual: {
+          run_id: params.run_id,
+          state: "visual_ready",
+          state_revision: Number(confirmedCurrentRun?.state_revision || 0),
+          transcript_ref: params.transcript_ref,
+          transcript_hash: params.transcript_hash,
+          artifact_ids: artifacts.map(item => item.artifact_id),
+        },
+        transcript: { ref: params.transcript_ref, hash: params.transcript_hash },
       });
     }
     const transcript = await step.do("transcript-verify", retry, async () => {
@@ -3509,7 +5947,8 @@ export class FiveAgentPublishingWorkflow extends AgentWorkflow<EditorialCoordina
         }
       });
       if ("state" in frozen2) return frozen2;
-      return await runVisualProductionPhase({ env: this.env, coordinator, params, frozen: frozen2, priorArtifactIds: [briefCommit.artifact_id, draft.artifact_id, review.artifact_id, dispatch.artifact_id, draft2.artifact_id, review2.artifact_id, frozen2.artifact_id], transcript, step });
+      const visual = await runVisualProductionPhase({ env: this.env, coordinator, params, frozen: frozen2, priorArtifactIds: [briefCommit.artifact_id, draft.artifact_id, review.artifact_id, dispatch.artifact_id, draft2.artifact_id, review2.artifact_id, frozen2.artifact_id], transcript, step });
+      return runWechatDraftPhase({ env: this.env, coordinator, params, frozen: frozen2, visual, transcript });
     }
     const frozen = await step.do("freeze-content", retry, async () => {
       try {
@@ -3525,7 +5964,8 @@ export class FiveAgentPublishingWorkflow extends AgentWorkflow<EditorialCoordina
       }
     });
     if ("state" in frozen) return frozen;
-    return await runVisualProductionPhase({ env: this.env, coordinator, params, frozen, priorArtifactIds: [briefCommit.artifact_id, draft.artifact_id, review.artifact_id, frozen.artifact_id], transcript, step });
+    const visual = await runVisualProductionPhase({ env: this.env, coordinator, params, frozen, priorArtifactIds: [briefCommit.artifact_id, draft.artifact_id, review.artifact_id, frozen.artifact_id], transcript, step });
+    return runWechatDraftPhase({ env: this.env, coordinator, params, frozen, visual, transcript });
   }
 }
 

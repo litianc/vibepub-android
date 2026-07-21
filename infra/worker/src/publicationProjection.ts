@@ -211,9 +211,9 @@ const ALLOWED_PROJECTION_TRANSITIONS: Record<PublicationState, readonly Publicat
   content_frozen: ["visual_planning", "failed", "cancelled"],
   visual_planning: ["visual_generating", "needs_action", "failed", "cancelled"],
   visual_generating: ["visual_ready", "needs_action", "failed", "cancelled"],
-  visual_ready: ["formatting", "failed", "cancelled"],
-  formatting: ["visual_qa", "failed", "cancelled"],
-  visual_qa: ["draft_syncing", "failed", "cancelled"],
+  visual_ready: ["formatting", "needs_action", "failed", "cancelled"],
+  formatting: ["visual_qa", "needs_action", "failed", "cancelled"],
+  visual_qa: ["draft_syncing", "needs_action", "failed", "cancelled"],
   draft_syncing: ["draft_verifying", "needs_action", "failed", "cancelled"],
   draft_verifying: ["draft_ready", "needs_action", "failed", "cancelled"],
   draft_ready: [],
@@ -341,6 +341,11 @@ export type SystemPublicationTransitionInput = {
   targetState: PublicationState;
   expectedStateRevision?: number;
   options: PublicationProjectionTransitionOptions;
+  compatibilityProjection?: {
+    recordingId: number;
+    wechatDraftId: string;
+    verifiedCoverImageUrl?: string;
+  };
 };
 
 /**
@@ -380,15 +385,57 @@ export async function applySystemPublicationTransition(
     : input.options.eventCreatedAt;
   const projected = projectPublicationTransition(current, input.targetState, { ...input.options, eventCreatedAt });
   const eventStage = publicationStage(projected.last_successful_state);
+  const compatibility = input.compatibilityProjection;
+  const compatibilityStatements: D1PreparedStatement[] = [];
+  let compatibilityExistsSql = "";
+  let compatibilityExistsValues: unknown[] = [];
+  if (compatibility) {
+    if (input.targetState !== "draft_ready" || current.recording_id !== compatibility.recordingId || !compatibility.wechatDraftId) {
+      throw new PublicationProjectionError("publication_compatibility_invalid", "verified draft compatibility projection is invalid", 409);
+    }
+    const cover = compatibility.verifiedCoverImageUrl;
+    const coverSql = cover ? ", cover_image_url = CASE WHEN cover_image_url IS NULL THEN ? ELSE cover_image_url END" : "";
+    const coverGuard = cover ? "AND (cover_image_url IS NULL OR cover_image_url = ?)" : "";
+    const values: unknown[] = [compatibility.wechatDraftId];
+    if (cover) values.push(cover);
+    values.push(compatibility.recordingId, input.auth.userId, input.auth.workspaceId, compatibility.wechatDraftId);
+    if (cover) values.push(cover);
+    // The recording write must see the exact same publication pre-state as the
+    // run CAS. Otherwise a stale completion could change the legacy projection
+    // while its publication transition loses the race.
+    values.push(
+      input.runId, input.auth.userId, input.auth.workspaceId, expectedRevision,
+      current.state, current.last_event_id, current.last_event_type,
+      current.last_event_idempotency_key, current.last_event_payload_hash,
+      current.last_event_created_at,
+    );
+    compatibilityStatements.push(db.prepare(`UPDATE recordings SET
+      wechat_draft_id = CASE WHEN wechat_draft_id IS NULL THEN ? ELSE wechat_draft_id END${coverSql}
+      WHERE id = ? AND user_id = ? AND workspace_id = ? AND (wechat_draft_id IS NULL OR wechat_draft_id = ?) ${coverGuard}
+        AND EXISTS (
+          SELECT 1 FROM publication_runs
+          WHERE run_id = ? AND user_id = ? AND workspace_id = ? AND state_revision = ?
+            AND state = ? AND last_event_id = ? AND last_event_type = ?
+            AND last_event_idempotency_key = ? AND last_event_payload_hash = ?
+            AND last_event_created_at = ?
+        )`).bind(...values));
+    // Every statement in this batch uses the same verified recording identity.
+    // This prevents a cover conflict from committing draft_ready/event alone.
+    compatibilityExistsSql = ` AND EXISTS (SELECT 1 FROM recordings WHERE id = ? AND user_id = ? AND workspace_id = ? AND wechat_draft_id = ?${cover ? " AND cover_image_url = ?" : ""})`;
+    compatibilityExistsValues = [compatibility.recordingId, input.auth.userId, input.auth.workspaceId, compatibility.wechatDraftId, ...(cover ? [cover] : [])];
+  }
   let batch: D1Result[];
   try {
     batch = await db.batch([
+      ...compatibilityStatements,
       db.prepare(`UPDATE publication_runs
         SET state = ?, run_status = ?, state_revision = ?, progress_percent = ?, resume_state = ?,
             last_successful_state = ?, last_successful_progress_percent = ?, retry_count = ?,
             next_action = ?, error_code = ?, updated_at = ?, last_event_id = ?, last_event_type = ?,
             last_event_idempotency_key = ?, last_event_payload_hash = ?, last_event_created_at = ?
-        WHERE run_id = ? AND user_id = ? AND workspace_id = ? AND state_revision = ?`)
+        WHERE run_id = ? AND user_id = ? AND workspace_id = ? AND state_revision = ?
+          AND state = ? AND last_event_id = ? AND last_event_type = ?
+          AND last_event_idempotency_key = ? AND last_event_payload_hash = ? AND last_event_created_at = ?${compatibilityExistsSql}`)
         .bind(
           projected.state, projected.run_status, projected.state_revision, projected.progress_percent,
           projected.resume_state, projected.last_successful_state, projected.last_successful_progress_percent,
@@ -396,6 +443,9 @@ export async function applySystemPublicationTransition(
           projected.last_event_id, projected.last_event_type, projected.last_event_idempotency_key,
           projected.last_event_payload_hash, projected.last_event_created_at,
           input.runId, input.auth.userId, input.auth.workspaceId, expectedRevision,
+          current.state, current.last_event_id, current.last_event_type,
+          current.last_event_idempotency_key, current.last_event_payload_hash, current.last_event_created_at,
+          ...compatibilityExistsValues,
         ),
       db.prepare(`INSERT INTO publication_run_events
         (event_id, run_id, user_id, workspace_id, recording_id, revision, event_type, state,
@@ -403,13 +453,17 @@ export async function applySystemPublicationTransition(
          idempotency_key, payload_hash, created_at)
         SELECT ?, run_id, user_id, workspace_id, recording_id, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
         FROM publication_runs
-        WHERE run_id = ? AND user_id = ? AND workspace_id = ? AND state_revision = ?`)
+        WHERE run_id = ? AND user_id = ? AND workspace_id = ? AND state_revision = ?
+          AND state = ? AND last_event_id = ? AND last_event_type = ?
+          AND last_event_idempotency_key = ? AND last_event_payload_hash = ? AND last_event_created_at = ?${compatibilityExistsSql}`)
         .bind(
           projected.last_event_id, projected.state_revision, projected.last_event_type, projected.state,
           eventStage, projected.progress_percent, projected.retry_count, projected.next_action,
           projected.error_code, projected.last_event_idempotency_key, projected.last_event_payload_hash,
           projected.last_event_created_at, input.runId, input.auth.userId, input.auth.workspaceId,
-          projected.state_revision,
+          projected.state_revision, projected.state, projected.last_event_id, projected.last_event_type,
+          projected.last_event_idempotency_key, projected.last_event_payload_hash, projected.last_event_created_at,
+          ...compatibilityExistsValues,
         ),
     ]);
   } catch (error) {
@@ -418,7 +472,10 @@ export async function applySystemPublicationTransition(
     }
     throw error;
   }
-  if (Number(batch[0]?.meta?.changes || 0) !== 1) {
+  const runUpdateIndex = compatibilityStatements.length;
+  if ((compatibility && Number(batch[0]?.meta?.changes || 0) !== 1) ||
+      Number(batch[runUpdateIndex]?.meta?.changes || 0) !== 1 ||
+      Number(batch[runUpdateIndex + 1]?.meta?.changes || 0) !== 1) {
     throw new PublicationProjectionError("publication_revision_conflict", "publication run changed during transition", 409);
   }
   const after = await first<PublicationRunRow>(db, `
