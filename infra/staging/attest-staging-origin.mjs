@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { StagingManifestError, validateManifest } from "./render-staging-config.mjs";
 
@@ -37,8 +37,38 @@ export function validateStagingOriginAttestation(manifestRaw, expectedOrigin, ac
   return { manifest_sha_bound: true, origin_attested: true };
 }
 
+export async function fetchWorkersSubdomain(accountId, token, fetchImpl = fetch) {
+  if (typeof accountId !== "string" || !ACCOUNT_ID.test(accountId) || typeof token !== "string" || token.length < 16 || token.length > 4096) {
+    fail("staging_origin_fetch_input_invalid");
+  }
+  let response;
+  try {
+    response = await fetchImpl(`https://api.cloudflare.com/client/v4/accounts/${accountId}/workers/subdomain`, {
+      method: "GET",
+      redirect: "manual",
+      signal: AbortSignal.timeout(15_000),
+      headers: { authorization: `Bearer ${token}` },
+    });
+  } catch {
+    fail("staging_origin_fetch_failed");
+  }
+  if (response.status !== 200) fail("staging_origin_fetch_failed");
+  const declared = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > 1024 * 1024) fail("staging_origin_fetch_failed");
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  if (bytes.byteLength > 1024 * 1024) fail("staging_origin_fetch_failed");
+  try { return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)); } catch { fail("staging_origin_fetch_failed"); }
+}
+
 async function main() {
   const args = process.argv.slice(2);
+  if (args[0] === "--fetch") {
+    const [, accountId, outputPath] = args;
+    if (!accountId || !outputPath) throw new Error("usage: node infra/staging/attest-staging-origin.mjs --fetch <account-id> <output.json>");
+    const response = await fetchWorkersSubdomain(accountId, process.env.CLOUDFLARE_API_TOKEN);
+    await writeFile(outputPath, `${JSON.stringify(response)}\n`, "utf8");
+    return;
+  }
   const preflight = args[0] === "--preflight";
   const [manifestPath, expectedOrigin, accountId, subdomainPath] = preflight ? args.slice(1) : args;
   if (preflight) {

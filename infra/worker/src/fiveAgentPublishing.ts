@@ -24,6 +24,7 @@ import {
 import {
   createPublicationRun,
   publicationFeatureEnabled,
+  stagingHttpImageCanaryScopeEnabled,
   applySystemPublicationTransition,
   type PublicationState,
   type PublicationRunRow,
@@ -140,10 +141,11 @@ export type FiveAgentWorkflowResult = {
   artifact_ids: string[];
 };
 
-export function visualProductionFeatureEnabled(env: Pick<EditorialRuntimeEnv, "VISUAL_PRODUCTION_V3" | "VISUAL_PRODUCTION_V3_ALLOWLIST">, userId: string, workspaceId: string): boolean {
+export function visualProductionFeatureEnabled(env: EditorialRuntimeEnv, userId: string, workspaceId: string, runId?: string): boolean {
   if (env.VISUAL_PRODUCTION_V3 !== "true") return false;
   const target = `${userId}:${workspaceId}`;
-  return (env.VISUAL_PRODUCTION_V3_ALLOWLIST || "").split(",").map(value => value.trim()).filter(Boolean).includes(target);
+  return (env.VISUAL_PRODUCTION_V3_ALLOWLIST || "").split(",").map(value => value.trim()).filter(Boolean).includes(target) &&
+    stagingHttpImageCanaryScopeEnabled(env, userId, workspaceId, runId);
 }
 
 function errorResponse(error: unknown): Response {
@@ -2398,7 +2400,7 @@ export async function runVisualProductionPhase(input: {
   step: AgentWorkflowStep;
 }): Promise<FiveAgentWorkflowResult> {
   const { env, coordinator, params, frozen, priorArtifactIds, transcript, step } = input;
-  if (!visualProductionFeatureEnabled(env, params.user_id, params.workspace_id)) {
+  if (!visualProductionFeatureEnabled(env, params.user_id, params.workspace_id, params.run_id)) {
     return { run_id: params.run_id, state: "content_frozen", state_revision: Number(frozen.doStateRevision || 0), transcript_ref: transcript.ref, transcript_hash: transcript.hash, artifact_ids: priorArtifactIds };
   }
   if (await isPublicationCancelled(env, params)) {
@@ -2435,6 +2437,9 @@ export async function runVisualProductionPhase(input: {
           const key = await deriveVisualImageOperationKey(params.run_id, planPayload.frozen_payload_hash, planMeta.payload_hash, pendingSlot.slot_id, pendingSlot.prompt_hash);
           const reconciled = await reconcileExistingVisualAdapterCall(env, coordinator, params, "image", "visual_image", key, {
             operation_id: key,
+            run_id: params.run_id,
+            user_id: params.user_id,
+            workspace_id: params.workspace_id,
             prompt: pendingSlot.prompt,
             size: `${pendingSlot.width}x${pendingSlot.height}`,
             model: "gpt-image-2",
@@ -2541,7 +2546,7 @@ export async function runVisualProductionPhase(input: {
     try {
       const assetMeta = await step.do(`visual-asset-${slot.slot_id}`, { retries: { limit: 2, delay: "5 seconds" as const, backoff: "exponential" as const }, timeout: "2 minutes" as const }, async () => {
         const imageOperationId = await deriveVisualImageOperationKey(params.run_id, planPayload.frozen_payload_hash, planMeta.payload_hash, slot.slot_id, slot.prompt_hash);
-        const call = await runVisualAdapterCall(env, coordinator, params, "image", "visual_image", imageOperationId, { operation_id: imageOperationId, prompt: slot.prompt, size: `${slot.width}x${slot.height}`, model: "gpt-image-2" }, workflowTimestamp(params.created_at, 14_000 + slot.order), reconciledCalls);
+        const call = await runVisualAdapterCall(env, coordinator, params, "image", "visual_image", imageOperationId, { operation_id: imageOperationId, run_id: params.run_id, user_id: params.user_id, workspace_id: params.workspace_id, prompt: slot.prompt, size: `${slot.width}x${slot.height}`, model: "gpt-image-2" }, workflowTimestamp(params.created_at, 14_000 + slot.order), reconciledCalls);
         if (await isPublicationCancelled(env, params)) throw new VisualCancelledError();
         const binaryKey = visualBinaryKey(params.user_id, params.workspace_id, params.run_id, planPayload.frozen_payload_hash, slot.slot_id);
         const existingBinary = call.response ? null : await readExistingImmutableBinaryImage(env.FILES_BUCKET, binaryKey, {
@@ -5673,7 +5678,7 @@ export class FiveAgentPublishingWorkflow extends AgentWorkflow<EditorialCoordina
       (confirmedCurrentRun?.state === "needs_action" && confirmedCurrentRun?.error_code === "external_side_effect_unknown" &&
         confirmedCurrentRun?.next_action === "reconcile_external_side_effect" &&
         (confirmedCurrentRun?.last_successful_state === "visual_planning" || confirmedCurrentRun?.last_successful_state === "visual_generating"));
-    if (visualResumeState && visualProductionFeatureEnabled(this.env, params.user_id, params.workspace_id)) {
+    if (visualResumeState && visualProductionFeatureEnabled(this.env, params.user_id, params.workspace_id, params.run_id)) {
       const frozen = (await coordinator.listFiveAgentArtifacts(params.run_id, params.user_id, params.workspace_id)).find(item => item.kind === "frozen_article_version") as StoredArtifactMetadata | undefined;
       if (!frozen) throw new EditorialRuntimeError("frozen_artifact_not_found", "visual replay cannot find the frozen artifact", 503);
       const visual = await runVisualProductionPhase({
@@ -5986,6 +5991,9 @@ export async function handleFiveAgentPublishingInternalRoute(
   try {
     if (request.method === "POST" && parts.length === 5 && parts[4] === "runs") {
       const body = normalizeFiveAgentStartBody(await parseRequestJson(request));
+      if (!publicationFeatureEnabled(env, userId, workspaceId, body.run_id)) {
+        return Response.json({ error: "editorial_workflow_disabled" }, { status: 404 });
+      }
       const existingCanonical = await env.DB.prepare(`SELECT user_id, workspace_id, article_id, recording_id, created_at
         FROM editorial_runs WHERE run_id = ? LIMIT 1`).bind(body.run_id).first<{
           user_id: string; workspace_id: string; article_id: string; recording_id: number; created_at: string;

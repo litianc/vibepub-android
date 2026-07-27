@@ -1,0 +1,290 @@
+name: Wave 2E Staging HTTP Image Canary
+
+on:
+  pull_request:
+    paths:
+      - "infra/image-generation-adapter/**"
+      - "infra/worker/**"
+      - "infra/staging/**"
+      - ".github/workflows/wave2e-http-image-canary.yml"
+  workflow_dispatch:
+    inputs:
+      source_key:
+        description: "Exact isolated staging text-submission R2 key"
+        required: true
+        type: string
+      user_id:
+        description: "Exact isolated staging user id"
+        required: true
+        type: string
+      workspace_id:
+        description: "Exact isolated staging workspace id"
+        required: true
+        type: string
+      expected_recording_id:
+        description: "Exact staging recording id returned after text submission"
+        required: true
+        type: string
+      expected_source_hash:
+        description: "sha256: hash of the exact downloaded text-submission object"
+        required: true
+        type: string
+      max_operations:
+        description: "Normal article uses 3; long article uses 6"
+        required: true
+        default: "3"
+        type: choice
+        options: ["3", "6"]
+      plaintext_transport_attestation:
+        description: "Exact approval for one staging run; production remains HTTPS-only"
+        required: true
+        default: "false"
+        type: choice
+        options: ["false", "plaintext_key_and_content_approved_for_single_staging_run"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.event_name == 'workflow_dispatch' && 'vibepub-staging-deploy' || format('wave2e-http-canary-validation-{0}', github.run_id) }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate fail-closed HTTP canary contracts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require workflow dispatch from the repository default branch
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: test "$GITHUB_REF" = "refs/heads/$DEFAULT_BRANCH"
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install affected packages without deployment credentials
+        run: |
+          npm ci --prefix infra/image-generation-adapter
+          npm ci --prefix infra/worker
+      - name: Run focused canary, adapter, and Worker validation
+        run: |
+          node --test infra/staging/test/staging-http-image-canary.test.mjs
+          npm test --prefix infra/image-generation-adapter
+          npm run typecheck --prefix infra/image-generation-adapter
+          npm run typecheck --prefix infra/worker
+
+  canary:
+    name: Run and always close one protected staging canary
+    if: github.event_name == 'workflow_dispatch' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    environment: vibepub-staging
+    env:
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      SOURCE_KEY: ${{ inputs.source_key }}
+      CANARY_USER_ID: ${{ inputs.user_id }}
+      CANARY_WORKSPACE_ID: ${{ inputs.workspace_id }}
+      EXPECTED_RECORDING_ID: ${{ inputs.expected_recording_id }}
+      EXPECTED_SOURCE_HASH: ${{ inputs.expected_source_hash }}
+      MAX_OPERATIONS: ${{ inputs.max_operations }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Require the exact one-run plaintext transport approval
+        env:
+          ATTESTATION: ${{ inputs.plaintext_transport_attestation }}
+        run: |
+          test "$ATTESTATION" = "plaintext_key_and_content_approved_for_single_staging_run" || {
+            echo "::error::exact staging plaintext transport approval is required"
+            exit 1
+          }
+          node -e 'const values=[process.env.SOURCE_KEY,process.env.CANARY_USER_ID,process.env.CANARY_WORKSPACE_ID]; if(!/^[A-Za-z0-9][A-Za-z0-9._:\/-]{0,511}$/.test(values[0])||values[0].includes("..")||!values[0].startsWith(`users/${values[1]}/text-submissions/`)||!values.slice(1).every(v=>/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/.test(v))||!/^[1-9][0-9]*$/.test(process.env.EXPECTED_RECORDING_ID)||!/^sha256:[a-f0-9]{64}$/.test(process.env.EXPECTED_SOURCE_HASH)) process.exit(1)'
+
+      - name: Render the permanent flag-off rollback baseline first
+        env:
+          STAGING_RESOURCE_MANIFEST_JSON: ${{ secrets.STAGING_RESOURCE_MANIFEST_JSON }}
+        run: |
+          test -n "$STAGING_RESOURCE_MANIFEST_JSON" || { echo "::error::STAGING_RESOURCE_MANIFEST_JSON is required"; exit 1; }
+          printf '%s' "$STAGING_RESOURCE_MANIFEST_JSON" > "$RUNNER_TEMP/staging-resource-manifest.json"
+          node infra/staging/render-staging-config.mjs --manifest "$RUNNER_TEMP/staging-resource-manifest.json" --out-dir "$RUNNER_TEMP/safe-config" --intent deploy
+          node infra/staging/verify-staging-config.mjs --manifest "$RUNNER_TEMP/staging-resource-manifest.json" --out-dir "$RUNNER_TEMP/safe-config" --intent deploy
+          node -e 'const fs=require("fs");const m=require(process.argv[1]);fs.appendFileSync(process.env.GITHUB_ENV,`STAGING_BASE_URL=${m.main.public_base_url}\nSTAGING_FILES_BUCKET=${m.main.files_bucket}\n`)' "$RUNNER_TEMP/staging-resource-manifest.json"
+
+      - name: Attest the exact staging origin to this Cloudflare account
+        env:
+          STAGING_PUBLIC_BASE_URL: ${{ vars.STAGING_PUBLIC_BASE_URL }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          for name in STAGING_PUBLIC_BASE_URL CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_API_TOKEN; do
+            test -n "${!name}" || { echo "::error::$name is required for staging origin attestation"; exit 1; }
+          done
+          node infra/staging/attest-staging-origin.mjs --preflight "$RUNNER_TEMP/staging-resource-manifest.json" "$STAGING_PUBLIC_BASE_URL" "$CLOUDFLARE_ACCOUNT_ID"
+          node infra/staging/attest-staging-origin.mjs --fetch "$CLOUDFLARE_ACCOUNT_ID" "$RUNNER_TEMP/workers-subdomain.json"
+          node infra/staging/attest-staging-origin.mjs "$RUNNER_TEMP/staging-resource-manifest.json" "$STAGING_PUBLIC_BASE_URL" "$CLOUDFLARE_ACCOUNT_ID" "$RUNNER_TEMP/workers-subdomain.json"
+          echo "STAGING_ATTESTED_BASE_URL=$STAGING_PUBLIC_BASE_URL" >> "$GITHUB_ENV"
+
+      - name: Install operator packages without provider credentials
+        run: |
+          npm ci --prefix infra/image-generation-adapter
+          npm ci --prefix infra/worker
+
+      - name: Prove staging cannot trigger the production Mining workflow
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          timeout 60s npx --prefix infra/worker wrangler secret list --config "$RUNNER_TEMP/safe-config/main.wrangler.toml" --format json > "$RUNNER_TEMP/main-secrets.json"
+          node -e 'const rows=require(process.argv[1]);const names=new Set(rows.map(x=>x.name));if(names.has("GITHUB_PAT")) throw new Error("GITHUB_PAT must be absent from staging");for(const name of ["WRITING_AGENT_TOKEN","REVIEW_AGENT_TOKEN","VISUAL_PRODUCTION_TOKEN","MINING_V3_HANDOFF_TOKEN"])if(!names.has(name))throw new Error(`${name} is missing from staging`)' "$RUNNER_TEMP/main-secrets.json"
+          timeout 60s npx --prefix infra/image-generation-adapter wrangler secret list --config "$RUNNER_TEMP/safe-config/image.wrangler.toml" --format json > "$RUNNER_TEMP/image-secrets.json"
+          node -e 'const rows=require(process.argv[1]);const names=new Set(rows.map(x=>x.name));for(const name of ["VISUAL_PRODUCTION_TOKEN","GPT_IMAGE_API_KEY"])if(!names.has(name))throw new Error(`${name} is missing from staging`)' "$RUNNER_TEMP/image-secrets.json"
+
+      - name: Read and bind the exact isolated staging source
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          node -e 'const fs=require("fs");const q=`SELECT r.id,r.user_id,s.workspace_id,r.filename,r.r2_key,r.source_type,r.article_title,r.style_profile_id,r.style_profile_version,r.layout_profile_id,r.layout_profile_version FROM recordings r JOIN editorial_recording_scopes s ON s.recording_id=r.id AND s.user_id=r.user_id WHERE r.r2_key=\x27${process.env.SOURCE_KEY}\x27 AND r.user_id=\x27${process.env.CANARY_USER_ID}\x27 AND s.workspace_id=\x27${process.env.CANARY_WORKSPACE_ID}\x27;`;fs.writeFileSync(process.argv[1],q)' "$RUNNER_TEMP/canary-recording.sql"
+          timeout 60s npx --prefix infra/worker wrangler d1 execute DB --remote --json --file "$RUNNER_TEMP/canary-recording.sql" --config "$RUNNER_TEMP/safe-config/main.wrangler.toml" > "$RUNNER_TEMP/canary-recording.json"
+          node -e 'const rows=require(process.argv[1]);const data=Array.isArray(rows)&&rows.length===1?rows[0].results:[];if(data.length!==1||String(data[0].id)!==process.env.EXPECTED_RECORDING_ID)throw new Error("recording identity mismatch")' "$RUNNER_TEMP/canary-recording.json"
+          timeout 60s npx --prefix infra/worker wrangler r2 object get "$STAGING_FILES_BUCKET/$SOURCE_KEY" --remote --file "$RUNNER_TEMP/canary-source.json" --config "$RUNNER_TEMP/safe-config/main.wrangler.toml"
+          node infra/staging/staging-http-image-canary.mjs identity \
+            --source-file "$RUNNER_TEMP/canary-source.json" \
+            --recording-file "$RUNNER_TEMP/canary-recording.json" \
+            --source-key "$SOURCE_KEY" \
+            --user-id "$CANARY_USER_ID" \
+            --workspace-id "$CANARY_WORKSPACE_ID" \
+            --expected-source-hash "$EXPECTED_SOURCE_HASH" \
+            --max-operations "$MAX_OPERATIONS" \
+            --grant-seed "${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}" \
+            --out "$RUNNER_TEMP/canary.json"
+          node -e 'const fs=require("fs");const run=require(process.argv[1]).identity.run_id;if(!/^run_v3_[a-f0-9]{64}$/.test(run))throw new Error("run identity invalid");fs.writeFileSync(process.argv[2],`SELECT (SELECT count(*) FROM editorial_runs WHERE run_id=\x27${run}\x27) AS editorial_count,(SELECT count(*) FROM publication_runs WHERE run_id=\x27${run}\x27) AS publication_count,(SELECT count(*) FROM editorial_artifacts WHERE run_id=\x27${run}\x27) AS artifact_count;`)' "$RUNNER_TEMP/canary.json" "$RUNNER_TEMP/canary-absence.sql"
+          timeout 60s npx --prefix infra/worker wrangler d1 execute DB --remote --json --file "$RUNNER_TEMP/canary-absence.sql" --config "$RUNNER_TEMP/safe-config/main.wrangler.toml" > "$RUNNER_TEMP/canary-absence.json"
+          node -e 'const row=require(process.argv[1])?.[0]?.results?.[0];if(!row||Number(row.editorial_count)!==0||Number(row.publication_count)!==0||Number(row.artifact_count)!==0)throw new Error("canary run already exists")' "$RUNNER_TEMP/canary-absence.json"
+          node infra/staging/staging-http-image-canary.mjs render --manifest "$RUNNER_TEMP/staging-resource-manifest.json" --canary "$RUNNER_TEMP/canary.json" --out-dir "$RUNNER_TEMP/canary-config" --intent deploy
+          node infra/staging/staging-http-image-canary.mjs verify --manifest "$RUNNER_TEMP/staging-resource-manifest.json" --canary "$RUNNER_TEMP/canary.json" --out-dir "$RUNNER_TEMP/canary-config" --intent deploy
+          timeout 180s npx --prefix infra/image-generation-adapter wrangler deploy --dry-run --config "$RUNNER_TEMP/canary-config/image.wrangler.toml"
+          timeout 180s npx --prefix infra/worker wrangler deploy --dry-run --config "$RUNNER_TEMP/canary-config/main.wrangler.toml"
+
+      - name: Deploy the one-grant image adapter
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: timeout 180s npx --prefix infra/image-generation-adapter wrangler deploy --config "$RUNNER_TEMP/canary-config/image.wrangler.toml" --message "staging HTTP image canary ${GITHUB_RUN_ID}" --var "DEPLOY_COMMIT:${GITHUB_SHA}" --var "DEPLOY_REF:${GITHUB_REF_NAME}" --var "DEPLOYED_AT:$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+      - name: Deploy the exact-user visual main gate with WeChat off
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: timeout 180s npx --prefix infra/worker wrangler deploy --config "$RUNNER_TEMP/canary-config/main.wrangler.toml" --message "staging HTTP image canary ${GITHUB_RUN_ID}" --var "DEPLOY_COMMIT:${GITHUB_SHA}" --var "DEPLOY_REF:${GITHUB_REF_NAME}" --var "DEPLOYED_AT:$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+      - name: Prove the attested origin serves this exact reviewed deployment
+        run: |
+          node -e 'const fs=require("fs");const url=`${process.env.STAGING_ATTESTED_BASE_URL}/health?adapters=1`;fetch(url,{redirect:"manual",signal:AbortSignal.timeout(30000)}).then(async response=>{if(response.status!==200)throw new Error("staging health unavailable");const body=new Uint8Array(await response.arrayBuffer());if(body.byteLength>1024*1024)throw new Error("staging health oversized");fs.writeFileSync(process.argv[1],body)}).catch(()=>process.exit(1))' "$RUNNER_TEMP/canary-health.json"
+          node infra/staging/verify-staging-health.mjs "$RUNNER_TEMP/canary-health.json" "$GITHUB_SHA" "$GITHUB_REF_NAME"
+
+      - name: Start exactly the prepared Mining V3 handoff
+        env:
+          MINING_V3_HANDOFF_TOKEN: ${{ secrets.MINING_V3_HANDOFF_TOKEN }}
+        run: |
+          node infra/staging/staging-http-image-canary-request.mjs start \
+            --base-url "$STAGING_BASE_URL" \
+            --canary "$RUNNER_TEMP/canary.json" \
+            --eligibility-out "$RUNNER_TEMP/eligibility-response.json" \
+            --start-out "$RUNNER_TEMP/start-response.json"
+
+      - name: Poll the immutable publication projection to a terminal visual state
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          node -e 'const fs=require("fs");const run=require(process.argv[1]).identity.run_id;fs.writeFileSync(process.argv[2],`SELECT run_id,state,progress_percent,state_revision,error_code,next_action,updated_at FROM publication_runs WHERE run_id=\x27${run}\x27;`)' "$RUNNER_TEMP/canary.json" "$RUNNER_TEMP/canary-state.sql"
+          for attempt in $(seq 1 60); do
+            timeout 60s npx --prefix infra/worker wrangler d1 execute DB --remote --json --file "$RUNNER_TEMP/canary-state.sql" --config "$RUNNER_TEMP/safe-config/main.wrangler.toml" > "$RUNNER_TEMP/canary-state.json"
+            STATE="$(node -e 'const rows=require(process.argv[1]);const row=rows?.[0]?.results?.[0];if(!row)process.exit(2);process.stdout.write(String(row.state))' "$RUNNER_TEMP/canary-state.json")"
+            PROGRESS="$(node -e 'const rows=require(process.argv[1]);process.stdout.write(String(rows?.[0]?.results?.[0]?.progress_percent??""))' "$RUNNER_TEMP/canary-state.json")"
+            echo "Canary state $STATE at $PROGRESS% (poll $attempt/60)"
+            if [ "$STATE" = "visual_ready" ] || [ "$STATE" = "needs_action" ] || [ "$STATE" = "failed" ] || [ "$STATE" = "cancelled" ]; then
+              cp "$RUNNER_TEMP/canary-state.json" "$RUNNER_TEMP/canary-terminal.json"
+              break
+            fi
+            sleep 10
+          done
+          test -f "$RUNNER_TEMP/canary-terminal.json" || { echo "::error::canary did not reach a terminal visual state"; exit 1; }
+
+      - name: Close the main user and visual gates
+        if: always()
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          for attempt in 1 2 3; do
+            if timeout 180s npx --prefix infra/worker wrangler deploy --config "$RUNNER_TEMP/safe-config/main.wrangler.toml" --message "close staging HTTP image canary ${GITHUB_RUN_ID}" --var "DEPLOY_COMMIT:${GITHUB_SHA}" --var "DEPLOY_REF:${GITHUB_REF_NAME}" --var "DEPLOYED_AT:$(date -u +%Y-%m-%dT%H:%M:%SZ)"; then
+              touch "$RUNNER_TEMP/main-cleanup-deployed"
+              exit 0
+            fi
+            sleep $((attempt * 5))
+          done
+          exit 1
+
+      - name: Remove the HTTP provider configuration
+        if: always()
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          for attempt in 1 2 3; do
+            if timeout 180s npx --prefix infra/image-generation-adapter wrangler deploy --config "$RUNNER_TEMP/safe-config/image.wrangler.toml" --message "close staging HTTP image canary ${GITHUB_RUN_ID}" --var "DEPLOY_COMMIT:${GITHUB_SHA}" --var "DEPLOY_REF:${GITHUB_REF_NAME}" --var "DEPLOYED_AT:$(date -u +%Y-%m-%dT%H:%M:%SZ)"; then
+              touch "$RUNNER_TEMP/image-cleanup-deployed"
+              exit 0
+            fi
+            sleep $((attempt * 5))
+          done
+          exit 1
+
+      - name: Prove the marker is held after the flag-off restore
+        if: always()
+        env:
+          MINING_V3_HANDOFF_TOKEN: ${{ secrets.MINING_V3_HANDOFF_TOKEN }}
+        run: |
+          test -f "$RUNNER_TEMP/canary.json" || { echo "::error::canary never produced cleanup probe identity"; exit 1; }
+          node infra/staging/staging-http-image-canary-request.mjs probe \
+            --base-url "$STAGING_BASE_URL" \
+            --canary "$RUNNER_TEMP/canary.json" \
+            --out "$RUNNER_TEMP/cleanup-probe.json"
+
+      - name: Capture non-secret D1 evidence after cleanup
+        if: always()
+        continue-on-error: true
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          if [ -f "$RUNNER_TEMP/canary.json" ]; then
+            node -e 'const fs=require("fs");const run=require(process.argv[1]).identity.run_id;fs.writeFileSync(process.argv[2],`SELECT revision,event_type,state,payload_hash,error_code,next_action,created_at FROM publication_run_events WHERE run_id=\x27${run}\x27 ORDER BY revision;`);fs.writeFileSync(process.argv[3],`SELECT artifact_id,kind,payload_hash,storage_ref,created_at FROM editorial_artifacts WHERE run_id=\x27${run}\x27 ORDER BY created_at,artifact_id;`)' "$RUNNER_TEMP/canary.json" "$RUNNER_TEMP/canary-events.sql" "$RUNNER_TEMP/canary-artifacts.sql"
+            timeout 60s npx --prefix infra/worker wrangler d1 execute DB --remote --json --file "$RUNNER_TEMP/canary-events.sql" --config "$RUNNER_TEMP/safe-config/main.wrangler.toml" > "$RUNNER_TEMP/canary-events.json"
+            timeout 60s npx --prefix infra/worker wrangler d1 execute DB --remote --json --file "$RUNNER_TEMP/canary-artifacts.sql" --config "$RUNNER_TEMP/safe-config/main.wrangler.toml" > "$RUNNER_TEMP/canary-artifacts.json"
+          fi
+
+      - name: Upload redacted canary evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: staging-http-image-canary-${{ github.run_id }}
+          if-no-files-found: warn
+          retention-days: 7
+          path: |
+            ${{ runner.temp }}/canary.json
+            ${{ runner.temp }}/start-response.json
+            ${{ runner.temp }}/canary-terminal.json
+            ${{ runner.temp }}/canary-events.json
+            ${{ runner.temp }}/canary-artifacts.json
+            ${{ runner.temp }}/cleanup-probe.json
+            ${{ runner.temp }}/main-cleanup-deployed
+            ${{ runner.temp }}/image-cleanup-deployed
+
+      - name: Require a successful visual-only terminal result
+        if: always()
+        run: |
+          test -f "$RUNNER_TEMP/main-cleanup-deployed" || { echo "::error::main staging gates were not restored"; exit 1; }
+          test -f "$RUNNER_TEMP/image-cleanup-deployed" || { echo "::error::HTTP image provider configuration was not removed"; exit 1; }
+          test -f "$RUNNER_TEMP/canary-terminal.json" || { echo "::error::missing terminal canary evidence"; exit 1; }
+          test -f "$RUNNER_TEMP/canary-artifacts.json" || { echo "::error::missing canary artifact evidence"; exit 1; }
+          node -e 'const row=require(process.argv[1])?.[0]?.results?.[0];if(row?.state!=="visual_ready"||row?.progress_percent!==80||row?.error_code!==null||row?.next_action!==null)throw new Error(`canary stopped at ${row?.state||"unknown"}`)' "$RUNNER_TEMP/canary-terminal.json"
+          node -e 'const rows=require(process.argv[1])?.[0]?.results||[];const visual=rows.filter(row=>row.kind==="visual_asset");if(visual.length!==Number(process.env.MAX_OPERATIONS)||new Set(visual.map(row=>row.artifact_id)).size!==visual.length)throw new Error(`expected ${process.env.MAX_OPERATIONS} fresh visual provider claims, found ${visual.length}`)' "$RUNNER_TEMP/canary-artifacts.json"

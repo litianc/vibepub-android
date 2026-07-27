@@ -142,6 +142,12 @@ export type EditorialRuntimeEnv = Cloudflare.Env & {
   EDITORIAL_COORDINATOR: DurableObjectNamespace<EditorialCoordinatorAgent>;
   FIVE_AGENT_PUBLISHING_V3?: string;
   FIVE_AGENT_PUBLISHING_V3_ALLOWLIST?: string;
+  DEPLOY_ENVIRONMENT?: string;
+  STAGING_HTTP_IMAGE_CANARY_MODE?: string;
+  STAGING_HTTP_IMAGE_CANARY_RUN_ID?: string;
+  STAGING_HTTP_IMAGE_CANARY_USER_ID?: string;
+  STAGING_HTTP_IMAGE_CANARY_WORKSPACE_ID?: string;
+  STAGING_HTTP_IMAGE_CANARY_EXPIRES_AT?: string;
   MINING_V3_HANDOFF_TOKEN?: string;
   EDITORIAL_WORKFLOW: Workflow<EditorialWorkflowParams>;
   FIVE_AGENT_PUBLISHING_WORKFLOW?: Workflow<FiveAgentRunInput>;

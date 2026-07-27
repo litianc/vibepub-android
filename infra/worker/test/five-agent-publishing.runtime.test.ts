@@ -8,6 +8,7 @@ import {
   normalizeFiveAgentStartBody,
   persistWechatArtifactForVerification,
   reconcilePreStartHold,
+  visualProductionFeatureEnabled,
 } from "../src/fiveAgentPublishing";
 import projectionMigration from "../migrations/0011_five_agent_publication_projection.sql?raw";
 import {
@@ -22,12 +23,13 @@ import {
   deriveArtifactId,
   WAVE2_SCHEMA_VERSION,
 } from "../src/wave2/artifactContracts";
-import { applySystemPublicationTransition, projectPublicationTransition, type PublicationRunRow } from "../src/publicationProjection";
+import { applySystemPublicationTransition, projectPublicationTransition, publicationFeatureEnabled, type PublicationRunRow } from "../src/publicationProjection";
 import { coordinatorShardName, EditorialRuntimeError } from "../src/editorialAgents";
 import { wechatDraftFeatureEnabled } from "../src/wave2/wechatServiceClients";
 import { makeWechatArtifact } from "../src/wave2/wechatContracts";
 
 const runtimeEnv = env as any;
+const originalImageGenerationAdapter = runtimeEnv.IMAGE_GENERATION_ADAPTER;
 let nextWechatFixtureRecordingId = 90_000;
 
 async function applySqlScript(script: string): Promise<void> {
@@ -598,13 +600,17 @@ async function executeSyntheticScenario(
       },
     }), { status: 200, headers: { "content-type": "application/json" } });
   });
-  const visualAdapter = runtimeEnv.IMAGE_GENERATION_ADAPTER;
+  const visualAdapter = originalImageGenerationAdapter;
   const countedVisualAdapter = visualAdapter ? { fetch: async (request: Request) => {
     visualCalls += 1;
     let body: Record<string, unknown> | null = null;
     try {
       body = await request.clone().json() as Record<string, unknown>;
       const responseKey = `${String(body.operation_id)}:${String(body.attempt)}`;
+      if (request.url.endsWith("/internal/v3/visual/image") &&
+          (body.run_id !== runId || body.user_id !== userId || body.workspace_id !== workspaceId)) {
+        return Response.json({ error: { code: "run_scope_invalid", retryable: false } }, { status: 400 });
+      }
       if (body.reconcile_only === true) {
         visualReconcileCalls += 1;
         const stored = visualDurableResponses.get(responseKey);
@@ -613,7 +619,9 @@ async function executeSyntheticScenario(
       }
       else {
         visualExecuteCalls += 1;
-        if (request.url.endsWith("/internal/v3/visual/image")) visualProviderOperations += 1;
+        if (request.url.endsWith("/internal/v3/visual/image")) {
+          visualProviderOperations += 1;
+        }
       }
     } catch { /* service boundary owns response validation */ }
     if (body && body.reconcile_only !== true && options.visualBindingFetchThrow && !visualBindingThrowInjected &&
@@ -1622,6 +1630,32 @@ async function metadataFor(
 }
 
 describe("Wave2B publishing runtime boundary", () => {
+  it("auto-expires one exact staging canary scope across publication and visual gates", () => {
+    const runId = `run_v3_${"a".repeat(64)}`;
+    const userId = "staging_canary_user";
+    const workspaceId = "staging_canary_workspace";
+    const canary = {
+      FIVE_AGENT_PUBLISHING_V3: "true",
+      FIVE_AGENT_PUBLISHING_V3_ALLOWLIST: `${userId}:${workspaceId}`,
+      VISUAL_PRODUCTION_V3: "true",
+      VISUAL_PRODUCTION_V3_ALLOWLIST: `${userId}:${workspaceId}`,
+      DEPLOY_ENVIRONMENT: "staging",
+      STAGING_HTTP_IMAGE_CANARY_MODE: "staging_single_run",
+      STAGING_HTTP_IMAGE_CANARY_RUN_ID: runId,
+      STAGING_HTTP_IMAGE_CANARY_USER_ID: userId,
+      STAGING_HTTP_IMAGE_CANARY_WORKSPACE_ID: workspaceId,
+      STAGING_HTTP_IMAGE_CANARY_EXPIRES_AT: new Date(Date.now() + 60_000).toISOString(),
+    } as any;
+    expect(publicationFeatureEnabled(canary, userId, workspaceId)).toBe(true);
+    expect(publicationFeatureEnabled(canary, userId, workspaceId, runId)).toBe(true);
+    expect(visualProductionFeatureEnabled(canary, userId, workspaceId, runId)).toBe(true);
+    expect(publicationFeatureEnabled(canary, userId, workspaceId, `run_v3_${"b".repeat(64)}`)).toBe(false);
+    expect(visualProductionFeatureEnabled(canary, userId, workspaceId, `run_v3_${"b".repeat(64)}`)).toBe(false);
+    expect(publicationFeatureEnabled({ ...canary, DEPLOY_ENVIRONMENT: "production" }, userId, workspaceId, runId)).toBe(false);
+    expect(publicationFeatureEnabled({ ...canary, STAGING_HTTP_IMAGE_CANARY_EXPIRES_AT: new Date(Date.now() - 1).toISOString() }, userId, workspaceId, runId)).toBe(false);
+    expect(visualProductionFeatureEnabled({ ...canary, STAGING_HTTP_IMAGE_CANARY_EXPIRES_AT: new Date(Date.now() + 60 * 60 * 1000 + 1).toISOString() }, userId, workspaceId, runId)).toBe(false);
+  });
+
   it("rejects extra nested dynamic pin keys", () => {
     const valid = {
       ...PUBLICATION_SKILL_PINS,
