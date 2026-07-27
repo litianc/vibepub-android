@@ -24,7 +24,8 @@ import {
 import {
   createPublicationRun,
   publicationFeatureEnabled,
-  stagingHttpImageCanaryScopeEnabled,
+  publicationTenantFeatureEnabled,
+  stagingImageCanaryScopeEnabled,
   applySystemPublicationTransition,
   type PublicationState,
   type PublicationRunRow,
@@ -145,7 +146,7 @@ export function visualProductionFeatureEnabled(env: EditorialRuntimeEnv, userId:
   if (env.VISUAL_PRODUCTION_V3 !== "true") return false;
   const target = `${userId}:${workspaceId}`;
   return (env.VISUAL_PRODUCTION_V3_ALLOWLIST || "").split(",").map(value => value.trim()).filter(Boolean).includes(target) &&
-    stagingHttpImageCanaryScopeEnabled(env, userId, workspaceId, runId);
+    stagingImageCanaryScopeEnabled(env, userId, workspaceId, runId);
 }
 
 function errorResponse(error: unknown): Response {
@@ -5985,11 +5986,12 @@ export async function handleFiveAgentPublishingInternalRoute(
     userId = id(request.headers.get("x-vibepub-user-id") || "", "x-vibepub-user-id");
     workspaceId = id(request.headers.get("x-vibepub-workspace-id") || "", "x-vibepub-workspace-id");
   } catch (error) { return errorResponse(error); }
-  if (!publicationFeatureEnabled(env, userId, workspaceId)) return Response.json({ error: "editorial_workflow_disabled" }, { status: 404 });
-
   const parts = url.pathname.split("/").filter(Boolean);
   try {
     if (request.method === "POST" && parts.length === 5 && parts[4] === "runs") {
+      if (!publicationTenantFeatureEnabled(env, userId, workspaceId)) {
+        return Response.json({ error: "editorial_workflow_disabled" }, { status: 404 });
+      }
       const body = normalizeFiveAgentStartBody(await parseRequestJson(request));
       if (!publicationFeatureEnabled(env, userId, workspaceId, body.run_id)) {
         return Response.json({ error: "editorial_workflow_disabled" }, { status: 404 });
@@ -6122,7 +6124,13 @@ export async function handleFiveAgentPublishingInternalRoute(
       return startResultResponse(result, current, briefMetadata, result.replayed ? 200 : 202);
     }
     if (request.method === "GET" && parts.length === 6 && parts[4] === "runs") {
+      if (!publicationTenantFeatureEnabled(env, userId, workspaceId)) {
+        return Response.json({ error: "editorial_workflow_disabled" }, { status: 404 });
+      }
       const runId = id(parts[5], "run_id");
+      if (!publicationFeatureEnabled(env, userId, workspaceId, runId)) {
+        return Response.json({ error: "editorial_workflow_disabled" }, { status: 404 });
+      }
       const articleId = id(url.searchParams.get("article_id") || "", "article_id");
       const coordinator = env.EDITORIAL_COORDINATOR.getByName(await coordinatorShardName(userId, workspaceId, articleId, runId));
       const current = await coordinator.getFiveAgentRun(runId, userId, workspaceId) as Record<string, unknown>;

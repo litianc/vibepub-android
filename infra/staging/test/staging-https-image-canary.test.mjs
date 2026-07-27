@@ -7,16 +7,16 @@ import {
   buildCanaryGrant,
   deriveCanaryIdentity,
   renderCanaryConfigs,
-  StagingHttpCanaryError,
+  StagingHttpsCanaryError,
   validateCanaryGrant,
   verifyCanaryConfigs,
   writeCanaryConfigs,
-} from "../staging-http-image-canary.mjs";
+} from "../staging-https-image-canary.mjs";
 import {
   probeClosedCanary,
   startCanaryHandoff,
-  StagingHttpCanaryRequestError,
-} from "../staging-http-image-canary-request.mjs";
+  StagingHttpsCanaryRequestError,
+} from "../staging-https-image-canary-request.mjs";
 import {
   queryStagingD1,
   StagingD1QueryError,
@@ -24,7 +24,7 @@ import {
 } from "../query-staging-d1.mjs";
 
 const fixture = JSON.parse(await readFile(new URL("../fixtures/staging-resource-manifest.synthetic.json", import.meta.url), "utf8"));
-const workflow = await readFile(new URL("../../../.github/workflows/wave2e-http-image-canary.yml", import.meta.url), "utf8");
+const workflow = await readFile(new URL("../../../.github/workflows/wave2e-https-image-canary.yml", import.meta.url), "utf8");
 
 function sourceFixture() {
   const filename = "VibePub-2026-07-28-Text-canary.txt";
@@ -73,7 +73,7 @@ function identityFixture() {
 }
 
 function errorCode(callback) {
-  assert.throws(callback, error => error instanceof StagingHttpCanaryError);
+  assert.throws(callback, error => error instanceof StagingHttpsCanaryError);
   try { callback(); } catch (error) { return error.code; }
   throw new Error("expected canary error");
 }
@@ -106,41 +106,46 @@ test("rejects source hash, owner, profile, and recording drift before rendering"
 test("renders only the exact scoped main and image canary while WeChat stays off", () => {
   const now = new Date();
   const identity = identityFixture();
-  const grant = buildCanaryGrant(identity, { now, grantSeed: "unit-test", maxOperations: 3 });
-  const configs = renderCanaryConfigs(fixture, grant, "dry-run", "/tmp/vibepub-http-canary-test");
+  const grant = buildCanaryGrant(identity, { now, canarySeed: "unit-test", maxOperations: 3 });
+  const configs = renderCanaryConfigs(fixture, grant, "dry-run", "/tmp/vibepub-https-canary-test");
   assert.match(configs["main.wrangler.toml"], /FIVE_AGENT_PUBLISHING_V3 = "true"/);
   assert.match(configs["main.wrangler.toml"], /FIVE_AGENT_PUBLISHING_V3_ALLOWLIST = "canary_user:canary_workspace"/);
   assert.match(configs["main.wrangler.toml"], /VISUAL_PRODUCTION_V3 = "true"/);
-  assert.match(configs["main.wrangler.toml"], new RegExp(`STAGING_HTTP_IMAGE_CANARY_RUN_ID = "${identity.run_id}"`));
-  assert.match(configs["main.wrangler.toml"], /STAGING_HTTP_IMAGE_CANARY_EXPIRES_AT = "/);
+  assert.match(configs["main.wrangler.toml"], new RegExp(`STAGING_IMAGE_CANARY_RUN_ID = "${identity.run_id}"`));
+  assert.match(configs["main.wrangler.toml"], /STAGING_IMAGE_CANARY_SOURCE_KEY = "users\/canary_user\/text-submissions\//);
+  assert.match(configs["main.wrangler.toml"], /STAGING_IMAGE_CANARY_EXPIRES_AT = "/);
   assert.match(configs["main.wrangler.toml"], /WECHAT_DRAFT_SYNC_V3 = "false"/);
-  assert.match(configs["image.wrangler.toml"], /IMAGE_PROVIDER_URL = "http:\/\/23\.105\.194\.173:8881\/v1\/images\/generations"/);
-  assert.match(configs["image.wrangler.toml"], new RegExp(`IMAGE_PROVIDER_INSECURE_HTTP_RUN_ID = "${identity.run_id}"`));
-  assert.match(configs["image.wrangler.toml"], /IMAGE_PROVIDER_INSECURE_HTTP_MAX_OPERATIONS = "3"/);
+  assert.match(configs["image.wrangler.toml"], /IMAGE_PROVIDER_URL = "https:\/\/api\.clawparty\.cn\/v1\/images\/generations"/);
+  assert.match(configs["image.wrangler.toml"], /IMAGE_PROVIDER_HOST = "api\.clawparty\.cn"/);
+  assert.match(configs["image.wrangler.toml"], new RegExp(`IMAGE_PROVIDER_CANARY_RUN_ID = "${identity.run_id}"`));
+  assert.match(configs["image.wrangler.toml"], /IMAGE_PROVIDER_CANARY_MAX_OPERATIONS = "3"/);
+  assert.match(configs["image.wrangler.toml"], /IMAGE_PROVIDER_CANARY_EXPIRES_AT = "/);
+  assert.doesNotMatch(configs["image.wrangler.toml"], /INSECURE_HTTP|23\.105\.194\.173|http:\/\//);
   assert.doesNotMatch(JSON.stringify(configs), /sk-[a-z0-9]/i);
 });
 
 test("rejects expired, overlong, wrong-provider, and over-budget grants", () => {
   const now = new Date();
   const identity = identityFixture();
-  const valid = buildCanaryGrant(identity, { now, grantSeed: "unit-test" });
+  const valid = buildCanaryGrant(identity, { now, canarySeed: "unit-test" });
   const expired = { ...valid, expires_at: new Date(now.getTime() - 1).toISOString() };
   assert.equal(errorCode(() => validateCanaryGrant(expired, now)), "canary_expiry_invalid");
   const overlong = { ...valid, expires_at: new Date(now.getTime() + 60 * 60 * 1000 + 1).toISOString() };
   assert.equal(errorCode(() => validateCanaryGrant(overlong, now)), "canary_expiry_invalid");
-  const provider = { ...valid, provider: { ...valid.provider, url: "http://23.105.194.173:8880/v1/images/generations" } };
+  const provider = { ...valid, provider: { ...valid.provider, url: "https://api.clawparty.cn:8443/v1/images/generations" } };
   assert.equal(errorCode(() => validateCanaryGrant(provider, now)), "canary_provider_invalid");
-  const budget = { ...valid, max_requests: 10 };
+  const budget = { ...valid, max_operations: 4 };
   assert.equal(errorCode(() => validateCanaryGrant(budget, now)), "canary_budget_invalid");
+  assert.equal(errorCode(() => buildCanaryGrant(identity, { now, canarySeed: "unit-test", maxOperations: 6 })), "canary_budget_invalid");
 });
 
 test("writes and verifies canary configs and detects any post-render drift", async () => {
-  const output = await mkdtemp(resolve(tmpdir(), "vibepub-http-canary-"));
-  const grant = buildCanaryGrant(identityFixture(), { grantSeed: "write-test" });
+  const output = await mkdtemp(resolve(tmpdir(), "vibepub-https-canary-"));
+  const grant = buildCanaryGrant(identityFixture(), { canarySeed: "write-test" });
   await writeCanaryConfigs(fixture, grant, output, "dry-run");
   await verifyCanaryConfigs(fixture, grant, output, "dry-run");
   await writeFile(resolve(output, "image.wrangler.toml"), "tampered\n", "utf8");
-  await assert.rejects(() => verifyCanaryConfigs(fixture, grant, output, "dry-run"), error => error instanceof StagingHttpCanaryError && error.code === "canary_render_conflict");
+  await assert.rejects(() => verifyCanaryConfigs(fixture, grant, output, "dry-run"), error => error instanceof StagingHttpsCanaryError && error.code === "canary_render_conflict");
 });
 
 test("protected canary workflow always restores main before image and proves flag-off", () => {
@@ -155,13 +160,15 @@ test("protected canary workflow always restores main before image and proves fla
   assert.equal(workflow.match(/query-staging-d1\.mjs/g)?.length, 5);
   assert.doesNotMatch(workflow, /wrangler d1 execute/);
   assert.match(workflow, /canary run already exists/);
-  assert.match(workflow, /started\.status !== 202|staging-http-image-canary-request\.mjs start/);
+  assert.match(workflow, /started\.status !== 202|staging-https-image-canary-request\.mjs start/);
   assert.match(workflow, /Close the main user and visual gates\n\s+if: always\(\)/);
-  assert.match(workflow, /Remove the HTTP provider configuration\n\s+if: always\(\)/);
-  assert.ok(workflow.indexOf("Close the main user and visual gates") < workflow.indexOf("Remove the HTTP provider configuration"));
-  assert.ok(workflow.indexOf("Remove the HTTP provider configuration") < workflow.indexOf("Capture non-secret D1 evidence after cleanup"));
+  assert.match(workflow, /Remove the canary provider configuration\n\s+if: always\(\)/);
+  assert.ok(workflow.indexOf("Close the main user and visual gates") < workflow.indexOf("Remove the canary provider configuration"));
+  assert.ok(workflow.indexOf("Remove the canary provider configuration") < workflow.indexOf("Capture non-secret D1 evidence after cleanup"));
   assert.match(workflow, /Prove the marker is held after the flag-off restore/);
   assert.doesNotMatch(workflow, /WECHAT_DRAFT_SYNC_V3:true/);
+  assert.doesNotMatch(workflow, /plaintext|INSECURE_HTTP|23\.105\.194\.173/);
+  assert.doesNotMatch(workflow, /options:\s*\["3",\s*"6"\]|inputs\.max_operations/);
   assert.doesNotMatch(workflow, /\bcurl\b/);
   assert.doesNotMatch(workflow, /Authorization: Bearer/);
 });
@@ -251,7 +258,7 @@ test("rejects mutations, comments, multiple statements, and non-deploy manifests
 
 test("uses an environment-only token and accepts only a fresh handoff start", async () => {
   const identity = identityFixture();
-  const canary = { identity, grant: buildCanaryGrant(identity, { grantSeed: "request-test" }) };
+  const canary = { identity, grant: buildCanaryGrant(identity, { canarySeed: "request-test" }) };
   const calls = [];
   const responses = [
     new Response(JSON.stringify({ decision: "v3", handoff_id: identity.handoff_id }), { status: 200 }),
@@ -282,7 +289,7 @@ test("uses an environment-only token and accepts only a fresh handoff start", as
         ? { decision: "accepted", run_id: identity.run_id, replayed: true }
         : { decision: "v3", handoff_id: identity.handoff_id },
     ), { status: JSON.parse(init.body).handoff_id ? 200 : 200 }),
-  }), error => error instanceof StagingHttpCanaryRequestError && error.code === "canary_start_replayed_or_invalid");
+  }), error => error instanceof StagingHttpsCanaryRequestError && error.code === "canary_start_replayed_or_invalid");
 
   let mismatchedOriginCalls = 0;
   await assert.rejects(() => startCanaryHandoff({
@@ -294,13 +301,13 @@ test("uses an environment-only token and accepts only a fresh handoff start", as
       mismatchedOriginCalls += 1;
       return new Response("{}", { status: 200 });
     },
-  }), error => error instanceof StagingHttpCanaryRequestError && error.code === "canary_base_url_invalid");
+  }), error => error instanceof StagingHttpsCanaryRequestError && error.code === "canary_base_url_invalid");
   assert.equal(mismatchedOriginCalls, 0);
 });
 
 test("proves the exact marker is held after cleanup", async () => {
   const identity = identityFixture();
-  const canary = { identity, grant: buildCanaryGrant(identity, { grantSeed: "probe-test" }) };
+  const canary = { identity, grant: buildCanaryGrant(identity, { canarySeed: "probe-test" }) };
   const result = await probeClosedCanary({
     baseUrl: "https://vibepub-api-staging.example.workers.dev",
     attestedBaseUrl: "https://vibepub-api-staging.example.workers.dev",

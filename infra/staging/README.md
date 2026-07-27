@@ -59,10 +59,16 @@ probes (`invalid_claim_target` and a nonexistent handoff source). It never
 starts Mining, creates a marker, or calls ASR. Actual Mining launch remains
 separately authorized.
 
-The currently supplied image gateway is HTTP and therefore cannot satisfy the
-Image adapter's HTTPS/443 provider contract. Full visual staging canary remains
-externally blocked until a TLS front is available and the corresponding provider
-key is rotated.
+The protected image canary pins the provider to
+`https://api.clawparty.cn/v1/images/generations` on HTTPS/443. It enables only
+one exact staging source, user, workspace, and deterministic run for up to one
+hour, keeps WeChat off, and caps the Image adapter at three distinct operations
+and nine total attempts through a Durable Object ledger. It always restores the
+flag-off main and empty-provider Image configurations; if the runner is
+terminated before cleanup, both main and Image gates reject new work after the
+same expiry. The retired HTTP exception is rejected even if its old variables
+are injected. Production still requires separate approval and provider-key
+rotation.
 
 Neither synthetic rendering nor any Wrangler dry-run creates, changes, or
 deploys a Cloudflare resource.

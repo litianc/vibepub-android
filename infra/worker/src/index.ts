@@ -21,6 +21,7 @@ import {
   getPublicationRunForRecording,
   enrichRecordingList,
   publicationFeatureEnabled,
+  publicationTenantFeatureEnabled,
   PublicationProjectionError,
   recordPublicationActionIntent,
 } from "./publicationProjection";
@@ -76,11 +77,12 @@ export interface Env {
   FIVE_AGENT_PUBLISHING_V3?: string;
   FIVE_AGENT_PUBLISHING_V3_ALLOWLIST?: string;
   DEPLOY_ENVIRONMENT?: string;
-  STAGING_HTTP_IMAGE_CANARY_MODE?: string;
-  STAGING_HTTP_IMAGE_CANARY_RUN_ID?: string;
-  STAGING_HTTP_IMAGE_CANARY_USER_ID?: string;
-  STAGING_HTTP_IMAGE_CANARY_WORKSPACE_ID?: string;
-  STAGING_HTTP_IMAGE_CANARY_EXPIRES_AT?: string;
+  STAGING_IMAGE_CANARY_MODE?: string;
+  STAGING_IMAGE_CANARY_RUN_ID?: string;
+  STAGING_IMAGE_CANARY_USER_ID?: string;
+  STAGING_IMAGE_CANARY_WORKSPACE_ID?: string;
+  STAGING_IMAGE_CANARY_SOURCE_KEY?: string;
+  STAGING_IMAGE_CANARY_EXPIRES_AT?: string;
   FIVE_AGENT_PUBLISHING_TOKEN?: string;
   VISUAL_PRODUCTION_V3?: string;
   VISUAL_PRODUCTION_V3_ALLOWLIST?: string;
@@ -330,19 +332,23 @@ export default {
 
     const recordingPublicationMatch = url.pathname.match(/^\/api\/recordings\/(\d+)\/publication-run$/);
     if (request.method === "GET" && recordingPublicationMatch) {
-      if (!publicationFeatureEnabled(env, auth.userId, auth.workspaceId)) {
+      if (!publicationTenantFeatureEnabled(env, auth.userId, auth.workspaceId)) {
         return json({ error: "publication_workflow_disabled" }, 404);
       }
-      return publicationRoute(async () => getPublicationRunForRecording(
-        env.DB,
-        auth,
-        Number(recordingPublicationMatch[1]),
-      ));
+      return publicationRoute(async () => {
+        const result = await getPublicationRunForRecording(env.DB, auth, Number(recordingPublicationMatch[1]));
+        const runId = String((result.run as Record<string, unknown> | undefined)?.run_id || "");
+        if (!publicationFeatureEnabled(env, auth.userId, auth.workspaceId, runId)) {
+          throw new PublicationProjectionError("publication_workflow_disabled", "publication workflow disabled", 404);
+        }
+        return result;
+      });
     }
 
     const publicationEventsMatch = url.pathname.match(/^\/api\/publication-runs\/([^/]+)\/events$/);
     if (request.method === "GET" && publicationEventsMatch) {
-      if (!publicationFeatureEnabled(env, auth.userId, auth.workspaceId)) {
+      const runId = safeDecodeURIComponent(publicationEventsMatch[1]);
+      if (!publicationFeatureEnabled(env, auth.userId, auth.workspaceId, runId)) {
         return json({ error: "publication_workflow_disabled" }, 404);
       }
       const afterRevisionParam = url.searchParams.get("after_revision");
@@ -351,7 +357,7 @@ export default {
       return publicationRoute(() => getPublicationRunEvents(
         env.DB,
         auth,
-        safeDecodeURIComponent(publicationEventsMatch[1]),
+        runId,
         afterRevision,
         limit,
       ));
@@ -361,7 +367,8 @@ export default {
     if (request.method === "POST" && publicationActionMatch) {
       const verified = requireVerifiedEmail(auth);
       if (verified) return verified;
-      if (!publicationFeatureEnabled(env, auth.userId, auth.workspaceId)) {
+      const runId = safeDecodeURIComponent(publicationActionMatch[1]);
+      if (!publicationFeatureEnabled(env, auth.userId, auth.workspaceId, runId)) {
         return json({ error: "publication_workflow_disabled" }, 404);
       }
       const body = await parseJson(request);
@@ -386,7 +393,7 @@ export default {
         ? recordPublicationActionIntent(
           env.DB,
           auth,
-          safeDecodeURIComponent(publicationActionMatch[1]),
+          runId,
           action as "confirm" | "abandon" | "resume",
           idempotencyKey,
           payloadHash,
@@ -395,7 +402,7 @@ export default {
         : assertPublicationAction(
           env.DB,
           auth,
-          safeDecodeURIComponent(publicationActionMatch[1]),
+          runId,
           action,
           idempotencyKey,
           payloadHash,
