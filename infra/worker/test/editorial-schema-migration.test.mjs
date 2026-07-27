@@ -7,6 +7,7 @@ import { test } from "node:test";
 const schema = await readFile(resolve("schema.sql"), "utf8");
 const migration = await readFile(resolve("migrations/0010_editorial_visual_pipeline.sql"), "utf8");
 const legacy = await readFile(resolve("test/fixtures/editorial/legacy-recordings-schema.sql"), "utf8");
+const workerIndex = await readFile(resolve("src/index.ts"), "utf8");
 
 test("canonical schema plus migration is fresh-safe and re-applicable", () => {
   const output = runSql(`${schema}\n${migration}\n${migration}\nSELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('editorial_recording_scopes', 'editorial_version_states', 'editorial_runs', 'editorial_artifacts') ORDER BY name;`);
@@ -53,9 +54,8 @@ test("text submission scope backfill supports canonical fresh and legacy existin
 
 test("old schema without workspace_id remains upload-compatible by contract", () => {
   assert.match(migration, /workspace_id TEXT NOT NULL DEFAULT 'vibepub-dogfood'/);
-  const indexSource = execFileSync("rg", ["-n", "insertUploadedRecording|workspace_id", "src/index.ts"], { encoding: "utf8" });
-  assert.match(indexSource, /insertUploadedRecording/);
-  assert.match(indexSource, /INSERT OR IGNORE INTO editorial_recording_scopes/);
+  assert.match(workerIndex, /insertUploadedRecording/);
+  assert.match(workerIndex, /INSERT OR IGNORE INTO editorial_recording_scopes/);
 });
 
 test("SQLite composite ownership and append-only triggers reject cross-scope and snapshot mutation", () => {
