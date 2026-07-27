@@ -56,8 +56,6 @@ jobs:
   validate:
     name: Synthetic staging validation only
     runs-on: ubuntu-latest
-    env:
-      STAGING_OUT_DIR: ${{ runner.temp }}/vibepub-staging-config
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -71,6 +69,8 @@ jobs:
       - name: Validate renderer, release gate, and workflow contracts
         run: node --test infra/staging/test/*.test.mjs
       - name: Render synthetic staging configs
+        env:
+          STAGING_OUT_DIR: ${{ runner.temp }}/vibepub-staging-config
         run: |
           node infra/staging/render-staging-config.mjs \
             --manifest infra/staging/fixtures/staging-resource-manifest.synthetic.json \
@@ -96,6 +96,8 @@ jobs:
           npm test --prefix infra/wechat-publishing-adapter
           npm run typecheck --prefix infra/wechat-publishing-adapter
       - name: Dry-run all rendered staging targets without network resources
+        env:
+          STAGING_OUT_DIR: ${{ runner.temp }}/vibepub-staging-config
         run: |
           npx --prefix infra/worker wrangler deploy --dry-run --config "$STAGING_OUT_DIR/main.wrangler.toml"
           npx --prefix infra/writing-agent wrangler deploy --dry-run --config "$STAGING_OUT_DIR/writing.wrangler.toml"
