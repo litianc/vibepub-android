@@ -13,6 +13,7 @@
 
 | 时间 | 功能更新 |
 | --- | --- |
+| 2026-07-27 21:10 CST | Wave 2E staging 验证为串行多场景恢复测试设置明确的 20 秒上限，避免 GitHub runner 负载造成超时与后续断言污染。 |
 | 2026-07-27 15:18 CST | Wave 2E 图像 Agent 锁文件补全 Linux 原生绑定，使 staging 发布验证可在 GitHub runner 上启动图像测试。 |
 | 2026-07-27 14:05 CST | Wave 2E 验证锁定 Wrangler 与 Cloudflare 测试池版本、使用 CI 同版 npm 同步依赖锁、移除本机 ripgrep 依赖并限定 staging 临时目录作用域，使发布候选可在 GitHub runner 上一致执行。 |
 | 2026-07-22 22:57 CST | Wave 2E 增加受保护 D1 与独立 staging origin 证据、固定 manifest 摘要、串行 100% 版本部署、收敛重试与无写入双令牌 readiness 门禁。 |
