@@ -13,6 +13,7 @@
 
 | 时间 | 功能更新 |
 | --- | --- |
+| 2026-07-28 01:56 CST | Wave 2E staging HTTP canary 改用固定 Cloudflare D1 只读查询边界返回真实行数据，使输入绑定、状态轮询与清理取证不再受 Wrangler 文件执行摘要影响。 |
 | 2026-07-28 01:29 CST | Wave 2E 增加仅限指定 staging 发布运行和固定 HTTP 端点、主流程与图像调用一小时内自动失效且先回滚后取证的明文传输例外，生产 HTTPS 默认策略保持不变。 |
 | 2026-07-27 21:30 CST | Wave 2E staging 门禁兼容旧版 recordings 表并将发布传播期的短暂 404 纳入有限重试，使 Mining V3 无写入探针可验证真实 D1 契约。 |
 | 2026-07-27 21:10 CST | Wave 2E staging 验证为串行多场景恢复测试设置明确的 20 秒上限，避免 GitHub runner 负载造成超时与后续断言污染。 |

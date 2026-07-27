@@ -147,7 +147,7 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
           node -e 'const fs=require("fs");const q=`SELECT r.id,r.user_id,s.workspace_id,r.filename,r.r2_key,r.source_type,r.article_title,r.style_profile_id,r.style_profile_version,r.layout_profile_id,r.layout_profile_version FROM recordings r JOIN editorial_recording_scopes s ON s.recording_id=r.id AND s.user_id=r.user_id WHERE r.r2_key=\x27${process.env.SOURCE_KEY}\x27 AND r.user_id=\x27${process.env.CANARY_USER_ID}\x27 AND s.workspace_id=\x27${process.env.CANARY_WORKSPACE_ID}\x27;`;fs.writeFileSync(process.argv[1],q)' "$RUNNER_TEMP/canary-recording.sql"
-          timeout 60s npx --prefix infra/worker wrangler d1 execute DB --remote --json --file "$RUNNER_TEMP/canary-recording.sql" --config "$RUNNER_TEMP/safe-config/main.wrangler.toml" > "$RUNNER_TEMP/canary-recording.json"
+          timeout 60s node infra/staging/query-staging-d1.mjs --manifest "$RUNNER_TEMP/staging-resource-manifest.json" --sql-file "$RUNNER_TEMP/canary-recording.sql" --out "$RUNNER_TEMP/canary-recording.json"
           node -e 'const rows=require(process.argv[1]);const data=Array.isArray(rows)&&rows.length===1?rows[0].results:[];if(data.length!==1||String(data[0].id)!==process.env.EXPECTED_RECORDING_ID)throw new Error("recording identity mismatch")' "$RUNNER_TEMP/canary-recording.json"
           timeout 60s npx --prefix infra/worker wrangler r2 object get "$STAGING_FILES_BUCKET/$SOURCE_KEY" --remote --file "$RUNNER_TEMP/canary-source.json" --config "$RUNNER_TEMP/safe-config/main.wrangler.toml"
           node infra/staging/staging-http-image-canary.mjs identity \
@@ -161,7 +161,7 @@ jobs:
             --grant-seed "${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}" \
             --out "$RUNNER_TEMP/canary.json"
           node -e 'const fs=require("fs");const run=require(process.argv[1]).identity.run_id;if(!/^run_v3_[a-f0-9]{64}$/.test(run))throw new Error("run identity invalid");fs.writeFileSync(process.argv[2],`SELECT (SELECT count(*) FROM editorial_runs WHERE run_id=\x27${run}\x27) AS editorial_count,(SELECT count(*) FROM publication_runs WHERE run_id=\x27${run}\x27) AS publication_count,(SELECT count(*) FROM editorial_artifacts WHERE run_id=\x27${run}\x27) AS artifact_count;`)' "$RUNNER_TEMP/canary.json" "$RUNNER_TEMP/canary-absence.sql"
-          timeout 60s npx --prefix infra/worker wrangler d1 execute DB --remote --json --file "$RUNNER_TEMP/canary-absence.sql" --config "$RUNNER_TEMP/safe-config/main.wrangler.toml" > "$RUNNER_TEMP/canary-absence.json"
+          timeout 60s node infra/staging/query-staging-d1.mjs --manifest "$RUNNER_TEMP/staging-resource-manifest.json" --sql-file "$RUNNER_TEMP/canary-absence.sql" --out "$RUNNER_TEMP/canary-absence.json"
           node -e 'const row=require(process.argv[1])?.[0]?.results?.[0];if(!row||Number(row.editorial_count)!==0||Number(row.publication_count)!==0||Number(row.artifact_count)!==0)throw new Error("canary run already exists")' "$RUNNER_TEMP/canary-absence.json"
           node infra/staging/staging-http-image-canary.mjs render --manifest "$RUNNER_TEMP/staging-resource-manifest.json" --canary "$RUNNER_TEMP/canary.json" --out-dir "$RUNNER_TEMP/canary-config" --intent deploy
           node infra/staging/staging-http-image-canary.mjs verify --manifest "$RUNNER_TEMP/staging-resource-manifest.json" --canary "$RUNNER_TEMP/canary.json" --out-dir "$RUNNER_TEMP/canary-config" --intent deploy
@@ -199,7 +199,7 @@ jobs:
         run: |
           node -e 'const fs=require("fs");const run=require(process.argv[1]).identity.run_id;fs.writeFileSync(process.argv[2],`SELECT run_id,state,progress_percent,state_revision,error_code,next_action,updated_at FROM publication_runs WHERE run_id=\x27${run}\x27;`)' "$RUNNER_TEMP/canary.json" "$RUNNER_TEMP/canary-state.sql"
           for attempt in $(seq 1 60); do
-            timeout 60s npx --prefix infra/worker wrangler d1 execute DB --remote --json --file "$RUNNER_TEMP/canary-state.sql" --config "$RUNNER_TEMP/safe-config/main.wrangler.toml" > "$RUNNER_TEMP/canary-state.json"
+            timeout 60s node infra/staging/query-staging-d1.mjs --manifest "$RUNNER_TEMP/staging-resource-manifest.json" --sql-file "$RUNNER_TEMP/canary-state.sql" --out "$RUNNER_TEMP/canary-state.json"
             STATE="$(node -e 'const rows=require(process.argv[1]);const row=rows?.[0]?.results?.[0];if(!row)process.exit(2);process.stdout.write(String(row.state))' "$RUNNER_TEMP/canary-state.json")"
             PROGRESS="$(node -e 'const rows=require(process.argv[1]);process.stdout.write(String(rows?.[0]?.results?.[0]?.progress_percent??""))' "$RUNNER_TEMP/canary-state.json")"
             echo "Canary state $STATE at $PROGRESS% (poll $attempt/60)"
@@ -258,8 +258,8 @@ jobs:
         run: |
           if [ -f "$RUNNER_TEMP/canary.json" ]; then
             node -e 'const fs=require("fs");const run=require(process.argv[1]).identity.run_id;fs.writeFileSync(process.argv[2],`SELECT revision,event_type,state,payload_hash,error_code,next_action,created_at FROM publication_run_events WHERE run_id=\x27${run}\x27 ORDER BY revision;`);fs.writeFileSync(process.argv[3],`SELECT artifact_id,kind,payload_hash,storage_ref,created_at FROM editorial_artifacts WHERE run_id=\x27${run}\x27 ORDER BY created_at,artifact_id;`)' "$RUNNER_TEMP/canary.json" "$RUNNER_TEMP/canary-events.sql" "$RUNNER_TEMP/canary-artifacts.sql"
-            timeout 60s npx --prefix infra/worker wrangler d1 execute DB --remote --json --file "$RUNNER_TEMP/canary-events.sql" --config "$RUNNER_TEMP/safe-config/main.wrangler.toml" > "$RUNNER_TEMP/canary-events.json"
-            timeout 60s npx --prefix infra/worker wrangler d1 execute DB --remote --json --file "$RUNNER_TEMP/canary-artifacts.sql" --config "$RUNNER_TEMP/safe-config/main.wrangler.toml" > "$RUNNER_TEMP/canary-artifacts.json"
+            timeout 60s node infra/staging/query-staging-d1.mjs --manifest "$RUNNER_TEMP/staging-resource-manifest.json" --sql-file "$RUNNER_TEMP/canary-events.sql" --out "$RUNNER_TEMP/canary-events.json"
+            timeout 60s node infra/staging/query-staging-d1.mjs --manifest "$RUNNER_TEMP/staging-resource-manifest.json" --sql-file "$RUNNER_TEMP/canary-artifacts.sql" --out "$RUNNER_TEMP/canary-artifacts.json"
           fi
 
       - name: Upload redacted canary evidence
