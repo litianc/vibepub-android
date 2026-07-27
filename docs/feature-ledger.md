@@ -13,6 +13,7 @@
 
 | 时间 | 功能更新 |
 | --- | --- |
+| 2026-07-28 01:29 CST | Wave 2E 增加仅限指定 staging 发布运行和固定 HTTP 端点、主流程与图像调用一小时内自动失效且先回滚后取证的明文传输例外，生产 HTTPS 默认策略保持不变。 |
 | 2026-07-27 21:30 CST | Wave 2E staging 门禁兼容旧版 recordings 表并将发布传播期的短暂 404 纳入有限重试，使 Mining V3 无写入探针可验证真实 D1 契约。 |
 | 2026-07-27 21:10 CST | Wave 2E staging 验证为串行多场景恢复测试设置明确的 20 秒上限，避免 GitHub runner 负载造成超时与后续断言污染。 |
 | 2026-07-27 15:18 CST | Wave 2E 图像 Agent 锁文件补全 Linux 原生绑定，使 staging 发布验证可在 GitHub runner 上启动图像测试。 |

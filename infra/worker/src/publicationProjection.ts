@@ -243,17 +243,59 @@ export function isPublicationState(value: unknown): value is PublicationState {
   return typeof value === "string" && PUBLICATION_STATES.includes(value as PublicationState);
 }
 
-export function publicationFeatureEnabled(
-  env: { FIVE_AGENT_PUBLISHING_V3?: string; FIVE_AGENT_PUBLISHING_V3_ALLOWLIST?: string },
+type PublicationFeatureEnv = {
+  FIVE_AGENT_PUBLISHING_V3?: string;
+  FIVE_AGENT_PUBLISHING_V3_ALLOWLIST?: string;
+  DEPLOY_ENVIRONMENT?: string;
+  STAGING_HTTP_IMAGE_CANARY_MODE?: string;
+  STAGING_HTTP_IMAGE_CANARY_RUN_ID?: string;
+  STAGING_HTTP_IMAGE_CANARY_USER_ID?: string;
+  STAGING_HTTP_IMAGE_CANARY_WORKSPACE_ID?: string;
+  STAGING_HTTP_IMAGE_CANARY_EXPIRES_AT?: string;
+};
+
+const STAGING_HTTP_IMAGE_CANARY_MODE = "staging_single_run";
+const STAGING_HTTP_IMAGE_CANARY_MAX_TTL_MS = 60 * 60 * 1000;
+
+export function stagingHttpImageCanaryScopeEnabled(
+  env: PublicationFeatureEnv,
   userId: string,
   workspaceId: string,
+  runId?: string,
+): boolean {
+  const configured = [
+    env.STAGING_HTTP_IMAGE_CANARY_MODE,
+    env.STAGING_HTTP_IMAGE_CANARY_RUN_ID,
+    env.STAGING_HTTP_IMAGE_CANARY_USER_ID,
+    env.STAGING_HTTP_IMAGE_CANARY_WORKSPACE_ID,
+    env.STAGING_HTTP_IMAGE_CANARY_EXPIRES_AT,
+  ].some(value => Boolean(value?.trim()));
+  if (!configured) return true;
+  const expiresAt = env.STAGING_HTTP_IMAGE_CANARY_EXPIRES_AT?.trim() || "";
+  const expiresAtMs = Date.parse(expiresAt);
+  const now = Date.now();
+  return env.DEPLOY_ENVIRONMENT?.trim() === "staging" &&
+    env.STAGING_HTTP_IMAGE_CANARY_MODE?.trim() === STAGING_HTTP_IMAGE_CANARY_MODE &&
+    env.STAGING_HTTP_IMAGE_CANARY_USER_ID?.trim() === userId &&
+    env.STAGING_HTTP_IMAGE_CANARY_WORKSPACE_ID?.trim() === workspaceId &&
+    (runId === undefined || env.STAGING_HTTP_IMAGE_CANARY_RUN_ID?.trim() === runId) &&
+    /^run_v3_[a-f0-9]{64}$/.test(env.STAGING_HTTP_IMAGE_CANARY_RUN_ID?.trim() || "") &&
+    Number.isFinite(expiresAtMs) && new Date(expiresAtMs).toISOString() === expiresAt &&
+    expiresAtMs > now && expiresAtMs <= now + STAGING_HTTP_IMAGE_CANARY_MAX_TTL_MS;
+}
+
+export function publicationFeatureEnabled(
+  env: PublicationFeatureEnv,
+  userId: string,
+  workspaceId: string,
+  runId?: string,
 ): boolean {
   if (env.FIVE_AGENT_PUBLISHING_V3?.trim().toLowerCase() !== "true") return false;
   const allowlist = (env.FIVE_AGENT_PUBLISHING_V3_ALLOWLIST || "")
     .split(",")
     .map((value) => value.trim())
     .filter(Boolean);
-  return allowlist.includes(`${userId}:${workspaceId}`);
+  return allowlist.includes(`${userId}:${workspaceId}`) && stagingHttpImageCanaryScopeEnabled(env, userId, workspaceId, runId);
 }
 
 export type PublicationProjectionTransitionOptions = {

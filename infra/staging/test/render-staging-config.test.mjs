@@ -6,7 +6,7 @@ import { test } from "node:test";
 import { renderConfigs, StagingManifestError, validateManifest, verifyRenderedConfigs, writeRenderedConfigs } from "../render-staging-config.mjs";
 import { STAGING_DATA_ATTESTATION, validateStagingDataAttestation } from "../validate-staging-data-attestation.mjs";
 import { validateStagingMiningReadiness } from "../validate-staging-mining-readiness.mjs";
-import { validateStagingOriginAttestation } from "../attest-staging-origin.mjs";
+import { fetchWorkersSubdomain, validateStagingOriginAttestation } from "../attest-staging-origin.mjs";
 import { deploymentEvidence, requireActiveDeploymentEvidence } from "../record-staging-deployment-evidence.mjs";
 import { captureDeploymentBaseline } from "../capture-staging-deployment-baseline.mjs";
 import { verifyStagingHealth } from "../verify-staging-health.mjs";
@@ -191,6 +191,19 @@ test("binds the protected staging origin to the exact account-scoped Workers sub
       expectedCode,
     );
   }
+});
+
+test("fetches the account Workers subdomain without putting the API token in arguments", async () => {
+  const accountId = "a".repeat(32);
+  let seen = null;
+  const response = await fetchWorkersSubdomain(accountId, "synthetic-cloudflare-token", async (url, init) => {
+    seen = { url, init };
+    return new Response(JSON.stringify({ success: true, result: { subdomain: "account-staging" } }), { status: 200 });
+  });
+  assert.deepEqual(response, { success: true, result: { subdomain: "account-staging" } });
+  assert.equal(seen.url, `https://api.cloudflare.com/client/v4/accounts/${accountId}/workers/subdomain`);
+  assert.equal(seen.init.redirect, "manual");
+  assert.equal(seen.init.headers.authorization, "Bearer synthetic-cloudflare-token");
 });
 
 test("rejects staging resource aliases and validates the exact dynamic render before deploy", async () => {

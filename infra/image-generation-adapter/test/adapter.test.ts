@@ -85,7 +85,9 @@ const env = (results = bucket()) => ({
 
 function durableEnv(results: FakeBucket | undefined = bucket(), overrides: Record<string, unknown> = {}): any {
   const base = { VISUAL_PRODUCTION_TOKEN: "visual-token", GPT_IMAGE_API_KEY: "synthetic-provider-token", IMAGE_PROVIDER_URL: "https://gateway.example/v1/images/generations", IMAGE_PROVIDER_HOST: "gateway.example", VISUAL_RESULTS_BUCKET: results, ...overrides };
-  return { ...base, VISUAL_OPERATION: new FakeOperationNamespace(base) };
+  const runtime: Record<string, unknown> = { ...base };
+  runtime.VISUAL_OPERATION = new FakeOperationNamespace(runtime);
+  return runtime;
 }
 
 function request(path: string, token: string, body: string, headers: Record<string, string> = {}): Request {
@@ -96,12 +98,15 @@ function request(path: string, token: string, body: string, headers: Record<stri
   });
 }
 
-function imageBody(operationId: string, attempt = 1): string {
-  return JSON.stringify({ operation_id: operationId, attempt, model: "gpt-image-2", prompt: "synthetic prompt", size: "1536x864" });
+function imageBody(operationId: string, attempt = 1, runId?: string, userId?: string, workspaceId?: string): string {
+  return JSON.stringify({ operation_id: operationId, attempt, ...(runId ? { run_id: runId } : {}), ...(userId ? { user_id: userId } : {}), ...(workspaceId ? { workspace_id: workspaceId } : {}), model: "gpt-image-2", prompt: "synthetic prompt", size: "1536x864" });
 }
 
 describe("controlled visual adapter", () => {
-  afterEach(() => vi.unstubAllGlobals());
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
 
   it("returns only non-secret deployment evidence from health", async () => {
     const response = await adapter.fetch(new Request("https://adapter.test/health"), {
@@ -453,5 +458,167 @@ describe("controlled visual adapter", () => {
     expect(model.status).toBe(409);
     const size = await adapter.fetch(request("/internal/v3/visual/image", "visual-token", JSON.stringify({ operation_id: "size", attempt: 1, prompt: "x", size: "1024x1024" })), durableEnv());
     expect(size.status).toBe(400);
+  });
+
+  it("allows HTTP only for one exact short-lived staging run and endpoint", async () => {
+    let providerCalls = 0;
+    let redirectMode = "";
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
+      providerCalls += 1;
+      redirectMode = String(init.redirect);
+      return new Response(JSON.stringify({ data: [{ b64_json: "staging-canary-image" }] }), { status: 200 });
+    }));
+    const runId = `run_v3_${"a".repeat(64)}`;
+    const userId = "staging_http_user";
+    const workspaceId = "staging_http_workspace";
+    const expiresAt = new Date(Date.now() + 60_000).toISOString();
+    const insecure = {
+      IMAGE_PROVIDER_URL: "http://23.105.194.173:8881/v1/images/generations",
+      IMAGE_PROVIDER_HOST: "23.105.194.173",
+      DEPLOY_ENVIRONMENT: "staging",
+      IMAGE_PROVIDER_INSECURE_HTTP_MODE: "staging_single_run",
+      IMAGE_PROVIDER_INSECURE_HTTP_RUN_ID: runId,
+      IMAGE_PROVIDER_INSECURE_HTTP_USER_ID: userId,
+      IMAGE_PROVIDER_INSECURE_HTTP_WORKSPACE_ID: workspaceId,
+      IMAGE_PROVIDER_INSECURE_HTTP_GRANT_ID: `staging_http_${"c".repeat(32)}`,
+      IMAGE_PROVIDER_INSECURE_HTTP_MAX_OPERATIONS: "3",
+      IMAGE_PROVIDER_INSECURE_HTTP_MAX_REQUESTS: "9",
+      IMAGE_PROVIDER_INSECURE_HTTP_EXPIRES_AT: expiresAt,
+    };
+    const acceptedOperation = `visual_image_${"1".repeat(24)}`;
+    const accepted = await adapter.fetch(request("/internal/v3/visual/image", "visual-token", imageBody(acceptedOperation, 1, runId, userId, workspaceId)), durableEnv(bucket(), insecure));
+    expect(accepted.status).toBe(200);
+    expect(providerCalls).toBe(1);
+    expect(redirectMode).toBe("manual");
+
+    const rejected = [
+      { operation: "staging-http-missing-run", body: imageBody(`visual_image_${"2".repeat(24)}`), overrides: {} },
+      { operation: "staging-http-wrong-run", body: imageBody(`visual_image_${"3".repeat(24)}`, 1, `run_v3_${"b".repeat(64)}`, userId, workspaceId), overrides: {} },
+      { operation: "staging-http-wrong-user", body: imageBody(`visual_image_${"4".repeat(24)}`, 1, runId, "other_user", workspaceId), overrides: {} },
+      { operation: "staging-http-production", body: imageBody(`visual_image_${"5".repeat(24)}`, 1, runId, userId, workspaceId), overrides: { DEPLOY_ENVIRONMENT: "production" } },
+      { operation: "staging-http-wrong-host", body: imageBody(`visual_image_${"6".repeat(24)}`, 1, runId, userId, workspaceId), overrides: { IMAGE_PROVIDER_URL: "http://127.0.0.1:8881/v1/images/generations", IMAGE_PROVIDER_HOST: "127.0.0.1" } },
+      { operation: "staging-http-wrong-port", body: imageBody(`visual_image_${"7".repeat(24)}`, 1, runId, userId, workspaceId), overrides: { IMAGE_PROVIDER_URL: "http://23.105.194.173:8880/v1/images/generations" } },
+      { operation: "staging-http-expired", body: imageBody(`visual_image_${"8".repeat(24)}`, 1, runId, userId, workspaceId), overrides: { IMAGE_PROVIDER_INSECURE_HTTP_EXPIRES_AT: new Date(Date.now() - 1_000).toISOString() } },
+      { operation: "staging-http-long-lived", body: imageBody(`visual_image_${"9".repeat(24)}`, 1, runId, userId, workspaceId), overrides: { IMAGE_PROVIDER_INSECURE_HTTP_EXPIRES_AT: new Date(Date.now() + 60 * 60 * 1000 + 60_000).toISOString() } },
+    ];
+    for (const item of rejected) {
+      const response = await adapter.fetch(request("/internal/v3/visual/image", "visual-token", item.body), durableEnv(bucket(), { ...insecure, ...item.overrides }));
+      expect(response.status, item.operation).toBe(503);
+    }
+    expect(providerCalls).toBe(1);
+  });
+
+  it("does not start HTTP when the grant expires while its claim is completing", async () => {
+    vi.useFakeTimers();
+    const startedAt = new Date("2026-07-28T01:00:00.000Z");
+    const expiresAt = new Date(startedAt.getTime() + 30_000);
+    vi.setSystemTime(startedAt);
+    let providerCalls = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      providerCalls += 1;
+      return new Response(JSON.stringify({ data: [{ b64_json: "must-not-be-returned" }] }), { status: 200 });
+    }));
+    const runId = `run_v3_${"5".repeat(64)}`;
+    const userId = "staging_expiry_user";
+    const workspaceId = "staging_expiry_workspace";
+    const runtime = durableEnv(bucket(), {
+      IMAGE_PROVIDER_URL: "http://23.105.194.173:8881/v1/images/generations",
+      IMAGE_PROVIDER_HOST: "23.105.194.173",
+      DEPLOY_ENVIRONMENT: "staging",
+      IMAGE_PROVIDER_INSECURE_HTTP_MODE: "staging_single_run",
+      IMAGE_PROVIDER_INSECURE_HTTP_RUN_ID: runId,
+      IMAGE_PROVIDER_INSECURE_HTTP_USER_ID: userId,
+      IMAGE_PROVIDER_INSECURE_HTTP_WORKSPACE_ID: workspaceId,
+      IMAGE_PROVIDER_INSECURE_HTTP_GRANT_ID: `staging_http_${"6".repeat(32)}`,
+      IMAGE_PROVIDER_INSECURE_HTTP_MAX_OPERATIONS: "3",
+      IMAGE_PROVIDER_INSECURE_HTTP_MAX_REQUESTS: "9",
+      IMAGE_PROVIDER_INSECURE_HTTP_EXPIRES_AT: expiresAt.toISOString(),
+    });
+    const originalNamespace = runtime.VISUAL_OPERATION as FakeOperationNamespace;
+    runtime.VISUAL_OPERATION = {
+      idFromName: (name: string) => originalNamespace.idFromName(name),
+      get: (id: string) => {
+        const target = originalNamespace.get(id);
+        if (!id.startsWith("insecure-http-grant:")) return target;
+        return { fetch: async (requestValue: Request) => {
+          const response = await target.fetch(requestValue);
+          vi.setSystemTime(new Date(expiresAt.getTime() + 1));
+          return response;
+        } };
+      },
+    };
+    const operationId = `visual_image_${"7".repeat(24)}`;
+    const response = await adapter.fetch(request("/internal/v3/visual/image", "visual-token", imageBody(operationId, 1, runId, userId, workspaceId)), runtime);
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ error: { code: "insecure_http_grant_expired", retryable: false } });
+    expect(providerCalls).toBe(0);
+  });
+
+  it("consumes one staging HTTP grant across at most three image operations", async () => {
+    let providerCalls = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      providerCalls += 1;
+      return new Response(JSON.stringify({ data: [{ b64_json: `staging-image-${providerCalls}` }] }), { status: 200 });
+    }));
+    const runId = `run_v3_${"d".repeat(64)}`;
+    const userId = "staging_budget_user";
+    const workspaceId = "staging_budget_workspace";
+    const runtime = durableEnv(bucket(), {
+      IMAGE_PROVIDER_URL: "http://23.105.194.173:8881/v1/images/generations",
+      IMAGE_PROVIDER_HOST: "23.105.194.173",
+      DEPLOY_ENVIRONMENT: "staging",
+      IMAGE_PROVIDER_INSECURE_HTTP_MODE: "staging_single_run",
+      IMAGE_PROVIDER_INSECURE_HTTP_RUN_ID: runId,
+      IMAGE_PROVIDER_INSECURE_HTTP_USER_ID: userId,
+      IMAGE_PROVIDER_INSECURE_HTTP_WORKSPACE_ID: workspaceId,
+      IMAGE_PROVIDER_INSECURE_HTTP_GRANT_ID: `staging_http_${"e".repeat(32)}`,
+      IMAGE_PROVIDER_INSECURE_HTTP_MAX_OPERATIONS: "3",
+      IMAGE_PROVIDER_INSECURE_HTTP_MAX_REQUESTS: "9",
+      IMAGE_PROVIDER_INSECURE_HTTP_EXPIRES_AT: new Date(Date.now() + 60_000).toISOString(),
+    });
+    for (let index = 1; index <= 3; index += 1) {
+      const response = await adapter.fetch(request("/internal/v3/visual/image", "visual-token", imageBody(`visual_image_${String(index).repeat(24)}`, 1, runId, userId, workspaceId)), runtime);
+      expect(response.status).toBe(200);
+    }
+    const exhausted = await adapter.fetch(request("/internal/v3/visual/image", "visual-token", imageBody(`visual_image_${"4".repeat(24)}`, 1, runId, userId, workspaceId)), runtime);
+    expect(exhausted.status).toBe(409);
+    expect(await exhausted.json()).toEqual({ error: { code: "insecure_http_grant_exhausted", retryable: false } });
+    expect(providerCalls).toBe(3);
+  });
+
+  it("caps a long staging HTTP grant at six operations and eighteen attempts", async () => {
+    let providerCalls = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      providerCalls += 1;
+      return providerCalls % 3 === 0
+        ? new Response(JSON.stringify({ data: [{ b64_json: `staging-image-${providerCalls}` }] }), { status: 200 })
+        : new Response(JSON.stringify({ error: { message: "retry" } }), { status: 503 });
+    }));
+    const runId = `run_v3_${"8".repeat(64)}`;
+    const userId = "staging_long_user";
+    const workspaceId = "staging_long_workspace";
+    const runtime = durableEnv(bucket(), {
+      IMAGE_PROVIDER_URL: "http://23.105.194.173:8881/v1/images/generations",
+      IMAGE_PROVIDER_HOST: "23.105.194.173",
+      DEPLOY_ENVIRONMENT: "staging",
+      IMAGE_PROVIDER_INSECURE_HTTP_MODE: "staging_single_run",
+      IMAGE_PROVIDER_INSECURE_HTTP_RUN_ID: runId,
+      IMAGE_PROVIDER_INSECURE_HTTP_USER_ID: userId,
+      IMAGE_PROVIDER_INSECURE_HTTP_WORKSPACE_ID: workspaceId,
+      IMAGE_PROVIDER_INSECURE_HTTP_GRANT_ID: `staging_http_${"9".repeat(32)}`,
+      IMAGE_PROVIDER_INSECURE_HTTP_MAX_OPERATIONS: "6",
+      IMAGE_PROVIDER_INSECURE_HTTP_MAX_REQUESTS: "18",
+      IMAGE_PROVIDER_INSECURE_HTTP_EXPIRES_AT: new Date(Date.now() + 60_000).toISOString(),
+    });
+    for (let operation = 0; operation < 6; operation += 1) {
+      const operationId = `visual_image_${String.fromCharCode(97 + operation).repeat(24)}`;
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        const response = await adapter.fetch(request("/internal/v3/visual/image", "visual-token", imageBody(operationId, attempt, runId, userId, workspaceId)), runtime);
+        expect(response.status).toBe(attempt === 3 ? 200 : 503);
+      }
+    }
+    const exhausted = await adapter.fetch(request("/internal/v3/visual/image", "visual-token", imageBody(`visual_image_${"0".repeat(24)}`, 1, runId, userId, workspaceId)), runtime);
+    expect(exhausted.status).toBe(409);
+    expect(providerCalls).toBe(18);
   });
 });
