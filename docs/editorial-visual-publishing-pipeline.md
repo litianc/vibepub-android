@@ -625,7 +625,10 @@ tenant flags/allowlists, then reverts main and adapters; D1/DO data is
 forward-fixed rather than dropped or down-migrated. Device verification requires
 a reviewed source SHA matched to APK SHA/signing identity, explicit staging API
 profile, production-endpoint negative assertion, five-service health/version
-evidence, completed D1 data gate, and a synthetic staging account. The current
-HTTP image gateway fails the Image adapter HTTPS/443 contract, so a complete
-visual staging canary remains externally blocked until TLS fronting and key
-rotation are complete.
+evidence, completed D1 data gate, and a synthetic staging account. The visual
+staging canary pins the approved HTTPS/443 image endpoint to one deterministic
+source/user/workspace/run scope, keeps WeChat disabled, and enforces an expiring
+three-operation Image ledger before provider access. It restores empty provider
+configuration afterward, while the adapter-side expiry closes the provider if
+runner cleanup is interrupted; production remains separately gated on key
+rotation and release approval.

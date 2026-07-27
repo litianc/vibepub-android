@@ -4,10 +4,10 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { renderConfigs, StagingManifestError } from "./render-staging-config.mjs";
 
-const SCHEMA_VERSION = "vibepub-staging-http-image-canary.v1";
-const ACKNOWLEDGEMENT = "plaintext_key_and_content_approved_for_single_staging_run";
-const PROVIDER_URL = "http://23.105.194.173:8881/v1/images/generations";
-const PROVIDER_HOST = "23.105.194.173";
+const SCHEMA_VERSION = "vibepub-staging-https-image-canary.v1";
+const TRANSPORT = "https";
+const PROVIDER_URL = "https://api.clawparty.cn/v1/images/generations";
+const PROVIDER_HOST = "api.clawparty.cn";
 const CONTENT_GOAL = "将原始内容整理为真实、理性、结构化的公众号文章。";
 const STYLE_PIN = { id: "style_litianc_default", version: "2026-07-05" };
 const FORMATTING_PIN = { id: "md_to_wechat", version: "1.0.0" };
@@ -16,10 +16,10 @@ const OPAQUE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/;
 const HASH = /^sha256:[a-f0-9]{64}$/;
 const RUN_ID = /^run_v3_[a-f0-9]{64}$/;
 const HANDOFF_ID = /^handoff_v3_[a-f0-9]{64}$/;
-const GRANT_ID = /^staging_http_[a-f0-9]{32}$/;
+const CANARY_ID = /^staging_https_[a-f0-9]{32}$/;
 const MAX_TTL_MS = 60 * 60 * 1000;
 
-export class StagingHttpCanaryError extends Error {
+export class StagingHttpsCanaryError extends Error {
   constructor(code, message = code) {
     super(message);
     this.code = code;
@@ -27,7 +27,7 @@ export class StagingHttpCanaryError extends Error {
 }
 
 function fail(code, message) {
-  throw new StagingHttpCanaryError(code, message);
+  throw new StagingHttpsCanaryError(code, message);
 }
 
 function object(value, field) {
@@ -158,39 +158,38 @@ export function deriveCanaryIdentity(input) {
 export function buildCanaryGrant(identity, options = {}) {
   const now = options.now instanceof Date ? options.now : new Date();
   const maxOperations = Number(options.maxOperations || 3);
-  if (maxOperations !== 3 && maxOperations !== 6) fail("canary_budget_invalid", "max_operations must be 3 or 6");
+  if (maxOperations !== 3) fail("canary_budget_invalid", "max_operations must be 3");
   const expiresAt = options.expiresAt || new Date(now.getTime() + 45 * 60 * 1000).toISOString();
-  const seed = String(options.grantSeed || "");
-  if (!seed || seed.length > 256) fail("canary_grant_invalid", "grant seed is required");
+  const seed = String(options.canarySeed || "");
+  if (!seed || seed.length > 256) fail("canary_identity_invalid", "canary seed is required");
   return validateCanaryGrant({
     schema_version: SCHEMA_VERSION,
     environment: "staging",
-    acknowledgement: ACKNOWLEDGEMENT,
+    transport: TRANSPORT,
     provider: { url: PROVIDER_URL, host: PROVIDER_HOST },
     scope: { user_id: identity.user_id, workspace_id: identity.workspace_id, run_id: identity.run_id },
     source: { key: identity.source_key, hash: identity.source_hash, recording_id: identity.recording_id, handoff_id: identity.handoff_id },
-    grant_id: `staging_http_${sha256(`${seed}:${identity.run_id}`).slice("sha256:".length, "sha256:".length + 32)}`,
+    canary_id: `staging_https_${sha256(`${seed}:${identity.run_id}`).slice("sha256:".length, "sha256:".length + 32)}`,
     expires_at: expiresAt,
     max_operations: maxOperations,
-    max_requests: maxOperations * 3,
     wechat_draft: false,
   }, now);
 }
 
 export function validateCanaryGrant(raw, now = new Date()) {
   const grant = structuredClone(object(raw, "grant"));
-  exactKeys(grant, ["schema_version", "environment", "acknowledgement", "provider", "scope", "source", "grant_id", "expires_at", "max_operations", "max_requests", "wechat_draft"], "grant");
+  exactKeys(grant, ["schema_version", "environment", "transport", "provider", "scope", "source", "canary_id", "expires_at", "max_operations", "wechat_draft"], "grant");
   exactKeys(grant.provider, ["url", "host"], "grant.provider");
   exactKeys(grant.scope, ["user_id", "workspace_id", "run_id"], "grant.scope");
   exactKeys(grant.source, ["key", "hash", "recording_id", "handoff_id"], "grant.source");
-  if (grant.schema_version !== SCHEMA_VERSION || grant.environment !== "staging" || grant.acknowledgement !== ACKNOWLEDGEMENT || grant.wechat_draft !== false) fail("canary_policy_invalid");
+  if (grant.schema_version !== SCHEMA_VERSION || grant.environment !== "staging" || grant.transport !== TRANSPORT || grant.wechat_draft !== false) fail("canary_policy_invalid");
   if (grant.provider.url !== PROVIDER_URL || grant.provider.host !== PROVIDER_HOST) fail("canary_provider_invalid");
   opaque(grant.scope.user_id, "scope.user_id");
   opaque(grant.scope.workspace_id, "scope.workspace_id");
-  if (!RUN_ID.test(grant.scope.run_id) || !GRANT_ID.test(grant.grant_id) || !HASH.test(grant.source.hash) || !HANDOFF_ID.test(grant.source.handoff_id) ||
+  if (!RUN_ID.test(grant.scope.run_id) || !CANARY_ID.test(grant.canary_id) || !HASH.test(grant.source.hash) || !HANDOFF_ID.test(grant.source.handoff_id) ||
       !Number.isSafeInteger(grant.source.recording_id) || grant.source.recording_id < 1 || typeof grant.source.key !== "string" || grant.source.key.includes("..") ||
       grant.source.key !== `users/${grant.scope.user_id}/text-submissions/${grant.source.key.split("/").at(-1)}`) fail("canary_scope_invalid");
-  if ((grant.max_operations !== 3 && grant.max_operations !== 6) || grant.max_requests !== grant.max_operations * 3) fail("canary_budget_invalid");
+  if (grant.max_operations !== 3) fail("canary_budget_invalid");
   const expires = Date.parse(grant.expires_at);
   const current = now.getTime();
   if (!Number.isFinite(expires) || expires <= current || expires > current + MAX_TTL_MS) fail("canary_expiry_invalid");
@@ -223,28 +222,27 @@ export function renderCanaryConfigs(manifest, rawGrant, intent = "deploy", outpu
   main = replaceVar(main, "WECHAT_DRAFT_SYNC_V3_ALLOWLIST", "");
   const mainCanaryVars = {
     DEPLOY_ENVIRONMENT: "staging",
-    STAGING_HTTP_IMAGE_CANARY_MODE: "staging_single_run",
-    STAGING_HTTP_IMAGE_CANARY_RUN_ID: grant.scope.run_id,
-    STAGING_HTTP_IMAGE_CANARY_USER_ID: grant.scope.user_id,
-    STAGING_HTTP_IMAGE_CANARY_WORKSPACE_ID: grant.scope.workspace_id,
-    STAGING_HTTP_IMAGE_CANARY_EXPIRES_AT: grant.expires_at,
+    STAGING_IMAGE_CANARY_MODE: "staging_single_run",
+    STAGING_IMAGE_CANARY_RUN_ID: grant.scope.run_id,
+    STAGING_IMAGE_CANARY_USER_ID: grant.scope.user_id,
+    STAGING_IMAGE_CANARY_WORKSPACE_ID: grant.scope.workspace_id,
+    STAGING_IMAGE_CANARY_SOURCE_KEY: grant.source.key,
+    STAGING_IMAGE_CANARY_EXPIRES_AT: grant.expires_at,
   };
   main = prependVars(main, mainCanaryVars);
   let image = configs["image.wrangler.toml"];
   image = replaceVar(image, "IMAGE_PROVIDER_HOST", grant.provider.host);
   image = replaceVar(image, "IMAGE_PROVIDER_URL", grant.provider.url);
-  const imageVars = {
+  image = prependVars(image, {
     DEPLOY_ENVIRONMENT: "staging",
-    IMAGE_PROVIDER_INSECURE_HTTP_MODE: "staging_single_run",
-    IMAGE_PROVIDER_INSECURE_HTTP_RUN_ID: grant.scope.run_id,
-    IMAGE_PROVIDER_INSECURE_HTTP_USER_ID: grant.scope.user_id,
-    IMAGE_PROVIDER_INSECURE_HTTP_WORKSPACE_ID: grant.scope.workspace_id,
-    IMAGE_PROVIDER_INSECURE_HTTP_GRANT_ID: grant.grant_id,
-    IMAGE_PROVIDER_INSECURE_HTTP_MAX_OPERATIONS: grant.max_operations,
-    IMAGE_PROVIDER_INSECURE_HTTP_MAX_REQUESTS: grant.max_requests,
-    IMAGE_PROVIDER_INSECURE_HTTP_EXPIRES_AT: grant.expires_at,
-  };
-  image = prependVars(image, imageVars);
+    IMAGE_PROVIDER_CANARY_MODE: "staging_single_run",
+    IMAGE_PROVIDER_CANARY_RUN_ID: grant.scope.run_id,
+    IMAGE_PROVIDER_CANARY_USER_ID: grant.scope.user_id,
+    IMAGE_PROVIDER_CANARY_WORKSPACE_ID: grant.scope.workspace_id,
+    IMAGE_PROVIDER_CANARY_ID: grant.canary_id,
+    IMAGE_PROVIDER_CANARY_MAX_OPERATIONS: grant.max_operations,
+    IMAGE_PROVIDER_CANARY_EXPIRES_AT: grant.expires_at,
+  });
   return { ...configs, "main.wrangler.toml": main, "image.wrangler.toml": image };
 }
 
@@ -283,7 +281,7 @@ async function main() {
       workspaceId: option(args, "--workspace-id"),
       expectedSourceHash: option(args, "--expected-source-hash"),
     });
-    const grant = buildCanaryGrant(identity, { maxOperations: Number(option(args, "--max-operations") || 3), grantSeed: option(args, "--grant-seed") });
+    const grant = buildCanaryGrant(identity, { maxOperations: Number(option(args, "--max-operations") || 3), canarySeed: option(args, "--canary-seed") });
     await writeFile(resolve(outFile), `${JSON.stringify({ identity, grant }, null, 2)}\n`, "utf8");
     return;
   }
@@ -300,12 +298,12 @@ async function main() {
     else await verifyCanaryConfigs(manifest, grant, resolve(outDir), intent);
     return;
   }
-  fail("usage_invalid", "usage: staging-http-image-canary.mjs <identity|render|verify> ...");
+  fail("usage_invalid", "usage: staging-https-image-canary.mjs <identity|render|verify> ...");
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   main().catch(error => {
-    process.stderr.write(`${error instanceof StagingHttpCanaryError || error instanceof StagingManifestError ? error.code : error.message}\n`);
+    process.stderr.write(`${error instanceof StagingHttpsCanaryError || error instanceof StagingManifestError ? error.code : error.message}\n`);
     process.exitCode = 1;
   });
 }

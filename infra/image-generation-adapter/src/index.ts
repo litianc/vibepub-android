@@ -25,14 +25,13 @@ type Env = {
   IMAGE_PROVIDER_URL?: string;
   IMAGE_PROVIDER_HOST?: string;
   DEPLOY_ENVIRONMENT?: string;
-  IMAGE_PROVIDER_INSECURE_HTTP_MODE?: string;
-  IMAGE_PROVIDER_INSECURE_HTTP_RUN_ID?: string;
-  IMAGE_PROVIDER_INSECURE_HTTP_USER_ID?: string;
-  IMAGE_PROVIDER_INSECURE_HTTP_WORKSPACE_ID?: string;
-  IMAGE_PROVIDER_INSECURE_HTTP_GRANT_ID?: string;
-  IMAGE_PROVIDER_INSECURE_HTTP_MAX_OPERATIONS?: string;
-  IMAGE_PROVIDER_INSECURE_HTTP_MAX_REQUESTS?: string;
-  IMAGE_PROVIDER_INSECURE_HTTP_EXPIRES_AT?: string;
+  IMAGE_PROVIDER_CANARY_MODE?: string;
+  IMAGE_PROVIDER_CANARY_RUN_ID?: string;
+  IMAGE_PROVIDER_CANARY_USER_ID?: string;
+  IMAGE_PROVIDER_CANARY_WORKSPACE_ID?: string;
+  IMAGE_PROVIDER_CANARY_ID?: string;
+  IMAGE_PROVIDER_CANARY_MAX_OPERATIONS?: string;
+  IMAGE_PROVIDER_CANARY_EXPIRES_AT?: string;
   DEPLOY_COMMIT?: string;
   DEPLOY_REF?: string;
   DEPLOYED_AT?: string;
@@ -44,11 +43,10 @@ const MODEL = "gpt-image-2" as const;
 const ADAPTER_VERSION = "visual-generation.adapter.1.0.0" as const;
 const PROTOCOL = "vibepub.visual.v3" as const;
 const RESULT_PREFIX = "visual-adapter/v3/operations/";
-const STAGING_HTTP_HOST = "23.105.194.173";
-const STAGING_HTTP_PORT = "8881";
-const STAGING_HTTP_MODE = "staging_single_run";
-const STAGING_HTTP_MAX_TTL_MS = 60 * 60 * 1000;
-const STAGING_HTTP_RECONCILE_GRACE_MS = 60 * 60 * 1000;
+const IMAGE_CANARY_MODE = "staging_single_run";
+const IMAGE_CANARY_MAX_OPERATIONS = 3;
+const IMAGE_CANARY_MAX_TTL_MS = 60 * 60 * 1000;
+const IMAGE_CANARY_RECONCILE_GRACE_MS = 60 * 60 * 1000;
 const PROVIDER_TIMEOUT_MS = 90_000;
 const PROVIDER_MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
 
@@ -105,21 +103,33 @@ function authorized(request: Request, env: Env): boolean {
 
 type ProviderTarget = {
   url: string;
-  grant?: {
-    grantId: string;
+  canary?: {
+    canaryId: string;
     runId: string;
     userId: string;
     workspaceId: string;
-    maxOperations: number;
+    maxOperations: typeof IMAGE_CANARY_MAX_OPERATIONS;
     maxRequests: number;
     expiresAt: string;
     expiresAtMs: number;
   };
 };
 
+function imageCanaryConfigured(env: Env): boolean {
+  return [
+    env.IMAGE_PROVIDER_CANARY_MODE,
+    env.IMAGE_PROVIDER_CANARY_RUN_ID,
+    env.IMAGE_PROVIDER_CANARY_USER_ID,
+    env.IMAGE_PROVIDER_CANARY_WORKSPACE_ID,
+    env.IMAGE_PROVIDER_CANARY_ID,
+    env.IMAGE_PROVIDER_CANARY_MAX_OPERATIONS,
+    env.IMAGE_PROVIDER_CANARY_EXPIRES_AT,
+  ].some(value => Boolean(value?.trim()));
+}
+
 function providerTarget(
   env: Env,
-  scope: { runId?: string; userId?: string; workspaceId?: string; operationId?: string },
+  scope: { runId?: string; userId?: string; workspaceId?: string; operationId?: string } = {},
   allowExpired = false,
 ): ProviderTarget {
   const value = env.IMAGE_PROVIDER_URL?.trim();
@@ -129,44 +139,42 @@ function providerTarget(
   const expectedHost = env.IMAGE_PROVIDER_HOST?.trim().toLowerCase();
   const hostname = parsed.hostname.toLowerCase();
   const exactEndpoint = Boolean(expectedHost) && hostname === expectedHost && !parsed.username && !parsed.password && !parsed.search && !parsed.hash && parsed.pathname === "/v1/images/generations";
-  if (exactEndpoint && parsed.protocol === "https:" && (!parsed.port || parsed.port === "443")) return { url: parsed.toString() };
+  if (!exactEndpoint || parsed.protocol !== "https:" || (parsed.port && parsed.port !== "443")) {
+    throw new KnownAdapterError({ code: "service_unconfigured", status: 503, retryable: false });
+  }
+  if (!imageCanaryConfigured(env)) return { url: parsed.toString() };
 
-  const expiresAt = env.IMAGE_PROVIDER_INSECURE_HTTP_EXPIRES_AT?.trim() || "";
+  const expiresAt = env.IMAGE_PROVIDER_CANARY_EXPIRES_AT?.trim() || "";
   const expiresAtMs = Date.parse(expiresAt);
   const now = Date.now();
-  const canaryRunId = env.IMAGE_PROVIDER_INSECURE_HTTP_RUN_ID?.trim();
-  const canaryUserId = env.IMAGE_PROVIDER_INSECURE_HTTP_USER_ID?.trim();
-  const canaryWorkspaceId = env.IMAGE_PROVIDER_INSECURE_HTTP_WORKSPACE_ID?.trim();
-  const grantId = env.IMAGE_PROVIDER_INSECURE_HTTP_GRANT_ID?.trim();
-  const maxOperations = Number(env.IMAGE_PROVIDER_INSECURE_HTTP_MAX_OPERATIONS);
-  const maxRequests = Number(env.IMAGE_PROVIDER_INSECURE_HTTP_MAX_REQUESTS);
-  const stagingHttpAllowed = exactEndpoint &&
-    parsed.protocol === "http:" && hostname === STAGING_HTTP_HOST && parsed.port === STAGING_HTTP_PORT &&
-    env.DEPLOY_ENVIRONMENT?.trim() === "staging" &&
-    env.IMAGE_PROVIDER_INSECURE_HTTP_MODE?.trim() === STAGING_HTTP_MODE &&
+  const canaryId = env.IMAGE_PROVIDER_CANARY_ID?.trim();
+  const canaryRunId = env.IMAGE_PROVIDER_CANARY_RUN_ID?.trim();
+  const canaryUserId = env.IMAGE_PROVIDER_CANARY_USER_ID?.trim();
+  const canaryWorkspaceId = env.IMAGE_PROVIDER_CANARY_WORKSPACE_ID?.trim();
+  const maxOperations = Number(env.IMAGE_PROVIDER_CANARY_MAX_OPERATIONS);
+  const valid = env.DEPLOY_ENVIRONMENT?.trim() === "staging" &&
+    env.IMAGE_PROVIDER_CANARY_MODE?.trim() === IMAGE_CANARY_MODE &&
+    typeof canaryId === "string" && /^staging_https_[a-f0-9]{32}$/.test(canaryId) &&
     typeof canaryRunId === "string" && /^run_v3_[a-f0-9]{64}$/.test(canaryRunId) &&
     typeof canaryUserId === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/.test(canaryUserId) &&
     typeof canaryWorkspaceId === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/.test(canaryWorkspaceId) &&
-    typeof grantId === "string" && /^staging_http_[a-f0-9]{32}$/.test(grantId) &&
     scope.runId === canaryRunId && scope.userId === canaryUserId && scope.workspaceId === canaryWorkspaceId &&
     typeof scope.operationId === "string" && /^visual_image_[a-f0-9]{24}$/.test(scope.operationId) &&
-    (maxOperations === 3 || maxOperations === 6) && maxRequests === maxOperations * 3 &&
+    maxOperations === IMAGE_CANARY_MAX_OPERATIONS &&
     Number.isFinite(expiresAtMs) && new Date(expiresAtMs).toISOString() === expiresAt &&
     (allowExpired
-      ? expiresAtMs > now - STAGING_HTTP_RECONCILE_GRACE_MS && expiresAtMs <= now + STAGING_HTTP_MAX_TTL_MS
-      : expiresAtMs > now && expiresAtMs <= now + STAGING_HTTP_MAX_TTL_MS);
-  if (!stagingHttpAllowed) {
-    throw new KnownAdapterError({ code: "service_unconfigured", status: 503, retryable: false });
-  }
+      ? expiresAtMs > now - IMAGE_CANARY_RECONCILE_GRACE_MS && expiresAtMs <= now + IMAGE_CANARY_MAX_TTL_MS
+      : expiresAtMs > now && expiresAtMs <= now + IMAGE_CANARY_MAX_TTL_MS);
+  if (!valid) throw new KnownAdapterError({ code: "canary_scope_rejected", status: 403, retryable: false });
   return {
     url: parsed.toString(),
-    grant: {
-      grantId,
+    canary: {
+      canaryId,
       runId: canaryRunId,
       userId: canaryUserId,
       workspaceId: canaryWorkspaceId,
-      maxOperations,
-      maxRequests,
+      maxOperations: IMAGE_CANARY_MAX_OPERATIONS,
+      maxRequests: IMAGE_CANARY_MAX_OPERATIONS * 3,
       expiresAt,
       expiresAtMs,
     },
@@ -334,8 +342,9 @@ function resultResponse(operation: Operation, operationId: string, _requestedAtt
 
 type ShapedOperation = ReturnType<typeof requestShape>;
 
-type InsecureHttpGrantLedger = {
-  grant_id: string;
+type ImageCanaryLedger = {
+  canary_id: string;
+  provider_url: string;
   run_id: string;
   user_id: string;
   workspace_id: string;
@@ -346,31 +355,30 @@ type InsecureHttpGrantLedger = {
   request_keys: string[];
 };
 
-async function claimInsecureHttpGrant(env: Env, target: ProviderTarget, shaped: ShapedOperation): Promise<void> {
-  const grant = target.grant;
-  if (!grant || !env.VISUAL_OPERATION) throw new KnownAdapterError({ code: "service_unconfigured", status: 503, retryable: false });
+async function claimImageCanary(env: Env, target: ProviderTarget, shaped: ShapedOperation): Promise<void> {
+  const canary = target.canary;
+  if (!canary || !env.VISUAL_OPERATION) throw new KnownAdapterError({ code: "service_unconfigured", status: 503, retryable: false });
   let response: Response;
   try {
-    const id = env.VISUAL_OPERATION.idFromName(`insecure-http-grant:${grant.grantId}`);
-    response = await env.VISUAL_OPERATION.get(id).fetch(new Request("https://visual-operation.internal/insecure-http-grant/claim", {
+    const id = env.VISUAL_OPERATION.idFromName(`image-canary:${canary.canaryId}`);
+    response = await env.VISUAL_OPERATION.get(id).fetch(new Request("https://visual-operation.internal/image-canary/claim", {
       method: "POST",
       body: canonicalJson({
-        grant_id: grant.grantId,
-        run_id: grant.runId,
-        user_id: grant.userId,
-        workspace_id: grant.workspaceId,
-        max_operations: grant.maxOperations,
-        max_requests: grant.maxRequests,
-        expires_at: grant.expiresAt,
+        canary_id: canary.canaryId,
+        run_id: canary.runId,
+        user_id: canary.userId,
+        workspace_id: canary.workspaceId,
+        max_operations: canary.maxOperations,
+        expires_at: canary.expiresAt,
         operation_id: shaped.operationId,
         attempt: shaped.attempt,
       }),
     }));
   } catch {
-    throw new KnownAdapterError({ code: "service_unconfigured", status: 503, retryable: false });
+    throw new KnownAdapterError({ code: "canary_claim_unavailable", status: 503, retryable: false });
   }
   if (!response.ok) {
-    let code = "insecure_http_grant_rejected";
+    let code = "canary_claim_rejected";
     try {
       const body = await response.json() as { error?: { code?: unknown } };
       if (typeof body.error?.code === "string") code = body.error.code;
@@ -411,7 +419,7 @@ async function readLimitedProviderBody(response: Response): Promise<string> {
   return new TextDecoder().decode(bytes);
 }
 
-async function handleInsecureHttpGrantClaim(state: DurableObjectState, env: Env, request: Request): Promise<Response> {
+async function handleImageCanaryClaim(state: DurableObjectState, env: Env, request: Request): Promise<Response> {
   let body: Record<string, unknown>;
   try { body = await request.json() as Record<string, unknown>; } catch { return json({ error: { code: "invalid_request", retryable: false } }, 400); }
   let target: ProviderTarget;
@@ -428,42 +436,37 @@ async function handleInsecureHttpGrantClaim(state: DurableObjectState, env: Env,
     });
   } catch (error) {
     if (error instanceof KnownAdapterError) return json({ error: { code: error.detail.code, retryable: false } }, error.detail.status);
-    return json({ error: { code: "service_unconfigured", retryable: false } }, 503);
+    return json({ error: { code: "canary_scope_rejected", retryable: false } }, 403);
   }
-  const grant = target.grant;
-  if (!grant || body.grant_id !== grant.grantId || body.max_operations !== grant.maxOperations || body.max_requests !== grant.maxRequests) {
-    return json({ error: { code: "insecure_http_grant_conflict", retryable: false } }, 409);
+  const canary = target.canary;
+  if (!canary || body.canary_id !== canary.canaryId || body.max_operations !== canary.maxOperations || body.expires_at !== canary.expiresAt) {
+    return json({ error: { code: "canary_claim_conflict", retryable: false } }, 409);
   }
   const requestKey = `${operationId}:attempt:${Number(attempt)}`;
   const decision = await state.storage.transaction<"claimed" | "replayed" | "exhausted" | "conflict">(async transaction => {
-    const existing = await transaction.get<InsecureHttpGrantLedger>("insecure-http-grant");
+    const existing = await transaction.get<ImageCanaryLedger>("image-canary");
     const expectedIdentity = {
-      grant_id: grant.grantId,
-      run_id: grant.runId,
-      user_id: grant.userId,
-      workspace_id: grant.workspaceId,
-      max_operations: grant.maxOperations,
-      max_requests: grant.maxRequests,
-      expires_at: grant.expiresAt,
+      canary_id: canary.canaryId,
+      provider_url: target.url,
+      run_id: canary.runId,
+      user_id: canary.userId,
+      workspace_id: canary.workspaceId,
+      max_operations: canary.maxOperations,
+      max_requests: canary.maxRequests,
+      expires_at: canary.expiresAt,
     };
-    if (existing && Object.entries(expectedIdentity).some(([key, value]) => existing[key as keyof InsecureHttpGrantLedger] !== value)) {
-      return "conflict";
-    }
-    const ledger: InsecureHttpGrantLedger = existing || { ...expectedIdentity, operation_ids: [], request_keys: [] };
-    if (ledger.request_keys.includes(requestKey)) {
-      return "replayed";
-    }
+    if (existing && Object.entries(expectedIdentity).some(([key, value]) => existing[key as keyof ImageCanaryLedger] !== value)) return "conflict";
+    const ledger: ImageCanaryLedger = existing || { ...expectedIdentity, operation_ids: [], request_keys: [] };
+    if (ledger.request_keys.includes(requestKey)) return "replayed";
     const isNewOperation = !ledger.operation_ids.includes(operationId);
-    if (isNewOperation && ledger.operation_ids.length >= ledger.max_operations || ledger.request_keys.length >= ledger.max_requests) {
-      return "exhausted";
-    }
+    if ((isNewOperation && ledger.operation_ids.length >= ledger.max_operations) || ledger.request_keys.length >= ledger.max_requests) return "exhausted";
     if (isNewOperation) ledger.operation_ids.push(operationId);
     ledger.request_keys.push(requestKey);
-    await transaction.put("insecure-http-grant", ledger);
+    await transaction.put("image-canary", ledger);
     return "claimed";
   });
-  if (decision === "conflict") return json({ error: { code: "insecure_http_grant_conflict", retryable: false } }, 409);
-  if (decision === "exhausted") return json({ error: { code: "insecure_http_grant_exhausted", retryable: false } }, 409);
+  if (decision === "conflict") return json({ error: { code: "canary_claim_conflict", retryable: false } }, 409);
+  if (decision === "exhausted") return json({ error: { code: "canary_operation_budget_exhausted", retryable: false } }, 409);
   return json({ ok: true, replayed: decision === "replayed" });
 }
 
@@ -502,14 +505,15 @@ async function processOperation(env: Env, operation: Operation, shaped: ShapedOp
       await putImmutableRecord(bucket, currentKeys.result, record);
       return resultResponse(operation, shaped.operationId, shaped.attempt, record);
     }
-    const target = providerTarget(env, shaped);
-    if (target.grant) await claimInsecureHttpGrant(env, target, shaped);
-    const providerTimeout = target.grant
-      ? Math.min(PROVIDER_TIMEOUT_MS, target.grant.expiresAtMs - Date.now())
-      : PROVIDER_TIMEOUT_MS;
-    if (providerTimeout <= 0) {
-      throw new KnownAdapterError({ code: "insecure_http_grant_expired", status: 409, retryable: false });
+    let target = providerTarget(env, shaped);
+    if (target.canary) {
+      await claimImageCanary(env, target, shaped);
+      target = providerTarget(env, shaped);
     }
+    const providerTimeout = target.canary
+      ? Math.min(PROVIDER_TIMEOUT_MS, target.canary.expiresAtMs - Date.now())
+      : PROVIDER_TIMEOUT_MS;
+    if (providerTimeout <= 0) throw new KnownAdapterError({ code: "canary_expired", status: 403, retryable: false });
     let providerResponse: Response;
     try {
       providerResponse = await fetch(target.url, {
@@ -601,8 +605,8 @@ export class VisualOperationAgent {
   constructor(private readonly state: DurableObjectState, private readonly env: Env) {}
 
   async fetch(request: Request): Promise<Response> {
-    if (new URL(request.url).pathname === "/insecure-http-grant/claim") {
-      return handleInsecureHttpGrantClaim(this.state, this.env, request);
+    if (new URL(request.url).pathname === "/image-canary/claim") {
+      return handleImageCanaryClaim(this.state, this.env, request);
     }
     let input: { operation?: Operation; shaped?: ShapedOperation; mode?: "execute" | "reconcile" };
     try { input = await request.json() as { operation?: Operation; shaped?: ShapedOperation }; } catch { return json({ error: { code: "invalid_request", retryable: false } }, 400); }
@@ -736,27 +740,26 @@ async function invoke(request: Request, env: Env, operation: Operation): Promise
     if (error instanceof KnownAdapterError) return json({ error: { code: error.detail.code, retryable: error.detail.retryable } }, error.detail.status);
     return json({ error: { code: "invalid_request", retryable: false } }, 400);
   }
-  if (operation === "image" && env.IMAGE_PROVIDER_URL?.trim().toLowerCase().startsWith("http://")) {
+  if (operation === "image" && imageCanaryConfigured(env)) {
     try {
       const target = providerTarget(env, shaped, (body as Record<string, unknown>).reconcile_only === true);
-      if (!target.grant) throw new KnownAdapterError({ code: "service_unconfigured", status: 503, retryable: false });
-      const transportScope = {
-        grant_id: target.grant.grantId,
-        run_id: target.grant.runId,
-        user_id: target.grant.userId,
-        workspace_id: target.grant.workspaceId,
-        max_operations: target.grant.maxOperations,
-        max_requests: target.grant.maxRequests,
-        expires_at: target.grant.expiresAt,
+      if (!target.canary) throw new KnownAdapterError({ code: "canary_scope_rejected", status: 403, retryable: false });
+      const canaryScope = {
+        canary_id: target.canary.canaryId,
+        run_id: target.canary.runId,
+        user_id: target.canary.userId,
+        workspace_id: target.canary.workspaceId,
+        max_operations: target.canary.maxOperations,
+        expires_at: target.canary.expiresAt,
       };
       shaped = {
         ...shaped,
-        request: { ...shaped.request, transport_scope: transportScope },
-        logicalRequest: { ...shaped.logicalRequest, transport_scope: transportScope },
+        request: { ...shaped.request, canary_scope: canaryScope },
+        logicalRequest: { ...shaped.logicalRequest, canary_scope: canaryScope },
       };
     } catch (error) {
       if (error instanceof KnownAdapterError) return json({ error: { code: error.detail.code, retryable: error.detail.retryable } }, error.detail.status);
-      return json({ error: { code: "service_unconfigured", retryable: false } }, 503);
+      return json({ error: { code: "canary_scope_rejected", retryable: false } }, 403);
     }
   }
   if (!env.VISUAL_OPERATION) return json({ error: { code: "service_unconfigured", retryable: false } }, 503);

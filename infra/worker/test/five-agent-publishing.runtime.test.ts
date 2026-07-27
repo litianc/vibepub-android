@@ -23,7 +23,7 @@ import {
   deriveArtifactId,
   WAVE2_SCHEMA_VERSION,
 } from "../src/wave2/artifactContracts";
-import { applySystemPublicationTransition, projectPublicationTransition, publicationFeatureEnabled, type PublicationRunRow } from "../src/publicationProjection";
+import { applySystemPublicationTransition, projectPublicationTransition, publicationFeatureEnabled, publicationSourceFeatureEnabled, type PublicationRunRow } from "../src/publicationProjection";
 import { coordinatorShardName, EditorialRuntimeError } from "../src/editorialAgents";
 import { wechatDraftFeatureEnabled } from "../src/wave2/wechatServiceClients";
 import { makeWechatArtifact } from "../src/wave2/wechatContracts";
@@ -1634,26 +1634,30 @@ describe("Wave2B publishing runtime boundary", () => {
     const runId = `run_v3_${"a".repeat(64)}`;
     const userId = "staging_canary_user";
     const workspaceId = "staging_canary_workspace";
+    const sourceKey = `users/${userId}/text-submissions/canary.json`;
     const canary = {
       FIVE_AGENT_PUBLISHING_V3: "true",
       FIVE_AGENT_PUBLISHING_V3_ALLOWLIST: `${userId}:${workspaceId}`,
       VISUAL_PRODUCTION_V3: "true",
       VISUAL_PRODUCTION_V3_ALLOWLIST: `${userId}:${workspaceId}`,
       DEPLOY_ENVIRONMENT: "staging",
-      STAGING_HTTP_IMAGE_CANARY_MODE: "staging_single_run",
-      STAGING_HTTP_IMAGE_CANARY_RUN_ID: runId,
-      STAGING_HTTP_IMAGE_CANARY_USER_ID: userId,
-      STAGING_HTTP_IMAGE_CANARY_WORKSPACE_ID: workspaceId,
-      STAGING_HTTP_IMAGE_CANARY_EXPIRES_AT: new Date(Date.now() + 60_000).toISOString(),
+      STAGING_IMAGE_CANARY_MODE: "staging_single_run",
+      STAGING_IMAGE_CANARY_RUN_ID: runId,
+      STAGING_IMAGE_CANARY_USER_ID: userId,
+      STAGING_IMAGE_CANARY_WORKSPACE_ID: workspaceId,
+      STAGING_IMAGE_CANARY_SOURCE_KEY: sourceKey,
+      STAGING_IMAGE_CANARY_EXPIRES_AT: new Date(Date.now() + 60_000).toISOString(),
     } as any;
-    expect(publicationFeatureEnabled(canary, userId, workspaceId)).toBe(true);
+    expect(publicationFeatureEnabled(canary, userId, workspaceId)).toBe(false);
     expect(publicationFeatureEnabled(canary, userId, workspaceId, runId)).toBe(true);
+    expect(publicationSourceFeatureEnabled(canary, userId, workspaceId, sourceKey)).toBe(true);
+    expect(publicationSourceFeatureEnabled(canary, userId, workspaceId, `users/${userId}/text-submissions/other.json`)).toBe(false);
     expect(visualProductionFeatureEnabled(canary, userId, workspaceId, runId)).toBe(true);
     expect(publicationFeatureEnabled(canary, userId, workspaceId, `run_v3_${"b".repeat(64)}`)).toBe(false);
     expect(visualProductionFeatureEnabled(canary, userId, workspaceId, `run_v3_${"b".repeat(64)}`)).toBe(false);
     expect(publicationFeatureEnabled({ ...canary, DEPLOY_ENVIRONMENT: "production" }, userId, workspaceId, runId)).toBe(false);
-    expect(publicationFeatureEnabled({ ...canary, STAGING_HTTP_IMAGE_CANARY_EXPIRES_AT: new Date(Date.now() - 1).toISOString() }, userId, workspaceId, runId)).toBe(false);
-    expect(visualProductionFeatureEnabled({ ...canary, STAGING_HTTP_IMAGE_CANARY_EXPIRES_AT: new Date(Date.now() + 60 * 60 * 1000 + 1).toISOString() }, userId, workspaceId, runId)).toBe(false);
+    expect(publicationFeatureEnabled({ ...canary, STAGING_IMAGE_CANARY_EXPIRES_AT: new Date(Date.now() - 1).toISOString() }, userId, workspaceId, runId)).toBe(false);
+    expect(visualProductionFeatureEnabled({ ...canary, STAGING_IMAGE_CANARY_EXPIRES_AT: new Date(Date.now() + 60 * 60 * 1000 + 1).toISOString() }, userId, workspaceId, runId)).toBe(false);
   });
 
   it("rejects extra nested dynamic pin keys", () => {

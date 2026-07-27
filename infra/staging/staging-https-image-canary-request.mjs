@@ -6,7 +6,7 @@ const MAX_RESPONSE_BYTES = 1024 * 1024;
 const RUN_ID = /^run_v3_[a-f0-9]{64}$/;
 const HANDOFF_ID = /^handoff_v3_[a-f0-9]{64}$/;
 
-export class StagingHttpCanaryRequestError extends Error {
+export class StagingHttpsCanaryRequestError extends Error {
   constructor(code) {
     super(code);
     this.code = code;
@@ -14,7 +14,7 @@ export class StagingHttpCanaryRequestError extends Error {
 }
 
 function fail(code) {
-  throw new StagingHttpCanaryRequestError(code);
+  throw new StagingHttpsCanaryRequestError(code);
 }
 
 function exactBaseUrl(value, attestedValue) {
@@ -54,7 +54,7 @@ async function boundedJson(response) {
     if (!value || typeof value !== "object" || Array.isArray(value)) fail("canary_response_invalid");
     return value;
   } catch (error) {
-    if (error instanceof StagingHttpCanaryRequestError) throw error;
+    if (error instanceof StagingHttpsCanaryRequestError) throw error;
     fail("canary_response_invalid");
   }
 }
@@ -74,7 +74,7 @@ async function postJson({ baseUrl, attestedBaseUrl, path, token, body, fetchImpl
       body: JSON.stringify(body),
     });
   } catch (error) {
-    if (error instanceof StagingHttpCanaryRequestError) throw error;
+    if (error instanceof StagingHttpsCanaryRequestError) throw error;
     fail("canary_request_failed");
   }
   return { status: response.status, body: await boundedJson(response) };
@@ -160,7 +160,7 @@ async function main() {
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   main().catch(error => {
-    process.stderr.write(`${error instanceof StagingHttpCanaryRequestError ? error.code : "canary_request_failed"}\n`);
+    process.stderr.write(`${error instanceof StagingHttpsCanaryRequestError ? error.code : "canary_request_failed"}\n`);
     process.exitCode = 1;
   });
 }

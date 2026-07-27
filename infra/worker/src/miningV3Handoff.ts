@@ -6,7 +6,7 @@ import {
   handleFiveAgentPublishingInternalRoute,
   type FiveAgentStartBody,
 } from "./fiveAgentPublishing";
-import { CANONICAL_EDITORIAL_SCHEMA_VERSION, PUBLICATION_SCHEMA_VERSION, publicationFeatureEnabled } from "./publicationProjection";
+import { CANONICAL_EDITORIAL_SCHEMA_VERSION, PUBLICATION_SCHEMA_VERSION, publicationSourceFeatureEnabled } from "./publicationProjection";
 import { coordinatorShardName, type EditorialCoordinatorAgent, type EditorialRuntimeEnv } from "./editorialAgents";
 import {
   isExactWave2PublicationSkillPins,
@@ -1408,8 +1408,8 @@ async function startExistingV3Run(env: MiningV3HandoffEnv, marker: HandoffMarker
 
 type StartInvoker = (marker: HandoffMarker, transcript: TranscriptRef) => Promise<Response>;
 
-function isV3Enabled(env: MiningV3HandoffEnv, marker: Pick<HandoffMarker, "user_id" | "workspace_id">): boolean {
-  return publicationFeatureEnabled(env, marker.user_id, marker.workspace_id);
+function isV3Enabled(env: MiningV3HandoffEnv, marker: Pick<HandoffMarker, "user_id" | "workspace_id" | "source_key">): boolean {
+  return publicationSourceFeatureEnabled(env, marker.user_id, marker.workspace_id, marker.source_key);
 }
 
 async function eligibility(env: MiningV3HandoffEnv, sourceKeyValue: string): Promise<Response> {
@@ -1418,7 +1418,7 @@ async function eligibility(env: MiningV3HandoffEnv, sourceKeyValue: string): Pro
   if (existing.length === 0 && await v3HistoryExists(env, recording)) {
     return response({ decision: "v3_hold", reason: "v3_history_without_handoff_marker" }, 202);
   }
-  const enabled = publicationFeatureEnabled(env, recording.user_id, recording.workspace_id);
+  const enabled = publicationSourceFeatureEnabled(env, recording.user_id, recording.workspace_id, recording.r2_key);
   if (!enabled) {
     if (existing.length === 0) return response({ decision: "legacy" });
     return response({ decision: "v3_hold", reason: "v3_disabled_after_marker" }, 202);
