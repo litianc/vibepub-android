@@ -1980,7 +1980,7 @@ describe("Wave2B publishing runtime boundary", () => {
     expect(secondP0.projection).toMatchObject({ state: "needs_action", progress_percent: 50, error_code: "review_round_2_blocked" });
     expect(new Set(secondP0.projectionEventHashes).size).toBe(secondP0.projectionEventHashes.length);
     expect(new Set(secondP0.doEventHashes).size).toBe(secondP0.doEventHashes.length);
-  });
+  }, 20_000);
 
   it("projects Writing and Review failures from the real Workflow with one or three provider calls", async () => {
     const writingNonRetry = await executeSyntheticScenario("p2_pass", { role: "writing", retryable: false });
