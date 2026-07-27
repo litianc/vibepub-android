@@ -1,0 +1,69 @@
+{
+  "name": "synthetic-editorial-pipeline-phase1",
+  "version": {
+    "article_id": "article_synthetic_001",
+    "recording_id": 1,
+    "source": "initial",
+    "title": "A small systems note",
+    "body": "A short opening.\nA second paragraph with a measured claim.",
+    "blocks": [
+      { "block_id": "b_intro", "kind": "paragraph", "order": 0, "text": "A short opening." },
+      { "block_id": "b_claim", "kind": "paragraph", "order": 1, "text": "A second paragraph with a measured claim.", "claim_ids": ["claim_1"] }
+    ],
+    "claim_ledger": [
+      {
+        "claim_id": "claim_1",
+        "block_id": "b_claim",
+        "classification": "source_fact",
+        "verification_required": true,
+        "verification_status": "pending"
+      }
+    ],
+    "title_candidates": ["A small systems note", "A systems note"],
+    "cover_title": ["A small systems note"],
+    "formatting_skill_id": "md_to_wechat",
+    "formatting_skill_version": "1.0.0",
+    "idempotency_key": "synthetic-v1"
+  },
+  "p1_review": {
+    "findings": [
+      {
+        "severity": "P1",
+        "code": "unsupported_numeric_claim",
+        "block_id": "b_claim",
+        "suggested_action": "Verify the number before drafting.",
+        "requires_human": false
+      }
+    ],
+    "decision": "revise",
+    "idempotency_key": "synthetic-review-v1"
+  },
+  "p0_review": {
+    "findings": [
+      {
+        "severity": "P0",
+        "code": "private_data_exposure",
+        "block_id": "b_claim",
+        "suggested_action": "Remove the private data.",
+        "requires_human": true
+      }
+    ],
+    "decision": "block",
+    "idempotency_key": "synthetic-review-p0"
+  },
+  "visual_plan": {
+    "idempotency_key": "synthetic-visual-v1",
+    "items": [
+      {
+        "visual_id": "visual_claim_1",
+        "block_id": "b_claim",
+        "purpose": "Explain the verified claim.",
+        "kind": "chart",
+        "aspect_ratio": "4:3",
+        "alt": "A synthetic verification chart.",
+        "source": "data",
+        "data_provenance": "fixture://synthetic/claim-1"
+      }
+    ]
+  }
+}

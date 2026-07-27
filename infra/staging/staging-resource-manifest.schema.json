@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "VibePub staging resource manifest",
+  "type": "object",
+  "required": ["schema_version", "mode", "environment", "main", "writing", "review", "image", "wechat"],
+  "properties": {
+    "schema_version": { "const": "vibepub-staging-resource-manifest.v1" },
+    "mode": { "enum": ["synthetic", "deploy"] },
+    "environment": { "const": "staging" },
+    "main": { "$ref": "#/$defs/main" },
+    "writing": { "$ref": "#/$defs/d1Worker" },
+    "review": { "$ref": "#/$defs/worker" },
+    "image": { "$ref": "#/$defs/bucketWorker" },
+    "wechat": { "$ref": "#/$defs/d1BucketWorker" }
+  },
+  "$defs": {
+    "worker": {
+      "type": "object",
+      "required": ["name"],
+      "properties": { "name": { "type": "string" } },
+      "additionalProperties": false
+    },
+    "database": {
+      "type": "object",
+      "required": ["name", "id"],
+      "properties": {
+        "name": { "type": "string" },
+        "id": { "type": "string", "format": "uuid" }
+      },
+      "additionalProperties": false
+    },
+    "d1Worker": {
+      "type": "object",
+      "required": ["name", "d1"],
+      "properties": {
+        "name": { "type": "string" },
+        "d1": { "$ref": "#/$defs/database" }
+      },
+      "additionalProperties": false
+    },
+    "bucketWorker": {
+      "type": "object",
+      "required": ["name", "results_bucket"],
+      "properties": {
+        "name": { "type": "string" },
+        "results_bucket": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "d1BucketWorker": {
+      "type": "object",
+      "required": ["name", "d1", "results_bucket"],
+      "properties": {
+        "name": { "type": "string" },
+        "d1": { "$ref": "#/$defs/database" },
+        "results_bucket": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "main": {
+      "type": "object",
+      "required": ["name", "files_bucket", "d1", "services", "workflows", "public_base_url", "v3_flags", "allowlists"],
+      "properties": {
+        "name": { "type": "string" },
+        "files_bucket": { "type": "string" },
+        "d1": { "$ref": "#/$defs/database" },
+        "services": {
+          "type": "object",
+          "required": ["writing", "review", "image", "wechat"],
+          "properties": {
+            "writing": { "type": "string" },
+            "review": { "type": "string" },
+            "image": { "type": "string" },
+            "wechat": { "type": "string" }
+          },
+          "additionalProperties": false
+        },
+        "workflows": {
+          "type": "object",
+          "required": ["editorial", "five_agent"],
+          "properties": {
+            "editorial": { "type": "string" },
+            "five_agent": { "type": "string" }
+          },
+          "additionalProperties": false
+        },
+        "public_base_url": { "type": "string" },
+        "v3_flags": { "type": "object" },
+        "allowlists": { "type": "object" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

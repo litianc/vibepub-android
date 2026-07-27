@@ -1,0 +1,580 @@
+name: Wave 2E Staging Gate
+
+on:
+  pull_request:
+    paths:
+      - "infra/worker/**"
+      - "infra/writing-agent/**"
+      - "infra/review-agent/**"
+      - "infra/image-generation-adapter/**"
+      - "infra/wechat-publishing-adapter/**"
+      - "infra/mining/**"
+      - "infra/staging/**"
+      - ".github/workflows/wave2e-staging.yml"
+  push:
+    branches: [main]
+    paths:
+      - "infra/worker/**"
+      - "infra/writing-agent/**"
+      - "infra/review-agent/**"
+      - "infra/image-generation-adapter/**"
+      - "infra/wechat-publishing-adapter/**"
+      - "infra/mining/**"
+      - "infra/staging/**"
+      - ".github/workflows/wave2e-staging.yml"
+  workflow_dispatch:
+    inputs:
+      deploy:
+        description: "Set true only after vibepub-staging Environment approval"
+        required: true
+        default: "false"
+        type: choice
+        options: ["false", "true"]
+      data_prepared_attestation:
+        description: "Exact literal after isolated main/writing D1 backups and additive migration/schema verification"
+        required: true
+        default: "false"
+        type: choice
+        options: ["false", "staging_d1_backup_and_additive_migrations_verified_v1"]
+      mining_readiness_attestation:
+        description: "Exact literal for unscheduled Mining readiness only; this never launches Mining"
+        required: true
+        default: "false"
+        type: choice
+        options: ["false", "staging_mining_readiness_verified_v1"]
+
+permissions:
+  contents: read
+
+# Protected staging deployment runs serialize globally. Synthetic validation gets
+# a unique group per workflow run and therefore does not block PR or push CI.
+concurrency:
+  group: ${{ github.event_name == 'workflow_dispatch' && inputs.deploy == 'true' && 'vibepub-staging-deploy' || format('wave2e-staging-validation-{0}', github.run_id) }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Synthetic staging validation only
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install all Worker and Mining dependencies without deployment credentials
+        run: |
+          for directory in infra/worker infra/writing-agent infra/review-agent infra/image-generation-adapter infra/wechat-publishing-adapter infra/mining; do
+            npm ci --prefix "$directory"
+          done
+      - name: Validate renderer, release gate, and workflow contracts
+        run: node --test infra/staging/test/*.test.mjs
+      - name: Render synthetic staging configs
+        env:
+          STAGING_OUT_DIR: ${{ runner.temp }}/vibepub-staging-config
+        run: |
+          node infra/staging/render-staging-config.mjs \
+            --manifest infra/staging/fixtures/staging-resource-manifest.synthetic.json \
+            --out-dir "$STAGING_OUT_DIR" \
+            --intent dry-run
+          node infra/staging/verify-staging-config.mjs \
+            --manifest infra/staging/fixtures/staging-resource-manifest.synthetic.json \
+            --out-dir "$STAGING_OUT_DIR" \
+            --intent dry-run
+      - name: Test and typecheck all affected packages
+        run: |
+          npm test --prefix infra/worker
+          npm run test:runtime --prefix infra/worker
+          npm run typecheck --prefix infra/worker
+          npm test --prefix infra/mining
+          npx --prefix infra/mining tsc --noEmit -p infra/mining/tsconfig.json
+          npm test --prefix infra/writing-agent
+          npm run typecheck --prefix infra/writing-agent
+          npm test --prefix infra/review-agent
+          npm run typecheck --prefix infra/review-agent
+          npm test --prefix infra/image-generation-adapter
+          npm run typecheck --prefix infra/image-generation-adapter
+          npm test --prefix infra/wechat-publishing-adapter
+          npm run typecheck --prefix infra/wechat-publishing-adapter
+      - name: Dry-run all rendered staging targets without network resources
+        env:
+          STAGING_OUT_DIR: ${{ runner.temp }}/vibepub-staging-config
+        run: |
+          npx --prefix infra/worker wrangler deploy --dry-run --config "$STAGING_OUT_DIR/main.wrangler.toml"
+          npx --prefix infra/writing-agent wrangler deploy --dry-run --config "$STAGING_OUT_DIR/writing.wrangler.toml"
+          npx --prefix infra/review-agent wrangler deploy --dry-run --config "$STAGING_OUT_DIR/review.wrangler.toml"
+          npx --prefix infra/image-generation-adapter wrangler deploy --dry-run --config "$STAGING_OUT_DIR/image.wrangler.toml"
+          npx --prefix infra/wechat-publishing-adapter wrangler deploy --dry-run --config "$STAGING_OUT_DIR/wechat.wrangler.toml"
+
+  attest-staging-data:
+    name: Attest isolated staging D1 backup and additive migration evidence
+    if: github.event_name == 'workflow_dispatch' && inputs.deploy == 'true'
+    needs: validate
+    runs-on: ubuntu-latest
+    environment: vibepub-staging
+    outputs:
+      manifest_sha256: ${{ steps.evidence.outputs.manifest_sha256 }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Require reviewed D1 backup, migration, and schema evidence before any remote bootstrap
+        id: evidence
+        env:
+          STAGING_RESOURCE_MANIFEST_JSON: ${{ secrets.STAGING_RESOURCE_MANIFEST_JSON }}
+          STAGING_DATA_PREPARED_EVIDENCE_JSON: ${{ secrets.STAGING_DATA_PREPARED_EVIDENCE_JSON }}
+          DATA_PREPARED_ATTESTATION: ${{ inputs.data_prepared_attestation }}
+        run: |
+          test -n "$STAGING_RESOURCE_MANIFEST_JSON" || { echo "::error::STAGING_RESOURCE_MANIFEST_JSON is required"; exit 1; }
+          test -n "$STAGING_DATA_PREPARED_EVIDENCE_JSON" || { echo "::error::STAGING_DATA_PREPARED_EVIDENCE_JSON is required"; exit 1; }
+          printf '%s' "$STAGING_RESOURCE_MANIFEST_JSON" > "$RUNNER_TEMP/staging-resource-manifest.json"
+          echo "manifest_sha256=$(sha256sum "$RUNNER_TEMP/staging-resource-manifest.json" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          printf '%s' "$STAGING_DATA_PREPARED_EVIDENCE_JSON" > "$RUNNER_TEMP/staging-data-evidence.json"
+          node infra/staging/validate-staging-data-attestation.mjs \
+            "$RUNNER_TEMP/staging-resource-manifest.json" \
+            "$RUNNER_TEMP/staging-data-evidence.json" \
+            "$DATA_PREPARED_ATTESTATION" | tee "$RUNNER_TEMP/staging-data-summary.json"
+          echo "## Staging data preparation evidence" >> "$GITHUB_STEP_SUMMARY"
+          node -e 'const e=require(process.argv[1]); console.log(`- main D1 backup: ${e.main_backup_id}\n- main migrations: ${e.main_migrations.join(", ")}\n- main schema evidence: ${e.main_schema_evidence_hash}\n- writing D1 backup: ${e.writing_backup_id}\n- writing migrations: ${e.writing_migrations.join(", ")}\n- writing schema evidence: ${e.writing_schema_evidence_hash}`)' "$RUNNER_TEMP/staging-data-summary.json" >> "$GITHUB_STEP_SUMMARY"
+      - name: Declare no remote migration action
+        run: echo "No remote D1 migration is run by this workflow; attestation proves an operator completed additive staging preparation." >> "$GITHUB_STEP_SUMMARY"
+
+  attest-staging-origin:
+    name: Attest the exact protected staging workers.dev origin
+    if: github.event_name == 'workflow_dispatch' && inputs.deploy == 'true'
+    needs: attest-staging-data
+    runs-on: ubuntu-latest
+    environment: vibepub-staging
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Prove the manifest origin belongs to the protected Cloudflare account
+        env:
+          STAGING_RESOURCE_MANIFEST_JSON: ${{ secrets.STAGING_RESOURCE_MANIFEST_JSON }}
+          EXPECTED_MANIFEST_SHA256: ${{ needs.attest-staging-data.outputs.manifest_sha256 }}
+          STAGING_PUBLIC_BASE_URL: ${{ vars.STAGING_PUBLIC_BASE_URL }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          for name in STAGING_RESOURCE_MANIFEST_JSON EXPECTED_MANIFEST_SHA256 STAGING_PUBLIC_BASE_URL CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_API_TOKEN; do
+            test -n "${!name}" || { echo "::error::$name is required for staging origin attestation"; exit 1; }
+          done
+          printf '%s' "$STAGING_RESOURCE_MANIFEST_JSON" > "$RUNNER_TEMP/staging-resource-manifest.json"
+          test "$(sha256sum "$RUNNER_TEMP/staging-resource-manifest.json" | awk '{print $1}')" = "$EXPECTED_MANIFEST_SHA256" || { echo "::error::staging manifest changed after data attestation"; exit 1; }
+          node infra/staging/attest-staging-origin.mjs --preflight "$RUNNER_TEMP/staging-resource-manifest.json" "$STAGING_PUBLIC_BASE_URL" "$CLOUDFLARE_ACCOUNT_ID"
+          curl --fail-with-body --silent --show-error --connect-timeout 5 --max-time 15 \
+            --header "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/subdomain" \
+            --output "$RUNNER_TEMP/workers-subdomain.json"
+          node infra/staging/attest-staging-origin.mjs "$RUNNER_TEMP/staging-resource-manifest.json" "$STAGING_PUBLIC_BASE_URL" "$CLOUDFLARE_ACCOUNT_ID" "$RUNNER_TEMP/workers-subdomain.json"
+          echo "## Staging origin attested" >> "$GITHUB_STEP_SUMMARY"
+          echo "The protected exact staging origin was bound to the attested manifest and account-scoped Workers subdomain without exposing the manifest or credentials." >> "$GITHUB_STEP_SUMMARY"
+
+  deploy-writing:
+    name: Deploy approved staging Writing adapter
+    if: github.event_name == 'workflow_dispatch' && inputs.deploy == 'true'
+    needs: [attest-staging-data, attest-staging-origin]
+    runs-on: ubuntu-latest
+    environment: vibepub-staging
+    env:
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Render and verify approved Writing target
+        env:
+          STAGING_RESOURCE_MANIFEST_JSON: ${{ secrets.STAGING_RESOURCE_MANIFEST_JSON }}
+          EXPECTED_MANIFEST_SHA256: ${{ needs.attest-staging-data.outputs.manifest_sha256 }}
+        run: |
+          test -n "$STAGING_RESOURCE_MANIFEST_JSON" || { echo "::error::STAGING_RESOURCE_MANIFEST_JSON is required"; exit 1; }
+          printf '%s' "$STAGING_RESOURCE_MANIFEST_JSON" > "$RUNNER_TEMP/staging-resource-manifest.json"
+          test "$(sha256sum "$RUNNER_TEMP/staging-resource-manifest.json" | awk '{print $1}')" = "$EXPECTED_MANIFEST_SHA256" || { echo "::error::staging manifest changed after attestation"; exit 1; }
+          node infra/staging/render-staging-config.mjs --manifest "$RUNNER_TEMP/staging-resource-manifest.json" --out-dir "$RUNNER_TEMP/config" --intent deploy
+          node infra/staging/verify-staging-config.mjs --manifest "$RUNNER_TEMP/staging-resource-manifest.json" --out-dir "$RUNNER_TEMP/config" --intent deploy
+      - name: Install Writing dependencies without deployment credentials
+        run: npm ci --prefix infra/writing-agent
+      - name: Record Writing rollback baseline
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          test -n "$CLOUDFLARE_API_TOKEN" || { echo "::error::CLOUDFLARE_API_TOKEN is required"; exit 1; }
+          test -n "$CLOUDFLARE_ACCOUNT_ID" || { echo "::error::CLOUDFLARE_ACCOUNT_ID is required"; exit 1; }
+          if npx --prefix infra/writing-agent wrangler deployments list --json --config "$RUNNER_TEMP/config/writing.wrangler.toml" > "$RUNNER_TEMP/writing-before.json" 2> "$RUNNER_TEMP/writing-before.err"; then
+            node infra/staging/record-staging-deployment-evidence.mjs "$RUNNER_TEMP/writing-before.json" "Writing rollback baseline" >> "$GITHUB_STEP_SUMMARY"
+          else
+            status=$?
+            node infra/staging/capture-staging-deployment-baseline.mjs "$status" "$RUNNER_TEMP/writing-before.json" "$RUNNER_TEMP/writing-before.err" "$RUNNER_TEMP/writing-baseline.json"
+            echo "- Writing rollback baseline: proven first deployment (no prior version)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Bootstrap private Writing adapter before secret sync
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: npx --prefix infra/writing-agent wrangler deploy --config "$RUNNER_TEMP/config/writing.wrangler.toml" --message "Wave2E staging bootstrap ${GITHUB_SHA}"
+      - name: Sync Writing-only secrets
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          WRITING_AGENT_TOKEN: ${{ secrets.WRITING_AGENT_TOKEN }}
+          GLM_API_KEY: ${{ secrets.GLM_API_KEY }}
+        run: |
+          test -n "$WRITING_AGENT_TOKEN" && test -n "$GLM_API_KEY" || { echo "::error::Writing secrets are required"; exit 1; }
+          printf '%s' "$WRITING_AGENT_TOKEN" | npx --prefix infra/writing-agent wrangler secret put WRITING_AGENT_TOKEN --config "$RUNNER_TEMP/config/writing.wrangler.toml"
+          printf '%s' "$GLM_API_KEY" | npx --prefix infra/writing-agent wrangler secret put GLM_API_KEY --config "$RUNNER_TEMP/config/writing.wrangler.toml"
+      - name: Deploy versioned Writing adapter
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: npx --prefix infra/writing-agent wrangler deploy --config "$RUNNER_TEMP/config/writing.wrangler.toml" --message "Wave2E staging ${GITHUB_SHA}" --var "DEPLOY_COMMIT:${GITHUB_SHA}" --var "DEPLOY_REF:${GITHUB_REF_NAME}" --var "DEPLOYED_AT:$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      - name: Record active Writing version
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          npx --prefix infra/writing-agent wrangler deployments list --json --config "$RUNNER_TEMP/config/writing.wrangler.toml" > "$RUNNER_TEMP/writing-after.json"
+          node infra/staging/record-staging-deployment-evidence.mjs "$RUNNER_TEMP/writing-after.json" "Writing active version" --require-active >> "$GITHUB_STEP_SUMMARY"
+
+  deploy-review:
+    name: Deploy approved staging Review adapter
+    if: github.event_name == 'workflow_dispatch' && inputs.deploy == 'true'
+    needs: [attest-staging-data, attest-staging-origin, deploy-writing]
+    runs-on: ubuntu-latest
+    environment: vibepub-staging
+    env:
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Render and verify approved Review target
+        env:
+          STAGING_RESOURCE_MANIFEST_JSON: ${{ secrets.STAGING_RESOURCE_MANIFEST_JSON }}
+          EXPECTED_MANIFEST_SHA256: ${{ needs.attest-staging-data.outputs.manifest_sha256 }}
+        run: |
+          test -n "$STAGING_RESOURCE_MANIFEST_JSON" || { echo "::error::STAGING_RESOURCE_MANIFEST_JSON is required"; exit 1; }
+          printf '%s' "$STAGING_RESOURCE_MANIFEST_JSON" > "$RUNNER_TEMP/staging-resource-manifest.json"
+          test "$(sha256sum "$RUNNER_TEMP/staging-resource-manifest.json" | awk '{print $1}')" = "$EXPECTED_MANIFEST_SHA256" || { echo "::error::staging manifest changed after attestation"; exit 1; }
+          node infra/staging/render-staging-config.mjs --manifest "$RUNNER_TEMP/staging-resource-manifest.json" --out-dir "$RUNNER_TEMP/config" --intent deploy
+          node infra/staging/verify-staging-config.mjs --manifest "$RUNNER_TEMP/staging-resource-manifest.json" --out-dir "$RUNNER_TEMP/config" --intent deploy
+      - name: Install Review dependencies without deployment credentials
+        run: npm ci --prefix infra/review-agent
+      - name: Record Review rollback baseline
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          test -n "$CLOUDFLARE_API_TOKEN" || { echo "::error::CLOUDFLARE_API_TOKEN is required"; exit 1; }
+          test -n "$CLOUDFLARE_ACCOUNT_ID" || { echo "::error::CLOUDFLARE_ACCOUNT_ID is required"; exit 1; }
+          if npx --prefix infra/review-agent wrangler deployments list --json --config "$RUNNER_TEMP/config/review.wrangler.toml" > "$RUNNER_TEMP/review-before.json" 2> "$RUNNER_TEMP/review-before.err"; then
+            node infra/staging/record-staging-deployment-evidence.mjs "$RUNNER_TEMP/review-before.json" "Review rollback baseline" >> "$GITHUB_STEP_SUMMARY"
+          else
+            status=$?
+            node infra/staging/capture-staging-deployment-baseline.mjs "$status" "$RUNNER_TEMP/review-before.json" "$RUNNER_TEMP/review-before.err" "$RUNNER_TEMP/review-baseline.json"
+            echo "- Review rollback baseline: proven first deployment (no prior version)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Bootstrap private Review adapter before secret sync
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: npx --prefix infra/review-agent wrangler deploy --config "$RUNNER_TEMP/config/review.wrangler.toml" --message "Wave2E staging bootstrap ${GITHUB_SHA}"
+      - name: Sync Review-only token
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          REVIEW_AGENT_TOKEN: ${{ secrets.REVIEW_AGENT_TOKEN }}
+        run: |
+          test -n "$REVIEW_AGENT_TOKEN" || { echo "::error::REVIEW_AGENT_TOKEN is required"; exit 1; }
+          printf '%s' "$REVIEW_AGENT_TOKEN" | npx --prefix infra/review-agent wrangler secret put REVIEW_AGENT_TOKEN --config "$RUNNER_TEMP/config/review.wrangler.toml"
+      - name: Deploy versioned Review adapter
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: npx --prefix infra/review-agent wrangler deploy --config "$RUNNER_TEMP/config/review.wrangler.toml" --message "Wave2E staging ${GITHUB_SHA}" --var "DEPLOY_COMMIT:${GITHUB_SHA}" --var "DEPLOY_REF:${GITHUB_REF_NAME}" --var "DEPLOYED_AT:$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      - name: Record active Review version
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          npx --prefix infra/review-agent wrangler deployments list --json --config "$RUNNER_TEMP/config/review.wrangler.toml" > "$RUNNER_TEMP/review-after.json"
+          node infra/staging/record-staging-deployment-evidence.mjs "$RUNNER_TEMP/review-after.json" "Review active version" --require-active >> "$GITHUB_STEP_SUMMARY"
+
+  deploy-image:
+    name: Deploy approved staging Image adapter
+    if: github.event_name == 'workflow_dispatch' && inputs.deploy == 'true'
+    needs: [attest-staging-data, attest-staging-origin, deploy-review]
+    runs-on: ubuntu-latest
+    environment: vibepub-staging
+    env:
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Render and verify approved Image target
+        env:
+          STAGING_RESOURCE_MANIFEST_JSON: ${{ secrets.STAGING_RESOURCE_MANIFEST_JSON }}
+          EXPECTED_MANIFEST_SHA256: ${{ needs.attest-staging-data.outputs.manifest_sha256 }}
+        run: |
+          test -n "$STAGING_RESOURCE_MANIFEST_JSON" || { echo "::error::STAGING_RESOURCE_MANIFEST_JSON is required"; exit 1; }
+          printf '%s' "$STAGING_RESOURCE_MANIFEST_JSON" > "$RUNNER_TEMP/staging-resource-manifest.json"
+          test "$(sha256sum "$RUNNER_TEMP/staging-resource-manifest.json" | awk '{print $1}')" = "$EXPECTED_MANIFEST_SHA256" || { echo "::error::staging manifest changed after attestation"; exit 1; }
+          node infra/staging/render-staging-config.mjs --manifest "$RUNNER_TEMP/staging-resource-manifest.json" --out-dir "$RUNNER_TEMP/config" --intent deploy
+          node infra/staging/verify-staging-config.mjs --manifest "$RUNNER_TEMP/staging-resource-manifest.json" --out-dir "$RUNNER_TEMP/config" --intent deploy
+      - name: Install Image dependencies without deployment credentials
+        run: npm ci --prefix infra/image-generation-adapter
+      - name: Record Image rollback baseline
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          test -n "$CLOUDFLARE_API_TOKEN" || { echo "::error::CLOUDFLARE_API_TOKEN is required"; exit 1; }
+          test -n "$CLOUDFLARE_ACCOUNT_ID" || { echo "::error::CLOUDFLARE_ACCOUNT_ID is required"; exit 1; }
+          if npx --prefix infra/image-generation-adapter wrangler deployments list --json --config "$RUNNER_TEMP/config/image.wrangler.toml" > "$RUNNER_TEMP/image-before.json" 2> "$RUNNER_TEMP/image-before.err"; then
+            node infra/staging/record-staging-deployment-evidence.mjs "$RUNNER_TEMP/image-before.json" "Image rollback baseline" >> "$GITHUB_STEP_SUMMARY"
+          else
+            status=$?
+            node infra/staging/capture-staging-deployment-baseline.mjs "$status" "$RUNNER_TEMP/image-before.json" "$RUNNER_TEMP/image-before.err" "$RUNNER_TEMP/image-baseline.json"
+            echo "- Image rollback baseline: proven first deployment (no prior version)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Bootstrap private Image adapter before secret sync
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: npx --prefix infra/image-generation-adapter wrangler deploy --config "$RUNNER_TEMP/config/image.wrangler.toml" --message "Wave2E staging bootstrap ${GITHUB_SHA}"
+      - name: Sync Image-only secrets
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          VISUAL_PRODUCTION_TOKEN: ${{ secrets.VISUAL_PRODUCTION_TOKEN }}
+          GPT_IMAGE_API_KEY: ${{ secrets.GPT_IMAGE_API_KEY }}
+        run: |
+          test -n "$VISUAL_PRODUCTION_TOKEN" && test -n "$GPT_IMAGE_API_KEY" || { echo "::error::Image secrets are required"; exit 1; }
+          printf '%s' "$VISUAL_PRODUCTION_TOKEN" | npx --prefix infra/image-generation-adapter wrangler secret put VISUAL_PRODUCTION_TOKEN --config "$RUNNER_TEMP/config/image.wrangler.toml"
+          printf '%s' "$GPT_IMAGE_API_KEY" | npx --prefix infra/image-generation-adapter wrangler secret put GPT_IMAGE_API_KEY --config "$RUNNER_TEMP/config/image.wrangler.toml"
+      - name: Deploy versioned Image adapter
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: npx --prefix infra/image-generation-adapter wrangler deploy --config "$RUNNER_TEMP/config/image.wrangler.toml" --message "Wave2E staging ${GITHUB_SHA}" --var "DEPLOY_COMMIT:${GITHUB_SHA}" --var "DEPLOY_REF:${GITHUB_REF_NAME}" --var "DEPLOYED_AT:$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      - name: Record active Image version
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          npx --prefix infra/image-generation-adapter wrangler deployments list --json --config "$RUNNER_TEMP/config/image.wrangler.toml" > "$RUNNER_TEMP/image-after.json"
+          node infra/staging/record-staging-deployment-evidence.mjs "$RUNNER_TEMP/image-after.json" "Image active version" --require-active >> "$GITHUB_STEP_SUMMARY"
+
+  deploy-wechat:
+    name: Deploy approved staging WeChat adapter
+    if: github.event_name == 'workflow_dispatch' && inputs.deploy == 'true'
+    needs: [attest-staging-data, attest-staging-origin, deploy-image]
+    runs-on: ubuntu-latest
+    environment: vibepub-staging
+    env:
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Render and verify approved WeChat target
+        env:
+          STAGING_RESOURCE_MANIFEST_JSON: ${{ secrets.STAGING_RESOURCE_MANIFEST_JSON }}
+          EXPECTED_MANIFEST_SHA256: ${{ needs.attest-staging-data.outputs.manifest_sha256 }}
+        run: |
+          test -n "$STAGING_RESOURCE_MANIFEST_JSON" || { echo "::error::STAGING_RESOURCE_MANIFEST_JSON is required"; exit 1; }
+          printf '%s' "$STAGING_RESOURCE_MANIFEST_JSON" > "$RUNNER_TEMP/staging-resource-manifest.json"
+          test "$(sha256sum "$RUNNER_TEMP/staging-resource-manifest.json" | awk '{print $1}')" = "$EXPECTED_MANIFEST_SHA256" || { echo "::error::staging manifest changed after attestation"; exit 1; }
+          node infra/staging/render-staging-config.mjs --manifest "$RUNNER_TEMP/staging-resource-manifest.json" --out-dir "$RUNNER_TEMP/config" --intent deploy
+          node infra/staging/verify-staging-config.mjs --manifest "$RUNNER_TEMP/staging-resource-manifest.json" --out-dir "$RUNNER_TEMP/config" --intent deploy
+      - name: Install WeChat dependencies without deployment credentials
+        run: npm ci --prefix infra/wechat-publishing-adapter
+      - name: Record WeChat rollback baseline
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          test -n "$CLOUDFLARE_API_TOKEN" || { echo "::error::CLOUDFLARE_API_TOKEN is required"; exit 1; }
+          test -n "$CLOUDFLARE_ACCOUNT_ID" || { echo "::error::CLOUDFLARE_ACCOUNT_ID is required"; exit 1; }
+          if npx --prefix infra/wechat-publishing-adapter wrangler deployments list --json --config "$RUNNER_TEMP/config/wechat.wrangler.toml" > "$RUNNER_TEMP/wechat-before.json" 2> "$RUNNER_TEMP/wechat-before.err"; then
+            node infra/staging/record-staging-deployment-evidence.mjs "$RUNNER_TEMP/wechat-before.json" "WeChat rollback baseline" >> "$GITHUB_STEP_SUMMARY"
+          else
+            status=$?
+            node infra/staging/capture-staging-deployment-baseline.mjs "$status" "$RUNNER_TEMP/wechat-before.json" "$RUNNER_TEMP/wechat-before.err" "$RUNNER_TEMP/wechat-baseline.json"
+            echo "- WeChat rollback baseline: proven first deployment (no prior version)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Bootstrap private WeChat adapter before secret sync
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: npx --prefix infra/wechat-publishing-adapter wrangler deploy --config "$RUNNER_TEMP/config/wechat.wrangler.toml" --message "Wave2E staging bootstrap ${GITHUB_SHA}"
+      - name: Sync WeChat-only secrets
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          WECHAT_PUBLISHING_TOKEN: ${{ secrets.WECHAT_PUBLISHING_TOKEN }}
+          CREDENTIAL_ENCRYPTION_KEY: ${{ secrets.CREDENTIAL_ENCRYPTION_KEY }}
+        run: |
+          test -n "$WECHAT_PUBLISHING_TOKEN" && test -n "$CREDENTIAL_ENCRYPTION_KEY" || { echo "::error::WeChat secrets are required"; exit 1; }
+          printf '%s' "$WECHAT_PUBLISHING_TOKEN" | npx --prefix infra/wechat-publishing-adapter wrangler secret put WECHAT_PUBLISHING_TOKEN --config "$RUNNER_TEMP/config/wechat.wrangler.toml"
+          printf '%s' "$CREDENTIAL_ENCRYPTION_KEY" | npx --prefix infra/wechat-publishing-adapter wrangler secret put CREDENTIAL_ENCRYPTION_KEY --config "$RUNNER_TEMP/config/wechat.wrangler.toml"
+      - name: Deploy versioned WeChat adapter
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: npx --prefix infra/wechat-publishing-adapter wrangler deploy --config "$RUNNER_TEMP/config/wechat.wrangler.toml" --message "Wave2E staging ${GITHUB_SHA}" --var "DEPLOY_COMMIT:${GITHUB_SHA}" --var "DEPLOY_REF:${GITHUB_REF_NAME}" --var "DEPLOYED_AT:$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      - name: Record active WeChat version
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          npx --prefix infra/wechat-publishing-adapter wrangler deployments list --json --config "$RUNNER_TEMP/config/wechat.wrangler.toml" > "$RUNNER_TEMP/wechat-after.json"
+          node infra/staging/record-staging-deployment-evidence.mjs "$RUNNER_TEMP/wechat-after.json" "WeChat active version" --require-active >> "$GITHUB_STEP_SUMMARY"
+
+  deploy-main:
+    name: Deploy approved staging main Worker
+    if: github.event_name == 'workflow_dispatch' && inputs.deploy == 'true'
+    needs: [attest-staging-data, attest-staging-origin, deploy-writing, deploy-review, deploy-image, deploy-wechat]
+    runs-on: ubuntu-latest
+    environment: vibepub-staging
+    env:
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    outputs:
+      manifest_sha256: ${{ needs.attest-staging-data.outputs.manifest_sha256 }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Render and dynamically verify main service bindings
+        env:
+          STAGING_RESOURCE_MANIFEST_JSON: ${{ secrets.STAGING_RESOURCE_MANIFEST_JSON }}
+          EXPECTED_MANIFEST_SHA256: ${{ needs.attest-staging-data.outputs.manifest_sha256 }}
+        run: |
+          test -n "$STAGING_RESOURCE_MANIFEST_JSON" || { echo "::error::STAGING_RESOURCE_MANIFEST_JSON is required"; exit 1; }
+          printf '%s' "$STAGING_RESOURCE_MANIFEST_JSON" > "$RUNNER_TEMP/staging-resource-manifest.json"
+          test "$(sha256sum "$RUNNER_TEMP/staging-resource-manifest.json" | awk '{print $1}')" = "$EXPECTED_MANIFEST_SHA256" || { echo "::error::staging manifest changed after attestation"; exit 1; }
+          node infra/staging/render-staging-config.mjs --manifest "$RUNNER_TEMP/staging-resource-manifest.json" --out-dir "$RUNNER_TEMP/config" --intent deploy
+          node infra/staging/verify-staging-config.mjs --manifest "$RUNNER_TEMP/staging-resource-manifest.json" --out-dir "$RUNNER_TEMP/config" --intent deploy
+      - name: Install main Worker dependencies without deployment credentials
+        run: npm ci --prefix infra/worker
+      - name: Record main rollback baseline
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          test -n "$CLOUDFLARE_API_TOKEN" || { echo "::error::CLOUDFLARE_API_TOKEN is required"; exit 1; }
+          test -n "$CLOUDFLARE_ACCOUNT_ID" || { echo "::error::CLOUDFLARE_ACCOUNT_ID is required"; exit 1; }
+          if npx --prefix infra/worker wrangler deployments list --json --config "$RUNNER_TEMP/config/main.wrangler.toml" > "$RUNNER_TEMP/main-before.json" 2> "$RUNNER_TEMP/main-before.err"; then
+            node infra/staging/record-staging-deployment-evidence.mjs "$RUNNER_TEMP/main-before.json" "Main rollback baseline" >> "$GITHUB_STEP_SUMMARY"
+          else
+            status=$?
+            node infra/staging/capture-staging-deployment-baseline.mjs "$status" "$RUNNER_TEMP/main-before.json" "$RUNNER_TEMP/main-before.err" "$RUNNER_TEMP/main-baseline.json"
+            echo "- Main rollback baseline: proven first deployment (no prior version)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Bootstrap route-free, flag-off main Worker before secret sync
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: npx --prefix infra/worker wrangler deploy --config "$RUNNER_TEMP/config/main.wrangler.toml" --message "Wave2E staging bootstrap ${GITHUB_SHA}"
+      - name: Sync main-only and service-bound secrets
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          WRITING_AGENT_TOKEN: ${{ secrets.WRITING_AGENT_TOKEN }}
+          REVIEW_AGENT_TOKEN: ${{ secrets.REVIEW_AGENT_TOKEN }}
+          VISUAL_PRODUCTION_TOKEN: ${{ secrets.VISUAL_PRODUCTION_TOKEN }}
+          WECHAT_PUBLISHING_TOKEN: ${{ secrets.WECHAT_PUBLISHING_TOKEN }}
+          MINING_SERVICE_TOKEN: ${{ secrets.MINING_SERVICE_TOKEN }}
+          MINING_V3_HANDOFF_TOKEN: ${{ secrets.MINING_V3_HANDOFF_TOKEN }}
+          CREDENTIAL_ENCRYPTION_KEY: ${{ secrets.CREDENTIAL_ENCRYPTION_KEY }}
+        run: |
+          for name in WRITING_AGENT_TOKEN REVIEW_AGENT_TOKEN VISUAL_PRODUCTION_TOKEN WECHAT_PUBLISHING_TOKEN MINING_SERVICE_TOKEN MINING_V3_HANDOFF_TOKEN CREDENTIAL_ENCRYPTION_KEY; do
+            test -n "${!name}" || { echo "::error::$name is required"; exit 1; }
+            printf '%s' "${!name}" | npx --prefix infra/worker wrangler secret put "$name" --config "$RUNNER_TEMP/config/main.wrangler.toml"
+          done
+      - name: Deploy versioned flag-off main Worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: npx --prefix infra/worker wrangler deploy --config "$RUNNER_TEMP/config/main.wrangler.toml" --message "Wave2E staging ${GITHUB_SHA}" --var "DEPLOY_COMMIT:${GITHUB_SHA}" --var "DEPLOY_REF:${GITHUB_REF_NAME}" --var "DEPLOYED_AT:$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      - name: Record active main version
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          npx --prefix infra/worker wrangler deployments list --json --config "$RUNNER_TEMP/config/main.wrangler.toml" > "$RUNNER_TEMP/main-after.json"
+          node infra/staging/record-staging-deployment-evidence.mjs "$RUNNER_TEMP/main-after.json" "Main active version" --require-active >> "$GITHUB_STEP_SUMMARY"
+
+  verify-staging-health:
+    name: Verify main and private adapter health/version evidence
+    if: github.event_name == 'workflow_dispatch' && inputs.deploy == 'true'
+    needs: [deploy-main, attest-staging-origin]
+    runs-on: ubuntu-latest
+    environment: vibepub-staging
+    outputs:
+      manifest_sha256: ${{ needs.deploy-main.outputs.manifest_sha256 }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Query main-mediated private adapter health without provider work
+        env:
+          STAGING_RESOURCE_MANIFEST_JSON: ${{ secrets.STAGING_RESOURCE_MANIFEST_JSON }}
+          EXPECTED_MANIFEST_SHA256: ${{ needs.deploy-main.outputs.manifest_sha256 }}
+        run: |
+          printf '%s' "$STAGING_RESOURCE_MANIFEST_JSON" > "$RUNNER_TEMP/staging-resource-manifest.json"
+          test "$(sha256sum "$RUNNER_TEMP/staging-resource-manifest.json" | awk '{print $1}')" = "$EXPECTED_MANIFEST_SHA256" || { echo "::error::staging manifest changed after attestation"; exit 1; }
+          BASE_URL="$(node -e 'const m=require(process.argv[1]); process.stdout.write(m.main.public_base_url)' "$RUNNER_TEMP/staging-resource-manifest.json")"
+          for attempt in 1 2 3 4 5; do
+            status="$(curl --silent --show-error --connect-timeout 5 --max-time 15 --output "$RUNNER_TEMP/staging-health.json" --write-out '%{http_code}' "$BASE_URL/health?adapters=1")" || status="000"
+            if [ "$status" = "200" ]; then
+              if node infra/staging/verify-staging-health.mjs "$RUNNER_TEMP/staging-health.json" "$GITHUB_SHA" "$GITHUB_REF_NAME"; then
+                exit 0
+              fi
+              echo "Stale staging version evidence (attempt $attempt/5); retrying propagation"
+            elif [ "$status" -ge 400 ] && [ "$status" -lt 500 ] && [ "$status" != "429" ]; then
+              echo "::error::staging health returned terminal HTTP $status"
+              exit 1
+            fi
+            if [ "$attempt" = "5" ]; then
+              echo "::error::staging health/version evidence did not converge"
+              exit 1
+            fi
+            echo "Waiting for staging health propagation (attempt $attempt/5, HTTP $status)"
+            sleep $((attempt * 2))
+          done
+
+  attest-staging-mining-readiness:
+    name: Attest isolated unscheduled staging Mining readiness
+    if: github.event_name == 'workflow_dispatch' && inputs.deploy == 'true' && inputs.mining_readiness_attestation == 'staging_mining_readiness_verified_v1'
+    needs: [verify-staging-health, attest-staging-data, attest-staging-origin]
+    runs-on: ubuntu-latest
+    environment: vibepub-staging
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate unscheduled Mining readiness without starting Mining
+        env:
+          STAGING_RESOURCE_MANIFEST_JSON: ${{ secrets.STAGING_RESOURCE_MANIFEST_JSON }}
+          EXPECTED_MANIFEST_SHA256: ${{ needs.attest-staging-data.outputs.manifest_sha256 }}
+          STAGING_MINING_CONFIG_JSON: ${{ secrets.STAGING_MINING_CONFIG_JSON }}
+          MINING_SERVICE_TOKEN: ${{ secrets.MINING_SERVICE_TOKEN }}
+          MINING_V3_HANDOFF_TOKEN: ${{ secrets.MINING_V3_HANDOFF_TOKEN }}
+        run: |
+          for name in STAGING_RESOURCE_MANIFEST_JSON STAGING_MINING_CONFIG_JSON MINING_SERVICE_TOKEN MINING_V3_HANDOFF_TOKEN; do
+            test -n "${!name}" || { echo "::error::$name is required for isolated Mining readiness"; exit 1; }
+          done
+          printf '%s' "$STAGING_RESOURCE_MANIFEST_JSON" > "$RUNNER_TEMP/staging-resource-manifest.json"
+          test "$(sha256sum "$RUNNER_TEMP/staging-resource-manifest.json" | awk '{print $1}')" = "$EXPECTED_MANIFEST_SHA256" || { echo "::error::staging manifest changed after attestation"; exit 1; }
+          printf '%s' "$STAGING_MINING_CONFIG_JSON" > "$RUNNER_TEMP/staging-mining-readiness.json"
+          node infra/staging/validate-staging-mining-readiness.mjs "$RUNNER_TEMP/staging-resource-manifest.json" "$RUNNER_TEMP/staging-mining-readiness.json"
+          BASE_URL="$(node -e 'const m=require(process.argv[1]); process.stdout.write(m.main.public_base_url)' "$RUNNER_TEMP/staging-resource-manifest.json")"
+          for attempt in 1 2 3 4 5; do
+            status="$(curl --silent --show-error --connect-timeout 5 --max-time 15 --output "$RUNNER_TEMP/staging-health.json" --write-out '%{http_code}' "$BASE_URL/health?adapters=1")" || status="000"
+            if [ "$status" = "200" ]; then
+              if node infra/staging/verify-staging-health.mjs "$RUNNER_TEMP/staging-health.json" "$GITHUB_SHA" "$GITHUB_REF_NAME"; then
+                break
+              fi
+              echo "Stale staging version evidence (attempt $attempt/5); retrying propagation"
+            elif [ "$status" -ge 400 ] && [ "$status" -lt 500 ] && [ "$status" != "429" ]; then
+              echo "::error::staging health returned terminal HTTP $status"
+              exit 1
+            fi
+            if [ "$attempt" = "5" ]; then
+              echo "::error::staging health/version evidence did not converge"
+              exit 1
+            fi
+            echo "Waiting for staging health propagation (attempt $attempt/5, HTTP $status)"
+            sleep $((attempt * 2))
+          done
+          STATUS="$(curl --silent --show-error --connect-timeout 5 --max-time 15 --output "$RUNNER_TEMP/mining-unauthorized.json" --write-out '%{http_code}' --request POST "$BASE_URL/api/internal/v3/mining-handoffs/eligibility" --header 'content-type: application/json' --data '{}')"
+          test "$STATUS" = "401" || { echo "::error::unauthenticated V3 handoff boundary must return 401"; exit 1; }
+          CLAIM_STATUS="$(curl --silent --show-error --connect-timeout 5 --max-time 15 --output "$RUNNER_TEMP/mining-claim-probe.json" --write-out '%{http_code}' --request POST "$BASE_URL/api/internal/mining-claims" --header "Authorization: Bearer $MINING_SERVICE_TOKEN" --header 'content-type: application/json' --data '{"action":"claim","user_id":"staging_probe","target_key":"../invalid","claim_id":"staging-probe"}')"
+          test "$CLAIM_STATUS" = "400" || { echo "::error::MINING_SERVICE_TOKEN probe must return invalid_claim_target"; exit 1; }
+          node -e 'const body=require(process.argv[1]); if (body.error !== "invalid_claim_target") process.exit(1)' "$RUNNER_TEMP/mining-claim-probe.json"
+          PROBE_SOURCE_KEY="users/staging_probe_${GITHUB_RUN_ID}/inbox/mining-handoff-probe-${GITHUB_RUN_ATTEMPT}.txt"
+          HANDOFF_STATUS="$(curl --silent --show-error --connect-timeout 5 --max-time 15 --output "$RUNNER_TEMP/mining-handoff-probe.json" --write-out '%{http_code}' --request POST "$BASE_URL/api/internal/v3/mining-handoffs/status" --header "Authorization: Bearer $MINING_V3_HANDOFF_TOKEN" --header 'content-type: application/json' --data "{\"source_key\":\"$PROBE_SOURCE_KEY\"}")"
+          test "$HANDOFF_STATUS" = "409" || { echo "::error::MINING_V3_HANDOFF_TOKEN probe must return mining_handoff_recording_not_found"; exit 1; }
+          node -e 'const body=require(process.argv[1]); if (body.error !== "mining_handoff_recording_not_found") process.exit(1)' "$RUNNER_TEMP/mining-handoff-probe.json"
+          echo "## Mining readiness only" >> "$GITHUB_STEP_SUMMARY"
+          echo "Validated retried health/version evidence, unauthenticated rejection, and both authenticated no-write token probes. This job does not start Mining, schedule Mining, create a marker, or call an ASR/provider." >> "$GITHUB_STEP_SUMMARY"

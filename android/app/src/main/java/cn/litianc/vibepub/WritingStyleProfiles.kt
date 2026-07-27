@@ -103,7 +103,9 @@ object WritingStyleProfiles {
     }
 
     fun submissionBodyFor(profile: WritingStyleProfileOption): String {
-        return if (profile.custom || profile.remote) profile.body.orEmpty().trim() else ""
+        val isRegisteredDefault = profile.id == DEFAULT_STYLE_PROFILE_ID &&
+            profile.version == DEFAULT_STYLE_PROFILE_VERSION
+        return if (isRegisteredDefault) "" else profile.body.orEmpty().trim()
     }
 
     fun decodeCustomProfiles(json: String): List<WritingStyleProfileOption> {

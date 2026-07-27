@@ -5,6 +5,7 @@ import { generateWechatCoverBuffer } from "./coverRenderer.js";
 import { articleImagesForTranscript, insertArticleImagesIntoHtml, type ArticleImageAsset } from "./articleImageActions.js";
 import { prepareArticleImages, type PreparedArticleImage } from "./articleImages.js";
 import { getAccessToken, publishDraft, updateDraft, uploadWechatArticleImage, type WechatConfig } from "./wechat.js";
+import { acceptMiningV3Handoff, decideMiningV3Route, miningV3HandoffEnabled, readMiningV3Status, type MiningV3Status } from "./v3Handoff.js";
 import path from "path";
 import { pathToFileURL } from "url";
 import { randomUUID } from "node:crypto";
@@ -531,6 +532,15 @@ async function processRevisionRequest(revisionRequestKey: string): Promise<void>
   const fileKey = userIdFromPipelineKey(revisionRequestKey) ? `users/${userId}/inbox/${filename}` : `inbox/${filename}`;
 
   try {
+    if (miningV3HandoffEnabled()) {
+      // A V3 marker is authoritative even when a later Worker tenant rollout
+      // changes. This client gate is only an opt-in compatibility switch: once
+      // enabled, a marked revision must never fall back into legacy mutation.
+      const v3Status = await readMiningV3Status(fileKey);
+      if (v3Status.decision !== "legacy") {
+        throw new Error("v3_revision_reconciliation_required");
+      }
+    }
     await updateStatus(filename, "PROCESSING", { userId, processingStage: "ASR" });
     const transcript = parseJsonBuffer(transcriptKey, await downloadFile(transcriptKey));
     const rawText = optionalStringField(transcript, "rawText", "raw_text") || "";
@@ -663,6 +673,64 @@ async function processRevisionRequest(revisionRequestKey: string): Promise<void>
   }
 }
 
+type V3ClaimOutcome = "legacy" | "accepted" | "held";
+
+async function processV3HandoffClaim(
+  fileKey: string,
+  filename: string,
+  userId: string,
+  claimId: string,
+): Promise<V3ClaimOutcome> {
+  if (!miningV3HandoffEnabled()) return "legacy";
+  let decision: MiningV3Status;
+  try {
+    decision = await decideMiningV3Route(fileKey);
+  } catch (error) {
+    console.error(`V3 eligibility failed closed for ${fileKey}:`, describeError(error));
+    await releaseMiningInput(userId, fileKey, claimId);
+    return "held";
+  }
+  if (decision.decision === "legacy") return "legacy";
+
+  try {
+    let status = decision;
+    if (status.decision === "v3") status = await readMiningV3Status(fileKey);
+    if (status.decision === "accepted") {
+      await completeMiningInput(userId, fileKey, claimId);
+      return "accepted";
+    }
+    if (status.decision === "v3_hold") {
+      await releaseMiningInput(userId, fileKey, claimId);
+      return "held";
+    }
+
+    let transcript: string | undefined;
+    if (status.decision === "v3_pending_asr" && !isSupportedTextSubmissionKey(fileKey)) {
+      await updateStatus(filename, "PROCESSING", { userId, processingStage: "ASR" });
+      const audioUrl = await createPresignedDownloadUrl(fileKey);
+      const ext = path.extname(fileKey).slice(1);
+      transcript = await transcribeAudioUrl(audioUrl, ext || "m4a");
+    }
+    // Text is deliberately sent without a transcript. The authoritative Worker
+    // reads and canonicalizes its owner-scoped text source itself.
+    const accepted = await acceptMiningV3Handoff(
+      fileKey,
+      status,
+      transcript,
+      undefined,
+      isSupportedTextSubmissionKey(fileKey),
+    );
+    if (accepted.decision === "accepted") {
+      await completeMiningInput(userId, fileKey, claimId);
+      return "accepted";
+    }
+  } catch (error) {
+    console.error(`V3 handoff failed closed for ${fileKey}:`, describeError(error));
+  }
+  await releaseMiningInput(userId, fileKey, claimId);
+  return "held";
+}
+
 export async function main() {
   console.log("Starting VibePub Mining Job...");
   let failedCount = 0;
@@ -717,6 +785,16 @@ export async function main() {
     try {
       console.log(`\n--- Processing file: ${fileKey} ---`);
       
+      const v3Outcome = await processV3HandoffClaim(fileKey, filename, userId, claimId);
+      if (v3Outcome === "accepted") {
+        resultFinalized = true;
+        continue;
+      }
+      if (v3Outcome === "held") {
+        failedCount += 1;
+        continue;
+      }
+
       await updateStatus(filename, "PROCESSING", { userId, processingStage });
 
       if (isSupportedTextSubmissionKey(fileKey)) {

@@ -1,9 +1,28 @@
 import { describe, expect, it, vi, afterEach } from "vitest";
 import worker from "../src/index";
 
+async function sha256Hex(value: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return `sha256:${Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("")}`;
+}
+
 describe("WritingAgent Worker", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  it("returns only non-secret deployment evidence from health", async () => {
+    const response = await worker.fetch(new Request("https://writing-agent.test/health"), {
+      DEPLOY_COMMIT: "abc123",
+      DEPLOY_REF: "codex/staging",
+      DEPLOYED_AT: "2026-07-22T00:00:00.000Z",
+      GLM_API_KEY: "synthetic-secret",
+    });
+    expect(await response.json()).toEqual({
+      ok: true,
+      service: "writing-agent",
+      version: { commit: "abc123", ref: "codex/staging", deployed_at: "2026-07-22T00:00:00.000Z" },
+    });
   });
 
   it("requires auth for profile endpoints", async () => {
@@ -13,6 +32,93 @@ describe("WritingAgent Worker", () => {
     );
 
     expect(response.status).toBe(401);
+  });
+
+  it("does not allow FILES_TOKEN to authenticate the V3 internal endpoint", async () => {
+    const modelFetch = vi.fn();
+    vi.stubGlobal("fetch", modelFetch);
+    const response = await worker.fetch(
+      new Request("https://writing-agent.test/internal/v3/write", {
+        method: "POST",
+        headers: { Authorization: "Bearer legacy-files-token", "Content-Type": "application/json" },
+        body: JSON.stringify({
+          protocol_version: "vibepub.editorial.v3",
+          job_id: "v3-auth-files-token",
+          idempotency_key: "v3-auth-files-token",
+          mode: "initial",
+          article_id: "article-auth",
+          run_id: "run-auth",
+          recording_id: 1,
+          source_text: "合成认证测试素材。",
+        }),
+      }),
+      { FILES_TOKEN: "legacy-files-token", GLM_API_KEY: "synthetic" },
+    );
+
+    expect(response.status).toBe(401);
+    expect(modelFetch).not.toHaveBeenCalled();
+  });
+
+  it("authenticates the V3 internal endpoint only with the dedicated token", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      choices: [{ message: { content: JSON.stringify({
+        title: "认证测试标题",
+        body: "认证测试正文。",
+        blocks: [{ block_id: "block_v1_1", kind: "paragraph", order: 0, text: "认证测试正文。", text_hash: await sha256Hex("认证测试正文。"), claim_ids: [], image_ref_ids: [] }],
+        claim_ledger: [],
+        title_candidates: ["认证测试标题"],
+        selected_title: "认证测试标题",
+        cover_title: ["认证测试标题"],
+      }) } }],
+    }), { status: 200, headers: { "Content-Type": "application/json" } })));
+    const response = await worker.fetch(
+      new Request("https://writing-agent.test/internal/v3/write", {
+        method: "POST",
+        headers: { Authorization: "Bearer dedicated-v3-token", "Content-Type": "application/json" },
+        body: JSON.stringify({
+          protocol_version: "vibepub.editorial.v3",
+          job_id: "v3-auth-dedicated",
+          idempotency_key: "v3-auth-dedicated",
+          mode: "initial",
+          article_id: "article-auth",
+          run_id: "run-auth",
+          recording_id: 1,
+          source_text: "合成认证测试素材。",
+        }),
+      }),
+      { WRITING_AGENT_TOKEN: "dedicated-v3-token", GLM_API_KEY: "synthetic" },
+    );
+
+    expect(response.status).toBe(201);
+    await expect(response.json()).resolves.toMatchObject({
+      protocol_version: "vibepub.editorial.v3",
+      status: "article_draft_ready",
+    });
+  });
+
+  it("rejects a wrong token on the V3 internal endpoint without invoking the model", async () => {
+    const modelFetch = vi.fn();
+    vi.stubGlobal("fetch", modelFetch);
+    const response = await worker.fetch(
+      new Request("https://writing-agent.test/internal/v3/write", {
+        method: "POST",
+        headers: { Authorization: "Bearer wrong-v3-token", "Content-Type": "application/json" },
+        body: JSON.stringify({
+          protocol_version: "vibepub.editorial.v3",
+          job_id: "v3-auth-wrong",
+          idempotency_key: "v3-auth-wrong",
+          mode: "initial",
+          article_id: "article-auth",
+          run_id: "run-auth",
+          recording_id: 1,
+          source_text: "合成认证测试素材。",
+        }),
+      }),
+      { WRITING_AGENT_TOKEN: "dedicated-v3-token", FILES_TOKEN: "legacy-files-token", GLM_API_KEY: "synthetic" },
+    );
+
+    expect(response.status).toBe(401);
+    expect(modelFetch).not.toHaveBeenCalled();
   });
 
   it("lists default profiles for authorized callers", async () => {

@@ -1,6 +1,7 @@
 name = "vibepub-api"
 main = "src/index.ts"
 compatibility_date = "2026-06-24"
+compatibility_flags = ["nodejs_compat"]
 
 routes = [
   { pattern = "vibepub.litianc.cn", custom_domain = true }
@@ -20,8 +21,91 @@ GITHUB_WORKFLOW_REF = "main"
 WRITING_AGENT_BASE_URL = "https://writing-agent.719153161.workers.dev"
 EMAIL_FROM = "VibePub <no-reply@vibepub.litianc.cn>"
 INVITE_BASE_URL = "vibepub://auth"
+EDITORIAL_WORKFLOW_V2 = "false"
+EDITORIAL_WORKFLOW_V2_ALLOWLIST = ""
+FIVE_AGENT_PUBLISHING_V3 = "false"
+FIVE_AGENT_PUBLISHING_V3_ALLOWLIST = ""
+VISUAL_PRODUCTION_V3 = "false"
+VISUAL_PRODUCTION_V3_ALLOWLIST = ""
+WECHAT_DRAFT_SYNC_V3 = "false"
+WECHAT_DRAFT_SYNC_V3_ALLOWLIST = ""
+WECHAT_PUBLISHING_ACCOUNT_ALLOWLIST = ""
+WECHAT_MEDIA_URL_HOST_ALLOWLIST = ""
+
+[[services]]
+binding = "WRITING_AGENT"
+service = "writing-agent"
+
+[[services]]
+binding = "REVIEW_AGENT"
+service = "editorial-review-agent"
+
+[[services]]
+binding = "IMAGE_GENERATION_ADAPTER"
+service = "image-generation-adapter"
+
+[[services]]
+binding = "WECHAT_PUBLISHING_ADAPTER"
+service = "wechat-publishing-adapter"
 
 [[d1_databases]]
 binding = "DB"
 database_name = "vibepub-db"
 database_id = "0804a462-4413-4eaf-bfab-60531eef06be"
+
+[[durable_objects.bindings]]
+name = "EDITORIAL_COORDINATOR"
+class_name = "EditorialCoordinatorAgent"
+
+[[durable_objects.bindings]]
+name = "EDITORIAL_WRITING"
+class_name = "EditorialWritingAgent"
+
+[[durable_objects.bindings]]
+name = "EDITORIAL_REVIEW"
+class_name = "EditorialReviewAgent"
+
+[[durable_objects.bindings]]
+name = "EDITORIAL_VISUAL_PRODUCTION"
+class_name = "EditorialVisualProductionAgent"
+
+[[durable_objects.bindings]]
+name = "EDITORIAL_WECHAT_PUBLISHING"
+class_name = "EditorialWechatPublishingAgent"
+
+# Historical namespace compatibility only. These classes are not active Wave 1
+# business roles and are never selected for new runs.
+[[durable_objects.bindings]]
+name = "EDITORIAL_ILLUSTRATION"
+class_name = "EditorialIllustrationAgent"
+
+[[durable_objects.bindings]]
+name = "EDITORIAL_COVER"
+class_name = "EditorialCoverAgent"
+
+[[workflows]]
+name = "editorial-workflow-v2"
+binding = "EDITORIAL_WORKFLOW"
+class_name = "EditorialWorkflow"
+
+[[workflows]]
+name = "five-agent-publishing-workflow"
+binding = "FIVE_AGENT_PUBLISHING_WORKFLOW"
+class_name = "FiveAgentPublishingWorkflow"
+
+[[migrations]]
+tag = "v2-editorial-agents"
+new_sqlite_classes = [
+  "EditorialCoordinatorAgent",
+  "EditorialWritingAgent",
+  "EditorialReviewAgent",
+  "EditorialIllustrationAgent",
+  "EditorialCoverAgent",
+]
+
+[[migrations]]
+tag = "v3-five-agent-publishing"
+new_sqlite_classes = [
+  "EditorialVisualProductionAgent",
+  "EditorialWechatPublishingAgent",
+]

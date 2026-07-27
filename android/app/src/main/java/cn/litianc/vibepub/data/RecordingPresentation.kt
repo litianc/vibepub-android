@@ -66,6 +66,7 @@ fun RecordingEntity.listDurationLabel(): String {
 }
 
 fun RecordingEntity.statusLabel(): String {
+    publicationWorkflowPresentationOrNull()?.let { return it.statusLabel }
     return when (status.asRecordingStatus()) {
         RecordingStatus.LOCAL_RECORDED -> if (isTextSource()) "待提交" else "待上传"
         RecordingStatus.UPLOADING -> if (isTextSource()) "提交中" else "上传中"
@@ -81,6 +82,7 @@ fun RecordingEntity.statusLabel(): String {
 }
 
 fun RecordingEntity.statusDetail(): String {
+    publicationWorkflowPresentationOrNull()?.let { return it.statusDetail }
     if (isTextSource()) return textStatusDetail()
     return when (status.asRecordingStatus()) {
         RecordingStatus.LOCAL_RECORDED -> "录音已保存，等待上传。"
@@ -93,11 +95,13 @@ fun RecordingEntity.statusDetail(): String {
 }
 
 fun RecordingEntity.shouldShowStatusDetailInline(): Boolean {
+    publicationWorkflowPresentationOrNull()?.let { return it.isBlocked }
     return status.asRecordingStatus() == RecordingStatus.FAILED ||
         (status.asRecordingStatus() == RecordingStatus.UPLOADING && !lastError.isNullOrBlank())
 }
 
 fun RecordingEntity.workflowNextActionLabel(): String {
+    publicationWorkflowPresentationOrNull()?.let { return it.nextActionLabel }
     if (isTextSource()) return textWorkflowNextActionLabel()
     return when (status.asRecordingStatus()) {
         RecordingStatus.LOCAL_RECORDED -> "下一步：点重试上传；如果反复失败，先到设置页检查登录状态。"
@@ -109,9 +113,21 @@ fun RecordingEntity.workflowNextActionLabel(): String {
     }
 }
 
-fun RecordingEntity.isTerminalComplete(): Boolean = status.asRecordingStatus() == RecordingStatus.COMPLETED
+fun RecordingEntity.isTerminalComplete(): Boolean = publicationWorkflowPresentationOrNull()?.isAutomationComplete
+    ?: (status.asRecordingStatus() == RecordingStatus.COMPLETED)
 
 fun RecordingEntity.primaryRecoveryAction(): RecordingRecoveryAction? {
+    publicationWorkflowPresentationOrNull()?.let { publication ->
+        return if (publication.isBlocked) {
+            RecordingRecoveryAction(
+                type = RecordingRecoveryActionType.REFRESH_SYNC,
+                label = "同步状态",
+                detail = "刷新云端状态，确认下一步处理方式。",
+            )
+        } else {
+            null
+        }
+    }
     return when (status.asRecordingStatus()) {
         RecordingStatus.LOCAL_RECORDED -> RecordingRecoveryAction(
             type = RecordingRecoveryActionType.RETRY_UPLOAD,
@@ -149,6 +165,12 @@ fun RecordingEntity.workflowHelpSummary(): String {
 }
 
 fun RecordingEntity.workflowProgressLabel(): String {
+    publicationWorkflowPresentationOrNull()?.let { presentation ->
+        val activeStep = presentation.steps.firstOrNull {
+            it.state == WorkflowStepState.CURRENT || it.state == WorkflowStepState.BLOCKED
+        } ?: presentation.steps.last()
+        return "第 ${activeStep.number}/${presentation.steps.size} 步 · ${presentation.progressPercent}%"
+    }
     val steps = workflowSteps()
     val activeStep = steps.firstOrNull {
         it.state == WorkflowStepState.CURRENT || it.state == WorkflowStepState.BLOCKED
@@ -157,6 +179,7 @@ fun RecordingEntity.workflowProgressLabel(): String {
 }
 
 fun RecordingEntity.workflowProgressFraction(): Float {
+    publicationWorkflowPresentationOrNull()?.let { return it.progressPercent / 100f }
     val steps = workflowSteps()
     if (steps.isEmpty()) return 0f
     val doneCount = steps.count { it.state == WorkflowStepState.DONE }
@@ -177,6 +200,12 @@ fun RecordingEntity.workflowCurrentNodeLabel(): String {
 }
 
 fun RecordingEntity.workflowFreshnessLabel(nowMs: Long = System.currentTimeMillis()): String {
+    publicationWorkflowPresentationOrNull()?.let { presentation ->
+        val age = publicationUpdatedAt?.let(::publicationTimestampMillis)
+            ?.let { relativeWorkflowAgeLabel(it, nowMs) }
+            ?: "未知"
+        return "云端状态更新：$age"
+    }
     val age = workflowFreshnessAnchorMs()?.let { relativeWorkflowAgeLabel(it, nowMs) } ?: "未知"
     return when (status.asRecordingStatus()) {
         RecordingStatus.LOCAL_RECORDED -> "本机保存：$age"
@@ -189,6 +218,21 @@ fun RecordingEntity.workflowFreshnessLabel(nowMs: Long = System.currentTimeMilli
 }
 
 fun RecordingEntity.workflowAttention(nowMs: Long = System.currentTimeMillis()): RecordingWorkflowAttention? {
+    publicationWorkflowPresentationOrNull()?.let { presentation ->
+        return when {
+            presentation.isBlocked -> RecordingWorkflowAttention(
+                title = "需要处理",
+                detail = presentation.nextActionLabel.removePrefix("下一步："),
+                level = RecordingWorkflowAttentionLevel.WARNING,
+            )
+            presentation.isRetrying -> RecordingWorkflowAttention(
+                title = "正在重试",
+                detail = presentation.nextActionLabel.removePrefix("下一步："),
+                level = RecordingWorkflowAttentionLevel.INFO,
+            )
+            else -> null
+        }
+    }
     val normalizedStatus = status.asRecordingStatus()
     val nextAction = workflowNextActionLabel().removePrefix("下一步：")
     return when {
@@ -251,6 +295,7 @@ fun wechatDraftReferenceOrNull(wechatDraftId: String?, wechatUrl: String?): Stri
 }
 
 fun RecordingEntity.workflowSteps(): List<RecordingWorkflowStep> {
+    publicationWorkflowPresentationOrNull()?.let { return it.steps }
     val status = status.asRecordingStatus()
     val currentIndex = workflowCurrentIndex(status)
     val completedWithDraftFailure = status == RecordingStatus.COMPLETED &&
@@ -431,6 +476,163 @@ private fun RecordingEntity.processingNextActionLabel(): String {
             else -> "下一步：等待云端转录；如果长时间没有更新，点同步刷新。"
         }
     }
+}
+
+private data class PublicationWorkflowPresentation(
+    val statusLabel: String,
+    val statusDetail: String,
+    val nextActionLabel: String,
+    val steps: List<RecordingWorkflowStep>,
+    val progressPercent: Int,
+    val isBlocked: Boolean,
+    val isRetrying: Boolean,
+    val isAutomationComplete: Boolean,
+)
+
+private fun RecordingEntity.publicationWorkflowPresentationOrNull(): PublicationWorkflowPresentation? {
+    val snapshot = publicationSnapshotOrNull() ?: return null
+    val blocked = snapshot.runStatus == "needs_action" || snapshot.runStatus == "failed"
+    val retrying = snapshot.runStatus == "retrying"
+    val cancelled = snapshot.runStatus == "cancelled" || snapshot.state == "cancelled"
+    val effectiveState = if (blocked || retrying || cancelled) snapshot.lastSuccessfulState else snapshot.state
+    val stepIndex = publicationWorkflowStepIndex(effectiveState, isTextSource()) ?: return null
+    val automationComplete = snapshot.state == "draft_ready" && snapshot.runStatus == "ready"
+    val steps = workflowBaseSteps().mapIndexed { index, step ->
+        val stepState = when {
+            automationComplete && index < 6 -> WorkflowStepState.DONE
+            automationComplete && index == 6 -> WorkflowStepState.CURRENT
+            blocked && index < stepIndex -> WorkflowStepState.DONE
+            blocked && index == stepIndex -> WorkflowStepState.BLOCKED
+            index < stepIndex -> WorkflowStepState.DONE
+            index == stepIndex -> WorkflowStepState.CURRENT
+            else -> WorkflowStepState.PENDING
+        }
+        step.copy(state = stepState)
+    }
+    val progress = if (blocked || retrying || cancelled) {
+        snapshot.lastSuccessfulProgressPercent
+    } else {
+        snapshot.progressPercent
+    }
+    return PublicationWorkflowPresentation(
+        statusLabel = publicationStatusLabel(snapshot, effectiveState, blocked, retrying, cancelled),
+        statusDetail = publicationStatusDetail(snapshot, effectiveState, blocked, retrying, cancelled),
+        nextActionLabel = publicationNextActionLabel(snapshot, blocked, retrying, cancelled, automationComplete),
+        steps = steps,
+        progressPercent = progress.coerceIn(0, 100),
+        isBlocked = blocked,
+        isRetrying = retrying,
+        isAutomationComplete = automationComplete,
+    )
+}
+
+private fun publicationWorkflowStepIndex(state: String, textSource: Boolean): Int? {
+    if (state == "draft_ready") return 6
+    return if (textSource) {
+        when (state) {
+            "queued", "transcribing", "transcript_ready" -> 2
+            "writing", "draft_generated", "reviewing", "revising", "reviewed", "content_frozen" -> 3
+            "visual_planning", "visual_generating", "visual_ready", "formatting", "visual_qa" -> 4
+            "draft_syncing", "draft_verifying" -> 5
+            else -> null
+        }
+    } else {
+        when (state) {
+            "queued" -> 2
+            "transcribing", "transcript_ready" -> 3
+            "writing", "draft_generated", "reviewing", "revising", "reviewed", "content_frozen",
+            "visual_planning", "visual_generating", "visual_ready", "formatting", "visual_qa" -> 4
+            "draft_syncing", "draft_verifying" -> 5
+            else -> null
+        }
+    }
+}
+
+private fun publicationStatusLabel(
+    snapshot: PublicationSnapshot,
+    effectiveState: String,
+    blocked: Boolean,
+    retrying: Boolean,
+    cancelled: Boolean,
+): String {
+    if (cancelled) return "已取消"
+    if (blocked) return "需要处理"
+    if (retrying) return "正在重试"
+    return when (effectiveState) {
+        "queued" -> "排队中"
+        "transcribing" -> if (snapshot.state == "transcribing") "转录中" else "处理中"
+        "transcript_ready" -> "转录完成"
+        "writing", "draft_generated" -> "正在成文"
+        "reviewing", "revising", "reviewed" -> "内容审核中"
+        "content_frozen" -> "内容已确认"
+        "visual_planning", "visual_generating", "visual_ready" -> "视觉内容处理中"
+        "formatting", "visual_qa" -> "正在排版"
+        "draft_syncing", "draft_verifying" -> "生成草稿中"
+        "draft_ready" -> "草稿已就绪"
+        else -> "处理中"
+    }
+}
+
+private fun publicationStatusDetail(
+    snapshot: PublicationSnapshot,
+    effectiveState: String,
+    blocked: Boolean,
+    retrying: Boolean,
+    cancelled: Boolean,
+): String {
+    if (cancelled) return "自动流程已取消，停留在${publicationStageDescription(effectiveState)}。"
+    if (blocked) return "自动流程暂停在${publicationStageDescription(effectiveState)}，处理后可继续。"
+    if (retrying) return "系统正在从已确认的${publicationStageDescription(effectiveState)}继续处理。"
+    return when (effectiveState) {
+        "draft_ready" -> "自动流程已完成，公众号草稿已经准备好，仍需你人工确认后发布。"
+        "draft_syncing", "draft_verifying" -> "正在把已确认内容同步到公众号草稿箱。"
+        "visual_planning", "visual_generating", "visual_ready", "formatting", "visual_qa" -> "正在准备文章视觉和排版内容。"
+        "writing", "draft_generated", "reviewing", "revising", "reviewed", "content_frozen" -> "正在把原始内容整理成可发布文章。"
+        "transcribing", "transcript_ready" -> "正在处理原始转录内容。"
+        else -> "云端任务正在处理这条内容。"
+    }
+}
+
+private fun publicationNextActionLabel(
+    snapshot: PublicationSnapshot,
+    blocked: Boolean,
+    retrying: Boolean,
+    cancelled: Boolean,
+    automationComplete: Boolean,
+): String {
+    if (automationComplete) return "下一步：打开公众号草稿做最后一眼人工确认，再决定是否发布。"
+    if (cancelled) return "下一步：如需继续，请重新发起新的内容处理。"
+    if (retrying) return "下一步：系统正在重试已确认阶段，可以稍后同步查看进度。"
+    if (blocked) {
+        return when (snapshot.nextAction) {
+            "retry" -> "下一步：稍后重试，或点同步查看处理是否恢复。"
+            "retry_after_service_fix" -> "下一步：等待服务修复后再同步重试。"
+            "reconcile_external_side_effect", "reconcile_draft", "reconcile_draft_identity" ->
+                "下一步：系统正在核对处理结果，请稍后同步确认。"
+            "repair_publishing_account", "request_account_enablement", "repair_draft_payload" ->
+                "下一步：检查公众号发布配置后，再同步确认处理状态。"
+            "review_round_1_human_review" ->
+                "下一步：请完成第一轮人工内容审核后，再同步确认处理状态。"
+            "review_round_2_human_review" ->
+                "下一步：请完成第二轮人工内容审核后，再同步确认处理状态。"
+            "review_visual_assets", "revise_content_before_visuals" ->
+                "下一步：检查内容后再同步确认处理状态。"
+            else -> "下一步：请同步查看云端状态，按提示继续处理。"
+        }
+    }
+    return "下一步：等待云端继续处理；如果长时间没有更新，点同步刷新。"
+}
+
+private fun publicationStageDescription(state: String): String = when (state) {
+    "queued" -> "云端排队"
+    "transcribing", "transcript_ready" -> "内容理解"
+    "writing", "draft_generated" -> "文章改写"
+    "reviewing", "revising", "reviewed", "content_frozen" -> "内容审核"
+    "visual_planning", "visual_generating", "visual_ready" -> "视觉准备"
+    "formatting", "visual_qa" -> "文章排版"
+    "draft_syncing", "draft_verifying" -> "公众号草稿"
+    "draft_ready" -> "草稿确认"
+    else -> "当前处理阶段"
 }
 
 private enum class ProcessingStageKind {

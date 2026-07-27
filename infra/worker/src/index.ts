@@ -1,8 +1,48 @@
+import { handleEditorialInternalRoute, handleEditorialRoute } from "./editorialPipeline";
+import {
+  EditorialCoordinatorAgent,
+  EditorialCoverAgent,
+  EditorialIllustrationAgent,
+  EditorialReviewAgent,
+  EditorialVisualProductionAgent,
+  EditorialWechatPublishingAgent,
+  EditorialWorkflow,
+  EditorialWritingAgent,
+  handleEditorialOrchestrationInternalRoute,
+} from "./editorialAgents";
+import type { EditorialRuntimeEnv, EditorialWorkflowParams } from "./editorialAgents";
+import { FiveAgentPublishingWorkflow, handleFiveAgentPublishingInternalRoute } from "./fiveAgentPublishing";
+import type { FiveAgentWorkflowParams } from "./fiveAgentPublishing";
+import { handleMiningV3HandoffInternalRoute } from "./miningV3Handoff";
+import {
+  assertPublicationAction,
+  getPublicationRun,
+  getPublicationRunEvents,
+  getPublicationRunForRecording,
+  enrichRecordingList,
+  publicationFeatureEnabled,
+  PublicationProjectionError,
+  recordPublicationActionIntent,
+} from "./publicationProjection";
+
+export {
+  EditorialCoordinatorAgent,
+  EditorialWritingAgent,
+  EditorialReviewAgent,
+  EditorialIllustrationAgent,
+  EditorialCoverAgent,
+  EditorialVisualProductionAgent,
+  EditorialWechatPublishingAgent,
+  EditorialWorkflow,
+  FiveAgentPublishingWorkflow,
+};
+
 export interface Env {
   FILES_BUCKET: R2Bucket;
   DB: D1Database;
   FILES_TOKEN?: string;
   MINING_SERVICE_TOKEN?: string;
+  MINING_V3_HANDOFF_TOKEN?: string;
   PUBLIC_BASE_URL: string;
   GITHUB_PAT?: string;
   GITHUB_WORKFLOW_REF?: string;
@@ -11,6 +51,12 @@ export interface Env {
   DEPLOYED_AT?: string;
   WRITING_AGENT_BASE_URL?: string;
   WRITING_AGENT_TOKEN?: string;
+  REVIEW_AGENT_BASE_URL?: string;
+  REVIEW_AGENT_TOKEN?: string;
+  WRITING_AGENT?: Fetcher;
+  REVIEW_AGENT?: Fetcher;
+  IMAGE_GENERATION_ADAPTER?: Fetcher;
+  WECHAT_PUBLISHING_ADAPTER?: Fetcher;
   CREDENTIAL_ENCRYPTION_KEY?: string;
   EMAIL?: {
     send(message: {
@@ -25,6 +71,28 @@ export interface Env {
   INVITE_BASE_URL?: string;
   BOOTSTRAP_ADMIN_EMAIL?: string;
   BOOTSTRAP_ADMIN_USER_ID?: string;
+  EDITORIAL_WORKFLOW_V2?: string;
+  EDITORIAL_WORKFLOW_V2_ALLOWLIST?: string;
+  FIVE_AGENT_PUBLISHING_V3?: string;
+  FIVE_AGENT_PUBLISHING_V3_ALLOWLIST?: string;
+  FIVE_AGENT_PUBLISHING_TOKEN?: string;
+  VISUAL_PRODUCTION_V3?: string;
+  VISUAL_PRODUCTION_V3_ALLOWLIST?: string;
+  VISUAL_PRODUCTION_TOKEN?: string;
+  WECHAT_DRAFT_SYNC_V3?: string;
+  WECHAT_DRAFT_SYNC_V3_ALLOWLIST?: string;
+  WECHAT_PUBLISHING_ACCOUNT_ALLOWLIST?: string;
+  WECHAT_MEDIA_URL_HOST_ALLOWLIST?: string;
+  WECHAT_PUBLISHING_TOKEN?: string;
+  EDITORIAL_WORKFLOW: Workflow<EditorialWorkflowParams>;
+  FIVE_AGENT_PUBLISHING_WORKFLOW: Workflow<FiveAgentWorkflowParams>;
+  EDITORIAL_COORDINATOR: DurableObjectNamespace<EditorialCoordinatorAgent>;
+  EDITORIAL_WRITING: DurableObjectNamespace<EditorialWritingAgent>;
+  EDITORIAL_REVIEW: DurableObjectNamespace<EditorialReviewAgent>;
+  EDITORIAL_VISUAL_PRODUCTION: DurableObjectNamespace<EditorialVisualProductionAgent>;
+  EDITORIAL_WECHAT_PUBLISHING: DurableObjectNamespace<EditorialWechatPublishingAgent>;
+  EDITORIAL_ILLUSTRATION: DurableObjectNamespace<EditorialIllustrationAgent>;
+  EDITORIAL_COVER: DurableObjectNamespace<EditorialCoverAgent>;
 }
 
 const MINING_CLAIM_LEASE_MS = 2 * 60 * 60 * 1000;
@@ -90,10 +158,17 @@ export default {
     const url = new URL(request.url);
 
     if (request.method === "GET" && url.pathname === "/health") {
+      const adapters = url.searchParams.get("adapters") === "1"
+        ? await collectAdapterHealth(env).catch(() => null)
+        : undefined;
+      if (url.searchParams.get("adapters") === "1" && !adapters) {
+        return json({ ok: false, error: "adapter_health_unavailable" }, 503);
+      }
       return json({
         ok: true,
         service: "vibepub-api",
         version: deploymentVersion(env),
+        ...(adapters ? { adapters } : {}),
       });
     }
 
@@ -122,6 +197,31 @@ export default {
       return handleMiningClaim(request, env);
     }
 
+    if (url.pathname.startsWith("/api/internal/editorial/")) {
+      if (!(await isInternalAuthorized(request, env))) {
+        return json({ error: "unauthorized" }, 401);
+      }
+      if (url.pathname.startsWith("/api/internal/editorial/runs")) {
+        const editorialEnv = env as unknown as EditorialRuntimeEnv;
+        return handleEditorialOrchestrationInternalRoute(request, editorialEnv, url);
+      }
+      return handleEditorialInternalRoute(request, env, url);
+    }
+
+    if (url.pathname.startsWith("/api/internal/v3/publishing/")) {
+      if (!(await isFiveAgentPublishingAuthorized(request, env))) {
+        return json({ error: "unauthorized" }, 401);
+      }
+      return handleFiveAgentPublishingInternalRoute(request, env, url);
+    }
+
+    if (url.pathname.startsWith("/api/internal/v3/mining-handoffs/")) {
+      if (!(await isMiningV3HandoffAuthorized(request, env))) {
+        return json({ error: "unauthorized" }, 401);
+      }
+      return handleMiningV3HandoffInternalRoute(request, env, url);
+    }
+
     if (!url.pathname.startsWith("/api/")) {
       return json({ error: "not_found" }, 404);
     }
@@ -129,6 +229,14 @@ export default {
     const auth = await authenticateRequest(request, env);
     if (!auth) {
       return json({ error: "unauthorized" }, 401);
+    }
+
+    if (url.pathname.startsWith("/api/editorial/")) {
+      if (request.method !== "GET") {
+        const verified = requireVerifiedEmail(auth);
+        if (verified) return verified;
+      }
+      return handleEditorialRoute(request, env, url, auth);
     }
 
     if (request.method === "GET" && url.pathname === "/api/me") {
@@ -212,6 +320,81 @@ export default {
 
     if (request.method === "GET" && url.pathname === "/api/recordings") {
       return listRecordings(env, auth);
+    }
+
+    const recordingPublicationMatch = url.pathname.match(/^\/api\/recordings\/(\d+)\/publication-run$/);
+    if (request.method === "GET" && recordingPublicationMatch) {
+      if (!publicationFeatureEnabled(env, auth.userId, auth.workspaceId)) {
+        return json({ error: "publication_workflow_disabled" }, 404);
+      }
+      return publicationRoute(async () => getPublicationRunForRecording(
+        env.DB,
+        auth,
+        Number(recordingPublicationMatch[1]),
+      ));
+    }
+
+    const publicationEventsMatch = url.pathname.match(/^\/api\/publication-runs\/([^/]+)\/events$/);
+    if (request.method === "GET" && publicationEventsMatch) {
+      if (!publicationFeatureEnabled(env, auth.userId, auth.workspaceId)) {
+        return json({ error: "publication_workflow_disabled" }, 404);
+      }
+      const afterRevisionParam = url.searchParams.get("after_revision");
+      const afterRevision = afterRevisionParam === null ? -1 : Number(afterRevisionParam);
+      const limit = Number(url.searchParams.get("limit") || "50");
+      return publicationRoute(() => getPublicationRunEvents(
+        env.DB,
+        auth,
+        safeDecodeURIComponent(publicationEventsMatch[1]),
+        afterRevision,
+        limit,
+      ));
+    }
+
+    const publicationActionMatch = url.pathname.match(/^\/api\/publication-runs\/([^/]+)\/(retry|cancel|actions)$/);
+    if (request.method === "POST" && publicationActionMatch) {
+      const verified = requireVerifiedEmail(auth);
+      if (verified) return verified;
+      if (!publicationFeatureEnabled(env, auth.userId, auth.workspaceId)) {
+        return json({ error: "publication_workflow_disabled" }, 404);
+      }
+      const body = await parseJson(request);
+      const endpointAction = publicationActionMatch[2];
+      const action = endpointAction === "actions"
+        ? normalizeOptionalString(body?.action)
+        : endpointAction;
+      const idempotencyKey = normalizeOptionalString(
+        body?.idempotency_key ?? body?.idempotencyKey ?? request.headers.get("Idempotency-Key"),
+      );
+      const expectedStateRevision = Number(body?.expected_state_revision ?? body?.expectedStateRevision);
+      if (!action || !idempotencyKey) return json({ error: "idempotency_key_required" }, 400);
+      if (!Number.isSafeInteger(expectedStateRevision) || expectedStateRevision < 0) {
+        return json({ error: "expected_state_revision_required" }, 400);
+      }
+      const payloadHash = `sha256:${await sha256Hex(JSON.stringify({
+        action,
+        expected_state_revision: expectedStateRevision,
+        contract: endpointAction === "actions" ? "human.v1" : "system.v1",
+      }))}`;
+      return publicationRoute(async () => endpointAction === "actions"
+        ? recordPublicationActionIntent(
+          env.DB,
+          auth,
+          safeDecodeURIComponent(publicationActionMatch[1]),
+          action as "confirm" | "abandon" | "resume",
+          idempotencyKey,
+          payloadHash,
+          expectedStateRevision,
+        )
+        : assertPublicationAction(
+          env.DB,
+          auth,
+          safeDecodeURIComponent(publicationActionMatch[1]),
+          action,
+          idempotencyKey,
+          payloadHash,
+          expectedStateRevision,
+        ));
     }
 
     if (request.method === "POST" && isRecordingRevisionPath(url.pathname)) {
@@ -630,6 +813,22 @@ async function isInternalAuthorized(request: Request, env: Env): Promise<boolean
   return Boolean(legacy && await secureTokenEquals(legacy, token));
 }
 
+async function isFiveAgentPublishingAuthorized(request: Request, env: Env): Promise<boolean> {
+  const configured = env.FIVE_AGENT_PUBLISHING_TOKEN?.trim();
+  if (!configured) return false;
+  const authorization = request.headers.get("Authorization") || "";
+  const bearer = authorization.match(/^Bearer\s+(.+)$/i)?.[1] || request.headers.get("X-Five-Agent-Publishing-Token") || "";
+  return Boolean(bearer) && await secureTokenEquals(configured, bearer);
+}
+
+async function isMiningV3HandoffAuthorized(request: Request, env: Env): Promise<boolean> {
+  const configured = env.MINING_V3_HANDOFF_TOKEN?.trim();
+  if (!configured) return false;
+  const authorization = request.headers.get("Authorization") || "";
+  const bearer = authorization.match(/^Bearer\s+(.+)$/i)?.[1] || "";
+  return Boolean(bearer) && await secureTokenEquals(configured, bearer);
+}
+
 function requireVerifiedEmail(auth: AuthContext): Response | null {
   return auth.emailVerified
     ? null
@@ -870,29 +1069,40 @@ async function upsertTextRecording(
     .run();
 
   if ((updated.meta.changes ?? 0) === 0) {
-    await env.DB.prepare(
-      `
-      INSERT INTO recordings (user_id, filename, r2_key, status, processing_stage, duration_ms, raw_text, article_title, source_type, style_profile_id, style_profile_version, layout_profile_id, layout_profile_version)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `,
-    )
-      .bind(
-        auth.userId,
-        input.filename,
-        input.key,
-        "PROCESSING",
-        "REWRITING",
-        0,
-        input.text,
-        input.titleHint || null,
-        "TEXT",
-        input.profileSelection?.styleProfileId || null,
-        input.profileSelection?.styleProfileVersion || null,
-        input.profileSelection?.layoutProfileId || null,
-        input.profileSelection?.layoutProfileVersion || null,
-      )
-      .run();
+    const values = [
+      auth.userId,
+      auth.workspaceId,
+      input.filename,
+      input.key,
+      "PROCESSING",
+      "REWRITING",
+      0,
+      input.text,
+      input.titleHint || null,
+      "TEXT",
+      input.profileSelection?.styleProfileId || null,
+      input.profileSelection?.styleProfileVersion || null,
+      input.profileSelection?.layoutProfileId || null,
+      input.profileSelection?.layoutProfileVersion || null,
+    ];
+    try {
+      await env.DB.prepare(
+        `
+        INSERT INTO recordings (user_id, workspace_id, filename, r2_key, status, processing_stage, duration_ms, raw_text, article_title, source_type, style_profile_id, style_profile_version, layout_profile_id, layout_profile_version)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `,
+      ).bind(...values).run();
+    } catch (error) {
+      if (!String((error as any)?.message || error).includes("workspace_id")) throw error;
+      await env.DB.prepare(
+        `
+        INSERT INTO recordings (user_id, filename, r2_key, status, processing_stage, duration_ms, raw_text, article_title, source_type, style_profile_id, style_profile_version, layout_profile_id, layout_profile_version)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `,
+      ).bind(...values.filter((_, index) => index !== 1)).run();
+    }
   }
+  await ensureEditorialRecordingScope(env, auth, input.filename);
 }
 
 async function uploadAudio(request: Request, env: Env, ctx: ExecutionContext, auth: AuthContext): Promise<Response> {
@@ -996,25 +1206,7 @@ async function upsertUploadedRecording(
       .run();
 
     if ((updated.meta.changes ?? 0) === 0) {
-      await env.DB.prepare(
-        `
-        INSERT INTO recordings (user_id, filename, r2_key, status, processing_stage, duration_ms, style_profile_id, style_profile_version, layout_profile_id, layout_profile_version)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `,
-      )
-        .bind(
-          auth.userId,
-          input.filename,
-          input.key,
-          "UPLOADED",
-          "QUEUED",
-          input.durationMs,
-          input.profileSelection.styleProfileId || null,
-          input.profileSelection.styleProfileVersion || null,
-          input.profileSelection.layoutProfileId || null,
-          input.profileSelection.layoutProfileVersion || null,
-        )
-        .run();
+      await insertUploadedRecording(env, auth, input, true);
     }
   } catch (dbErr: any) {
     const message = String(dbErr?.message || "");
@@ -1040,25 +1232,71 @@ async function upsertUploadedRecording(
       .run();
 
     if ((updated.meta.changes ?? 0) === 0) {
-      await env.DB.prepare(
-        `
-        INSERT INTO recordings (user_id, filename, r2_key, status, processing_stage, style_profile_id, style_profile_version, layout_profile_id, layout_profile_version)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `,
-      )
-        .bind(
-          auth.userId,
-          input.filename,
-          input.key,
-          "UPLOADED",
-          "QUEUED",
-          input.profileSelection.styleProfileId || null,
-          input.profileSelection.styleProfileVersion || null,
-          input.profileSelection.layoutProfileId || null,
-          input.profileSelection.layoutProfileVersion || null,
-        )
-        .run();
+      await insertUploadedRecording(env, auth, input, false);
     }
+  }
+  await ensureEditorialRecordingScope(env, auth, input.filename);
+}
+
+async function insertUploadedRecording(
+  env: Env,
+  auth: AuthContext,
+  input: {
+    filename: string;
+    key: string;
+    durationMs: number | null;
+    profileSelection: WritingProfileSelection;
+  },
+  includeDuration: boolean,
+): Promise<void> {
+  const durationColumns = includeDuration ? ", duration_ms" : "";
+  const durationValues = includeDuration ? ", ?" : "";
+  const values: unknown[] = [
+    auth.userId,
+    auth.workspaceId,
+    input.filename,
+    input.key,
+    "UPLOADED",
+    "QUEUED",
+  ];
+  if (includeDuration) values.push(input.durationMs);
+  values.push(
+    input.profileSelection.styleProfileId || null,
+    input.profileSelection.styleProfileVersion || null,
+    input.profileSelection.layoutProfileId || null,
+    input.profileSelection.layoutProfileVersion || null,
+  );
+  try {
+    await env.DB.prepare(
+      `INSERT INTO recordings (user_id, workspace_id, filename, r2_key, status, processing_stage${durationColumns}, style_profile_id, style_profile_version, layout_profile_id, layout_profile_version)
+       VALUES (?, ?, ?, ?, ?, ?${durationValues}, ?, ?, ?, ?)`,
+    ).bind(...values).run();
+  } catch (error) {
+    if (!String((error as any)?.message || error).includes("workspace_id")) throw error;
+    const legacyValues: unknown[] = [auth.userId, input.filename, input.key, "UPLOADED", "QUEUED"];
+    if (includeDuration) legacyValues.push(input.durationMs);
+    legacyValues.push(
+      input.profileSelection.styleProfileId || null,
+      input.profileSelection.styleProfileVersion || null,
+      input.profileSelection.layoutProfileId || null,
+      input.profileSelection.layoutProfileVersion || null,
+    );
+    await env.DB.prepare(
+      `INSERT INTO recordings (user_id, filename, r2_key, status, processing_stage${durationColumns}, style_profile_id, style_profile_version, layout_profile_id, layout_profile_version)
+       VALUES (?, ?, ?, ?, ?${includeDuration ? ", ?" : ""}, ?, ?, ?, ?)`,
+    ).bind(...legacyValues).run();
+  }
+}
+
+async function ensureEditorialRecordingScope(env: Env, auth: AuthContext, filename: string): Promise<void> {
+  try {
+    await env.DB.prepare(
+      `INSERT OR IGNORE INTO editorial_recording_scopes (recording_id, user_id, workspace_id)
+       SELECT id, ?, ? FROM recordings WHERE user_id = ? AND filename = ?`,
+    ).bind(auth.userId, auth.workspaceId, auth.userId, filename).run();
+  } catch (error) {
+    // Old Worker databases can accept uploads before the additive editorial migration is applied.
+    console.warn("Editorial recording scope backfill deferred:", error instanceof Error ? error.message : String(error));
   }
 }
 
@@ -1224,11 +1462,36 @@ async function listUploads(env: Env, url: URL, auth: AuthContext): Promise<Respo
 
 async function listRecordings(env: Env, auth: AuthContext): Promise<Response> {
   try {
-    return json({ recordings: withRecordingDisplayFields(await queryRecordings(env, auth.userId)) });
+    const recordings = await queryRecordings(env, auth.userId);
+    const projected = publicationFeatureEnabled(env, auth.userId, auth.workspaceId)
+      ? await enrichRecordingList(env.DB, auth, recordings)
+      : recordings;
+    return json({ recordings: withRecordingDisplayFields(projected) });
   } catch (dbErr: any) {
     console.error("Failed to fetch from D1:", dbErr);
     return json({ error: "database_error", details: dbErr.message }, 500);
   }
+}
+
+async function publicationRoute(factory: () => Promise<Record<string, unknown>>): Promise<Response> {
+  try {
+    return json(redactPublicPublicationErrorCodes(await factory()));
+  } catch (error) {
+    if (error instanceof PublicationProjectionError) {
+      return json({ error: error.code }, error.status);
+    }
+    console.error("Publication projection request failed:", error);
+    return json({ error: "publication_projection_unavailable" }, 503);
+  }
+}
+
+function redactPublicPublicationErrorCodes(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(redactPublicPublicationErrorCodes);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, item]) => [
+    key,
+    key === "error_code" ? null : redactPublicPublicationErrorCodes(item),
+  ]));
 }
 
 async function deleteRecording(env: Env, auth: AuthContext, filename: string): Promise<Response> {
@@ -2079,6 +2342,39 @@ function deploymentVersion(env: Env): Record<string, string | null> {
     ref: metadataValue(env.DEPLOY_REF),
     deployed_at: metadataValue(env.DEPLOYED_AT),
   };
+}
+
+const ADAPTER_HEALTH_SERVICES = {
+  writing: { binding: "WRITING_AGENT", service: "writing-agent" },
+  review: { binding: "REVIEW_AGENT", service: "editorial-review-agent" },
+  image: { binding: "IMAGE_GENERATION_ADAPTER", service: "image-generation-adapter" },
+  wechat: { binding: "WECHAT_PUBLISHING_ADAPTER", service: "wechat-publishing-adapter" },
+} as const;
+
+type AdapterHealth = {
+  service: string;
+  version: Record<string, string | null>;
+};
+
+async function collectAdapterHealth(env: Env): Promise<Record<keyof typeof ADAPTER_HEALTH_SERVICES, AdapterHealth>> {
+  const entries = await Promise.all(Object.entries(ADAPTER_HEALTH_SERVICES).map(async ([role, expected]) => {
+    const binding = env[expected.binding];
+    if (!binding) throw new Error("adapter health binding missing");
+    const response = await binding.fetch(new Request("https://vibepub.internal/health"));
+    const payload = await response.json().catch(() => null) as Record<string, unknown> | null;
+    if (!response.ok || !payload || payload.ok !== true || payload.service !== expected.service ||
+        !payload.version || typeof payload.version !== "object" || Array.isArray(payload.version)) {
+      throw new Error("adapter health response invalid");
+    }
+    const version = payload.version as Record<string, unknown>;
+    const normalized = {
+      commit: typeof version.commit === "string" ? version.commit : null,
+      ref: typeof version.ref === "string" ? version.ref : null,
+      deployed_at: typeof version.deployed_at === "string" ? version.deployed_at : null,
+    };
+    return [role, { service: expected.service, version: normalized }] as const;
+  }));
+  return Object.fromEntries(entries) as unknown as Record<keyof typeof ADAPTER_HEALTH_SERVICES, AdapterHealth>;
 }
 
 function metadataValue(value: string | undefined): string | null {

@@ -41,16 +41,19 @@ job has saved one; older recordings may omit it.
 
 ```bash
 npm install
-npx wrangler r2 bucket create vibepub-files
-npm run migrate:remote
-# Runtime secret name used by the Worker.
-npx wrangler secret put GITHUB_PAT
-# Required when Android should sync/distill WritingAgent style profiles.
-npx wrangler secret put WRITING_AGENT_TOKEN
-# Required for encrypted per-user WeChat publishing credentials.
-npx wrangler secret put CREDENTIAL_ENCRYPTION_KEY
-npx wrangler deploy
+npx wrangler deploy --dry-run
 ```
+
+Do not run bare `wrangler deploy`, `wrangler secret put`, or remote D1
+migrations from this directory as a default setup step. Wave 2E staging uses a
+protected `STAGING_RESOURCE_MANIFEST_JSON` to render an isolated target config;
+every approved secret or deploy command names that generated `--config`
+explicitly. The CI workflow validates and dry-runs only by default. Its manual
+`deploy=true` path bootstraps a no-custom-production-route, flag-off Worker
+before syncing
+secrets and applying a final commit/ref/timestamp-stamped version. Remote D1
+migration and backup are a separate human GO/NO-GO decision, never an automatic
+workflow step.
 
 The Worker route is configured for `vibepub.litianc.cn`.
 `GITHUB_PAT` must be able to create workflow dispatch events for
@@ -77,12 +80,9 @@ npm test
 npx wrangler deploy --dry-run
 ```
 
-Apply D1 migrations before the Worker and mining workflow when their contract changes:
-
-```bash
-npm run migrate:remote
-npm run deploy
-```
+For a production or staging data change, prepare an additive forward-fix plan,
+back up the approved target, and obtain a separate migration approval. Neither
+the staging renderer nor GitHub deployment workflow runs remote D1 migrations.
 
 For mining claims, apply migration `0009`, deploy the Worker, then deploy the
 mining workflow. To roll back, restore the previous mining workflow ref first,
