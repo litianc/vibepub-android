@@ -13,6 +13,7 @@
 
 | 时间 | 功能更新 |
 | --- | --- |
+| 2026-07-27 15:18 CST | Wave 2E 图像 Agent 锁文件补全 Linux 原生绑定，使 staging 发布验证可在 GitHub runner 上启动图像测试。 |
 | 2026-07-27 14:05 CST | Wave 2E 验证锁定 Wrangler 与 Cloudflare 测试池版本、使用 CI 同版 npm 同步依赖锁、移除本机 ripgrep 依赖并限定 staging 临时目录作用域，使发布候选可在 GitHub runner 上一致执行。 |
 | 2026-07-22 22:57 CST | Wave 2E 增加受保护 D1 与独立 staging origin 证据、固定 manifest 摘要、串行 100% 版本部署、收敛重试与无写入双令牌 readiness 门禁。 |
 | 2026-07-22 18:42 CST | Wave 2E 将旧 Mining 输入安全交接到可恢复的 V3 发布运行并向 Android 提供脱敏、单调合并的发布进度快照。 |
