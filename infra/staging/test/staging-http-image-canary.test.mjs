@@ -17,6 +17,11 @@ import {
   startCanaryHandoff,
   StagingHttpCanaryRequestError,
 } from "../staging-http-image-canary-request.mjs";
+import {
+  queryStagingD1,
+  StagingD1QueryError,
+  validateReadOnlySql,
+} from "../query-staging-d1.mjs";
 
 const fixture = JSON.parse(await readFile(new URL("../fixtures/staging-resource-manifest.synthetic.json", import.meta.url), "utf8"));
 const workflow = await readFile(new URL("../../../.github/workflows/wave2e-http-image-canary.yml", import.meta.url), "utf8");
@@ -147,6 +152,8 @@ test("protected canary workflow always restores main before image and proves fla
   assert.match(workflow, /STAGING_ATTESTED_BASE_URL/);
   assert.match(workflow, /Prove the attested origin serves this exact reviewed deployment/);
   assert.match(workflow, /Prove staging cannot trigger the production Mining workflow[\s\S]*GITHUB_PAT must be absent/);
+  assert.equal(workflow.match(/query-staging-d1\.mjs/g)?.length, 5);
+  assert.doesNotMatch(workflow, /wrangler d1 execute/);
   assert.match(workflow, /canary run already exists/);
   assert.match(workflow, /started\.status !== 202|staging-http-image-canary-request\.mjs start/);
   assert.match(workflow, /Close the main user and visual gates\n\s+if: always\(\)/);
@@ -157,6 +164,89 @@ test("protected canary workflow always restores main before image and proves fla
   assert.doesNotMatch(workflow, /WECHAT_DRAFT_SYNC_V3:true/);
   assert.doesNotMatch(workflow, /\bcurl\b/);
   assert.doesNotMatch(workflow, /Authorization: Bearer/);
+});
+
+test("queries the exact protected staging D1 through a bounded read-only API call", async () => {
+  const manifest = {
+    ...fixture,
+    mode: "deploy",
+    main: {
+      ...fixture.main,
+      public_base_url: "https://vibepub-api-staging.example.workers.dev",
+    },
+  };
+  let observed;
+  const result = await queryStagingD1({
+    manifest,
+    sql: "SELECT id, state FROM publication_runs WHERE run_id = 'run_v3_test';",
+    accountId: "a".repeat(32),
+    apiToken: "synthetic-cloudflare-token",
+    fetchImpl: async (url, init) => {
+      observed = { url, init };
+      return new Response(JSON.stringify({
+        success: true,
+        result: [{ success: true, results: [{ id: 1, state: "visual_ready" }], meta: {} }],
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    },
+  });
+  assert.deepEqual(result[0].results, [{ id: 1, state: "visual_ready" }]);
+  assert.equal(observed.url, `https://api.cloudflare.com/client/v4/accounts/${"a".repeat(32)}/d1/database/${fixture.main.d1.id}/query`);
+  assert.equal(observed.init.headers.authorization, "Bearer synthetic-cloudflare-token");
+  assert.equal(observed.init.redirect, "error");
+  assert.deepEqual(JSON.parse(observed.init.body), { sql: "SELECT id, state FROM publication_runs WHERE run_id = 'run_v3_test'" });
+});
+
+test("rejects mutations, comments, multiple statements, and non-deploy manifests before D1 fetch", async () => {
+  const deployManifest = {
+    ...fixture,
+    mode: "deploy",
+    main: {
+      ...fixture.main,
+      public_base_url: "https://vibepub-api-staging.example.workers.dev",
+    },
+  };
+  for (const sql of [
+    "UPDATE publication_runs SET state = 'failed'",
+    "SELECT 1; SELECT 2",
+    "SELECT 1 -- comment",
+  ]) {
+    assert.throws(() => validateReadOnlySql(sql), error => error instanceof StagingD1QueryError);
+  }
+  let calls = 0;
+  await assert.rejects(() => queryStagingD1({
+    manifest: fixture,
+    sql: "SELECT 1",
+    accountId: "a".repeat(32),
+    apiToken: "synthetic-cloudflare-token",
+    fetchImpl: async () => {
+      calls += 1;
+      return new Response("{}");
+    },
+  }), error => error instanceof StagingD1QueryError && error.code === "staging_d1_manifest_invalid");
+  assert.equal(calls, 0);
+
+  const disguisedProduction = {
+    ...deployManifest,
+    main: {
+      ...deployManifest.main,
+      d1: { name: "arbitrary-staging", id: "0804a462-4413-4eaf-bfab-60531eef06be" },
+    },
+    wechat: {
+      ...deployManifest.wechat,
+      d1: { name: "arbitrary-staging", id: "0804a462-4413-4eaf-bfab-60531eef06be" },
+    },
+  };
+  await assert.rejects(() => queryStagingD1({
+    manifest: disguisedProduction,
+    sql: "SELECT 1",
+    accountId: "a".repeat(32),
+    apiToken: "synthetic-cloudflare-token",
+    fetchImpl: async () => {
+      calls += 1;
+      return new Response("{}");
+    },
+  }), error => error instanceof StagingD1QueryError && error.code === "staging_d1_manifest_invalid");
+  assert.equal(calls, 0);
 });
 
 test("uses an environment-only token and accepts only a fresh handoff start", async () => {
