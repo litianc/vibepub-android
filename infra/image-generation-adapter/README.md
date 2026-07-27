@@ -31,3 +31,10 @@ reference/hash evidence remains inside the adapter-owned Durable Object and
 is not exposed as a separate response field. It does not create an intent,
 claim an attempt, or call the provider. If the result cannot be proved, it
 returns `external_side_effect_unknown` and remains on hold.
+
+Wave 2E renders this adapter only as a private staging target
+(`workers_dev=false`, `preview_urls=false`). Synthetic CI and a Wrangler
+dry-run do not deploy it or contact the image provider. An approved staging
+bootstrap precedes secret synchronization and a final explicit-config deploy;
+`GET /health` exposes only service plus non-secret commit/ref/timestamp
+evidence.

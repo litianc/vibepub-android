@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { test } from "node:test";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
@@ -27,6 +28,45 @@ test("editorial producer writes are behind the internal service boundary", async
   assert.equal((await response.json()).error, "unauthorized");
 });
 
+test("Mining V3 handoff auth rejects every legacy token before parsing or I/O", async () => {
+  for (const authorization of ["Bearer files-token", "Bearer mining-token", "Bearer five-agent-token", "Bearer session-access-token"]) {
+    let reads = 0;
+    const response = await worker.fetch(
+      new Request("https://example.test/api/internal/v3/mining-handoffs/eligibility", {
+        method: "POST",
+        headers: { Authorization: authorization, "content-type": "application/json" },
+        body: "{not-json",
+      }),
+      createEnv({
+        FILES_TOKEN: "files-token",
+        MINING_SERVICE_TOKEN: "mining-token",
+        FIVE_AGENT_PUBLISHING_TOKEN: "five-agent-token",
+        MINING_V3_HANDOFF_TOKEN: "mining-v3-token",
+        DB: { prepare() { reads += 1; throw new Error("DB must not be read"); } },
+        FILES_BUCKET: { get() { reads += 1; throw new Error("R2 must not be read"); } },
+      }),
+      createExecutionContext(),
+    );
+    assert.equal(response.status, 401);
+    assert.equal(reads, 0);
+  }
+});
+
+test("Mining V3 handoff accepts only its dedicated bearer before dispatch", async () => {
+  const response = await worker.fetch(
+    new Request("https://example.test/api/internal/v3/mining-handoffs/eligibility", {
+      method: "POST",
+      headers: { Authorization: "Bearer mining-v3-token", "content-type": "application/json" },
+      body: "{}",
+    }),
+    createEnv({ MINING_V3_HANDOFF_TOKEN: "mining-v3-token" }),
+    createExecutionContext(),
+  );
+  // The data-URL harness intentionally stubs the real coordinator module;
+  // 503 proves auth routed to the dedicated endpoint rather than a fallback.
+  assert.equal(response.status, 503);
+});
+
 test("health check exposes deploy version metadata", async () => {
   const response = await worker.fetch(
     new Request("https://example.test/health"),
@@ -47,6 +87,45 @@ test("health check exposes deploy version metadata", async () => {
     ref: "main",
     deployed_at: "2026-07-10T05:32:00Z",
   });
+});
+
+test("main health aggregates private adapter version evidence without provider work", async () => {
+  const adapter = (service) => ({
+    async fetch(request) {
+      assert.equal(new URL(request.url).pathname, "/health");
+      return Response.json({
+        ok: true,
+        service,
+        version: { commit: "abc1234", ref: "staging", deployed_at: "2026-07-22T10:00:00Z" },
+      });
+    },
+  });
+  const response = await worker.fetch(
+    new Request("https://example.test/health?adapters=1"),
+    createEnv({
+      WRITING_AGENT: adapter("writing-agent"),
+      REVIEW_AGENT: adapter("editorial-review-agent"),
+      IMAGE_GENERATION_ADAPTER: adapter("image-generation-adapter"),
+      WECHAT_PUBLISHING_ADAPTER: adapter("wechat-publishing-adapter"),
+    }),
+    createExecutionContext(),
+  );
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.deepEqual(Object.keys(body.adapters).sort(), ["image", "review", "wechat", "writing"]);
+  assert.equal(body.adapters.wechat.version.commit, "abc1234");
+});
+
+test("main health fails closed when a private adapter health response is unavailable", async () => {
+  const response = await worker.fetch(
+    new Request("https://example.test/health?adapters=1"),
+    createEnv({
+      WRITING_AGENT: { fetch: async () => Response.json({ ok: true, service: "writing-agent", version: {} }) },
+    }),
+    createExecutionContext(),
+  );
+  assert.equal(response.status, 503);
+  assert.deepEqual(await response.json(), { ok: false, error: "adapter_health_unavailable" });
 });
 
 test("publication action routes stay disabled when the V3 allowlist is empty", async () => {
@@ -172,6 +251,33 @@ test("recording publication route falls back once to a legacy run when projectio
   assert.equal(body.run.source_manifest_hash, null);
 });
 
+test("public publication run details redact persisted provider error codes", async () => {
+  const runRow = publicationRunRow({
+    state: "failed",
+    run_status: "failed",
+    error_code: "provider_internal_error_500",
+    next_action: "retry",
+  });
+  const db = {
+    prepare(sql) {
+      if (sql.includes("FROM publication_runs")) {
+        return statement({ all: async () => ({ results: [runRow] }) });
+      }
+      throw new Error(`Unexpected public publication detail SQL: ${sql}`);
+    },
+  };
+
+  const response = await worker.fetch(
+    authorizedRequest("https://example.test/api/recordings/101/publication-run"),
+    publicationEnabledEnv(db),
+    createExecutionContext(),
+  );
+
+  assert.equal(response.status, 200);
+  assert.doesNotMatch(await response.clone().text(), /provider_internal_error_500/);
+  assert.equal((await response.json()).run.error_code, null);
+});
+
 test("publication events paginate in bounded revision order and reject invalid bounds", async () => {
   const runRow = {
     run_id: "synthetic-run",
@@ -197,7 +303,7 @@ test("publication events paginate in bounded revision order and reject invalid b
     last_successful_progress_percent: 28,
     retry_count: 0,
     next_action: null,
-    error_code: null,
+    error_code: "provider_internal_error_500",
     idempotency_key: "synthetic-run",
     payload_hash: "sha256:synthetic",
     created_at: "2026-07-19T00:00:01Z",
@@ -215,7 +321,7 @@ test("publication events paginate in bounded revision order and reject invalid b
     progress_percent: revision === 0 ? 0 : revision === 1 ? 14 : revision === 2 ? 20 : 28,
     retry_count: 0,
     next_action: null,
-    error_code: null,
+    error_code: "provider_internal_error_500",
     idempotency_key: `synthetic-event:${revision}`,
     payload_hash: `sha256:event:${revision}`,
     created_at: `2026-07-19T00:00:0${revision}Z`,
@@ -244,8 +350,10 @@ test("publication events paginate in bounded revision order and reject invalid b
     createExecutionContext(),
   );
   assert.equal(firstPageResponse.status, 200);
+  assert.doesNotMatch(await firstPageResponse.clone().text(), /provider_internal_error_500/);
   const firstPage = await firstPageResponse.json();
   assert.deepEqual(firstPage.events.map((event) => event.revision), [0, 1, 2, 3]);
+  assert.deepEqual(firstPage.events.map((event) => event.error_code), [null, null, null, null]);
   assert.equal(firstPage.after_revision, -1);
   assert.equal(firstPage.has_more, false);
   assert.equal(firstPage.next_after_revision, 3);
@@ -368,6 +476,56 @@ test("publication action rejects a stale revision before writing an intent", asy
   assert.equal(batchCalled, false);
 });
 
+test("public retry, cancel, and human action replays redact persisted provider error codes", async () => {
+  for (const [path, action, contract] of [
+    ["retry", "retry", "system.v1"],
+    ["cancel", "cancel", "system.v1"],
+    ["actions", "confirm", "human.v1"],
+  ]) {
+    const expectedStateRevision = 3;
+    const payloadHash = `sha256:${createHash("sha256").update(JSON.stringify({
+      action,
+      expected_state_revision: expectedStateRevision,
+      contract,
+    })).digest("hex")}`;
+    const db = {
+      prepare(sql) {
+        if (sql.includes("FROM publication_run_actions")) {
+          return statement({
+            all: async () => ({
+              results: [{
+                payload_hash: payloadHash,
+                result_json: JSON.stringify({
+                  action,
+                  run: { run_id: "synthetic-run", error_code: "provider_internal_error_500" },
+                  replayed: false,
+                }),
+              }],
+            }),
+          });
+        }
+        throw new Error(`Unexpected public ${path} replay SQL: ${sql}`);
+      },
+    };
+    const body = path === "actions"
+      ? { action, expected_state_revision: expectedStateRevision }
+      : { expected_state_revision: expectedStateRevision };
+    const response = await worker.fetch(
+      authorizedRequest(`https://example.test/api/publication-runs/synthetic-run/${path}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Idempotency-Key": `redaction-${path}` },
+        body: JSON.stringify(body),
+      }),
+      publicationEnabledEnv(db),
+      createExecutionContext(),
+    );
+
+    assert.equal(response.status, 200, path);
+    assert.doesNotMatch(await response.clone().text(), /provider_internal_error_500/, path);
+    assert.equal((await response.json()).run.error_code, null, path);
+  }
+});
+
 test("GLM production defaults keep Mining and WritingAgent on the Coding endpoint", async () => {
   const codingBaseUrl = "https://open.bigmodel.cn/api/coding/paas/v4/";
   const [miningLlm, writingAgent, writingAgentWrangler] = await Promise.all([
@@ -422,7 +580,10 @@ test("mining input claims allow one active holder and keep completed inputs out 
 test("mining input claims reject a target outside the stated user scope", async () => {
   const response = await worker.fetch(
     miningClaimRequest("claim", "usr_one", "users/usr_two/inbox/voice.m4a", "claim-one"),
-    createEnv({ MINING_SERVICE_TOKEN: "mining-token" }),
+    createEnv({
+      MINING_SERVICE_TOKEN: "mining-token",
+      DB: { prepare() { throw new Error("invalid claim target must not reach D1"); } },
+    }),
     createExecutionContext(),
   );
 
@@ -487,6 +648,9 @@ test("recording list exposes only the agreed publication projection fields", asy
               last_successful_progress_percent: 28,
               retry_count: 0,
               next_action: null,
+              error_code: "provider_internal_error_500",
+              created_at: "2026-07-22T00:00:00.000Z",
+              updated_at: "2026-07-22T00:00:01.000Z",
             }],
           }),
         });
@@ -520,7 +684,9 @@ test("recording list exposes only the agreed publication projection fields", asy
   );
 
   assert.equal(response.status, 200);
-  const recording = (await response.json()).recordings[0];
+  const responseText = await response.text();
+  assert.equal(responseText.includes("provider_internal_error_500"), false);
+  const recording = JSON.parse(responseText).recordings[0];
   assert.deepEqual({
     run_id: recording.run_id,
     publication_stage: recording.publication_stage,
@@ -539,6 +705,176 @@ test("recording list exposes only the agreed publication projection fields", asy
   assert.equal(recording.source_manifest_hash, undefined);
   assert.equal(recording.agent_versions, undefined);
   assert.equal(recording.skill_pins, undefined);
+  assert.deepEqual(Object.keys(recording.publication_summary).sort(), [
+    "created_at",
+    "error_code",
+    "last_successful_progress_percent",
+    "last_successful_state",
+    "next_action",
+    "progress_percent",
+    "publication_stage",
+    "retry_count",
+    "run_id",
+    "run_status",
+    "state",
+    "state_revision",
+    "updated_at",
+  ]);
+  assert.deepEqual(recording.publication_summary, {
+    run_id: "synthetic-run",
+    state: "writing",
+    run_status: "active",
+    publication_stage: "writing",
+    state_revision: 2,
+    progress_percent: 28,
+    last_successful_state: "writing",
+    last_successful_progress_percent: 28,
+    retry_count: 0,
+    next_action: null,
+    error_code: null,
+    created_at: "2026-07-22T00:00:00.000Z",
+    updated_at: "2026-07-22T00:00:01.000Z",
+  });
+});
+
+test("recording list requires current pointers to match run owner, workspace, and recording", async () => {
+  let projectionSql = "";
+  const db = {
+    prepare(sql) {
+      if (sql.includes("FROM publication_runs")) {
+        projectionSql = sql;
+        const exactPointerJoin = [
+          "c.current_run_id = p.run_id",
+          "c.user_id = p.user_id",
+          "c.workspace_id = p.workspace_id",
+          "c.recording_id = p.recording_id",
+        ].every((fragment) => sql.includes(fragment));
+        return statement({
+          all: async () => ({
+            results: exactPointerJoin ? [] : [{
+              run_id: "cross-tenant-pointer",
+              recording_id: 1,
+              state: "writing",
+              run_status: "active",
+              state_revision: 1,
+              progress_percent: 28,
+              last_successful_state: "writing",
+              last_successful_progress_percent: 28,
+              retry_count: 0,
+              next_action: null,
+              error_code: null,
+              created_at: "2026-07-22T00:00:00.000Z",
+              updated_at: "2026-07-22T00:00:01.000Z",
+            }],
+          }),
+        });
+      }
+      if (sql.includes("FROM recordings")) {
+        return statement({
+          all: async () => ({ results: [{
+            id: 1,
+            filename: "scoped.m4a",
+            status: "PROCESSING",
+            created_at: "2026-07-22 00:00:00",
+            updated_at: "2026-07-22 00:00:01",
+            processing_stage: "ASR",
+            error_message: null,
+          }] }),
+        });
+      }
+      throw new Error(`Unexpected recording list SQL: ${sql}`);
+    },
+  };
+
+  const response = await worker.fetch(
+    authorizedRequest("https://example.test/api/recordings"),
+    createEnv({ DB: db, FIVE_AGENT_PUBLISHING_V3: "true", FIVE_AGENT_PUBLISHING_V3_ALLOWLIST: "default_user:vibepub-dogfood" }),
+    createExecutionContext(),
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).recordings[0].publication_summary, null);
+  assert.equal(projectionSql.includes("c.user_id = p.user_id"), true);
+  assert.equal(projectionSql.includes("c.workspace_id = p.workspace_id"), true);
+  assert.equal(projectionSql.includes("c.recording_id = p.recording_id"), true);
+});
+
+test("recording list keeps legacy fields and skips publication access when the V3 projection flag is off", async () => {
+  let publicationQueryCount = 0;
+  const db = {
+    prepare(sql) {
+      if (sql.includes("FROM publication_runs")) {
+        publicationQueryCount += 1;
+        throw new Error("publication projection must not be queried while disabled");
+      }
+      if (sql.includes("FROM recordings")) {
+        return statement({
+          all: async () => ({
+            results: [{
+              id: 9,
+              filename: "legacy.m4a",
+              status: "PROCESSING",
+              created_at: "2026-07-22 00:00:00",
+              updated_at: "2026-07-22 00:00:01",
+              processing_stage: "ASR",
+              error_message: null,
+            }],
+          }),
+        });
+      }
+      throw new Error(`Unexpected recording list SQL: ${sql}`);
+    },
+  };
+
+  const response = await worker.fetch(
+    authorizedRequest("https://example.test/api/recordings"),
+    createEnv({ DB: db }),
+    createExecutionContext(),
+  );
+
+  assert.equal(response.status, 200);
+  const recording = (await response.json()).recordings[0];
+  assert.equal(publicationQueryCount, 0);
+  assert.equal(Object.hasOwn(recording, "publication_summary"), false);
+  assert.equal(recording.processing_stage, "ASR");
+});
+
+test("recording list returns a null publication summary when the V3 projection has no current run", async () => {
+  const db = {
+    prepare(sql) {
+      if (sql.includes("FROM publication_runs")) {
+        return statement({ all: async () => ({ results: [] }) });
+      }
+      if (sql.includes("FROM recordings")) {
+        return statement({
+          all: async () => ({
+            results: [{
+              id: 10,
+              filename: "legacy-with-v3-enabled.m4a",
+              status: "PROCESSING",
+              created_at: "2026-07-22 00:00:00",
+              updated_at: "2026-07-22 00:00:01",
+              processing_stage: "ASR",
+              error_message: null,
+            }],
+          }),
+        });
+      }
+      throw new Error(`Unexpected recording list SQL: ${sql}`);
+    },
+  };
+
+  const response = await worker.fetch(
+    authorizedRequest("https://example.test/api/recordings"),
+    createEnv({ DB: db, FIVE_AGENT_PUBLISHING_V3: "true", FIVE_AGENT_PUBLISHING_V3_ALLOWLIST: "default_user:vibepub-dogfood" }),
+    createExecutionContext(),
+  );
+
+  assert.equal(response.status, 200);
+  const recording = (await response.json()).recordings[0];
+  assert.equal(recording.publication_summary, null);
+  assert.equal(recording.run_id, null);
+  assert.equal(recording.publication_stage, null);
 });
 
 test("preserves explicit recording duration when D1 starts returning it", async () => {
@@ -1854,8 +2190,12 @@ async function loadWorker() {
     "class FiveAgentPublishingWorkflow {}",
     'const handleFiveAgentPublishingInternalRoute = async () => new Response(JSON.stringify({ error: "editorial_workflow_disabled" }), { status: 404 });',
   ].join("\n");
+  const miningHandoffStub = [
+    'const handleMiningV3HandoffInternalRoute = async () => new Response(JSON.stringify({ error: "mining_v3_handoff_unavailable" }), { status: 503 });',
+  ].join("\n");
   const withFiveAgentStub = source
-    .replace(/import\s+\{\s*FiveAgentPublishingWorkflow,\s*handleFiveAgentPublishingInternalRoute\s*\}\s+from\s+"\.\/fiveAgentPublishing";/, fiveAgentStub);
+    .replace(/import\s+\{\s*FiveAgentPublishingWorkflow,\s*handleFiveAgentPublishingInternalRoute\s*\}\s+from\s+"\.\/fiveAgentPublishing";/, fiveAgentStub)
+    .replace(/import\s+\{\s*handleMiningV3HandoffInternalRoute\s*\}\s+from\s+"\.\/miningV3Handoff";/, miningHandoffStub);
   return (await import(moduleDataUrl(withFiveAgentStub))).default;
 }
 
@@ -1933,6 +2273,48 @@ function createEnv(overrides = {}) {
     PUBLIC_BASE_URL: "https://example.test",
     FILES_BUCKET: {},
     DB: createDb([]),
+    ...overrides,
+  };
+}
+
+function publicationEnabledEnv(db) {
+  return createEnv({
+    DB: db,
+    FIVE_AGENT_PUBLISHING_V3: "true",
+    FIVE_AGENT_PUBLISHING_V3_ALLOWLIST: "default_user:vibepub-dogfood",
+  });
+}
+
+function publicationRunRow(overrides = {}) {
+  return {
+    run_id: "synthetic-run",
+    user_id: "default_user",
+    workspace_id: "vibepub-dogfood",
+    article_id: "synthetic-article",
+    recording_id: 101,
+    source_run_id: "synthetic-run",
+    source_manifest_hash: "sha256:synthetic",
+    source_state: "writing",
+    source_state_revision: 0,
+    schema_version: "publication-projection.v1",
+    workflow_version: "publishing-workflow.v1",
+    policy_version: "publishing-policy.v1",
+    agent_versions_json: "{}",
+    skill_pins_json: "{}",
+    state: "writing",
+    run_status: "active",
+    state_revision: 3,
+    progress_percent: 28,
+    resume_state: null,
+    last_successful_state: "writing",
+    last_successful_progress_percent: 28,
+    retry_count: 0,
+    next_action: null,
+    error_code: null,
+    idempotency_key: "synthetic-run",
+    payload_hash: "sha256:synthetic",
+    created_at: "2026-07-19T00:00:01Z",
+    updated_at: "2026-07-19T00:00:04Z",
     ...overrides,
   };
 }

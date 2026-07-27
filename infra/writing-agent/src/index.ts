@@ -29,6 +29,9 @@ export interface Env {
   GLM_API_KEY?: string;
   GLM_BASE_URL?: string;
   GLM_MODEL?: string;
+  DEPLOY_COMMIT?: string;
+  DEPLOY_REF?: string;
+  DEPLOYED_AT?: string;
 }
 
 type RewriteJobRequest = {
@@ -134,7 +137,7 @@ export function createWritingAgentWorker(
 
     const url = new URL(request.url);
     if (request.method === "GET" && url.pathname === "/health") {
-      return json({ ok: true, service: "writing-agent" });
+      return json({ ok: true, service: "writing-agent", version: deploymentVersion(env) });
     }
 
     const isV3Write = request.method === "POST" && url.pathname === "/internal/v3/write";
@@ -234,6 +237,11 @@ export function createWritingAgentWorker(
     return json({ error: { code: "not_found", message: "Route not found" } }, 404);
   };
   return { fetch };
+}
+
+function deploymentVersion(env: Pick<Env, "DEPLOY_COMMIT" | "DEPLOY_REF" | "DEPLOYED_AT">) {
+  const value = (input: string | undefined) => input?.trim() || null;
+  return { commit: value(env.DEPLOY_COMMIT), ref: value(env.DEPLOY_REF), deployed_at: value(env.DEPLOYED_AT) };
 }
 
 export default createWritingAgentWorker();

@@ -112,18 +112,60 @@ npm install
 npx wrangler dev
 ```
 
-Deploy after Cloudflare auth is configured:
-
-```bash
-cd infra/worker
-npx wrangler r2 bucket create vibepub-files
-npm run migrate:remote
-npx wrangler deploy
-```
+Production deployment is not a local default. Wave 2E first renders a complete,
+isolated staging configuration from a protected Environment manifest, validates
+it synthetically, and performs five explicit `wrangler deploy --dry-run`
+checks. A dry-run is validation only, not a staging deployment. See
+[`infra/staging/README.md`](infra/staging/README.md) before any approved
+staging operation.
 
 ## Current Ops Notes
 
 Cloudflare is logged in on this machine and Worker deployment is available with `npx wrangler`.
+
+## Release States And Staging Safety
+
+- **Code complete** means local source and tests are ready; it does not create a
+  Cloudflare resource or enable a feature.
+- **CI validated** means synthetic manifest rendering and local Wrangler
+  dry-runs passed; it is not a staging deployment.
+- **Staging data prepared** requires protected evidence of isolated main and
+  Writing D1 backups, additive migration lists through main `0011` and Writing
+  `0001`, and schema verification hashes; the workflow never performs remote
+  migrations itself.
+- **Staging deployed** requires the protected `vibepub-staging` GitHub
+  Environment, a real protected resource manifest, explicit `deploy=true`,
+  a separately protected exact `STAGING_PUBLIC_BASE_URL` proven by the
+  account-scoped Cloudflare Workers subdomain API, serial private adapters
+  before the main Worker, one 100-percent active deploy-version/rollback
+  evidence per service, and all V3 flags and allowlists still disabled. Main
+  has no custom production route but does expose its isolated `workers.dev`
+  staging entry.
+- **Mining readiness attested** confirms the isolated unscheduled Mining
+  config, retried main/adapter health versions, the unauthenticated handoff
+  boundary, and two authenticated no-write token probes; it never starts
+  Mining. **Mining launched** is a
+  separate protected authorization after this attestation.
+- **Production released** is a separately approved operation after staging
+  canary evidence. Do not infer it from CI, dry-runs, or a staging health
+  response.
+
+The staging rollout begins with one exact tenant/account allowlist after flags
+are explicitly enabled, exercises both audio and text V3 handoffs, verifies
+retry and unknown-side-effect reconciliation, and stops WeChat at a draft.
+Rollback first clears the main Worker tenant flags and allowlists while keeping
+V3 status reconciliation available, then rolls back the main Worker and private
+adapters. Never turn the Mining client gate off to send an already-marked V3
+recording back through legacy work. D1 and Durable Object changes are forward
+fixes only: never drop or down-migrate a protected data store.
+
+Before a device can be called staging-ready, reconcile the reviewed source SHA
+with the APK SHA and signing identity, select the explicit staging API profile,
+assert the production endpoint is rejected, verify main plus four adapter
+health/version evidence, complete the D1 data-prepared gate, and use a
+synthetic staging publishing account. Use `adb install -r` to preserve local
+data. The current HTTP image gateway remains an external blocker for a complete
+visual staging canary until a TLS front and key rotation are complete.
 
 Uploads wake the GitHub Actions mining workflow immediately through a
 Cloudflare Worker secret named `GITHUB_PAT`. GitHub Actions repository secrets

@@ -574,3 +574,58 @@ body, or publishing request is written into the main Coordinator/D1 mirror.
 The private draft receipt and pass readback QA retain the verified media and
 cover evidence solely for exact replay comparison; a completed run fails
 closed if either recording field differs from that immutable evidence.
+
+## Wave 2E Integration And Staging Gate
+
+Wave 2E may hand off an allowlisted legacy Mining source to the exact V3
+owner-scoped transcript and publishing run without duplicating legacy writing,
+images, or WeChat work. The public recording list may expose only a redacted
+publication snapshot; internal error codes remain in the Coordinator/D1 audit
+path and are never surfaced to Android.
+
+Staging is prepared from a protected structured resource manifest at
+`infra/staging/`, never from checked-in IDs, bucket names, routes, or secret
+values. The manifest supplies only exact isolated `-staging` resources and the
+main `https://<worker>.<account>.workers.dev` origin; it rejects production,
+private-like, lookalike, path-bearing, and trailing-dot targets. CI performs
+synthetic render plus five explicit generated-config Wrangler dry-runs only.
+
+Before any remote bootstrap, a protected Environment attestation must prove
+both isolated main/Writing D1 backup identifiers, the exact additive migration
+lists (main through `0011`, Writing through `0001`), and schema evidence hashes.
+Its manifest SHA-256 is passed to every later deploy/health job, which rejects
+TOCTOU changes; before any adapter deploy an independent protected
+`STAGING_PUBLIC_BASE_URL` must exactly equal the manifest and an account-scoped
+Cloudflare Workers subdomain response must prove its account label. Protected
+deploy runs serialize globally and execute Writing, Review, Image, WeChat, then
+main while synthetic CI does not block. The workflow does not apply remote
+migrations. Approved deployment records the current adapter/main deployment
+evidence, requiring exactly one active version at 100 percent, bootstraps the
+private adapters, syncs only each job's required secrets, performs final
+commit/ref/timestamp deploys, and asks main to aggregate non-provider `/health`
+evidence from the four private service bindings. Main has no custom production
+route but retains its isolated `workers.dev` staging entry with preview URLs
+disabled; all V3 flags and allowlists stay off.
+
+Mining readiness is an unscheduled, separate attestation after bounded
+five-service health convergence: it checks exact staging config, the
+unauthenticated handoff boundary, and two authenticated no-write probes for
+`MINING_SERVICE_TOKEN` and `MINING_V3_HANDOFF_TOKEN` without creating a marker
+or starting Mining. Actual Mining launch remains separately authorized. Once a
+source has a V3 marker, stopping writes means clearing the main Worker tenant
+flags/allowlists, not disabling the Mining client gate and allowing a legacy
+revision.
+
+The release progression is deliberately distinct: code complete, CI validated,
+staging data prepared, staging deployed, Mining readiness attested, Mining
+launched, and production released. Canary one exact tenant/account pair at a
+time with both audio and text handoff paths, verify retries and unknown-side-
+effect reconciliation, and stop WeChat at a draft. Rollback first clears main
+tenant flags/allowlists, then reverts main and adapters; D1/DO data is
+forward-fixed rather than dropped or down-migrated. Device verification requires
+a reviewed source SHA matched to APK SHA/signing identity, explicit staging API
+profile, production-endpoint negative assertion, five-service health/version
+evidence, completed D1 data gate, and a synthetic staging account. The current
+HTTP image gateway fails the Image adapter HTTPS/443 contract, so a complete
+visual staging canary remains externally blocked until TLS fronting and key
+rotation are complete.

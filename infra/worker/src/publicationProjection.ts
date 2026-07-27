@@ -608,6 +608,9 @@ export async function getPublicationRunForRecording(
     row = await first<PublicationRunRow>(db, `
       SELECT p.* FROM publication_runs p
       JOIN publication_current_runs c ON c.current_run_id = p.run_id
+        AND c.user_id = p.user_id
+        AND c.workspace_id = p.workspace_id
+        AND c.recording_id = p.recording_id
       WHERE c.recording_id = ? AND c.user_id = ? AND c.workspace_id = ?
       LIMIT 1
     `, [recordingId, auth.userId, auth.workspaceId]);
@@ -1092,6 +1095,9 @@ export async function enrichRecordingList(
     rows = await all<PublicationRunRow>(db, `
       SELECT p.* FROM publication_runs p
       JOIN publication_current_runs c ON c.current_run_id = p.run_id
+        AND c.user_id = p.user_id
+        AND c.workspace_id = p.workspace_id
+        AND c.recording_id = p.recording_id
       WHERE c.user_id = ? AND c.workspace_id = ? AND c.recording_id IN (${placeholders})
     `, [auth.userId, auth.workspaceId, ...ids]);
   } catch (error) {
@@ -1111,8 +1117,34 @@ export async function enrichRecordingList(
   return recordings.map((item) => {
     const recording = item as Record<string, unknown>;
     const row = byRecording.get(Number(recording.id));
-    if (!row) return { ...recording, run_id: null, publication_stage: null, state_revision: null, progress_percent: null, retry_count: 0, next_action: null };
+    if (!row) {
+      return {
+        ...recording,
+        run_id: null,
+        publication_stage: null,
+        state_revision: null,
+        progress_percent: null,
+        retry_count: 0,
+        next_action: null,
+        publication_summary: null,
+      };
+    }
     const publicRun = publicationResponse(row) as Record<string, unknown>;
+    const publicationSummary = {
+      run_id: publicRun.run_id,
+      state: publicRun.state,
+      run_status: publicRun.run_status,
+      publication_stage: publicRun.publication_stage,
+      state_revision: publicRun.state_revision,
+      progress_percent: publicRun.progress_percent,
+      last_successful_state: publicRun.last_successful_state,
+      last_successful_progress_percent: row.last_successful_progress_percent,
+      retry_count: publicRun.retry_count,
+      next_action: publicRun.next_action,
+      error_code: null,
+      created_at: publicRun.created_at,
+      updated_at: publicRun.updated_at,
+    };
     return {
       ...recording,
       run_id: publicRun.run_id,
@@ -1121,6 +1153,7 @@ export async function enrichRecordingList(
       progress_percent: publicRun.progress_percent,
       retry_count: publicRun.retry_count,
       next_action: publicRun.next_action,
+      publication_summary: publicationSummary,
     };
   });
 }

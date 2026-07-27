@@ -142,6 +142,7 @@ export type EditorialRuntimeEnv = Cloudflare.Env & {
   EDITORIAL_COORDINATOR: DurableObjectNamespace<EditorialCoordinatorAgent>;
   FIVE_AGENT_PUBLISHING_V3?: string;
   FIVE_AGENT_PUBLISHING_V3_ALLOWLIST?: string;
+  MINING_V3_HANDOFF_TOKEN?: string;
   EDITORIAL_WORKFLOW: Workflow<EditorialWorkflowParams>;
   FIVE_AGENT_PUBLISHING_WORKFLOW?: Workflow<FiveAgentRunInput>;
   WRITING_AGENT?: Fetcher;
@@ -1697,13 +1698,18 @@ export class EditorialCoordinatorAgent extends Agent<EditorialRuntimeEnv, Editor
   }
 
   public async getFiveAgentStartEvidence(runId: string, workflowId: string): Promise<{
+    workflow_start_status: string | null;
     events: Array<{ event_type: string; idempotency_key: string; evidence_hash: string; created_at: string }>;
     receipts: Array<{ receipt_id: string; reconciliation_key: string; evidence_hash: string }>;
   }> {
     this.ensureSchema();
     const current = this.wave2bStartLedger(workflowId, runId);
     if (!current) throw new EditorialRuntimeError("workflow_start_not_found", "Wave2B start intent not found", 404);
+    const workflow = this.sql<{ status: string }>`
+      SELECT status FROM editorial_wave2b_workflow_starts
+      WHERE run_id = ${runId} AND workflow_id = ${workflowId} LIMIT 1`[0];
     return {
+      workflow_start_status: workflow?.status || null,
       events: this.sql<{ event_type: string; idempotency_key: string; evidence_hash: string; created_at: string }>`
         SELECT event_type, idempotency_key, evidence_hash, created_at FROM editorial_wave2b_start_events
         WHERE run_id = ${runId} AND workflow_id = ${workflowId} ORDER BY created_at, event_id`,
@@ -1735,12 +1741,14 @@ export class EditorialCoordinatorAgent extends Agent<EditorialRuntimeEnv, Editor
     const workflow = this.sql<{ status: string }>`
       SELECT status FROM editorial_wave2b_workflow_starts
       WHERE workflow_id = ${input.workflow_id} AND run_id = ${input.run_id} LIMIT 1`[0];
-    const event = this.sql<{ event_id: string; evidence_hash: string }>`
+    const events = this.sql<{ event_id: string; evidence_hash: string }>`
       SELECT event_id, evidence_hash FROM editorial_wave2b_start_events
       WHERE workflow_id = ${input.workflow_id} AND run_id = ${input.run_id}
         AND event_type = 'workflow_start_confirmed'
-      LIMIT 1`[0];
-    if (!ledger || !workflow || ledger.status !== "started" || workflow.status !== "started" || !event) {
+      ORDER BY created_at, event_id`;
+    const event = events[0];
+    if (!ledger || !workflow || ledger.status !== "started" || ledger.start_status !== null ||
+        ledger.error_code !== null || ledger.next_action !== null || workflow.status !== "started" || events.length !== 1 || !event) {
       return { confirmed: false, event_id: event?.event_id || null };
     }
     const expectedEvidenceHash = await hashJson({
@@ -2352,6 +2360,8 @@ export class EditorialCoordinatorAgent extends Agent<EditorialRuntimeEnv, Editor
     state_revision: number;
     artifact_id: string | null;
     payload_hash: string | null;
+    error_code: string | null;
+    next_action: string | null;
     created_at: string;
   }>> {
     this.ensureSchema();
@@ -2365,9 +2375,24 @@ export class EditorialCoordinatorAgent extends Agent<EditorialRuntimeEnv, Editor
       state_revision: number;
       artifact_id: string | null;
       payload_hash: string | null;
+      summary_json: string;
       created_at: string;
-    }>`SELECT event_type, state, state_revision, artifact_id, payload_hash, created_at
-      FROM editorial_wave2b_events WHERE run_id = ${runId} ORDER BY state_revision, event_type`;
+    }>`SELECT event_type, state, state_revision, artifact_id, payload_hash, summary_json, created_at
+      FROM editorial_wave2b_events WHERE run_id = ${runId} ORDER BY state_revision, event_type`
+      .map((row) => {
+        let summary: Record<string, unknown> = {};
+        try { summary = parseJson<Record<string, unknown>>(row.summary_json); } catch { /* append-only event summaries remain opaque on corruption */ }
+        return {
+          event_type: row.event_type,
+          state: row.state,
+          state_revision: row.state_revision,
+          artifact_id: row.artifact_id,
+          payload_hash: row.payload_hash,
+          error_code: typeof summary.error_code === "string" ? summary.error_code : null,
+          next_action: typeof summary.next_action === "string" ? summary.next_action : null,
+          created_at: row.created_at,
+        };
+      });
   }
 
   public async completeFiveAgentArtifact(input: {
@@ -2474,7 +2499,11 @@ export class EditorialCoordinatorAgent extends Agent<EditorialRuntimeEnv, Editor
         VALUES (${input.artifact_id}, ${input.run_id}, ${input.payload_hash}, ${input.created_at})`;
       this.sql`INSERT INTO editorial_wave2b_events
         (run_id, event_type, state, state_revision, artifact_id, payload_hash, summary_json, created_at)
-        VALUES (${input.run_id}, ${input.event_type}, ${input.state}, ${input.state_revision}, ${input.artifact_id}, ${input.payload_hash}, ${safeJson(input.summary)}, ${input.created_at})`;
+        VALUES (${input.run_id}, ${input.event_type}, ${input.state}, ${input.state_revision}, ${input.artifact_id}, ${input.payload_hash}, ${safeJson({
+          ...input.summary,
+          error_code: input.error_code || null,
+          next_action: input.next_action || null,
+        })}, ${input.created_at})`;
     });
     return { replayed: false };
   }

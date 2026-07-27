@@ -75,11 +75,22 @@ class WritingStyleProfilesTest {
     }
 
     @Test
-    fun builtInPromptBodiesAreForDisplayOnly() {
+    fun onlyTheExactRegisteredDefaultOmitsItsSubmissionBody() {
         assertEquals(
             "",
             WritingStyleProfiles.submissionBodyFor(WritingStyleProfiles.defaultStyleProfile),
         )
+
+        val nonDefaultBuiltIn = requireNotNull(WritingStyleProfiles.findById("style_product_review"))
+        assertEquals(nonDefaultBuiltIn.body?.trim(), WritingStyleProfiles.submissionBodyFor(nonDefaultBuiltIn))
+
+        val customProfile = WritingStyleProfiles.newCustomProfile(
+            name = "我的风格",
+            description = "",
+            body = "1. 保留我的表达。",
+            nowMs = 1L,
+        )
+        assertEquals("1. 保留我的表达。", WritingStyleProfiles.submissionBodyFor(customProfile))
 
         val remoteProfile = WritingStyleProfileOption(
             id = "style_remote",

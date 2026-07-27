@@ -53,6 +53,18 @@ describe('VibePub Cloud Pipeline', () => {
     proxyUrl: 'https://wechat-proxy.example.test',
   };
 
+  function acceptedV3(handoffId: string, runDigit: string) {
+    const runId = `run_v3_${runDigit.repeat(64)}`;
+    const transcriptHash = `sha256:${'c'.repeat(64)}`;
+    return {
+      decision: 'accepted',
+      handoff_id: handoffId,
+      run_id: runId,
+      transcript_ref: `editorial/v3/0123456789abcdef01234567/mining-handoffs/${handoffId}/transcripts/${'c'.repeat(64)}.v1.txt`,
+      transcript_hash: transcriptHash,
+    };
+  }
+
   function mockFetchWithPublishingAccount(account = testWechatConfig) {
     vi.stubGlobal('fetch', vi.fn(async (input) => {
       if (String(input).includes('/api/internal/mining-claims')) {
@@ -60,6 +72,14 @@ describe('VibePub Cloud Pipeline', () => {
           ok: true,
           status: 200,
           json: async () => ({ claimed: true, completed: true, released: true }),
+          text: async () => '',
+        } as any;
+      }
+      if (String(input).includes('/api/internal/v3/mining-handoffs/')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ decision: 'legacy' }),
           text: async () => '',
         } as any;
       }
@@ -99,6 +119,8 @@ describe('VibePub Cloud Pipeline', () => {
       PUBLIC_BASE_URL: 'https://vibepub.example.test',
       FILES_TOKEN: 'test-files-token',
       MINING_SERVICE_TOKEN: 'test-mining-service-token',
+      MINING_V3_HANDOFF_TOKEN: 'test-mining-v3-handoff-token',
+      MINING_V3_HANDOFF_ENABLED: 'true',
       TARGET_FILENAME: '',
       REVISION_REQUEST_KEY: '',
       WECHAT_APP_ID: '',
@@ -184,6 +206,9 @@ describe('VibePub Cloud Pipeline', () => {
           text: async () => '',
         } as any;
       }
+      if (String(input).includes('/api/internal/v3/mining-handoffs/')) {
+        return { ok: true, status: 200, json: async () => ({ decision: 'legacy' }), text: async () => '' } as any;
+      }
       throw new Error(`Unexpected request: ${String(input)}`);
     }));
     vi.mocked(listUnprocessedFiles).mockResolvedValue([fileKey]);
@@ -194,6 +219,175 @@ describe('VibePub Cloud Pipeline', () => {
     expect(processAudioText).not.toHaveBeenCalled();
     expect(publishDraft).not.toHaveBeenCalled();
     expect(statusUpdateBodies()).toEqual([]);
+  });
+
+  it.each([undefined, 'false'])('keeps ordinary inputs on legacy work with MINING_V3_HANDOFF_ENABLED=%s and makes zero V3 requests', async (enabled) => {
+    const fileKey = 'inbox/v3-client-gate.mp3';
+    process.env.MINING_V3_HANDOFF_ENABLED = enabled;
+    const legacyArticle = {
+      title: 'Legacy remains available', content: '<p>legacy</p>', imagePrompt: 'legacy', coverTitle: ['Legacy'], coverSubtitle: '',
+    };
+    vi.mocked(listUnprocessedFiles).mockResolvedValue([fileKey]);
+    vi.mocked(createPresignedDownloadUrl).mockResolvedValue('https://r2.example.test/v3-client-gate.mp3');
+    vi.mocked(transcribeAudioUrl).mockResolvedValue('legacy transcript');
+    vi.mocked(processAudioText).mockResolvedValue(legacyArticle);
+    vi.mocked(generateWechatCoverBuffer).mockResolvedValue(Buffer.from('cover'));
+    vi.mocked(uploadTranscript).mockResolvedValue();
+    vi.mocked(deleteFile).mockResolvedValue();
+    vi.stubGlobal('fetch', vi.fn(async (input, init) => {
+      const url = String(input);
+      if (url.includes('/api/internal/v3/mining-handoffs/')) throw new Error('V3 request must be disabled');
+      if (url.includes('/api/internal/mining-claims')) {
+        const action = JSON.parse(String(init?.body)).action;
+        return { ok: true, status: 200, json: async () => ({ claimed: action === 'claim', completed: action === 'complete' }), text: async () => '' } as any;
+      }
+      if (url.includes('/api/internal/status')) return { ok: true, status: 200, json: async () => ({}), text: async () => '' } as any;
+      if (url.includes('/api/internal/publishing-account')) return { ok: false, status: 404, json: async () => ({}), text: async () => '' } as any;
+      throw new Error(`unexpected request ${url}`);
+    }));
+
+    await expect(main()).resolves.toBeUndefined();
+
+    expect(vi.mocked(fetch).mock.calls.some(([input]) => String(input).includes('/api/internal/v3/mining-handoffs/'))).toBe(false);
+    expect(processAudioText).toHaveBeenCalledTimes(1);
+  });
+
+  it('hands an eligible audio source to V3 after ASR and never enters legacy writing, image, or WeChat work', async () => {
+    const fileKey = 'users/v3_user/inbox/v3-source.mp3';
+    const calls: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (input, init) => {
+      const url = String(input);
+      if (url.includes('/api/internal/mining-claims')) {
+        calls.push(`claim:${JSON.parse(String(init?.body)).action}`);
+        return { ok: true, status: 200, json: async () => ({ claimed: true, completed: true, released: true }), text: async () => '' } as any;
+      }
+      if (url.endsWith('/eligibility')) return { ok: true, status: 200, json: async () => ({ decision: 'v3', handoff_id: `handoff_v3_${'a'.repeat(64)}` }), text: async () => '' } as any;
+      if (url.endsWith('/status')) return { ok: true, status: 200, json: async () => ({ decision: 'v3_pending_asr', handoff_id: `handoff_v3_${'a'.repeat(64)}` }), text: async () => '' } as any;
+      if (url.endsWith('/start')) {
+        const body = JSON.parse(String(init?.body));
+        expect(body).toMatchObject({ source_key: fileKey, transcript_text: 'V3 only transcript' });
+        return { ok: true, status: 202, json: async () => acceptedV3(body.handoff_id, '1'), text: async () => '' } as any;
+      }
+      return { ok: true, status: 200, text: async () => '' } as any;
+    }));
+    vi.mocked(listUnprocessedFiles).mockResolvedValue([fileKey]);
+    vi.mocked(createPresignedDownloadUrl).mockResolvedValue('https://r2.example.test/v3-source.mp3');
+    vi.mocked(transcribeAudioUrl).mockResolvedValue('V3 only transcript');
+
+    await expect(main()).resolves.toBeUndefined();
+
+    expect(transcribeAudioUrl).toHaveBeenCalledTimes(1);
+    expect(processAudioText).not.toHaveBeenCalled();
+    expect(generateWechatCoverBuffer).not.toHaveBeenCalled();
+    expect(getAccessToken).not.toHaveBeenCalled();
+    expect(publishDraft).not.toHaveBeenCalled();
+    expect(calls).toEqual(['claim:claim', 'claim:complete']);
+  });
+
+  it('completes one V3 claim after a lost start response is proven by status without a second ASR or start', async () => {
+    const fileKey = 'users/v3_user/inbox/v3-response-loss.mp3';
+    const handoffId = `handoff_v3_${'f'.repeat(64)}`;
+    const calls: string[] = [];
+    let statusCalls = 0;
+    let startCalls = 0;
+    vi.stubGlobal('fetch', vi.fn(async (input, init) => {
+      const url = String(input);
+      if (url.includes('/api/internal/mining-claims')) {
+        calls.push(`claim:${JSON.parse(String(init?.body)).action}`);
+        return { ok: true, status: 200, json: async () => ({ claimed: true, completed: true }), text: async () => '' } as any;
+      }
+      if (url.endsWith('/eligibility')) return { ok: true, status: 200, json: async () => ({ decision: 'v3', handoff_id: handoffId }), text: async () => '' } as any;
+      if (url.endsWith('/api/internal/v3/mining-handoffs/status')) {
+        statusCalls += 1;
+        return { ok: true, status: 200, json: async () => statusCalls === 1
+          ? ({ decision: 'v3_pending_asr', handoff_id: handoffId })
+          : acceptedV3(handoffId, '4'), text: async () => '' } as any;
+      }
+      if (url.endsWith('/api/internal/status')) return { ok: true, status: 200, json: async () => ({ ok: true }), text: async () => '' } as any;
+      if (url.endsWith('/start')) {
+        startCalls += 1;
+        throw new Error('response lost after the exact Workflow start');
+      }
+      throw new Error(`unexpected V3 request: ${url} ${String(init?.body)}`);
+    }));
+    vi.mocked(listUnprocessedFiles).mockResolvedValue([fileKey]);
+    vi.mocked(createPresignedDownloadUrl).mockResolvedValue('https://r2.example.test/v3-response-loss.mp3');
+    vi.mocked(transcribeAudioUrl).mockResolvedValue('one durable ASR result');
+
+    await expect(main()).resolves.toBeUndefined();
+
+    expect(transcribeAudioUrl).toHaveBeenCalledTimes(1);
+    expect(startCalls).toBe(1);
+    expect(statusCalls).toBe(2);
+    expect(calls).toEqual(['claim:claim', 'claim:complete']);
+    expect(processAudioText).not.toHaveBeenCalled();
+    expect(publishDraft).not.toHaveBeenCalled();
+  });
+
+  it('replays an accepted V3 status without re-running ASR or any legacy work', async () => {
+    const fileKey = 'inbox/v3-replay.mp3';
+    vi.stubGlobal('fetch', vi.fn(async (input, init) => {
+      const url = String(input);
+      if (url.includes('/api/internal/mining-claims')) return { ok: true, status: 200, json: async () => ({ claimed: true, completed: true }), text: async () => '' } as any;
+      if (url.endsWith('/eligibility')) return { ok: true, status: 200, json: async () => ({ decision: 'v3', handoff_id: `handoff_v3_${'b'.repeat(64)}` }), text: async () => '' } as any;
+      if (url.endsWith('/status')) return { ok: true, status: 200, json: async () => acceptedV3(`handoff_v3_${'b'.repeat(64)}`, '2'), text: async () => '' } as any;
+      throw new Error(`unexpected V3 request: ${url} ${String(init?.body)}`);
+    }));
+    vi.mocked(listUnprocessedFiles).mockResolvedValue([fileKey]);
+
+    await expect(main()).resolves.toBeUndefined();
+
+    expect(transcribeAudioUrl).not.toHaveBeenCalled();
+    expect(processAudioText).not.toHaveBeenCalled();
+    expect(generateWechatCoverBuffer).not.toHaveBeenCalled();
+    expect(publishDraft).not.toHaveBeenCalled();
+  });
+
+  it('releases a V3 hold without falling back to legacy services', async () => {
+    const fileKey = 'inbox/v3-hold.mp3';
+    const claimActions: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (input, init) => {
+      const url = String(input);
+      if (url.includes('/api/internal/mining-claims')) {
+        claimActions.push(JSON.parse(String(init?.body)).action);
+        return { ok: true, status: 200, json: async () => ({ claimed: true, released: true }), text: async () => '' } as any;
+      }
+      if (url.endsWith('/eligibility')) return { ok: true, status: 202, json: async () => ({ decision: 'v3_hold', handoff_id: `handoff_v3_${'c'.repeat(64)}` }), text: async () => '' } as any;
+      return { ok: true, status: 200, text: async () => '' } as any;
+    }));
+    vi.mocked(listUnprocessedFiles).mockResolvedValue([fileKey]);
+
+    await expect(main()).rejects.toThrow('Mining Job failed to process 1 file');
+
+    expect(claimActions).toEqual(['claim', 'release']);
+    expect(transcribeAudioUrl).not.toHaveBeenCalled();
+    expect(processAudioText).not.toHaveBeenCalled();
+    expect(generateWechatCoverBuffer).not.toHaveBeenCalled();
+    expect(publishDraft).not.toHaveBeenCalled();
+  });
+
+  it('uses a text source as the V3 transcript without ASR or any legacy article work', async () => {
+    const fileKey = 'text-submissions/v3-text.json';
+    vi.stubGlobal('fetch', vi.fn(async (input, init) => {
+      const url = String(input);
+      if (url.includes('/api/internal/mining-claims')) return { ok: true, status: 200, json: async () => ({ claimed: true, completed: true }), text: async () => '' } as any;
+      if (url.endsWith('/eligibility')) return { ok: true, status: 200, json: async () => ({ decision: 'v3', handoff_id: `handoff_v3_${'d'.repeat(64)}` }), text: async () => '' } as any;
+      if (url.endsWith('/status')) return { ok: true, status: 200, json: async () => ({ decision: 'v3_pending_asr', handoff_id: `handoff_v3_${'d'.repeat(64)}` }), text: async () => '' } as any;
+      if (url.endsWith('/start')) {
+        expect(JSON.parse(String(init?.body))).toEqual({ source_key: fileKey, handoff_id: `handoff_v3_${'d'.repeat(64)}` });
+        return { ok: true, status: 202, json: async () => acceptedV3(`handoff_v3_${'d'.repeat(64)}`, '3'), text: async () => '' } as any;
+      }
+      throw new Error(`unexpected request ${url}`);
+    }));
+    vi.mocked(listUnprocessedFiles).mockResolvedValue([fileKey]);
+
+    await expect(main()).resolves.toBeUndefined();
+
+    expect(transcribeAudioUrl).not.toHaveBeenCalled();
+    expect(downloadFile).not.toHaveBeenCalled();
+    expect(processAudioText).not.toHaveBeenCalled();
+    expect(generateWechatCoverBuffer).not.toHaveBeenCalled();
+    expect(publishDraft).not.toHaveBeenCalled();
   });
 
   it('should build transcript payload with article and draft metadata', () => {
@@ -410,6 +604,9 @@ describe('VibePub Cloud Pipeline', () => {
           text: async () => '',
         } as any;
       }
+      if (String(input).includes('/api/internal/v3/mining-handoffs/')) {
+        return { ok: true, status: 200, json: async () => ({ decision: 'legacy' }), text: async () => '' } as any;
+      }
       if (String(input).includes('/api/internal/publishing-account')) {
         return {
           ok: false,
@@ -499,6 +696,57 @@ describe('VibePub Cloud Pipeline', () => {
         call.filename === filename
     )).toBe(false);
     expect(publishDraft).not.toHaveBeenCalled();
+  });
+
+  it('holds a V3-marked revision before ASR, legacy rewriting, images, or WeChat update', async () => {
+    const revisionRequestKey = 'revision-requests/V3-Revision/rev.json';
+    vi.mocked(downloadFile).mockImplementation(async (key) => {
+      if (key === revisionRequestKey) return Buffer.from(JSON.stringify({ filename: 'v3-source.mp3', audioKey: 'revision-requests/V3-Revision/rev.m4a' }));
+      throw new Error(`unexpected R2 read ${key}`);
+    });
+    process.env.REVISION_REQUEST_KEY = revisionRequestKey;
+    vi.stubGlobal('fetch', vi.fn(async (input) => {
+      const url = String(input);
+      if (url.endsWith('/api/internal/v3/mining-handoffs/status')) return { ok: true, status: 202, json: async () => ({ decision: 'v3_hold', handoff_id: `handoff_v3_${'e'.repeat(64)}` }), text: async () => '' } as any;
+      if (url.endsWith('/api/internal/status')) return { ok: true, status: 200, text: async () => '' } as any;
+      throw new Error(`unexpected request ${url}`);
+    }));
+
+    await expect(main()).rejects.toThrow('v3_revision_reconciliation_required');
+
+    expect(transcribeAudioUrl).not.toHaveBeenCalled();
+    expect(reviseArticleWithInstruction).not.toHaveBeenCalled();
+    expect(generateWechatCoverBuffer).not.toHaveBeenCalled();
+    expect(updateDraft).not.toHaveBeenCalled();
+  });
+
+  it.each([undefined, 'false'])('keeps legacy revisions off the V3 client when MINING_V3_HANDOFF_ENABLED=%s', async (enabled) => {
+    const revisionRequestKey = 'revision-requests/legacy-client-gate/rev.json';
+    process.env.MINING_V3_HANDOFF_ENABLED = enabled;
+    process.env.REVISION_REQUEST_KEY = revisionRequestKey;
+    vi.mocked(downloadFile).mockImplementation(async (key) => {
+      if (key === revisionRequestKey) return Buffer.from(JSON.stringify({ filename: 'legacy-client-gate.m4a', audioKey: 'revision-requests/legacy-client-gate/rev.m4a' }));
+      if (key === 'users/default_user/transcripts/legacy-client-gate.json') return Buffer.from(JSON.stringify({ rawText: 'old', articleTitle: 'old', articleContent: '<p>old</p>', wechatDraftId: 'MEDIA' }));
+      throw new Error(`unexpected key ${key}`);
+    });
+    vi.mocked(createPresignedDownloadUrl).mockResolvedValue('https://r2.example.test/revision.m4a');
+    vi.mocked(transcribeAudioUrl).mockResolvedValue('make it clearer');
+    vi.mocked(reviseArticleWithInstruction).mockResolvedValue({ title: 'new', content: '<p>new</p>', imagePrompt: 'new', coverTitle: ['new'], coverSubtitle: '' });
+    vi.mocked(generateWechatCoverBuffer).mockResolvedValue(Buffer.from('cover'));
+    vi.mocked(updateDraft).mockResolvedValue();
+    vi.mocked(uploadTranscript).mockResolvedValue();
+    vi.stubGlobal('fetch', vi.fn(async (input) => {
+      const url = String(input);
+      if (url.includes('/api/internal/v3/mining-handoffs/')) throw new Error('V3 revision check must be disabled');
+      if (url.includes('/api/internal/status')) return { ok: true, status: 200, text: async () => '' } as any;
+      if (url.includes('/api/internal/publishing-account')) return { ok: true, status: 200, json: async () => ({ publishing_account: { app_id: testWechatConfig.appId, app_secret: testWechatConfig.appSecret, proxy_url: testWechatConfig.proxyUrl } }), text: async () => '' } as any;
+      throw new Error(`unexpected request ${url}`);
+    }));
+
+    await expect(main()).resolves.toBeUndefined();
+
+    expect(reviseArticleWithInstruction).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(fetch).mock.calls.some(([input]) => String(input).includes('/api/internal/v3/mining-handoffs/'))).toBe(false);
   });
 
   it('should process a voice article revision by updating the existing WeChat draft', async () => {

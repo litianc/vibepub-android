@@ -9,6 +9,9 @@ export type Env = {
   WECHAT_PROVIDER_BASE_URL_ALLOWLIST?: string;
   WECHAT_MEDIA_URL_HOST_ALLOWLIST?: string;
   CREDENTIAL_ENCRYPTION_KEY?: string;
+  DEPLOY_COMMIT?: string;
+  DEPLOY_REF?: string;
+  DEPLOYED_AT?: string;
 };
 
 type Operation = "resolve_account" | "upload_image" | "write_draft" | "get_draft" | "find_draft";
@@ -105,6 +108,11 @@ export class AdapterError extends Error {
 }
 
 function json(value: unknown, status = 200): Response { return Response.json(value, { status }); }
+
+function deploymentVersion(env: Pick<Env, "DEPLOY_COMMIT" | "DEPLOY_REF" | "DEPLOYED_AT">) {
+  const value = (input: string | undefined) => input?.trim() || null;
+  return { commit: value(env.DEPLOY_COMMIT), ref: value(env.DEPLOY_REF), deployed_at: value(env.DEPLOYED_AT) };
+}
 export function canonical(value: unknown): string {
   if (value === undefined) return "null";
   if (value === null || typeof value !== "object") return JSON.stringify(value);
@@ -712,6 +720,9 @@ export class WechatOperationAgent {
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
+    if (request.method === "GET" && new URL(request.url).pathname === "/health") {
+      return json({ ok: true, service: "wechat-publishing-adapter", version: deploymentVersion(env) });
+    }
     // Auth is deliberately checked before parsing a client-controlled body.
     if (!auth(request, env)) return json({ error: { code: "unauthorized" } }, 401);
     let raw: Record<string, unknown>;

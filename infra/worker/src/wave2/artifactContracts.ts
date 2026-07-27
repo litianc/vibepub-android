@@ -199,6 +199,10 @@ export class Wave2ContractError extends Error {
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/;
 const KEY_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/;
 const HASH_RE = /^sha256:[a-f0-9]{64}$/;
+// Mining V3 persists its canonical transcript as a private, owner-sharded
+// object. Existing opaque transcript references remain valid for prior V3
+// callers; no other slash-containing reference is accepted here.
+const MINING_V3_TRANSCRIPT_REF_RE = /^editorial\/v3\/[a-f0-9]{24}\/mining-handoffs\/handoff_v3_[a-f0-9]{64}\/transcripts\/[a-f0-9]{64}\.v1\.txt$/;
 
 export function canonicalJson(value: unknown): string {
   if (value === undefined) return "null";
@@ -221,6 +225,13 @@ function text(value: unknown, field: string, max = 512): string {
 function id(value: unknown, field: string): string {
   const result = text(value, field, 160);
   if (!ID_RE.test(result)) throw new Wave2ContractError("invalid_id", `${field} is invalid`);
+  return result;
+}
+function transcriptRef(value: unknown): string {
+  const result = text(value, "transcript_ref", 512);
+  if (!ID_RE.test(result) && !MINING_V3_TRANSCRIPT_REF_RE.test(result)) {
+    throw new Wave2ContractError("invalid_transcript_ref", "transcript_ref is invalid");
+  }
   return result;
 }
 function key(value: unknown, field: string): string {
@@ -371,7 +382,7 @@ async function normalizePayload(kind: Wave2ArtifactKind, value: unknown): Promis
     }
     return {
       article_id: id(record.article_id, "article_id"), run_id: id(record.run_id, "run_id"), recording_id: positiveInteger(record.recording_id, "recording_id"),
-      source_type: sourceType, language: text(record.language, "language", 32), transcript_ref: id(record.transcript_ref, "transcript_ref"),
+      source_type: sourceType, language: text(record.language, "language", 32), transcript_ref: transcriptRef(record.transcript_ref),
       transcript_hash: hash(record.transcript_hash, "transcript_hash"), source_hash: hash(record.source_hash, "source_hash"),
       title_hint: record.title_hint === null ? null : text(record.title_hint, "title_hint", 2_000), content_goal: text(record.content_goal, "content_goal", 4_000),
       profile_pins: profilePins,

@@ -11,6 +11,20 @@ describe("WritingAgent Worker", () => {
     vi.unstubAllGlobals();
   });
 
+  it("returns only non-secret deployment evidence from health", async () => {
+    const response = await worker.fetch(new Request("https://writing-agent.test/health"), {
+      DEPLOY_COMMIT: "abc123",
+      DEPLOY_REF: "codex/staging",
+      DEPLOYED_AT: "2026-07-22T00:00:00.000Z",
+      GLM_API_KEY: "synthetic-secret",
+    });
+    expect(await response.json()).toEqual({
+      ok: true,
+      service: "writing-agent",
+      version: { commit: "abc123", ref: "codex/staging", deployed_at: "2026-07-22T00:00:00.000Z" },
+    });
+  });
+
   it("requires auth for profile endpoints", async () => {
     const response = await worker.fetch(
       new Request("https://writing-agent.test/v1/style-profiles"),

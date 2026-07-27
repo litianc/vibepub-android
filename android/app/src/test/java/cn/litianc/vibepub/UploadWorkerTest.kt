@@ -20,6 +20,7 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import java.io.File
 import java.net.InetSocketAddress
+import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -104,6 +105,40 @@ class UploadWorkerTest {
         assertTrue(recording.lastError.orEmpty().contains("会话刷新"))
     }
 
+    @Test
+    fun nonDefaultBuiltInStyleBodyIsSentWithTheAudioUpload() = runBlocking {
+        val uploadHits = AtomicInteger(0)
+        val styleBodyHeader = AtomicReference<String>()
+        val baseUrl = startServer(
+            uploadHits = uploadHits,
+            refreshStatus = null,
+            uploadStatus = 201,
+            onUpload = { headers -> styleBodyHeader.set(headers.getFirst("X-Style-Profile-Body-B64")) },
+        )
+        val userId = "usr_upload_style_body"
+        val file = createUploadFile("style-body")
+        val profile = requireNotNull(WritingStyleProfiles.findById("style_product_review"))
+        preferences.apiBaseUrl = baseUrl
+        preferences.saveAuthSession(testSession(userId, "access-style", ""))
+        insertUploadingRecording(userId, file)
+
+        val result = runWorker(
+            file = file,
+            userId = userId,
+            apiBaseUrl = baseUrl,
+            styleProfileId = profile.id,
+            styleProfileVersion = profile.version,
+            styleProfileBody = WritingStyleProfiles.submissionBodyFor(profile),
+        )
+
+        assertTrue(result is ListenableWorker.Result.Success)
+        assertEquals(1, uploadHits.get())
+        assertEquals(
+            profile.body?.trim(),
+            String(android.util.Base64.decode(styleBodyHeader.get(), android.util.Base64.DEFAULT), Charsets.UTF_8),
+        )
+    }
+
     private fun createUploadFile(label: String): File {
         val file = File(context.cacheDir, "upload-worker-$label-${System.nanoTime()}.m4a")
         file.writeBytes(byteArrayOf(1, 2, 3, 4))
@@ -125,7 +160,14 @@ class UploadWorkerTest {
         recordingsToDelete += userId to file.name
     }
 
-    private suspend fun runWorker(file: File, userId: String, apiBaseUrl: String): ListenableWorker.Result {
+    private suspend fun runWorker(
+        file: File,
+        userId: String,
+        apiBaseUrl: String,
+        styleProfileId: String = "",
+        styleProfileVersion: String = "",
+        styleProfileBody: String = "",
+    ): ListenableWorker.Result {
         val worker = TestListenableWorkerBuilder<UploadWorker>(context)
             .setInputData(
                 workDataOf(
@@ -133,21 +175,30 @@ class UploadWorkerTest {
                     UploadWorker.KEY_API_BASE_URL to apiBaseUrl,
                     UploadWorker.KEY_ACCESS_TOKEN to preferences.accessToken,
                     UploadWorker.KEY_USER_ID to userId,
+                    UploadWorker.KEY_STYLE_PROFILE_ID to styleProfileId,
+                    UploadWorker.KEY_STYLE_PROFILE_VERSION to styleProfileVersion,
+                    UploadWorker.KEY_STYLE_PROFILE_BODY to styleProfileBody,
                 ),
             )
             .build()
         return worker.doWork()
     }
 
-    private fun startServer(uploadHits: AtomicInteger, refreshStatus: Int?): String {
+    private fun startServer(
+        uploadHits: AtomicInteger,
+        refreshStatus: Int?,
+        uploadStatus: Int = 401,
+        onUpload: (com.sun.net.httpserver.Headers) -> Unit = {},
+    ): String {
         val httpServer = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
         httpServer.executor = Executors.newCachedThreadPool()
         httpServer.createContext("/api/uploads") { exchange ->
             uploadHits.incrementAndGet()
+            onUpload(exchange.requestHeaders)
             exchange.requestBody.use { it.readBytes() }
-            val body = """{"error":"unauthorized"}""".toByteArray()
-            exchange.sendResponseHeaders(401, body.size.toLong())
-            exchange.responseBody.use { it.write(body) }
+            val body = if (uploadStatus in 200..299) "{}" else """{"error":"unauthorized"}"""
+            exchange.sendResponseHeaders(uploadStatus, body.toByteArray().size.toLong())
+            exchange.responseBody.use { it.write(body.toByteArray()) }
         }
         httpServer.createContext("/api/auth/refresh") { exchange ->
             exchange.requestBody.use { it.readBytes() }

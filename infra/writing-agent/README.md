@@ -59,21 +59,16 @@ npm test
 npx wrangler deploy --dry-run
 ```
 
-Apply D1 migrations before using source imports or distilled profiles:
-
-```bash
-npx wrangler d1 migrations apply writing-agent-db --remote
-```
-
 ## Deployment
 
-Set Cloudflare and model secrets before enabling VibePub to call this service:
-
-```bash
-npx wrangler secret put WRITING_AGENT_TOKEN
-npx wrangler secret put GLM_API_KEY
-npx wrangler deploy
-```
+Wave 2E staging renders this private adapter from the protected staging
+resource manifest. The adapter has `workers_dev=false` and `preview_urls=false`;
+the manual deployment path bootstraps that private target, syncs
+`WRITING_AGENT_TOKEN` and `GLM_API_KEY` only through the protected Environment,
+then performs a final commit/ref/timestamp-stamped deploy using an explicit
+generated `--config`. The default CI path only validates and runs
+`wrangler deploy --dry-run`; it does not deploy, set secrets, or apply remote
+D1 migrations.
 
 Then configure VibePub Worker and mining callers:
 
@@ -85,3 +80,6 @@ WRITING_AGENT_LAYOUT_PROFILE_ID=wechat_clean_article
 ```
 
 If `WRITING_AGENT_BASE_URL` is not configured, VibePub mining continues using its embedded rewrite prompt.
+
+`GET /health` returns only the service name and non-secret deploy
+commit/ref/timestamp evidence; it never exposes credentials or model responses.

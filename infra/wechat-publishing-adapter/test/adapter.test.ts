@@ -83,6 +83,20 @@ function providerMock(options: { readHtml?: string; mediaUrl?: string; batch?: A
 describe("wechat publishing adapter", () => {
   afterEach(() => vi.unstubAllGlobals());
 
+  it("returns only non-secret deployment evidence from health", async () => {
+    const response = await adapter.fetch(new Request("https://adapter.test/health"), {
+      DEPLOY_COMMIT: "abc123",
+      DEPLOY_REF: "codex/staging",
+      DEPLOYED_AT: "2026-07-22T00:00:00.000Z",
+      WECHAT_PUBLISHING_TOKEN: "synthetic-secret",
+    } as Env);
+    expect(await response.json()).toEqual({
+      ok: true,
+      service: "wechat-publishing-adapter",
+      version: { commit: "abc123", ref: "codex/staging", deployed_at: "2026-07-22T00:00:00.000Z" },
+    });
+  });
+
   it("rejects legacy tokens before parsing JSON", async () => {
     const response = await adapter.fetch(new Request("https://adapter.test/internal/v3/wechat/upload", { method: "POST", headers: { authorization: "Bearer files-token" }, body: "not-json" }), env());
     expect(response.status).toBe(401);

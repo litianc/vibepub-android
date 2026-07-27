@@ -15,6 +15,10 @@ import cn.litianc.vibepub.data.RecordingSourceType
 import cn.litianc.vibepub.data.RecordingStatus
 import cn.litianc.vibepub.data.asRecordingSourceType
 import cn.litianc.vibepub.data.asRecordingStatus
+import cn.litianc.vibepub.data.mergePublicationSnapshot
+import cn.litianc.vibepub.data.parsePublicationSnapshot
+import cn.litianc.vibepub.data.publicationSnapshotOrNull
+import cn.litianc.vibepub.data.withPublicationSnapshot
 import org.json.JSONObject
 import java.text.SimpleDateFormat
 import java.util.Locale
@@ -166,9 +170,22 @@ internal fun mergeRemoteRecordingFromListItem(
     val inputText = recObj.optString("input_text", "")
         .ifBlank { recObj.optString("inputText", "") }
         .blankToNullValue()
+    val remoteRecordingId = recObj.optLong("id", -1L).takeIf { it > 0L }
+    val incomingPublicationSnapshot = parsePublicationSnapshot(recObj)
+    val publicationSnapshot = mergePublicationSnapshot(
+        existing = existing?.publicationSnapshotOrNull(),
+        incoming = incomingPublicationSnapshot,
+    )
+
+    fun applyPublicationSnapshot(recording: RecordingEntity): RecordingEntity {
+        val withRemoteId = recording.copy(
+            remoteRecordingId = remoteRecordingId ?: recording.remoteRecordingId,
+        )
+        return publicationSnapshot?.let(withRemoteId::withPublicationSnapshot) ?: withRemoteId
+    }
 
     if (existing == null) {
-        return RecordingEntity(
+        return applyPublicationSnapshot(RecordingEntity(
             userId = userId,
             filename = filename,
             durationMs = fallbackDurationMs ?: 0L,
@@ -185,10 +202,14 @@ internal fun mergeRemoteRecordingFromListItem(
             processingStage = processingStage,
             sourceType = sourceType.value,
             inputText = inputText,
-        )
+        ))
     }
 
-    if (existing.status == RecordingStatus.COMPLETED.value && remoteStatus != RecordingStatus.COMPLETED) {
+    if (
+        existing.status == RecordingStatus.COMPLETED.value &&
+        remoteStatus != RecordingStatus.COMPLETED &&
+        incomingPublicationSnapshot == null
+    ) {
         return null
     }
 
@@ -199,7 +220,7 @@ internal fun mergeRemoteRecordingFromListItem(
         else -> remoteStatus
     }
 
-    return existing.copy(
+    return applyPublicationSnapshot(existing.copy(
         status = nextStatus.value,
         durationMs = if (existing.durationMs > 0L) existing.durationMs else fallbackDurationMs ?: 0L,
         timestamp = when {
@@ -222,7 +243,7 @@ internal fun mergeRemoteRecordingFromListItem(
         processingStage = processingStage ?: existing.processingStage,
         sourceType = sourceType.value,
         inputText = inputText ?: existing.inputText,
-    )
+    ))
 }
 
 internal fun inferSourceTypeFromFilename(filename: String): RecordingSourceType {

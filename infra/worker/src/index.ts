@@ -13,6 +13,7 @@ import {
 import type { EditorialRuntimeEnv, EditorialWorkflowParams } from "./editorialAgents";
 import { FiveAgentPublishingWorkflow, handleFiveAgentPublishingInternalRoute } from "./fiveAgentPublishing";
 import type { FiveAgentWorkflowParams } from "./fiveAgentPublishing";
+import { handleMiningV3HandoffInternalRoute } from "./miningV3Handoff";
 import {
   assertPublicationAction,
   getPublicationRun,
@@ -41,6 +42,7 @@ export interface Env {
   DB: D1Database;
   FILES_TOKEN?: string;
   MINING_SERVICE_TOKEN?: string;
+  MINING_V3_HANDOFF_TOKEN?: string;
   PUBLIC_BASE_URL: string;
   GITHUB_PAT?: string;
   GITHUB_WORKFLOW_REF?: string;
@@ -156,10 +158,17 @@ export default {
     const url = new URL(request.url);
 
     if (request.method === "GET" && url.pathname === "/health") {
+      const adapters = url.searchParams.get("adapters") === "1"
+        ? await collectAdapterHealth(env).catch(() => null)
+        : undefined;
+      if (url.searchParams.get("adapters") === "1" && !adapters) {
+        return json({ ok: false, error: "adapter_health_unavailable" }, 503);
+      }
       return json({
         ok: true,
         service: "vibepub-api",
         version: deploymentVersion(env),
+        ...(adapters ? { adapters } : {}),
       });
     }
 
@@ -204,6 +213,13 @@ export default {
         return json({ error: "unauthorized" }, 401);
       }
       return handleFiveAgentPublishingInternalRoute(request, env, url);
+    }
+
+    if (url.pathname.startsWith("/api/internal/v3/mining-handoffs/")) {
+      if (!(await isMiningV3HandoffAuthorized(request, env))) {
+        return json({ error: "unauthorized" }, 401);
+      }
+      return handleMiningV3HandoffInternalRoute(request, env, url);
     }
 
     if (!url.pathname.startsWith("/api/")) {
@@ -802,6 +818,14 @@ async function isFiveAgentPublishingAuthorized(request: Request, env: Env): Prom
   if (!configured) return false;
   const authorization = request.headers.get("Authorization") || "";
   const bearer = authorization.match(/^Bearer\s+(.+)$/i)?.[1] || request.headers.get("X-Five-Agent-Publishing-Token") || "";
+  return Boolean(bearer) && await secureTokenEquals(configured, bearer);
+}
+
+async function isMiningV3HandoffAuthorized(request: Request, env: Env): Promise<boolean> {
+  const configured = env.MINING_V3_HANDOFF_TOKEN?.trim();
+  if (!configured) return false;
+  const authorization = request.headers.get("Authorization") || "";
+  const bearer = authorization.match(/^Bearer\s+(.+)$/i)?.[1] || "";
   return Boolean(bearer) && await secureTokenEquals(configured, bearer);
 }
 
@@ -1451,7 +1475,7 @@ async function listRecordings(env: Env, auth: AuthContext): Promise<Response> {
 
 async function publicationRoute(factory: () => Promise<Record<string, unknown>>): Promise<Response> {
   try {
-    return json(await factory());
+    return json(redactPublicPublicationErrorCodes(await factory()));
   } catch (error) {
     if (error instanceof PublicationProjectionError) {
       return json({ error: error.code }, error.status);
@@ -1459,6 +1483,15 @@ async function publicationRoute(factory: () => Promise<Record<string, unknown>>)
     console.error("Publication projection request failed:", error);
     return json({ error: "publication_projection_unavailable" }, 503);
   }
+}
+
+function redactPublicPublicationErrorCodes(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(redactPublicPublicationErrorCodes);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, item]) => [
+    key,
+    key === "error_code" ? null : redactPublicPublicationErrorCodes(item),
+  ]));
 }
 
 async function deleteRecording(env: Env, auth: AuthContext, filename: string): Promise<Response> {
@@ -2309,6 +2342,39 @@ function deploymentVersion(env: Env): Record<string, string | null> {
     ref: metadataValue(env.DEPLOY_REF),
     deployed_at: metadataValue(env.DEPLOYED_AT),
   };
+}
+
+const ADAPTER_HEALTH_SERVICES = {
+  writing: { binding: "WRITING_AGENT", service: "writing-agent" },
+  review: { binding: "REVIEW_AGENT", service: "editorial-review-agent" },
+  image: { binding: "IMAGE_GENERATION_ADAPTER", service: "image-generation-adapter" },
+  wechat: { binding: "WECHAT_PUBLISHING_ADAPTER", service: "wechat-publishing-adapter" },
+} as const;
+
+type AdapterHealth = {
+  service: string;
+  version: Record<string, string | null>;
+};
+
+async function collectAdapterHealth(env: Env): Promise<Record<keyof typeof ADAPTER_HEALTH_SERVICES, AdapterHealth>> {
+  const entries = await Promise.all(Object.entries(ADAPTER_HEALTH_SERVICES).map(async ([role, expected]) => {
+    const binding = env[expected.binding];
+    if (!binding) throw new Error("adapter health binding missing");
+    const response = await binding.fetch(new Request("https://vibepub.internal/health"));
+    const payload = await response.json().catch(() => null) as Record<string, unknown> | null;
+    if (!response.ok || !payload || payload.ok !== true || payload.service !== expected.service ||
+        !payload.version || typeof payload.version !== "object" || Array.isArray(payload.version)) {
+      throw new Error("adapter health response invalid");
+    }
+    const version = payload.version as Record<string, unknown>;
+    const normalized = {
+      commit: typeof version.commit === "string" ? version.commit : null,
+      ref: typeof version.ref === "string" ? version.ref : null,
+      deployed_at: typeof version.deployed_at === "string" ? version.deployed_at : null,
+    };
+    return [role, { service: expected.service, version: normalized }] as const;
+  }));
+  return Object.fromEntries(entries) as unknown as Record<keyof typeof ADAPTER_HEALTH_SERVICES, AdapterHealth>;
 }
 
 function metadataValue(value: string | undefined): string | null {

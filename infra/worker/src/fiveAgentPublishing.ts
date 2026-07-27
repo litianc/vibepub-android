@@ -498,7 +498,7 @@ async function ensureCanonicalRun(
   void manifest;
 }
 
-async function buildBriefObject(input: FiveAgentStartBody & { user_id: string; workspace_id: string; created_at: string }): Promise<ArtifactObject> {
+export async function buildFiveAgentBriefObject(input: FiveAgentStartBody & { user_id: string; workspace_id: string; created_at: string }): Promise<ArtifactObject> {
   const idempotencyKey = `brief:${input.run_id}`;
   const artifactId = await deriveArtifactId("article_brief", input.run_id, idempotencyKey);
   const payload: ArticleBrief = {
@@ -1099,7 +1099,7 @@ export async function reconcilePreStartHold(
     expectedStateRevision: retrying.run.state_revision,
     options: {
       eventId: `${params.run_id}:event:${retrying.run.state_revision + 1}`,
-      eventType: "run_queued",
+      eventType: "start_reconciliation_queued",
       eventIdempotencyKey: `start-reconcile:${startStatus}:queued:${params.run_id}`,
       eventPayloadHash: queuedHash,
       eventCreatedAt: workflowTimestamp(params.created_at, 2_002),
@@ -6013,7 +6013,7 @@ export async function handleFiveAgentPublishingInternalRoute(
       };
       // Transcript ownership and bytes are verified before any canonical run,
       // DO, D1, or R2 write. Building the brief is pure normalization only.
-      const briefObject = await buildBriefObject({ ...body, user_id: userId, workspace_id: workspaceId, created_at: createdAt });
+      const briefObject = await buildFiveAgentBriefObject({ ...body, user_id: userId, workspace_id: workspaceId, created_at: createdAt });
       const briefMetadata = toArtifactMetadata(briefObject);
       const workflowParams: FiveAgentWorkflowParams = {
         ...runInput,

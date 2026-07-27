@@ -5,7 +5,12 @@ export const REVIEW_RULE_PINS = {
   humanizer: { id: "humanizer-zh", version: "1.0.0" },
 } as const;
 
-type ReviewEnv = { REVIEW_AGENT_TOKEN?: string };
+type ReviewEnv = {
+  REVIEW_AGENT_TOKEN?: string;
+  DEPLOY_COMMIT?: string;
+  DEPLOY_REF?: string;
+  DEPLOYED_AT?: string;
+};
 
 type DraftBlock = {
   block_id: string;
@@ -266,7 +271,11 @@ async function reviewDraft(input: ReviewDraftRequest): Promise<ReviewReport> {
 export function createReviewAgentWorker() {
   return {
     async fetch(request: Request, env: ReviewEnv): Promise<Response> {
-      if (request.method !== "POST" || new URL(request.url).pathname !== "/internal/v3/review") return json({ error: { code: "not_found" } }, 404);
+      const path = new URL(request.url).pathname;
+      if (request.method === "GET" && path === "/health") {
+        return json({ ok: true, service: "editorial-review-agent", version: deploymentVersion(env) });
+      }
+      if (request.method !== "POST" || path !== "/internal/v3/review") return json({ error: { code: "not_found" } }, 404);
       const token = request.headers.get("authorization")?.replace(/^Bearer\s+/i, "").trim() || request.headers.get("x-review-agent-token")?.trim() || "";
       if (!env.REVIEW_AGENT_TOKEN || !await secureEquals(env.REVIEW_AGENT_TOKEN, token)) return json({ error: { code: "unauthorized" } }, 401);
       try {
@@ -278,6 +287,11 @@ export function createReviewAgentWorker() {
       }
     },
   };
+}
+
+function deploymentVersion(env: Pick<ReviewEnv, "DEPLOY_COMMIT" | "DEPLOY_REF" | "DEPLOYED_AT">) {
+  const value = (input: string | undefined) => input?.trim() || null;
+  return { commit: value(env.DEPLOY_COMMIT), ref: value(env.DEPLOY_REF), deployed_at: value(env.DEPLOYED_AT) };
 }
 
 export default createReviewAgentWorker();

@@ -10,6 +10,7 @@ local.properties
 # Node / Cloudflare Worker
 node_modules/
 .wrangler/
+infra/staging/generated/
 .dev.vars
 
 # Generated secrets and signing material

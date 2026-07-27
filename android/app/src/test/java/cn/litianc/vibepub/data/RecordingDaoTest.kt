@@ -1,6 +1,7 @@
 package cn.litianc.vibepub.data
 
 import android.content.Context
+import android.database.sqlite.SQLiteDatabase
 import androidx.room.Room
 import kotlinx.coroutines.runBlocking
 import org.junit.After
@@ -54,6 +55,41 @@ class RecordingDaoTest {
         assertEquals(1, recordings.size)
         assertEquals(32_000L, recordings.first().durationMs)
         assertEquals(RecordingStatus.COMPLETED.value, recordings.first().status)
+    }
+
+    @Test
+    fun migration9To10KeepsExistingRowsAndAddsNullablePublicationSnapshotColumns() {
+        val db = SQLiteDatabase.create(null)
+        try {
+            db.execSQL(
+                """
+                CREATE TABLE recordings (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                  userId TEXT NOT NULL,
+                  filename TEXT NOT NULL,
+                  durationMs INTEGER NOT NULL,
+                  timestamp INTEGER NOT NULL,
+                  status TEXT NOT NULL
+                )
+                """.trimIndent(),
+            )
+            db.execSQL(
+                "INSERT INTO recordings (userId, filename, durationMs, timestamp, status) VALUES ('user', 'v9.m4a', 1000, 1, 'PROCESSING')",
+            )
+
+            migrateRecordings9To10(db::execSQL)
+
+            db.rawQuery("SELECT filename, publicationRunId, publicationStateRevision, publicationProgressPercent FROM recordings", null)
+                .use { cursor ->
+                    assertEquals(true, cursor.moveToFirst())
+                    assertEquals("v9.m4a", cursor.getString(0))
+                    assertEquals(true, cursor.isNull(1))
+                    assertEquals(true, cursor.isNull(2))
+                    assertEquals(true, cursor.isNull(3))
+                }
+        } finally {
+            db.close()
+        }
     }
 
     @Test

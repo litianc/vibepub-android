@@ -285,4 +285,147 @@ class SyncWorkerTest {
 
         assertEquals(null, mergeRemoteRecordingFromListItem(remote, existing))
     }
+
+    @Test
+    fun completedLegacyRecordingAcceptsOnlyAValidIncomingV3Summary() {
+        val existing = RecordingEntity(
+            filename = "VibePub-v3-after-complete.m4a",
+            durationMs = 18_000L,
+            timestamp = 1L,
+            status = RecordingStatus.COMPLETED.value,
+            processingStage = "COMPLETED",
+        )
+        val remote = JSONObject(
+            """
+            {"filename":"VibePub-v3-after-complete.m4a","status":"PROCESSING","publication_summary":{
+              "run_id":"run-new-v3","state":"writing","run_status":"active","publication_stage":"writing",
+              "state_revision":1,"progress_percent":28,"last_successful_state":"writing",
+              "last_successful_progress_percent":28,"retry_count":0,"next_action":null,
+              "error_code":"provider_internal_error_500","created_at":"2026-07-22T00:00:00.000Z",
+              "updated_at":"2026-07-22T00:00:01.000Z"}}
+            """.trimIndent(),
+        )
+
+        val merged = mergeRemoteRecordingFromListItem(remote, existing)
+
+        requireNotNull(merged)
+        assertEquals(RecordingStatus.COMPLETED.value, merged.status)
+        assertEquals("run-new-v3", merged.publicationRunId)
+        assertEquals("writing", merged.publicationState)
+        assertEquals(null, merged.publicationErrorCode)
+    }
+
+    @Test
+    fun nestedPublicationSummaryPersistsWithTheRemoteRecording() {
+        val recording = mergeRemoteRecordingFromListItem(
+            JSONObject(
+                """
+                {
+                  "id": 44,
+                  "filename":"v3.m4a",
+                  "status":"PROCESSING",
+                  "publication_summary": {
+                    "run_id":"run-v3",
+                    "state":"visual_generating",
+                    "run_status":"active",
+                    "publication_stage":"visual",
+                    "state_revision":8,
+                    "progress_percent":74,
+                    "last_successful_state":"visual_generating",
+                    "last_successful_progress_percent":74,
+                    "retry_count":0,
+                    "next_action":null,
+                    "error_code":"provider_internal_error_500",
+                    "created_at":"2026-07-22T00:00:00.000Z",
+                    "updated_at":"2026-07-22T00:00:01.000Z"
+                  }
+                }
+                """.trimIndent(),
+            ),
+            existing = null,
+        )
+
+        requireNotNull(recording)
+        assertEquals(44L, recording.remoteRecordingId)
+        assertEquals("run-v3", recording.publicationRunId)
+        assertEquals("visual_generating", recording.publicationState)
+        assertEquals(8L, recording.publicationStateRevision)
+        assertEquals(74, recording.publicationProgressPercent)
+        assertEquals(null, recording.publicationErrorCode)
+    }
+
+    @Test
+    fun missingOrOutOfOrderPublicationSummaryDoesNotClearOrRegressStoredSnapshot() {
+        val existing = mergeRemoteRecordingFromListItem(
+            JSONObject(
+                """
+                {"filename":"v3.m4a","status":"PROCESSING","publication_summary":{
+                  "run_id":"run-v3","state":"writing","run_status":"active","publication_stage":"writing",
+                  "state_revision":4,"progress_percent":28,"last_successful_state":"writing",
+                  "last_successful_progress_percent":28,"retry_count":0,"next_action":"retry","error_code":null,
+                  "created_at":"2026-07-22T00:00:00.000Z","updated_at":"2026-07-22T00:00:01.000Z"}}
+                """.trimIndent(),
+            ),
+            existing = null,
+        )!!
+
+        val withoutSummary = mergeRemoteRecordingFromListItem(
+            JSONObject("""{"filename":"v3.m4a","status":"PROCESSING","article_title":"新标题"}"""),
+            existing = existing,
+        )!!
+        assertEquals("run-v3", withoutSummary.publicationRunId)
+        assertEquals(4L, withoutSummary.publicationStateRevision)
+        assertEquals("新标题", withoutSummary.articleTitle)
+
+        val lowerRevision = mergeRemoteRecordingFromListItem(
+            JSONObject(
+                """
+                {"filename":"v3.m4a","status":"PROCESSING","publication_summary":{
+                  "run_id":"run-v3","state":"transcribing","run_status":"active","publication_stage":"transcription",
+                  "state_revision":3,"progress_percent":14,"last_successful_state":"transcribing",
+                  "last_successful_progress_percent":14,"retry_count":0,"next_action":null,"error_code":null,
+                  "created_at":"2026-07-22T00:00:00.000Z","updated_at":"2026-07-22T00:00:02.000Z"}}
+                """.trimIndent(),
+            ),
+            existing = withoutSummary,
+        )!!
+        assertEquals("writing", lowerRevision.publicationState)
+        assertEquals(4L, lowerRevision.publicationStateRevision)
+    }
+
+    @Test
+    fun newerPublicationRunWinsButMissingCreatedAtCannotReplaceAnIdentifiedRun() {
+        val existing = mergeRemoteRecordingFromListItem(
+            JSONObject(
+                """
+                {"filename":"switch.m4a","status":"PROCESSING","publication_summary":{
+                  "run_id":"run-a","state":"writing","run_status":"active","publication_stage":"writing",
+                  "state_revision":1,"progress_percent":28,"last_successful_state":"writing",
+                  "last_successful_progress_percent":28,"retry_count":0,"next_action":null,"error_code":null,
+                  "created_at":"2026-07-22T00:00:00.000Z","updated_at":"2026-07-22T00:00:01.000Z"}}
+                """.trimIndent(),
+            ),
+            existing = null,
+        )!!
+
+        val newer = mergeRemoteRecordingFromListItem(
+            JSONObject(
+                """
+                {"filename":"switch.m4a","status":"PROCESSING","publication_summary":{
+                  "run_id":"run-b","state":"queued","run_status":"active","publication_stage":"upload",
+                  "state_revision":0,"progress_percent":0,"last_successful_state":"queued",
+                  "last_successful_progress_percent":0,"retry_count":0,"next_action":null,"error_code":null,
+                  "created_at":"2026-07-22T00:01:00.000Z","updated_at":"2026-07-22T00:01:00.000Z"}}
+                """.trimIndent(),
+            ),
+            existing = existing,
+        )!!
+        assertEquals("run-b", newer.publicationRunId)
+
+        val malformed = mergeRemoteRecordingFromListItem(
+            JSONObject("""{"filename":"switch.m4a","status":"PROCESSING","publication_summary":{"run_id":"run-c"}}"""),
+            existing = newer,
+        )!!
+        assertEquals("run-b", malformed.publicationRunId)
+    }
 }

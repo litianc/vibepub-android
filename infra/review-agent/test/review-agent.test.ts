@@ -63,6 +63,20 @@ const reviewRequestForDraft = async (draft: V3ArticleDraft, outerBlocks = draft.
 };
 
 describe("review adapter", () => {
+  it("returns only non-secret deployment evidence from health", async () => {
+    const response = await worker.fetch(new Request("https://review.test/health"), {
+      DEPLOY_COMMIT: "abc123",
+      DEPLOY_REF: "codex/staging",
+      DEPLOYED_AT: "2026-07-22T00:00:00.000Z",
+      REVIEW_AGENT_TOKEN: "synthetic-secret",
+    });
+    await expect(response.json()).resolves.toEqual({
+      ok: true,
+      service: "editorial-review-agent",
+      version: { commit: "abc123", ref: "codex/staging", deployed_at: "2026-07-22T00:00:00.000Z" },
+    });
+  });
+
   it("returns pass for a clean draft and does not expose source text in the report", async () => {
     const response = await worker.fetch(await request("这是一个具体、克制的段落。"), { REVIEW_AGENT_TOKEN: "review-secret" });
     expect(response.status).toBe(200);

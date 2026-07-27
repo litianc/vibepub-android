@@ -24,6 +24,9 @@ type Env = {
   GPT_IMAGE_API_KEY?: string;
   IMAGE_PROVIDER_URL?: string;
   IMAGE_PROVIDER_HOST?: string;
+  DEPLOY_COMMIT?: string;
+  DEPLOY_REF?: string;
+  DEPLOYED_AT?: string;
   VISUAL_RESULTS_BUCKET?: R2Bucket;
   VISUAL_OPERATION?: DurableObjectNamespace;
 };
@@ -71,6 +74,11 @@ function canonicalJson(value: unknown): string {
 
 function json(value: unknown, status = 200): Response {
   return Response.json(value, { status, headers: { "cache-control": "no-store" } });
+}
+
+function deploymentVersion(env: Pick<Env, "DEPLOY_COMMIT" | "DEPLOY_REF" | "DEPLOYED_AT">) {
+  const value = (input: string | undefined) => input?.trim() || null;
+  return { commit: value(env.DEPLOY_COMMIT), ref: value(env.DEPLOY_REF), deployed_at: value(env.DEPLOYED_AT) };
 }
 
 function authorized(request: Request, env: Env): boolean {
@@ -507,6 +515,9 @@ async function invoke(request: Request, env: Env, operation: Operation): Promise
 export default {
   fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+    if (request.method === "GET" && url.pathname === "/health") {
+      return Promise.resolve(json({ ok: true, service: "image-generation-adapter", version: deploymentVersion(env) }));
+    }
     if (url.pathname === "/internal/v3/visual/plan" && request.method === "POST") return invoke(request, env, "plan");
     if (url.pathname === "/internal/v3/visual/image" && request.method === "POST") return invoke(request, env, "image");
     return Promise.resolve(json({ error: { code: "not_found" } }, 404));

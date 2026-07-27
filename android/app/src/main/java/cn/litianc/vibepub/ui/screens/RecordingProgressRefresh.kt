@@ -3,11 +3,15 @@ package cn.litianc.vibepub.ui.screens
 import cn.litianc.vibepub.data.RecordingEntity
 import cn.litianc.vibepub.data.RecordingStatus
 import cn.litianc.vibepub.data.asRecordingStatus
+import cn.litianc.vibepub.data.publicationSnapshotOrNull
 
 internal const val ACTIVE_RECORDING_AUTO_REFRESH_INTERVAL_MS = 30_000L
 private const val ACTIVE_RECORDING_AUTO_REFRESH_RECENT_SYNC_MS = 15_000L
 
 internal fun recordingHasActiveCloudWork(recording: RecordingEntity?): Boolean {
+    recording?.publicationSnapshotOrNull()?.let { snapshot ->
+        return snapshot.state != "cancelled" && (snapshot.runStatus == "active" || snapshot.runStatus == "retrying")
+    }
     return when (recording?.status?.asRecordingStatus()) {
         RecordingStatus.UPLOADING,
         RecordingStatus.UPLOADED,

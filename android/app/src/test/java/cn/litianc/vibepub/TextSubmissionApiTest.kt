@@ -32,15 +32,16 @@ class TextSubmissionApiTest {
 
     @Test
     fun textSubmissionBodyIncludesSelectedWritingProfiles() {
+        val selectedProfile = requireNotNull(WritingStyleProfiles.findById("style_product_review"))
         val json = JSONObject(
             buildTextSubmissionBody(
                 text = "  这是一段足够长的文字输入  ",
                 titleHint = "  产品复盘  ",
-                styleProfileId = "style_product_review",
-                styleProfileVersion = "2026-07-05",
-                styleProfileName = "我的产品复盘风格",
-                styleProfileDescription = "保留具体排查过程",
-                styleProfileBody = "请用真实克制的产品复盘风格写作。",
+                styleProfileId = selectedProfile.id,
+                styleProfileVersion = selectedProfile.version,
+                styleProfileName = selectedProfile.name,
+                styleProfileDescription = selectedProfile.description,
+                styleProfileBody = WritingStyleProfiles.submissionBodyFor(selectedProfile),
                 layoutProfileId = "wechat_clean_article",
                 layoutProfileVersion = "2026-07-05",
             ),
@@ -49,11 +50,11 @@ class TextSubmissionApiTest {
         assertEquals("这是一段足够长的文字输入", json.getString("text"))
         assertEquals("产品复盘", json.getString("title_hint"))
         assertEquals("android_text", json.getString("source"))
-        assertEquals("style_product_review", json.getString("style_profile_id"))
+        assertEquals(selectedProfile.id, json.getString("style_profile_id"))
         assertEquals("2026-07-05", json.getString("style_profile_version"))
-        assertEquals("我的产品复盘风格", json.getString("style_profile_name"))
-        assertEquals("保留具体排查过程", json.getString("style_profile_description"))
-        assertEquals("请用真实克制的产品复盘风格写作。", json.getString("style_profile_body"))
+        assertEquals(selectedProfile.name, json.getString("style_profile_name"))
+        assertEquals(selectedProfile.description, json.getString("style_profile_description"))
+        assertEquals(selectedProfile.body?.trim(), json.getString("style_profile_body"))
         assertEquals("wechat_clean_article", json.getString("layout_profile_id"))
         assertEquals("2026-07-05", json.getString("layout_profile_version"))
     }

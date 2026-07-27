@@ -7,7 +7,7 @@ import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
-@Database(entities = [RecordingEntity::class], version = 9, exportSchema = false)
+@Database(entities = [RecordingEntity::class], version = 10, exportSchema = false)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun recordingDao(): RecordingDao
 
@@ -31,6 +31,7 @@ abstract class AppDatabase : RoomDatabase() {
                         MIGRATION_6_7,
                         MIGRATION_7_8,
                         MIGRATION_8_9,
+                        MIGRATION_9_10,
                     )
                     .build()
                 INSTANCE = instance
@@ -126,5 +127,30 @@ abstract class AppDatabase : RoomDatabase() {
                 db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_recordings_userId_filename ON recordings(userId, filename)")
             }
         }
+
+        internal val MIGRATION_9_10 = object : Migration(9, 10) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                migrateRecordings9To10(db::execSQL)
+            }
+        }
     }
+}
+
+internal fun migrateRecordings9To10(execSql: (String) -> Unit) {
+    listOf(
+        "ALTER TABLE recordings ADD COLUMN remoteRecordingId INTEGER",
+        "ALTER TABLE recordings ADD COLUMN publicationRunId TEXT",
+        "ALTER TABLE recordings ADD COLUMN publicationState TEXT",
+        "ALTER TABLE recordings ADD COLUMN publicationRunStatus TEXT",
+        "ALTER TABLE recordings ADD COLUMN publicationStage TEXT",
+        "ALTER TABLE recordings ADD COLUMN publicationStateRevision INTEGER",
+        "ALTER TABLE recordings ADD COLUMN publicationProgressPercent INTEGER",
+        "ALTER TABLE recordings ADD COLUMN publicationLastSuccessfulState TEXT",
+        "ALTER TABLE recordings ADD COLUMN publicationLastSuccessfulProgressPercent INTEGER",
+        "ALTER TABLE recordings ADD COLUMN publicationRetryCount INTEGER",
+        "ALTER TABLE recordings ADD COLUMN publicationNextAction TEXT",
+        "ALTER TABLE recordings ADD COLUMN publicationErrorCode TEXT",
+        "ALTER TABLE recordings ADD COLUMN publicationRunCreatedAt TEXT",
+        "ALTER TABLE recordings ADD COLUMN publicationUpdatedAt TEXT",
+    ).forEach(execSql)
 }

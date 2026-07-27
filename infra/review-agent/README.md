@@ -12,3 +12,9 @@ service, or call a model.
 
 Configure `REVIEW_AGENT_TOKEN` with the platform secret store. The value is
 intentionally absent from this repository.
+
+Wave 2E staging renders this adapter as a private `workers_dev=false`,
+`preview_urls=false` target. The normal CI job only performs synthetic rendering
+and `wrangler deploy --dry-run`; an approved protected Environment bootstrap
+and final explicit-config deployment stamps `/health` with non-secret
+commit/ref/timestamp metadata.
