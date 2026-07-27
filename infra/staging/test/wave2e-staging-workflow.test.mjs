@@ -104,6 +104,7 @@ test("adapter secret scopes are split by deployment job and main health proves t
   assert.match(health, /for attempt in 1 2 3 4 5/);
   assert.match(health, /--connect-timeout 5 --max-time 15/);
   assert.match(health, /Stale staging version evidence/);
+  assert.match(health, /\[ "\$status" != "404" \]/);
   assert.match(health, /\[ "\$status" != "429" \]/);
 });
 
@@ -122,6 +123,7 @@ test("staging Mining is an exact unscheduled readiness attestation, never a laun
   assert.match(mining, /mining-handoffs\/eligibility/);
   assert.match(mining, /EXPECTED_MANIFEST_SHA256/);
   assert.match(mining, /Stale staging version evidence/);
+  assert.match(mining, /\[ "\$status" != "404" \]/);
   assert.match(mining, /does not start Mining/);
   assert.doesNotMatch(mining, /npm start|schedule:|mining-job\.yml/);
 });

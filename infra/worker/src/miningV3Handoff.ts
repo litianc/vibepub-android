@@ -198,11 +198,11 @@ async function listObjects(bucket: R2Bucket, prefix: string): Promise<R2Object[]
 
 async function recordingForSource(env: MiningV3HandoffEnv, key: string): Promise<Recording> {
   const rows = await env.DB.prepare(`
-    SELECT r.id, r.user_id, r.workspace_id, r.filename, r.r2_key, r.source_type, r.article_title,
+    SELECT r.id, r.user_id, s.workspace_id AS workspace_id, r.filename, r.r2_key, r.source_type, r.article_title,
            r.style_profile_id, r.style_profile_version, r.layout_profile_id, r.layout_profile_version
     FROM recordings r
     JOIN editorial_recording_scopes s
-      ON s.recording_id = r.id AND s.user_id = r.user_id AND s.workspace_id = r.workspace_id
+      ON s.recording_id = r.id AND s.user_id = r.user_id
     WHERE r.r2_key = ?
   `).bind(key).all<Recording>();
   const found = rows.results || [];

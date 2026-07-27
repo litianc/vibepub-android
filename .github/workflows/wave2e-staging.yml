@@ -513,7 +513,7 @@ jobs:
                 exit 0
               fi
               echo "Stale staging version evidence (attempt $attempt/5); retrying propagation"
-            elif [ "$status" -ge 400 ] && [ "$status" -lt 500 ] && [ "$status" != "429" ]; then
+            elif [ "$status" -ge 400 ] && [ "$status" -lt 500 ] && [ "$status" != "404" ] && [ "$status" != "429" ]; then
               echo "::error::staging health returned terminal HTTP $status"
               exit 1
             fi
@@ -556,7 +556,7 @@ jobs:
                 break
               fi
               echo "Stale staging version evidence (attempt $attempt/5); retrying propagation"
-            elif [ "$status" -ge 400 ] && [ "$status" -lt 500 ] && [ "$status" != "429" ]; then
+            elif [ "$status" -ge 400 ] && [ "$status" -lt 500 ] && [ "$status" != "404" ] && [ "$status" != "429" ]; then
               echo "::error::staging health returned terminal HTTP $status"
               exit 1
             fi
