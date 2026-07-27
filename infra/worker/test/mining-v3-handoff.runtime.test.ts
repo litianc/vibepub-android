@@ -637,7 +637,10 @@ describe("Mining V3 handoff Worker boundary", () => {
 
     const env = testEnv(bucket);
     env.DB = {
-      prepare() {
+      prepare(sql: string) {
+        expect(sql).toContain("s.workspace_id AS workspace_id");
+        expect(sql).not.toContain("r.workspace_id");
+        expect(sql).not.toContain("s.workspace_id = r.workspace_id");
         return { bind() { return { all: async () => ({ results: [] }) }; } };
       },
     };

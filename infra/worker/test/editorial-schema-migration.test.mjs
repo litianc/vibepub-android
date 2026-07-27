@@ -8,6 +8,10 @@ const schema = await readFile(resolve("schema.sql"), "utf8");
 const migration = await readFile(resolve("migrations/0010_editorial_visual_pipeline.sql"), "utf8");
 const legacy = await readFile(resolve("test/fixtures/editorial/legacy-recordings-schema.sql"), "utf8");
 const workerIndex = await readFile(resolve("src/index.ts"), "utf8");
+const miningV3Handoff = await readFile(resolve("src/miningV3Handoff.ts"), "utf8");
+const recordingLookupMatch = miningV3Handoff.match(/async function recordingForSource[\s\S]*?env\.DB\.prepare\(`([\s\S]*?)`\)\.bind\(key\)/);
+assert.ok(recordingLookupMatch, "recordingForSource D1 lookup must remain extractable for legacy-schema verification");
+const recordingLookup = recordingLookupMatch[1];
 
 test("canonical schema plus migration is fresh-safe and re-applicable", () => {
   const output = runSql(`${schema}\n${migration}\n${migration}\nSELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('editorial_recording_scopes', 'editorial_version_states', 'editorial_runs', 'editorial_artifacts') ORDER BY name;`);
@@ -24,6 +28,30 @@ test("canonical schema plus migration is fresh-safe and re-applicable", () => {
 test("legacy recordings get a deterministic workspace scope and migration can be retried", () => {
   const output = runSql(`${legacy}\n${migration}\n${migration}\nSELECT recording_id || ':' || user_id || ':' || workspace_id FROM editorial_recording_scopes;`);
   assert.equal(output.trim(), "7:usr_legacy:ws_legacy");
+});
+
+test("Mining V3 source lookup reads workspace scope when legacy recordings has no workspace_id", () => {
+  const legacyHandoffSchema = `
+    PRAGMA foreign_keys = ON;
+    CREATE TABLE users (id TEXT PRIMARY KEY, email TEXT NOT NULL, workspace_id TEXT NOT NULL);
+    CREATE TABLE recordings (
+      id INTEGER PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      filename TEXT NOT NULL,
+      r2_key TEXT NOT NULL,
+      source_type TEXT DEFAULT 'RECORDING',
+      article_title TEXT,
+      style_profile_id TEXT,
+      style_profile_version TEXT,
+      layout_profile_id TEXT,
+      layout_profile_version TEXT
+    );
+    INSERT INTO users (id, email, workspace_id) VALUES ('usr_handoff', 'handoff@example.test', 'ws_handoff');
+    INSERT INTO recordings (id, user_id, filename, r2_key) VALUES (8, 'usr_handoff', 'handoff.m4a', 'audio/handoff.m4a');`;
+  const lookup = recordingLookup.replace("WHERE r.r2_key = ?", "WHERE r.r2_key = 'audio/handoff.m4a'");
+  const output = runSql(`${legacyHandoffSchema}\n${migration}\nWITH lookup AS (${lookup})
+    SELECT id || ':' || user_id || ':' || workspace_id || ':' || r2_key FROM lookup;`);
+  assert.equal(output.trim(), "8:usr_handoff:ws_handoff:audio/handoff.m4a");
 });
 
 test("text submission scope backfill supports canonical fresh and legacy existing schemas", () => {

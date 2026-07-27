@@ -13,6 +13,7 @@
 
 | 时间 | 功能更新 |
 | --- | --- |
+| 2026-07-27 21:30 CST | Wave 2E staging 门禁兼容旧版 recordings 表并将发布传播期的短暂 404 纳入有限重试，使 Mining V3 无写入探针可验证真实 D1 契约。 |
 | 2026-07-27 21:10 CST | Wave 2E staging 验证为串行多场景恢复测试设置明确的 20 秒上限，避免 GitHub runner 负载造成超时与后续断言污染。 |
 | 2026-07-27 15:18 CST | Wave 2E 图像 Agent 锁文件补全 Linux 原生绑定，使 staging 发布验证可在 GitHub runner 上启动图像测试。 |
 | 2026-07-27 14:05 CST | Wave 2E 验证锁定 Wrangler 与 Cloudflare 测试池版本、使用 CI 同版 npm 同步依赖锁、移除本机 ripgrep 依赖并限定 staging 临时目录作用域，使发布候选可在 GitHub runner 上一致执行。 |
