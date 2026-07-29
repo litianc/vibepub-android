@@ -1,6 +1,8 @@
 -- This migration is intentionally additive and re-runnable.
 -- Existing databases may not have recordings.workspace_id; the scope table is the
 -- compatibility source for the editorial contract and avoids conditional ALTER TABLE.
+-- Legacy recordings whose owner was removed remain in recordings for retention, but
+-- are intentionally excluded because they cannot participate in an authenticated run.
 -- It deliberately has no FK back to recordings: deleting a recording removes the
 -- latest-result projection while this row remains as the editorial audit tombstone.
 
@@ -18,7 +20,7 @@ INSERT OR IGNORE INTO editorial_recording_scopes (recording_id, user_id, workspa
 SELECT recordings.id, recordings.user_id,
        COALESCE(users.workspace_id, 'vibepub-dogfood')
 FROM recordings
-LEFT JOIN users ON users.id = recordings.user_id;
+JOIN users ON users.id = recordings.user_id;
 
 CREATE INDEX IF NOT EXISTS editorial_recording_scopes_user
   ON editorial_recording_scopes(user_id, workspace_id, recording_id);

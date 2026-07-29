@@ -30,6 +30,17 @@ test("legacy recordings get a deterministic workspace scope and migration can be
   assert.equal(output.trim(), "7:usr_legacy:ws_legacy");
 });
 
+test("legacy recordings whose owner no longer exists do not block migration", () => {
+  const orphan = `
+    INSERT INTO recordings (id, user_id, filename, r2_key)
+    VALUES (8, 'usr_removed', 'orphan.m4a', 'audio/orphan.m4a');`;
+  const output = runSql(`${legacy}\n${orphan}\n${migration}\n${migration}\n
+    SELECT (SELECT count(*) FROM recordings) || ':' ||
+           (SELECT count(*) FROM editorial_recording_scopes) || ':' ||
+           (SELECT count(*) FROM editorial_recording_scopes WHERE recording_id = 8);`);
+  assert.equal(output.trim(), "2:1:0");
+});
+
 test("Mining V3 source lookup reads workspace scope when legacy recordings has no workspace_id", () => {
   const legacyHandoffSchema = `
     PRAGMA foreign_keys = ON;
