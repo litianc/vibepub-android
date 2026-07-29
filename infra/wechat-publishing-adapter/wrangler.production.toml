@@ -1,0 +1,31 @@
+name = "wechat-publishing-adapter"
+main = "src/index.ts"
+compatibility_date = "2026-06-24"
+workers_dev = false
+preview_urls = false
+
+[vars]
+V3_TENANT_SCOPE = "all"
+WECHAT_PUBLISHING_ACCOUNT_ALLOWLIST = ""
+WECHAT_DRAFT_SYNC_V3 = "true"
+WECHAT_DRAFT_SYNC_V3_ALLOWLIST = ""
+WECHAT_PROVIDER_BASE_URL_ALLOWLIST = "https://api.clawparty.cn/wechat"
+WECHAT_MEDIA_URL_HOST_ALLOWLIST = "mmbiz.qpic.cn,mmbiz.qlogo.cn"
+PUBLISHING_ACCOUNT_RESOLVER_URL = "https://vibepub.litianc.cn/"
+
+[[r2_buckets]]
+binding = "WECHAT_RESULTS_BUCKET"
+bucket_name = "vibepub-wechat-publishing-results"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "vibepub-db"
+database_id = "0804a462-4413-4eaf-bfab-60531eef06be"
+
+[[durable_objects.bindings]]
+name = "WECHAT_OPERATION"
+class_name = "WechatOperationAgent"
+
+[[migrations]]
+tag = "v1-wechat-operation"
+new_sqlite_classes = ["WechatOperationAgent"]

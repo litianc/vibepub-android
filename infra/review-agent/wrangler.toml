@@ -1,6 +1,8 @@
 name = "editorial-review-agent"
 main = "src/index.ts"
 compatibility_date = "2026-07-19"
+workers_dev = false
+preview_urls = false
 
 # REVIEW_AGENT_TOKEN is a secret configured outside source control.
 # No provider/model credentials are required by this deterministic adapter.

@@ -243,7 +243,31 @@ export function isPublicationState(value: unknown): value is PublicationState {
   return typeof value === "string" && PUBLICATION_STATES.includes(value as PublicationState);
 }
 
-type PublicationFeatureEnv = {
+export type V3TenantScopeEnv = {
+  V3_TENANT_SCOPE?: string;
+};
+
+export function v3AllTenantsEnabled(env: V3TenantScopeEnv): boolean {
+  return env.V3_TENANT_SCOPE?.trim().toLowerCase() === "all";
+}
+
+export function v3TenantAllowed(
+  env: V3TenantScopeEnv,
+  allowlistValue: string | undefined,
+  userId: string,
+  workspaceId: string,
+): boolean {
+  const scope = env.V3_TENANT_SCOPE?.trim().toLowerCase() || "allowlist";
+  if (scope === "all") return true;
+  if (scope !== "allowlist") return false;
+  return (allowlistValue || "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean)
+    .includes(`${userId}:${workspaceId}`);
+}
+
+type PublicationFeatureEnv = V3TenantScopeEnv & {
   FIVE_AGENT_PUBLISHING_V3?: string;
   FIVE_AGENT_PUBLISHING_V3_ALLOWLIST?: string;
   DEPLOY_ENVIRONMENT?: string;
@@ -305,11 +329,7 @@ export function publicationTenantFeatureEnabled(
   workspaceId: string,
 ): boolean {
   if (env.FIVE_AGENT_PUBLISHING_V3?.trim().toLowerCase() !== "true") return false;
-  const allowlist = (env.FIVE_AGENT_PUBLISHING_V3_ALLOWLIST || "")
-    .split(",")
-    .map((value) => value.trim())
-    .filter(Boolean);
-  return allowlist.includes(`${userId}:${workspaceId}`);
+  return v3TenantAllowed(env, env.FIVE_AGENT_PUBLISHING_V3_ALLOWLIST, userId, workspaceId);
 }
 
 export function publicationFeatureEnabled(

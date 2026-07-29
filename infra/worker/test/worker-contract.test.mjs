@@ -1158,7 +1158,7 @@ test("stores publishing credentials encrypted and exposes them only to internal 
           }),
         });
       }
-      if (sql.includes("SELECT app_id, app_secret_ciphertext, proxy_url FROM publishing_accounts")) {
+      if (sql.includes("SELECT app_id, app_secret_ciphertext, proxy_url, updated_at FROM publishing_accounts")) {
         return statement({
           all: async () => ({
             results: publishingRow
@@ -1166,6 +1166,7 @@ test("stores publishing credentials encrypted and exposes them only to internal 
                   app_id: publishingRow.app_id,
                   app_secret_ciphertext: publishingRow.app_secret_ciphertext,
                   proxy_url: publishingRow.proxy_url,
+                  updated_at: publishingRow.updated_at,
                 }]
               : [],
           }),
@@ -1216,7 +1217,28 @@ test("stores publishing credentials encrypted and exposes them only to internal 
   );
 
   assert.equal(internalResponse.status, 200);
-  assert.equal((await internalResponse.json()).publishing_account.app_secret, "secret-value");
+  const internalAccount = (await internalResponse.json()).publishing_account;
+  assert.equal(internalAccount.app_secret, "secret-value");
+  assert.equal(internalAccount.updated_at, publishingRow.updated_at);
+
+  const resolverResponse = await worker.fetch(
+    new Request("https://example.test/api/internal/publishing-account", {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer resolver-token",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ user_id: "usr_publisher" }),
+    }),
+    createEnv({
+      DB: db,
+      PUBLISHING_ACCOUNT_RESOLVER_TOKEN: "resolver-token",
+      CREDENTIAL_ENCRYPTION_KEY: "test-credential-key",
+    }),
+    createExecutionContext(),
+  );
+  assert.equal(resolverResponse.status, 200);
+  assert.equal((await resolverResponse.json()).publishing_account.app_secret, "secret-value");
 });
 
 test("keeps rich recording fields when only processing_stage is not migrated yet", async () => {

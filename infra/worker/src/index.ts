@@ -44,6 +44,7 @@ export interface Env {
   FILES_TOKEN?: string;
   MINING_SERVICE_TOKEN?: string;
   MINING_V3_HANDOFF_TOKEN?: string;
+  PUBLISHING_ACCOUNT_RESOLVER_TOKEN?: string;
   PUBLIC_BASE_URL: string;
   GITHUB_PAT?: string;
   GITHUB_WORKFLOW_REF?: string;
@@ -74,6 +75,7 @@ export interface Env {
   BOOTSTRAP_ADMIN_USER_ID?: string;
   EDITORIAL_WORKFLOW_V2?: string;
   EDITORIAL_WORKFLOW_V2_ALLOWLIST?: string;
+  V3_TENANT_SCOPE?: string;
   FIVE_AGENT_PUBLISHING_V3?: string;
   FIVE_AGENT_PUBLISHING_V3_ALLOWLIST?: string;
   DEPLOY_ENVIRONMENT?: string;
@@ -192,7 +194,7 @@ export default {
     }
 
     if (request.method === "POST" && url.pathname === "/api/internal/publishing-account") {
-      if (!(await isInternalAuthorized(request, env))) {
+      if (!(await isInternalAuthorized(request, env)) && !(await isPublishingAccountResolverAuthorized(request, env))) {
         return json({ error: "unauthorized" }, 401);
       }
       return getInternalPublishingAccount(request, env);
@@ -836,6 +838,14 @@ async function isFiveAgentPublishingAuthorized(request: Request, env: Env): Prom
 
 async function isMiningV3HandoffAuthorized(request: Request, env: Env): Promise<boolean> {
   const configured = env.MINING_V3_HANDOFF_TOKEN?.trim();
+  if (!configured) return false;
+  const authorization = request.headers.get("Authorization") || "";
+  const bearer = authorization.match(/^Bearer\s+(.+)$/i)?.[1] || "";
+  return Boolean(bearer) && await secureTokenEquals(configured, bearer);
+}
+
+async function isPublishingAccountResolverAuthorized(request: Request, env: Env): Promise<boolean> {
+  const configured = env.PUBLISHING_ACCOUNT_RESOLVER_TOKEN?.trim();
   if (!configured) return false;
   const authorization = request.headers.get("Authorization") || "";
   const bearer = authorization.match(/^Bearer\s+(.+)$/i)?.[1] || "";
@@ -1614,7 +1624,7 @@ async function getInternalPublishingAccount(request: Request, env: Env): Promise
   const userId = normalizeOptionalString(body?.user_id ?? body?.userId) || bootstrapAdminUserId(env);
   const row = await queryOne<any>(
     env,
-    `SELECT app_id, app_secret_ciphertext, proxy_url FROM publishing_accounts WHERE user_id = ? AND type = 'wechat' LIMIT 1`,
+    `SELECT app_id, app_secret_ciphertext, proxy_url, updated_at FROM publishing_accounts WHERE user_id = ? AND type = 'wechat' LIMIT 1`,
     [userId],
   );
   if (!row) {
@@ -1626,6 +1636,7 @@ async function getInternalPublishingAccount(request: Request, env: Env): Promise
       app_id: row.app_id,
       app_secret: await decryptSecret(env, row.app_secret_ciphertext),
       proxy_url: row.proxy_url,
+      updated_at: row.updated_at,
     },
   });
 }

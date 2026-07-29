@@ -1,0 +1,21 @@
+name = "image-generation-adapter"
+main = "src/index.ts"
+compatibility_date = "2026-06-24"
+workers_dev = false
+preview_urls = false
+
+[vars]
+IMAGE_PROVIDER_HOST = "api.clawparty.cn"
+IMAGE_PROVIDER_URL = "https://api.clawparty.cn/v1/images/generations"
+
+[[r2_buckets]]
+binding = "VISUAL_RESULTS_BUCKET"
+bucket_name = "vibepub-visual-adapter-results"
+
+[[durable_objects.bindings]]
+name = "VISUAL_OPERATION"
+class_name = "VisualOperationAgent"
+
+[[migrations]]
+tag = "v1-visual-operation"
+new_sqlite_classes = ["VisualOperationAgent"]

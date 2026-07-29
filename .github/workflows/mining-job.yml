@@ -77,7 +77,7 @@ jobs:
           FILES_TOKEN: ${{ secrets.FILES_TOKEN }}
           MINING_SERVICE_TOKEN: ${{ secrets.MINING_SERVICE_TOKEN }}
           MINING_V3_HANDOFF_TOKEN: ${{ secrets.MINING_V3_HANDOFF_TOKEN }}
-          MINING_V3_HANDOFF_ENABLED: "false"
+          MINING_V3_HANDOFF_ENABLED: "true"
           PUBLIC_BASE_URL: "https://vibepub.litianc.cn"
           CLEANUP_PERMANENT_AUDIO_FAILURES: "true"
           TARGET_FILENAME: ${{ inputs.target_filename }}

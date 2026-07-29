@@ -3,12 +3,15 @@ export type Env = {
   WECHAT_RESULTS_BUCKET: R2Bucket;
   WECHAT_OPERATION: DurableObjectNamespace;
   WECHAT_PUBLISHING_TOKEN?: string;
+  V3_TENANT_SCOPE?: string;
   WECHAT_DRAFT_SYNC_V3?: string;
   WECHAT_DRAFT_SYNC_V3_ALLOWLIST?: string;
   WECHAT_PUBLISHING_ACCOUNT_ALLOWLIST?: string;
   WECHAT_PROVIDER_BASE_URL_ALLOWLIST?: string;
   WECHAT_MEDIA_URL_HOST_ALLOWLIST?: string;
   CREDENTIAL_ENCRYPTION_KEY?: string;
+  PUBLISHING_ACCOUNT_RESOLVER_URL?: string;
+  PUBLISHING_ACCOUNT_RESOLVER_TOKEN?: string;
   DEPLOY_COMMIT?: string;
   DEPLOY_REF?: string;
   DEPLOYED_AT?: string;
@@ -16,8 +19,9 @@ export type Env = {
 
 type Operation = "resolve_account" | "upload_image" | "write_draft" | "get_draft" | "find_draft";
 type Account = { user_id: string; app_id: string; app_secret_ciphertext: string; proxy_url: string | null; updated_at: string };
+type AccountMaterial = { user_id: string; app_id: string; app_secret: string; proxy_url: string | null; updated_at: string };
 type ResolvedAccount = {
-  account: Account;
+  account: AccountMaterial;
   binding_id: string;
   config_hash: string;
   receipt_hash: string;
@@ -181,11 +185,15 @@ export async function deriveWechatAccountBindingId(userId: string, workspaceId: 
   return `wab_${(await digest(`wechat-account-binding:v1\n${canonical({ user_id: userId, workspace_id: workspaceId, type: "wechat", app_id: appId })}`)).slice(7)}`;
 }
 function accountAllowed(env: Env, bindingId: string): boolean {
+  if (env.V3_TENANT_SCOPE?.trim().toLowerCase() === "all") return true;
   return (env.WECHAT_PUBLISHING_ACCOUNT_ALLOWLIST || "").split(",").map(value => value.trim()).filter(Boolean).includes(bindingId);
 }
 function tenantAllowed(env: Env, userId: string, workspaceId: string): boolean {
-  return env.WECHAT_DRAFT_SYNC_V3 === "true" &&
-    (env.WECHAT_DRAFT_SYNC_V3_ALLOWLIST || "").split(",").map(value => value.trim()).filter(Boolean).includes(`${userId}:${workspaceId}`);
+  if (env.WECHAT_DRAFT_SYNC_V3 !== "true") return false;
+  const scope = env.V3_TENANT_SCOPE?.trim().toLowerCase() || "allowlist";
+  if (scope === "all") return true;
+  if (scope !== "allowlist") return false;
+  return (env.WECHAT_DRAFT_SYNC_V3_ALLOWLIST || "").split(",").map(value => value.trim()).filter(Boolean).includes(`${userId}:${workspaceId}`);
 }
 function isPrivateLikeProviderHost(hostname: string): boolean {
   const host = hostname.toLowerCase();
@@ -289,18 +297,67 @@ async function decrypt(env: Env, ciphertext: string): Promise<string> {
   catch { throw new AdapterError("wechat_publishing_account_unavailable", 409); }
 }
 
-async function loadAccount(env: Env, userId: string, workspaceId: string, articleId: string): Promise<ResolvedAccount> {
+function publishingAccountResolver(env: Env): { url: URL; token: string } | null {
+  const rawUrl = env.PUBLISHING_ACCOUNT_RESOLVER_URL?.trim() || "";
+  const token = env.PUBLISHING_ACCOUNT_RESOLVER_TOKEN?.trim() || "";
+  if (!rawUrl && !token) return null;
+  if (!rawUrl || !token) throw new AdapterError("wechat_publishing_account_unavailable", 409);
+  let url: URL;
+  try { url = new URL(rawUrl); } catch { throw new AdapterError("wechat_publishing_account_unavailable", 409); }
+  if (url.protocol !== "https:" || (url.port !== "" && url.port !== "443") || !url.hostname ||
+      url.username || url.password || url.search || url.hash || url.pathname !== "/" || isPrivateLikeProviderHost(url.hostname)) {
+    throw new AdapterError("wechat_publishing_account_unavailable", 409);
+  }
+  url.pathname = "/api/internal/publishing-account";
+  return { url, token };
+}
+
+async function resolveAccountMaterial(env: Env, userId: string): Promise<AccountMaterial> {
+  const resolver = publishingAccountResolver(env);
+  if (resolver) {
+    let response: Response;
+    try {
+      response = await fetch(resolver.url, {
+        method: "POST",
+        headers: { authorization: `Bearer ${resolver.token}`, "content-type": "application/json" },
+        body: canonical({ user_id: userId }),
+      });
+    } catch {
+      throw new AdapterError("wechat_publishing_account_unavailable", 503, true, "not_forwarded");
+    }
+    if (!response.ok) {
+      if (WECHAT_RETRY_STATUS.has(response.status)) throw new AdapterError("wechat_publishing_account_unavailable", response.status, true, "not_forwarded");
+      throw new AdapterError("wechat_publishing_account_unavailable", 409);
+    }
+    let payload: unknown;
+    try { payload = await response.json(); } catch { throw new AdapterError("wechat_publishing_account_unavailable", 502, true, "not_forwarded"); }
+    const record = payload && typeof payload === "object" && !Array.isArray(payload) ? payload as Record<string, unknown> : {};
+    const value = record.publishing_account && typeof record.publishing_account === "object" && !Array.isArray(record.publishing_account)
+      ? record.publishing_account as Record<string, unknown>
+      : {};
+    if (typeof value.app_id !== "string" || !value.app_id || typeof value.app_secret !== "string" || !value.app_secret ||
+        (value.proxy_url !== null && typeof value.proxy_url !== "string") || typeof value.updated_at !== "string" || !value.updated_at) {
+      throw new AdapterError("wechat_publishing_account_unavailable", 502, true, "not_forwarded");
+    }
+    return { user_id: userId, app_id: value.app_id, app_secret: value.app_secret, proxy_url: value.proxy_url, updated_at: value.updated_at };
+  }
+
   const account = await env.DB.prepare(`SELECT user_id, app_id, app_secret_ciphertext, proxy_url, updated_at FROM publishing_accounts WHERE user_id = ? AND type = 'wechat' LIMIT 1`)
     .bind(userId).first<Account>();
   if (!account || !account.app_id || !account.app_secret_ciphertext) throw new AdapterError("wechat_publishing_account_unavailable", 409);
-  const providerBase = safeProviderBase(env, account.proxy_url);
   const appSecret = await decrypt(env, account.app_secret_ciphertext);
   if (!appSecret) throw new AdapterError("wechat_publishing_account_unavailable", 409);
+  return { user_id: account.user_id, app_id: account.app_id, app_secret: appSecret, proxy_url: account.proxy_url, updated_at: account.updated_at };
+}
+
+async function loadAccount(env: Env, userId: string, workspaceId: string, articleId: string): Promise<ResolvedAccount> {
+  const account = await resolveAccountMaterial(env, userId);
+  const providerBase = safeProviderBase(env, account.proxy_url);
   const bindingId = await deriveWechatAccountBindingId(userId, workspaceId, account.app_id);
   if (!accountAllowed(env, bindingId)) throw new AdapterError("wechat_publishing_account_not_allowed", 409);
   const configHash = await digest(canonical({ app_id: account.app_id, provider_base_url: providerBase.toString(), updated_at: account.updated_at }));
   const receiptHash = await digest(canonical({ version: "wechat-account-resolution.v1", user_id: userId, workspace_id: workspaceId, article_id: articleId, account_binding_id: bindingId, config_hash: configHash }));
-  return { account, binding_id: bindingId, config_hash: configHash, receipt_hash: receiptHash, provider_base: providerBase, app_secret: appSecret };
+  return { account, binding_id: bindingId, config_hash: configHash, receipt_hash: receiptHash, provider_base: providerBase, app_secret: account.app_secret };
 }
 
 function deliveryStatus(response: Response): "not_forwarded" | "rejected_before_commit" | null {

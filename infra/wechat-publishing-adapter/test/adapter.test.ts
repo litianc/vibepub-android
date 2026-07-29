@@ -102,6 +102,43 @@ describe("wechat publishing adapter", () => {
     expect(response.status).toBe(401);
   });
 
+  it("uses the private resolver without requiring the shared encryption key", async () => {
+    const configured = await configuredEnv();
+    configured.V3_TENANT_SCOPE = "all";
+    configured.WECHAT_DRAFT_SYNC_V3_ALLOWLIST = "";
+    configured.WECHAT_PUBLISHING_ACCOUNT_ALLOWLIST = "";
+    configured.PUBLISHING_ACCOUNT_RESOLVER_URL = "https://vibepub.example/";
+    configured.PUBLISHING_ACCOUNT_RESOLVER_TOKEN = "resolver-token";
+    configured.CREDENTIAL_ENCRYPTION_KEY = undefined;
+    const resolver = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      expect(request.url).toBe("https://vibepub.example/api/internal/publishing-account");
+      expect(request.headers.get("authorization")).toBe("Bearer resolver-token");
+      expect(await request.json()).toEqual({ user_id: "user-1" });
+      return Response.json({ publishing_account: {
+        app_id: "app-1",
+        app_secret: "provider-secret",
+        proxy_url: "https://gateway.example/wechat",
+        updated_at: "2026-07-21T00:00:00.000Z",
+      } });
+    });
+    vi.stubGlobal("fetch", resolver);
+
+    const receipt = await resolve(new WechatOperationAgent(state(), configured));
+    expect(receipt.account_binding_id).toMatch(/^wab_/);
+    expect(resolver).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails closed when only half of the private resolver is configured", async () => {
+    const configured = await configuredEnv();
+    configured.PUBLISHING_ACCOUNT_RESOLVER_URL = "https://vibepub.example/";
+    const response = await new WechatOperationAgent(state(), configured).fetch(new Request("https://internal", {
+      method: "POST",
+      body: requestBody("resolve_account", "resolve-partial"),
+    }));
+    expect(response.status).toBe(409);
+  });
+
   it("resolves and validates the account receipt before any durable operation", async () => {
     const bucket = new Bucket(); const instance = new WechatOperationAgent(state(), await configuredEnv(bucket));
     const fetcher = providerMock(); vi.stubGlobal("fetch", fetcher.fetcher);

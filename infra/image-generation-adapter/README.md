@@ -11,16 +11,16 @@ binding the adapter returns `service_unconfigured` before provider access.
 `IMAGE_PROVIDER_URL` and `IMAGE_PROVIDER_HOST` are deployment configuration,
 not request input. The URL must be a fixed HTTPS URL on port 443 whose host
 exactly equals `IMAGE_PROVIDER_HOST`, with no credentials, query, or fragment
-and the exact `/v1/images/generations` path. They are checked in empty until
-deployment has an approved TLS front. The staging canary uses the fixed
-`https://api.clawparty.cn/v1/images/generations` endpoint; HTTP remains rejected
+and the exact `/v1/images/generations` path. The default config is checked in
+empty and fail-closed; `wrangler.production.toml` pins the approved
+`https://api.clawparty.cn/v1/images/generations` endpoint. HTTP remains rejected
 before any provider call, including when retired staging exception variables are
 injected. Its staging-only canary variables must bind the exact run, user, and
 workspace, expire within one hour, and claim no more than three operations and
 nine attempts in a Durable Object ledger. An expired canary cannot call the
-provider even if workflow cleanup never ran. Production also requires rotation
-of the previously exposed provider key before this adapter is enabled. There is
-no main Worker URL fallback.
+provider even if workflow cleanup never ran. Production requires either key
+rotation or explicit owner authorization before reusing a previously supplied
+provider key. There is no main Worker URL fallback.
 
 Each operation requires a stable `operation_id` and attempt `1..3`. An intent
 is written before the provider call; a success or known failure is written and

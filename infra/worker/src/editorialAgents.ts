@@ -140,6 +140,7 @@ export type EditorialRuntimeEnv = Cloudflare.Env & {
   DB: D1Database;
   FILES_BUCKET: R2Bucket;
   EDITORIAL_COORDINATOR: DurableObjectNamespace<EditorialCoordinatorAgent>;
+  V3_TENANT_SCOPE?: string;
   FIVE_AGENT_PUBLISHING_V3?: string;
   FIVE_AGENT_PUBLISHING_V3_ALLOWLIST?: string;
   DEPLOY_ENVIRONMENT?: string;

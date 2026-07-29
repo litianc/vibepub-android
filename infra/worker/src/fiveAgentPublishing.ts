@@ -26,6 +26,7 @@ import {
   publicationFeatureEnabled,
   publicationTenantFeatureEnabled,
   stagingImageCanaryScopeEnabled,
+  v3TenantAllowed,
   applySystemPublicationTransition,
   type PublicationState,
   type PublicationRunRow,
@@ -144,8 +145,7 @@ export type FiveAgentWorkflowResult = {
 
 export function visualProductionFeatureEnabled(env: EditorialRuntimeEnv, userId: string, workspaceId: string, runId?: string): boolean {
   if (env.VISUAL_PRODUCTION_V3 !== "true") return false;
-  const target = `${userId}:${workspaceId}`;
-  return (env.VISUAL_PRODUCTION_V3_ALLOWLIST || "").split(",").map(value => value.trim()).filter(Boolean).includes(target) &&
+  return v3TenantAllowed(env, env.VISUAL_PRODUCTION_V3_ALLOWLIST, userId, workspaceId) &&
     stagingImageCanaryScopeEnabled(env, userId, workspaceId, runId);
 }
 
@@ -3816,7 +3816,7 @@ async function requireWechatAccount(
       !/^sha256:[a-f0-9]{64}$/.test(result.receipt_hash)) {
     throw new EditorialRuntimeError("wechat_account_receipt_invalid", "wechat account receipt is invalid", 502);
   }
-  if (!isWechatAccountAllowed(env.WECHAT_PUBLISHING_ACCOUNT_ALLOWLIST, result.account_binding_id)) throw new EditorialRuntimeError("wechat_publishing_account_not_allowed", "wechat account is not allowlisted", 409);
+  if (!isWechatAccountAllowed(env.WECHAT_PUBLISHING_ACCOUNT_ALLOWLIST, result.account_binding_id, env)) throw new EditorialRuntimeError("wechat_publishing_account_not_allowed", "wechat account is not allowlisted", 409);
   const expectedReceiptHash = await hashJson({
     version: "wechat-account-resolution.v1",
     user_id: params.user_id,
@@ -3936,7 +3936,7 @@ async function callWechatOperation(
   }
   if (typeof request.account_binding_id !== "string" ||
       typeof request.account_receipt_hash !== "string" || !/^sha256:[a-f0-9]{64}$/.test(request.account_receipt_hash) ||
-      !isWechatAccountAllowed(env.WECHAT_PUBLISHING_ACCOUNT_ALLOWLIST, request.account_binding_id)) {
+      !isWechatAccountAllowed(env.WECHAT_PUBLISHING_ACCOUNT_ALLOWLIST, request.account_binding_id, env)) {
     throw new EditorialRuntimeError("wechat_publishing_account_not_allowed", "WeChat account binding is not allowlisted", 409);
   }
   const requestPayload = request.payload && typeof request.payload === "object" && !Array.isArray(request.payload)

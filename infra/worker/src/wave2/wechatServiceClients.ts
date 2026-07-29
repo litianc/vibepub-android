@@ -1,4 +1,5 @@
 import { canonicalJson, sha256 } from "./artifactContracts";
+import { v3AllTenantsEnabled, v3TenantAllowed } from "../publicationProjection";
 
 export type WechatAdapterOperation = "resolve_account" | "upload_image" | "write_draft" | "get_draft" | "find_draft";
 
@@ -16,12 +17,13 @@ export type WechatPublishingServiceEnv = {
   WECHAT_MEDIA_URL_HOST_ALLOWLIST?: string;
 };
 
-export function wechatDraftFeatureEnabled(env: { WECHAT_DRAFT_SYNC_V3?: string; WECHAT_DRAFT_SYNC_V3_ALLOWLIST?: string }, userId: string, workspaceId: string): boolean {
+export function wechatDraftFeatureEnabled(env: { V3_TENANT_SCOPE?: string; WECHAT_DRAFT_SYNC_V3?: string; WECHAT_DRAFT_SYNC_V3_ALLOWLIST?: string }, userId: string, workspaceId: string): boolean {
   if (env.WECHAT_DRAFT_SYNC_V3 !== "true") return false;
-  return (env.WECHAT_DRAFT_SYNC_V3_ALLOWLIST || "").split(",").map(value => value.trim()).filter(Boolean).includes(`${userId}:${workspaceId}`);
+  return v3TenantAllowed(env, env.WECHAT_DRAFT_SYNC_V3_ALLOWLIST, userId, workspaceId);
 }
 
-export function isWechatAccountAllowed(value: string | undefined, accountBindingId: string): boolean {
+export function isWechatAccountAllowed(value: string | undefined, accountBindingId: string, env: { V3_TENANT_SCOPE?: string } = {}): boolean {
+  if (v3AllTenantsEnabled(env)) return true;
   return (value || "").split(",").map(item => item.trim()).filter(Boolean).includes(accountBindingId);
 }
 

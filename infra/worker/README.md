@@ -80,9 +80,20 @@ npm test
 npx wrangler deploy --dry-run
 ```
 
-For a production or staging data change, prepare an additive forward-fix plan,
-back up the approved target, and obtain a separate migration approval. Neither
-the staging renderer nor GitHub deployment workflow runs remote D1 migrations.
+The checked-in `wrangler.toml` remains fail-closed for local and staging-style
+validation. The all-tenant five-Agent release uses
+`wrangler.production.toml` explicitly; do not deploy that config without the
+private Review, Image, and WeChat services and their paired tokens.
+
+The manual `Wave 2E Production Release` workflow records rollback baselines,
+exports the Production D1 database, applies pending additive migrations, and
+deploys the private adapters before the main Worker. Mining V3 is enabled only
+after the matching dedicated handoff secret exists in GitHub and the main
+Worker.
+
+For any other production or staging data change, prepare an additive
+forward-fix plan, back up the approved target, and obtain a separate migration
+approval. The staging workflow never runs remote D1 migrations.
 
 For mining claims, apply migration `0009`, deploy the Worker, then deploy the
 mining workflow. To roll back, restore the previous mining workflow ref first,
