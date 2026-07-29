@@ -33,9 +33,15 @@ test("enables Mining only with the dedicated handoff secret and a backup-first r
   assert.match(miningWorkflow, /MINING_V3_HANDOFF_TOKEN:\s*\$\{\{ secrets\.MINING_V3_HANDOFF_TOKEN \}\}/);
   assert.match(miningWorkflow, /MINING_V3_HANDOFF_ENABLED:\s*"true"/);
   const backup = productionWorkflow.indexOf("wrangler d1 export vibepub-db --remote");
+  const retainedBackup = productionWorkflow.indexOf("wrangler r2 object get \"$PRODUCTION_BACKUP_OBJECT\"");
+  const retainedBackupCheck = productionWorkflow.indexOf("sha256sum -c -");
   const migration = productionWorkflow.indexOf("wrangler d1 migrations apply vibepub-db --remote");
   const mainDeploy = productionWorkflow.indexOf("Deploy all-tenant five-Agent main Worker");
   assert.ok(backup >= 0 && migration > backup && mainDeploy > migration);
+  assert.ok(retainedBackup >= 0 && retainedBackupCheck > retainedBackup && migration > retainedBackupCheck);
+  assert.match(productionWorkflow, /preexisting_backup_sha256:\s*\n\s*description:/);
+  assert.match(productionWorkflow, /PRODUCTION_BACKUP_OBJECT: vibepub-production-backups\/d1\/vibepub-db\/2026-07-29T2129CST-before-five-agent-96aefad6\.sql/);
+  assert.match(productionWorkflow, /PRODUCTION_BACKUP_SHA256: 96aefad69c8a18ee05ef4b757a2a02eb5ff53fb7a305f94704e6387dc41bc391/);
   for (const config of ["infra/worker", "infra/image-generation-adapter", "infra/wechat-publishing-adapter"]) {
     assert.match(productionWorkflow, new RegExp(`${config.replaceAll("/", "\\/")}.*wrangler\\.production\\.toml`, "s"));
   }

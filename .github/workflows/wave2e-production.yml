@@ -9,6 +9,11 @@ on:
         default: "false"
         type: choice
         options: ["false", "true"]
+      preexisting_backup_sha256:
+        description: Exact retained backup digest for this release; leave empty to export D1 now
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -60,6 +65,8 @@ jobs:
     env:
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      PRODUCTION_BACKUP_OBJECT: vibepub-production-backups/d1/vibepub-db/2026-07-29T2129CST-before-five-agent-96aefad6.sql
+      PRODUCTION_BACKUP_SHA256: 96aefad69c8a18ee05ef4b757a2a02eb5ff53fb7a305f94704e6387dc41bc391
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -88,7 +95,16 @@ jobs:
           npx --prefix infra/review-agent wrangler deployments list --json --config infra/review-agent/wrangler.toml > "$RUNNER_TEMP/review-before.json" 2>/dev/null || true
           npx --prefix infra/image-generation-adapter wrangler deployments list --json --config infra/image-generation-adapter/wrangler.production.toml > "$RUNNER_TEMP/image-before.json" 2>/dev/null || true
           npx --prefix infra/wechat-publishing-adapter wrangler deployments list --json --config infra/wechat-publishing-adapter/wrangler.production.toml > "$RUNNER_TEMP/wechat-before.json" 2>/dev/null || true
+      - name: Verify retained Production D1 backup
+        if: inputs.preexisting_backup_sha256 != ''
+        env:
+          REQUESTED_BACKUP_SHA256: ${{ inputs.preexisting_backup_sha256 }}
+        run: |
+          test "$REQUESTED_BACKUP_SHA256" = "$PRODUCTION_BACKUP_SHA256" || { echo "::error::Retained backup digest is not approved for this release"; exit 1; }
+          npx --prefix infra/worker wrangler r2 object get "$PRODUCTION_BACKUP_OBJECT" --remote --file "$RUNNER_TEMP/vibepub-db-before-five-agent.sql"
+          printf '%s  %s\n' "$PRODUCTION_BACKUP_SHA256" "$RUNNER_TEMP/vibepub-db-before-five-agent.sql" | sha256sum -c -
       - name: Export Production D1 before migration
+        if: inputs.preexisting_backup_sha256 == ''
         run: npx --prefix infra/worker wrangler d1 export vibepub-db --remote --config infra/worker/wrangler.production.toml --output "$RUNNER_TEMP/vibepub-db-before-five-agent.sql"
       - uses: actions/upload-artifact@v4
         with:
