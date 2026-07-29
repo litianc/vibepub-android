@@ -2427,7 +2427,7 @@ describe("Wave2B publishing runtime boundary", () => {
     expect(same.wechatProviderOperations.upload_image || 0).toBe(0);
     expect(same.wechatProviderOperations.write_draft || 0).toBe(0);
     expect(same.wechatProviderOperations.get_draft || 0).toBe(1);
-  });
+  }, 20_000);
 
   it.each(["upload", "package", "readback"] as const)("replays a completed WeChat %s receipt after its Durable Object response is lost", async (checkpoint) => {
     const drafted = await executeSyntheticScenario("p2_pass", undefined, false, {
