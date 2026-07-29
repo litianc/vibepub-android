@@ -42,6 +42,10 @@ test("enables Mining only with the dedicated handoff secret and a backup-first r
   assert.match(productionWorkflow, /preexisting_backup_sha256:\s*\n\s*description:/);
   assert.match(productionWorkflow, /PRODUCTION_BACKUP_OBJECT: vibepub-production-backups\/d1\/vibepub-db\/2026-07-29T2129CST-before-five-agent-96aefad6\.sql/);
   assert.match(productionWorkflow, /PRODUCTION_BACKUP_SHA256: 96aefad69c8a18ee05ef4b757a2a02eb5ff53fb7a305f94704e6387dc41bc391/);
+  assert.match(productionWorkflow, /preapplied_migrations_sha256:\s*\n\s*description:/);
+  assert.match(productionWorkflow, /PRODUCTION_MIGRATION_0010_SHA256: 1afaadd72a255021380504cef24d038cb8a83168451b38ed13a98920b72cbe4c/);
+  assert.match(productionWorkflow, /PRODUCTION_MIGRATION_0011_SHA256: 7fa3d7b375682a97b9c55c9bdc8bc373b8f7c1fb81162dea13680ee07ff95b6f/);
+  assert.match(productionWorkflow, /Verify pre-applied Production D1 migrations[\s\S]*sha256sum -c -[\s\S]*sha256sum -c -/);
   for (const config of ["infra/worker", "infra/image-generation-adapter", "infra/wechat-publishing-adapter"]) {
     assert.match(productionWorkflow, new RegExp(`${config.replaceAll("/", "\\/")}.*wrangler\\.production\\.toml`, "s"));
   }

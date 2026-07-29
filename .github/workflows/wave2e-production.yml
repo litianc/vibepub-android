@@ -14,6 +14,11 @@ on:
         required: false
         default: ""
         type: string
+      preapplied_migrations_sha256:
+        description: Exact 0010:0011 digest attestation; leave empty to apply D1 migrations now
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -67,6 +72,8 @@ jobs:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       PRODUCTION_BACKUP_OBJECT: vibepub-production-backups/d1/vibepub-db/2026-07-29T2129CST-before-five-agent-96aefad6.sql
       PRODUCTION_BACKUP_SHA256: 96aefad69c8a18ee05ef4b757a2a02eb5ff53fb7a305f94704e6387dc41bc391
+      PRODUCTION_MIGRATION_0010_SHA256: 1afaadd72a255021380504cef24d038cb8a83168451b38ed13a98920b72cbe4c
+      PRODUCTION_MIGRATION_0011_SHA256: 7fa3d7b375682a97b9c55c9bdc8bc373b8f7c1fb81162dea13680ee07ff95b6f
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -115,7 +122,17 @@ jobs:
         run: |
           npx --prefix infra/worker wrangler r2 bucket create vibepub-visual-adapter-results 2>/dev/null || npx --prefix infra/worker wrangler r2 bucket info vibepub-visual-adapter-results
           npx --prefix infra/worker wrangler r2 bucket create vibepub-wechat-publishing-results 2>/dev/null || npx --prefix infra/worker wrangler r2 bucket info vibepub-wechat-publishing-results
+      - name: Verify pre-applied Production D1 migrations
+        if: inputs.preapplied_migrations_sha256 != ''
+        env:
+          REQUESTED_MIGRATIONS_SHA256: ${{ inputs.preapplied_migrations_sha256 }}
+        run: |
+          expected="$PRODUCTION_MIGRATION_0010_SHA256:$PRODUCTION_MIGRATION_0011_SHA256"
+          test "$REQUESTED_MIGRATIONS_SHA256" = "$expected" || { echo "::error::Pre-applied migration digest is not approved for this release"; exit 1; }
+          printf '%s  %s\n' "$PRODUCTION_MIGRATION_0010_SHA256" infra/worker/migrations/0010_editorial_visual_pipeline.sql | sha256sum -c -
+          printf '%s  %s\n' "$PRODUCTION_MIGRATION_0011_SHA256" infra/worker/migrations/0011_five_agent_publication_projection.sql | sha256sum -c -
       - name: Apply additive Production D1 migrations
+        if: inputs.preapplied_migrations_sha256 == ''
         run: npx --prefix infra/worker wrangler d1 migrations apply vibepub-db --remote --config infra/worker/wrangler.production.toml
       - name: Deploy private Review Agent
         env:
