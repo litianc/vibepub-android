@@ -1,0 +1,145 @@
+name: Wave 2E Production Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      deploy:
+        description: Deploy the full five-Agent Production release
+        required: true
+        default: "false"
+        type: choice
+        options: ["false", "true"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vibepub-production-release
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate Production candidate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install locked dependencies
+        run: |
+          for directory in infra/worker infra/review-agent infra/image-generation-adapter infra/wechat-publishing-adapter infra/mining; do
+            npm ci --prefix "$directory"
+          done
+      - name: Test and typecheck
+        run: |
+          npm test --prefix infra/worker
+          npm run test:runtime --prefix infra/worker
+          npm run typecheck --prefix infra/worker
+          npm test --prefix infra/review-agent
+          npm run typecheck --prefix infra/review-agent
+          npm test --prefix infra/image-generation-adapter
+          npm run typecheck --prefix infra/image-generation-adapter
+          npm test --prefix infra/wechat-publishing-adapter
+          npm run typecheck --prefix infra/wechat-publishing-adapter
+          npm test --prefix infra/mining
+          npx --prefix infra/mining tsc --noEmit -p infra/mining/tsconfig.json
+      - name: Dry-run exact Production targets
+        run: |
+          npx --prefix infra/review-agent wrangler deploy --dry-run --config infra/review-agent/wrangler.toml
+          npx --prefix infra/image-generation-adapter wrangler deploy --dry-run --config infra/image-generation-adapter/wrangler.production.toml
+          npx --prefix infra/wechat-publishing-adapter wrangler deploy --dry-run --config infra/wechat-publishing-adapter/wrangler.production.toml
+          npx --prefix infra/worker wrangler deploy --dry-run --config infra/worker/wrangler.production.toml
+
+  deploy:
+    name: Backup, migrate, and deploy Production
+    if: github.event_name == 'workflow_dispatch' && inputs.deploy == 'true'
+    needs: validate
+    runs-on: ubuntu-latest
+    environment: vibepub-production
+    env:
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Require Production credentials
+        env:
+          REVIEW_AGENT_TOKEN: ${{ secrets.REVIEW_AGENT_TOKEN }}
+          VISUAL_PRODUCTION_TOKEN: ${{ secrets.VISUAL_PRODUCTION_TOKEN }}
+          WECHAT_PUBLISHING_TOKEN: ${{ secrets.WECHAT_PUBLISHING_TOKEN }}
+          MINING_V3_HANDOFF_TOKEN: ${{ secrets.MINING_V3_HANDOFF_TOKEN }}
+          PUBLISHING_ACCOUNT_RESOLVER_TOKEN: ${{ secrets.PUBLISHING_ACCOUNT_RESOLVER_TOKEN }}
+          GPT_IMAGE_API_KEY: ${{ secrets.GPT_IMAGE_API_KEY }}
+        run: |
+          for name in CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_API_TOKEN REVIEW_AGENT_TOKEN VISUAL_PRODUCTION_TOKEN WECHAT_PUBLISHING_TOKEN MINING_V3_HANDOFF_TOKEN PUBLISHING_ACCOUNT_RESOLVER_TOKEN GPT_IMAGE_API_KEY; do
+            test -n "${!name}" || { echo "::error::$name is required"; exit 1; }
+          done
+      - name: Install locked deployment dependencies
+        run: |
+          for directory in infra/worker infra/review-agent infra/image-generation-adapter infra/wechat-publishing-adapter; do
+            npm ci --prefix "$directory"
+          done
+      - name: Record Worker rollback baselines
+        run: |
+          npx --prefix infra/worker wrangler deployments list --json --config infra/worker/wrangler.production.toml > "$RUNNER_TEMP/main-before.json"
+          npx --prefix infra/review-agent wrangler deployments list --json --config infra/review-agent/wrangler.toml > "$RUNNER_TEMP/review-before.json" 2>/dev/null || true
+          npx --prefix infra/image-generation-adapter wrangler deployments list --json --config infra/image-generation-adapter/wrangler.production.toml > "$RUNNER_TEMP/image-before.json" 2>/dev/null || true
+          npx --prefix infra/wechat-publishing-adapter wrangler deployments list --json --config infra/wechat-publishing-adapter/wrangler.production.toml > "$RUNNER_TEMP/wechat-before.json" 2>/dev/null || true
+      - name: Export Production D1 before migration
+        run: npx --prefix infra/worker wrangler d1 export vibepub-db --remote --config infra/worker/wrangler.production.toml --output "$RUNNER_TEMP/vibepub-db-before-five-agent.sql"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vibepub-db-before-five-agent-${{ github.run_id }}
+          path: ${{ runner.temp }}/vibepub-db-before-five-agent.sql
+          retention-days: 30
+      - name: Create Production result buckets when absent
+        run: |
+          npx --prefix infra/worker wrangler r2 bucket create vibepub-visual-adapter-results 2>/dev/null || npx --prefix infra/worker wrangler r2 bucket info vibepub-visual-adapter-results
+          npx --prefix infra/worker wrangler r2 bucket create vibepub-wechat-publishing-results 2>/dev/null || npx --prefix infra/worker wrangler r2 bucket info vibepub-wechat-publishing-results
+      - name: Apply additive Production D1 migrations
+        run: npx --prefix infra/worker wrangler d1 migrations apply vibepub-db --remote --config infra/worker/wrangler.production.toml
+      - name: Deploy private Review Agent
+        env:
+          REVIEW_AGENT_TOKEN: ${{ secrets.REVIEW_AGENT_TOKEN }}
+        run: |
+          npx --prefix infra/review-agent wrangler deploy --config infra/review-agent/wrangler.toml --message "Five-Agent Production bootstrap ${GITHUB_SHA}"
+          printf '%s' "$REVIEW_AGENT_TOKEN" | npx --prefix infra/review-agent wrangler secret put REVIEW_AGENT_TOKEN --config infra/review-agent/wrangler.toml
+          npx --prefix infra/review-agent wrangler deploy --config infra/review-agent/wrangler.toml --message "Five-Agent Production ${GITHUB_SHA}" --var "DEPLOY_COMMIT:${GITHUB_SHA}" --var "DEPLOY_REF:${GITHUB_REF_NAME}" --var "DEPLOYED_AT:$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      - name: Deploy private Image Agent adapter
+        env:
+          VISUAL_PRODUCTION_TOKEN: ${{ secrets.VISUAL_PRODUCTION_TOKEN }}
+          GPT_IMAGE_API_KEY: ${{ secrets.GPT_IMAGE_API_KEY }}
+        run: |
+          npx --prefix infra/image-generation-adapter wrangler deploy --config infra/image-generation-adapter/wrangler.production.toml --message "Five-Agent Production bootstrap ${GITHUB_SHA}"
+          printf '%s' "$VISUAL_PRODUCTION_TOKEN" | npx --prefix infra/image-generation-adapter wrangler secret put VISUAL_PRODUCTION_TOKEN --config infra/image-generation-adapter/wrangler.production.toml
+          printf '%s' "$GPT_IMAGE_API_KEY" | npx --prefix infra/image-generation-adapter wrangler secret put GPT_IMAGE_API_KEY --config infra/image-generation-adapter/wrangler.production.toml
+          npx --prefix infra/image-generation-adapter wrangler deploy --config infra/image-generation-adapter/wrangler.production.toml --message "Five-Agent Production ${GITHUB_SHA}" --var "DEPLOY_COMMIT:${GITHUB_SHA}" --var "DEPLOY_REF:${GITHUB_REF_NAME}" --var "DEPLOYED_AT:$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      - name: Deploy private WeChat Agent adapter
+        env:
+          WECHAT_PUBLISHING_TOKEN: ${{ secrets.WECHAT_PUBLISHING_TOKEN }}
+          PUBLISHING_ACCOUNT_RESOLVER_TOKEN: ${{ secrets.PUBLISHING_ACCOUNT_RESOLVER_TOKEN }}
+        run: |
+          npx --prefix infra/wechat-publishing-adapter wrangler deploy --config infra/wechat-publishing-adapter/wrangler.production.toml --message "Five-Agent Production bootstrap ${GITHUB_SHA}"
+          printf '%s' "$WECHAT_PUBLISHING_TOKEN" | npx --prefix infra/wechat-publishing-adapter wrangler secret put WECHAT_PUBLISHING_TOKEN --config infra/wechat-publishing-adapter/wrangler.production.toml
+          printf '%s' "$PUBLISHING_ACCOUNT_RESOLVER_TOKEN" | npx --prefix infra/wechat-publishing-adapter wrangler secret put PUBLISHING_ACCOUNT_RESOLVER_TOKEN --config infra/wechat-publishing-adapter/wrangler.production.toml
+          npx --prefix infra/wechat-publishing-adapter wrangler deploy --config infra/wechat-publishing-adapter/wrangler.production.toml --message "Five-Agent Production ${GITHUB_SHA}" --var "DEPLOY_COMMIT:${GITHUB_SHA}" --var "DEPLOY_REF:${GITHUB_REF_NAME}" --var "DEPLOYED_AT:$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      - name: Sync main Worker five-Agent secrets
+        env:
+          REVIEW_AGENT_TOKEN: ${{ secrets.REVIEW_AGENT_TOKEN }}
+          VISUAL_PRODUCTION_TOKEN: ${{ secrets.VISUAL_PRODUCTION_TOKEN }}
+          WECHAT_PUBLISHING_TOKEN: ${{ secrets.WECHAT_PUBLISHING_TOKEN }}
+          MINING_V3_HANDOFF_TOKEN: ${{ secrets.MINING_V3_HANDOFF_TOKEN }}
+          PUBLISHING_ACCOUNT_RESOLVER_TOKEN: ${{ secrets.PUBLISHING_ACCOUNT_RESOLVER_TOKEN }}
+        run: |
+          printf '%s' "$REVIEW_AGENT_TOKEN" | npx --prefix infra/worker wrangler secret put REVIEW_AGENT_TOKEN --config infra/worker/wrangler.production.toml
+          printf '%s' "$VISUAL_PRODUCTION_TOKEN" | npx --prefix infra/worker wrangler secret put VISUAL_PRODUCTION_TOKEN --config infra/worker/wrangler.production.toml
+          printf '%s' "$WECHAT_PUBLISHING_TOKEN" | npx --prefix infra/worker wrangler secret put WECHAT_PUBLISHING_TOKEN --config infra/worker/wrangler.production.toml
+          printf '%s' "$MINING_V3_HANDOFF_TOKEN" | npx --prefix infra/worker wrangler secret put MINING_V3_HANDOFF_TOKEN --config infra/worker/wrangler.production.toml
+          printf '%s' "$PUBLISHING_ACCOUNT_RESOLVER_TOKEN" | npx --prefix infra/worker wrangler secret put PUBLISHING_ACCOUNT_RESOLVER_TOKEN --config infra/worker/wrangler.production.toml
+      - name: Deploy all-tenant five-Agent main Worker
+        run: npx --prefix infra/worker wrangler deploy --config infra/worker/wrangler.production.toml --message "Five-Agent Production ${GITHUB_SHA}" --var "DEPLOY_COMMIT:${GITHUB_SHA}" --var "DEPLOY_REF:${GITHUB_REF_NAME}" --var "DEPLOYED_AT:$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      - name: Verify Production health and private adapters
+        run: curl --fail-with-body --silent --show-error --connect-timeout 5 --max-time 30 "https://vibepub.litianc.cn/health?adapters=1"
