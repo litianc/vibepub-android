@@ -33,8 +33,11 @@ const realDraft = async (): Promise<V3ArticleDraft> => runV3WritingAdapter(
   },
   async () => new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({
     title: "真实 Draft 标题",
-    body: "真实 Draft 正文。",
-    blocks: [{ block_id: "block_v1_1", kind: "paragraph", order: 0, text: "真实 Draft 正文。", text_hash: await digest("真实 Draft 正文。"), claim_ids: ["claim_1"], image_ref_ids: ["image_1"] }],
+    body: "真实 Draft 正文第一段。\n\n真实 Draft 正文第二段。",
+    blocks: [
+      { block_id: "block_v1_1", kind: "paragraph", order: 0, text: "真实 Draft 正文第一段。", text_hash: await digest("真实 Draft 正文第一段。"), claim_ids: ["claim_1"], image_ref_ids: ["image_1"] },
+      { block_id: "block_v1_2", kind: "paragraph", order: 1, text: "真实 Draft 正文第二段。", text_hash: await digest("真实 Draft 正文第二段。"), claim_ids: [], image_ref_ids: [] },
+    ],
     claim_ledger: [{ claim_id: "claim_1", block_id: "block_v1_1", classification: "source_fact", verification_status: "pending" }],
     title_candidates: ["真实 Draft 标题"],
     selected_title: "真实 Draft 标题",
