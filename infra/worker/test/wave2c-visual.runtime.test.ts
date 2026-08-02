@@ -325,13 +325,15 @@ describe("Wave2C visual planning and immutable contracts", () => {
     expect(await verifyPngWhiteBackground(nearTransparent, 2, 2)).toBe(false);
   });
 
-  it("normalizes bounded provider scale drift before exact binary validation", async () => {
+  it("fits bounded provider canvases without cropping or stretching before exact binary validation", async () => {
     const source = await rgbaPngFixture(3, 3, 255, 2);
     const normalized = await normalizePngToExactDimensions(source, 4, 4);
     expect(normalized).not.toBe(source);
     expect(await verifyPngOpaqueCoverage(normalized, 4, 4)).toBe(true);
     expect(await normalizePngToExactDimensions(normalized, 4, 4)).toBe(normalized);
-    await expect(normalizePngToExactDimensions(source, 4, 3)).rejects.toMatchObject({ code: "binary_readback_mismatch" });
+    const fixedProviderCanvas = await rgbaPngFixture(6, 4, 255, 2);
+    const wideCover = await normalizePngToExactDimensions(fixedProviderCanvas, 9, 4);
+    expect(await verifyPngOpaqueCoverage(wideCover, 9, 4)).toBe(true);
     await expect(normalizePngToExactDimensions(await rgbaPngFixture(2, 2, 255), 4, 4)).rejects.toMatchObject({ code: "binary_readback_mismatch" });
   });
 });

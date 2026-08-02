@@ -167,9 +167,10 @@ async function encodeRgbaPng(rgba: Uint8Array, width: number, height: number): P
 }
 
 /**
- * The approved provider can preserve the requested aspect ratio while applying
- * a bounded pixel cap. Normalize that deterministic scale drift before the
- * immutable exact-dimension contract is evaluated.
+ * The approved provider may apply a pixel cap or return its fixed 3:2 canvas.
+ * Fit that canvas inside the requested dimensions and fill the unused area
+ * from its edge background so text and illustrations are neither stretched
+ * nor cropped before the immutable exact-dimension contract is evaluated.
  */
 export async function normalizePngToExactDimensions(bytes: Uint8Array, targetWidth: number, targetHeight: number): Promise<Uint8Array> {
   if (!Number.isSafeInteger(targetWidth) || !Number.isSafeInteger(targetHeight) || targetWidth < 1 || targetHeight < 1 || targetWidth > 2256 || targetHeight > 960) {
@@ -177,12 +178,9 @@ export async function normalizePngToExactDimensions(bytes: Uint8Array, targetWid
   }
   const info = readPng(bytes);
   if (info.width === targetWidth && info.height === targetHeight) return bytes;
-  const sourceRatio = info.width / info.height;
-  const targetRatio = targetWidth / targetHeight;
-  const ratioDrift = Math.abs(sourceRatio - targetRatio) / targetRatio;
   const widthScale = info.width / targetWidth;
   const heightScale = info.height / targetHeight;
-  if (ratioDrift > 0.005 || widthScale < 0.75 || widthScale > 1.25 || heightScale < 0.75 || heightScale > 1.25) {
+  if (widthScale < 0.6 || widthScale > 1.5 || heightScale < 0.6 || heightScale > 1.5) {
     throw new BinaryImageStoreError("binary_readback_mismatch", "provider image dimensions are outside the bounded normalization contract", 422);
   }
   const { pixels, channels } = await inflatePngPixels(info);
@@ -196,14 +194,21 @@ export async function normalizePngToExactDimensions(bytes: Uint8Array, targetWid
     sourceRgba[target + 2] = info.colorType === 0 || info.colorType === 4 ? gray : pixels[source + 2];
     sourceRgba[target + 3] = info.colorType === 4 ? pixels[source + 1] : info.colorType === 6 ? pixels[source + 3] : 255;
   }
+  const fitScale = Math.min(targetWidth / info.width, targetHeight / info.height);
+  const fittedWidth = Math.max(1, Math.min(targetWidth, Math.round(info.width * fitScale)));
+  const fittedHeight = Math.max(1, Math.min(targetHeight, Math.round(info.height * fitScale)));
+  const offsetX = Math.floor((targetWidth - fittedWidth) / 2);
+  const offsetY = Math.floor((targetHeight - fittedHeight) / 2);
   const targetRgba = new Uint8Array(targetWidth * targetHeight * 4);
   for (let y = 0; y < targetHeight; y += 1) {
-    const sourceY = Math.max(0, Math.min(info.height - 1, (y + 0.5) * info.height / targetHeight - 0.5));
+    const fittedY = Math.max(0, Math.min(fittedHeight - 1, y - offsetY));
+    const sourceY = Math.max(0, Math.min(info.height - 1, (fittedY + 0.5) * info.height / fittedHeight - 0.5));
     const y0 = Math.floor(sourceY);
     const y1 = Math.min(info.height - 1, y0 + 1);
     const yWeight = sourceY - y0;
     for (let x = 0; x < targetWidth; x += 1) {
-      const sourceX = Math.max(0, Math.min(info.width - 1, (x + 0.5) * info.width / targetWidth - 0.5));
+      const fittedX = Math.max(0, Math.min(fittedWidth - 1, x - offsetX));
+      const sourceX = Math.max(0, Math.min(info.width - 1, (fittedX + 0.5) * info.width / fittedWidth - 0.5));
       const x0 = Math.floor(sourceX);
       const x1 = Math.min(info.width - 1, x0 + 1);
       const xWeight = sourceX - x0;
