@@ -1,0 +1,28 @@
+name: Smoke V3 Writing Contract
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: Check real GLM response against the V3 writing contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: infra/writing-agent/package-lock.json
+      - name: Install locked Writing Agent dependencies
+        run: npm ci --prefix infra/writing-agent
+      - name: Run content-redacted V3 contract smoke
+        working-directory: infra/writing-agent
+        env:
+          GLM_API_KEY: ${{ secrets.GLM_API_KEY }}
+          GLM_BASE_URL: ${{ secrets.GLM_BASE_URL }}
+          GLM_MODEL: ${{ secrets.GLM_MODEL }}
+        run: npx vite-node scripts/smoke-v3-writing.ts
