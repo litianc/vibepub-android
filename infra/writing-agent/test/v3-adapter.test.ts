@@ -116,8 +116,9 @@ describe("WritingAgent V3 adapter", () => {
       calls.push(String(init?.body));
       return modelResponse("合成标题", "第一段", "保留的第二段", false, false);
     });
-    const requestBody = JSON.parse(calls[0]) as { messages: Array<{ content: string }> };
+    const requestBody = JSON.parse(calls[0]) as { messages: Array<{ content: string }>; thinking: { type: string } };
     expect(requestBody.messages[0].content).toContain(DEFAULT_STYLE_PROFILES[0].body);
+    expect(requestBody.thinking).toEqual({ type: "disabled" });
     expect(result.formatting_skill).toEqual(V3_FORMATTING_SKILL);
     expect(result.profile_pins.style).toEqual(V3_DEFAULT_STYLE_PROFILE);
     expect(result.revision).toBe(1);

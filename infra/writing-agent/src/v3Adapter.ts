@@ -471,7 +471,7 @@ export async function runV3WritingAdapter(env: {
       response = await fetchImpl(`${(env.GLM_BASE_URL || "https://open.bigmodel.cn/api/coding/paas/v4/").replace(/\/+$/, "")}/chat/completions`, {
         method: "POST",
         headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ model: env.GLM_MODEL || V3_WRITING_MODEL_VERSION, messages: [{ role: "user", content: promptFor(request, style) }], response_format: { type: "json_object" }, temperature: 0.2 }),
+        body: JSON.stringify({ model: env.GLM_MODEL || V3_WRITING_MODEL_VERSION, messages: [{ role: "user", content: promptFor(request, style) }], response_format: { type: "json_object" }, temperature: 0.2, thinking: { type: "disabled" } }),
         signal: controller.signal,
       });
     } catch {
