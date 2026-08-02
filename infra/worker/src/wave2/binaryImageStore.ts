@@ -26,6 +26,26 @@ export class BinaryImageStoreError extends Error {
   }
 }
 
+export class ImageTransformationServiceError extends Error {
+  constructor(
+    public readonly code: "image_transformation_quota_exceeded" | "image_transformation_service_unavailable",
+    message: string,
+    public readonly retryable: boolean,
+    public readonly providerCode?: number,
+  ) {
+    super(message);
+    this.name = "ImageTransformationServiceError";
+  }
+}
+
+function imageTransformationServiceError(error: unknown): ImageTransformationServiceError {
+  const value = error && typeof error === "object" ? error as { code?: unknown } : null;
+  const providerCode = typeof value?.code === "number" && Number.isSafeInteger(value.code) ? value.code : undefined;
+  return providerCode === 9422
+    ? new ImageTransformationServiceError("image_transformation_quota_exceeded", "Cloudflare Images transformation quota is exhausted", false, providerCode)
+    : new ImageTransformationServiceError("image_transformation_service_unavailable", "Cloudflare Images transformation is unavailable", true, providerCode);
+}
+
 const PNG_SIGNATURE = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
 export const MAX_PROVIDER_PNG_BYTES = 8 * 1024 * 1024;
 export const MAX_PROVIDER_BASE64_CHARS = Math.ceil(MAX_PROVIDER_PNG_BYTES / 3) * 4;
@@ -366,7 +386,7 @@ export async function normalizePngWithImagesBinding(
   }
   const backgroundRgb = options.backgroundRgb ?? [255, 255, 255];
   const padding = options.padding ?? "solid";
-  if (!Array.isArray(backgroundRgb) || backgroundRgb.length !== 3 || backgroundRgb.some(value => !Number.isInteger(value) || value < 0 || value > 255) || (padding !== "solid" && padding !== "edge")) {
+  if (!Array.isArray(backgroundRgb) || backgroundRgb.length !== 3 || backgroundRgb.some(value => !Number.isInteger(value) || value < 0 || value > 255) || padding !== "solid") {
     throw new BinaryImageStoreError("binary_readback_mismatch", "image normalization options are invalid", 422);
   }
   if (bytes.byteLength > MAX_PROVIDER_PNG_BYTES) throw new BinaryImageStoreError("binary_readback_mismatch", "provider PNG exceeds the normalization byte limit", 422);
@@ -387,7 +407,7 @@ export async function normalizePngWithImagesBinding(
     return output;
   } catch (error) {
     if (error instanceof BinaryImageStoreError) throw error;
-    throw new BinaryImageStoreError("binary_readback_mismatch", "Cloudflare Images could not normalize the provider PNG", 422);
+    throw imageTransformationServiceError(error);
   }
 }
 
@@ -403,14 +423,19 @@ async function samplePngPixels(images: ImagesBinding, bytes: Uint8Array, width: 
   } catch {
     // Miniflare does not implement raw Images output, so local tests use a
     // tiny PNG fallback. Production uses the raw path to minimize Worker CPU.
-    const transformed = await images.input(new Blob([bytes]).stream())
-      .transform({ width, height, fit: "squeeze" })
-      .output({ format: "image/png", anim: false });
-    const output = await readBoundedImageStream(transformed.image(), 64 * 1024);
-    const info = readPng(output);
-    if (info.width !== width || info.height !== height) throw new BinaryImageStoreError("binary_readback_mismatch", "image QA sample dimensions are invalid", 422);
-    const decoded = await inflatePngPixels(info);
-    return { width, height, colorType: info.colorType, ...decoded };
+    try {
+      const transformed = await images.input(new Blob([bytes]).stream())
+        .transform({ width, height, fit: "squeeze" })
+        .output({ format: "image/png", anim: false });
+      const output = await readBoundedImageStream(transformed.image(), 64 * 1024);
+      const info = readPng(output);
+      if (info.width !== width || info.height !== height) throw new BinaryImageStoreError("binary_readback_mismatch", "image QA sample dimensions are invalid", 422);
+      const decoded = await inflatePngPixels(info);
+      return { width, height, colorType: info.colorType, ...decoded };
+    } catch (error) {
+      if (error instanceof BinaryImageStoreError) throw error;
+      throw imageTransformationServiceError(error);
+    }
   }
 }
 
@@ -426,7 +451,8 @@ export async function verifyPngOpaqueCoverageWithImagesBinding(images: ImagesBin
       if (alpha === 255) opaque += 1;
     }
     return opaque / (sample.width * sample.height) >= OPAQUE_PIXEL_THRESHOLD;
-  } catch {
+  } catch (error) {
+    if (error instanceof ImageTransformationServiceError) throw error;
     return false;
   }
 }
@@ -467,7 +493,8 @@ export async function verifyPngWhiteBackgroundWithImagesBinding(images: ImagesBi
     }
     return opaque / (width * height) >= OPAQUE_PIXEL_THRESHOLD && nonWhite > 0 && white / opaque >= WHITE_BACKGROUND_MIN_COVERAGE && borderPixels > 0 &&
       borderOpaque / borderPixels >= OPAQUE_PIXEL_THRESHOLD && borderWhite / borderOpaque >= WHITE_BACKGROUND_THRESHOLD;
-  } catch {
+  } catch (error) {
+    if (error instanceof ImageTransformationServiceError) throw error;
     return false;
   }
 }

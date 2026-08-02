@@ -67,7 +67,7 @@ import {
   VisualContractError,
 } from "./wave2/visualContracts";
 import { putImmutableVisualArtifact, readImmutableVisualArtifact, VisualArtifactStoreError } from "./wave2/visualArtifactStore";
-import { BinaryImageStoreError, MAX_PROVIDER_BASE64_CHARS, MAX_PROVIDER_PNG_BYTES, describeImmutableBinaryImage, normalizePngWithImagesBinding, putImmutableBinaryImage, readExistingImmutableBinaryImage, readImmutableBinaryImage, verifyPngOpaqueCoverageWithImagesBinding, verifyPngWhiteBackgroundWithImagesBinding } from "./wave2/binaryImageStore";
+import { BinaryImageStoreError, ImageTransformationServiceError, MAX_PROVIDER_BASE64_CHARS, MAX_PROVIDER_PNG_BYTES, describeImmutableBinaryImage, normalizePngWithImagesBinding, putImmutableBinaryImage, readExistingImmutableBinaryImage, readImmutableBinaryImage, verifyPngOpaqueCoverageWithImagesBinding, verifyPngWhiteBackgroundWithImagesBinding } from "./wave2/binaryImageStore";
 import { callVisualImageService, callVisualPlanService, reconcileVisualImageService, reconcileVisualPlanService } from "./wave2/visualServiceClients";
 import {
   WAVE2D_SCHEMA_VERSION,
@@ -2589,7 +2589,7 @@ export async function runVisualProductionPhase(input: {
         const result = call.response as Record<string, unknown> | null;
         const imageBytes = result
           ? await normalizePngWithImagesBinding(env.IMAGES, decodeBase64(result.bytes_base64 ?? result.b64_json), slot.width, slot.height, slot.purpose === "cover"
-            ? { backgroundRgb: [0xde, 0xd9, 0xcf], padding: "edge" }
+            ? { backgroundRgb: [0xde, 0xd9, 0xcf], padding: "solid" }
             : { backgroundRgb: [255, 255, 255], padding: "solid" })
           : existingBinary!.bytes;
         const expectedBinary = existingBinary?.metadata ?? await describeImmutableBinaryImage(binaryKey, imageBytes, {
@@ -2629,6 +2629,7 @@ export async function runVisualProductionPhase(input: {
       const ids = [...priorArtifactIds, planMeta.artifact_id, ...assetMetadata.map(asset => asset.artifact_id)];
       if (error instanceof VisualCancelledError) return { run_id: params.run_id, state: "cancelled", state_revision: Number(planMeta.doStateRevision || frozen.doStateRevision || 0), transcript_ref: transcript.ref, transcript_hash: transcript.hash, artifact_ids: ids };
       if (isVisualReconciliationHold(error)) return visualHold(env, coordinator, params, transcript, ids, 15 + slot.order, error instanceof EditorialRuntimeError ? error.retryCount : 1);
+      if (error instanceof ImageTransformationServiceError) return visualFailure(env, coordinator, params, transcript, ids, error.code, error.retryable ? "retry" : "retry_after_service_fix", 15 + slot.order);
       if (visualIntegrityError(error)) return visualFailure(env, coordinator, params, transcript, ids, "visual_asset_contract_invalid", "retry_after_service_fix", 15 + slot.order);
       return visualFailure(env, coordinator, params, transcript, ids, error instanceof EditorialRuntimeError ? error.code : "visual_generation_non_retryable", error instanceof EditorialRuntimeError && error.code === "visual_generation_retry_exhausted" ? "retry" : "retry_after_service_fix", 15 + slot.order, error instanceof EditorialRuntimeError ? error.retryCount : 1);
     }
@@ -2691,6 +2692,7 @@ export async function runVisualProductionPhase(input: {
     const ids = [...priorArtifactIds, planMeta.artifact_id, ...assetMetadata.map(asset => asset.artifact_id), ...(qaMetadata ? [qaMetadata.artifact_id] : [])];
     if (error instanceof VisualCancelledError) return { run_id: params.run_id, state: "cancelled", state_revision: Number(planMeta.doStateRevision || frozen.doStateRevision || 0), transcript_ref: transcript.ref, transcript_hash: transcript.hash, artifact_ids: ids };
     if (isVisualReconciliationHold(error)) return visualHold(env, coordinator, params, transcript, ids, 20, error instanceof EditorialRuntimeError ? error.retryCount : 1);
+    if (error instanceof ImageTransformationServiceError) return visualFailure(env, coordinator, params, transcript, ids, error.code, error.retryable ? "retry" : "retry_after_service_fix", 20);
     if (visualIntegrityError(error)) return visualFailure(env, coordinator, params, transcript, ids, "visual_asset_contract_invalid", "retry_after_service_fix", 20);
     return visualFailure(env, coordinator, params, transcript, ids, "visual_qa_failed", "review_visual_assets", 20);
   }

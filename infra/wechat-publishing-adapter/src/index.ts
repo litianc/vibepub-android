@@ -93,6 +93,9 @@ type TokenIntent = {
   retryable?: boolean;
 };
 
+const MAX_UPLOAD_IMAGE_BYTES = 8 * 1024 * 1024;
+const MAX_UPLOAD_IMAGE_BASE64_CHARS = Math.ceil(MAX_UPLOAD_IMAGE_BYTES / 3) * 4;
+
 const PROTOCOL = "vibepub.wechat.v3";
 const OPS = new Set<Operation>(["resolve_account", "upload_image", "write_draft", "get_draft", "find_draft"]);
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/;
@@ -259,17 +262,21 @@ function mediaHostAllowed(env: Env, value: unknown): value is string {
 }
 function decodeBase64(value: string): Uint8Array {
   try {
+    if (value.length === 0 || value.length > MAX_UPLOAD_IMAGE_BASE64_CHARS) throw new AdapterError("invalid_request", 400);
     const constructor = Uint8Array as typeof Uint8Array & { fromBase64?: (encoded: string) => Uint8Array };
-    if (typeof constructor.fromBase64 === "function") return constructor.fromBase64(value);
-    return Uint8Array.from(atob(value), char => char.charCodeAt(0));
+    const bytes = typeof constructor.fromBase64 === "function"
+      ? constructor.fromBase64(value)
+      : Uint8Array.from(atob(value), char => char.charCodeAt(0));
+    if (bytes.byteLength > MAX_UPLOAD_IMAGE_BYTES) throw new AdapterError("invalid_request", 400);
+    return bytes;
   }
   catch { throw new AdapterError("invalid_request", 400); }
 }
 function assertOperationPayload(input: ParsedInput): void {
   const payload = input.payload;
   if (input.operation === "upload_image") {
-    if (payload.operation_id !== input.operation_id || typeof payload.image_base64 !== "string" || payload.image_base64.length === 0 ||
-        !Number.isSafeInteger(payload.byte_length) || Number(payload.byte_length) < 1 || !HASH.test(String(payload.byte_hash || "")) ||
+    if (payload.operation_id !== input.operation_id || typeof payload.image_base64 !== "string" || payload.image_base64.length === 0 || payload.image_base64.length > MAX_UPLOAD_IMAGE_BASE64_CHARS ||
+        !Number.isSafeInteger(payload.byte_length) || Number(payload.byte_length) < 1 || Number(payload.byte_length) > MAX_UPLOAD_IMAGE_BYTES || !HASH.test(String(payload.byte_hash || "")) ||
         payload.mime !== "image/png" || (payload.purpose !== "cover" && payload.purpose !== "body") || !ID.test(String(payload.slot_id || ""))) {
       throw new AdapterError("invalid_request", 400);
     }

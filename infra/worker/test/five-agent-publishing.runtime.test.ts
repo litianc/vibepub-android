@@ -246,6 +246,21 @@ function backgroundAwareImagesBinding(delegate: ImagesBinding): ImagesBinding {
   } as ImagesBinding;
 }
 
+function failingImagesBinding(providerCode: number): ImagesBinding {
+  return {
+    input() {
+      const transformer = {
+        transform() { return transformer; },
+        draw() { return transformer; },
+        async output(): Promise<ImageTransformationResult> {
+          throw Object.assign(new Error("synthetic Images failure"), { code: providerCode });
+        },
+      };
+      return transformer;
+    },
+  } as ImagesBinding;
+}
+
 async function hashJson(value: unknown): Promise<string> {
   return sha256Text(canonicalJson(value));
 }
@@ -422,6 +437,7 @@ async function executeSyntheticScenario(
     visualCoverTransparent?: boolean;
     visualCoverScaledByProvider?: boolean;
     visualBodyNonWhite?: boolean;
+    visualImagesError?: number;
     visualFailure?: "nonretry" | "retryable" | "unknown";
     visualPreCancelled?: boolean;
     visualCancellationReadFailure?: boolean;
@@ -916,6 +932,9 @@ async function executeSyntheticScenario(
   });
   if (options.visualCoverTransparent) {
     Object.defineProperty(testEnv, "IMAGES", { value: backgroundAwareImagesBinding(runtimeEnv.IMAGES), configurable: true });
+  }
+  if (options.visualImagesError !== undefined) {
+    Object.defineProperty(testEnv, "IMAGES", { value: failingImagesBinding(options.visualImagesError), configurable: true });
   }
   expect(wechatDraftFeatureEnabled(testEnv, userId, workspaceId)).toBe(options.wechat === true);
   if (artifactUnknown) {
@@ -3167,6 +3186,15 @@ describe("Wave2B publishing runtime boundary", () => {
     expect(qaPayload).toMatchObject({ passed: false, asset_artifact_ids: expect.any(Array), asset_byte_hashes: expect.any(Array) });
     expect(qaPayload.asset_artifact_ids).toHaveLength(3);
     expect(qaPayload.asset_byte_hashes).toHaveLength(3);
+  });
+
+  it.each([
+    [9523, "image_transformation_service_unavailable", "retry"],
+    [9422, "image_transformation_quota_exceeded", "retry_after_service_fix"],
+  ])("does not misreport Cloudflare Images error %s as a visual QA failure", async (providerCode, errorCode, nextAction) => {
+    const visual = await executeSyntheticScenario("p2_pass", undefined, false, { visual: true, visualImagesError: providerCode });
+    expect(visual.result).toMatchObject({ state: "failed" });
+    expect(visual.projection).toMatchObject({ state: "failed", error_code: errorCode, next_action: nextAction });
   });
 
   it("returns the persisted QA artifact when post-QA exact-set reconciliation holds", async () => {

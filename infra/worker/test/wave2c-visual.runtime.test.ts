@@ -435,8 +435,62 @@ describe("Wave2C visual planning and immutable contracts", () => {
     expect(await verifyPngWhiteBackgroundWithImagesBinding(runtimeEnv.IMAGES, body, 1536, 864)).toBe(true);
     const coverSource = await rgbaPngFixture(1800, 766, 255, 6, (x, y) =>
       x >= 400 && x < 1400 && y >= 150 && y < 620 ? [17, 17, 17, 255] : [0xde, 0xd9, 0xcf, 255]);
-    const cover = await normalizePngWithImagesBinding(runtimeEnv.IMAGES, coverSource, 2256, 960, { backgroundRgb: [0xde, 0xd9, 0xcf], padding: "edge" });
+    const cover = await normalizePngWithImagesBinding(runtimeEnv.IMAGES, coverSource, 2256, 960, { backgroundRgb: [0xde, 0xd9, 0xcf], padding: "solid" });
     expect(await verifyPngOpaqueCoverageWithImagesBinding(runtimeEnv.IMAGES, cover, 2256, 960)).toBe(true);
+  });
+
+  it("uses raw RGBA samples on the production Images path", async () => {
+    const formats: string[] = [];
+    const images = {
+      input() {
+        let dimensions = { width: 1, height: 1 };
+        const transformer = {
+          transform(value: ImageTransform) {
+            dimensions = { width: Number(value.width), height: Number(value.height) };
+            return transformer;
+          },
+          draw() { return transformer; },
+          async output(options: ImageOutputOptions): Promise<ImageTransformationResult> {
+            formats.push(options.format);
+            if (options.format !== "rgba") throw new Error("unexpected fallback");
+            const pixels = new Uint8Array(dimensions.width * dimensions.height * 4);
+            for (let index = 0; index < dimensions.width * dimensions.height; index += 1) pixels.set([255, 255, 255, 255], index * 4);
+            const center = (Math.floor(dimensions.height / 2) * dimensions.width + Math.floor(dimensions.width / 2)) * 4;
+            pixels.set([17, 17, 17, 255], center);
+            return {
+              response: () => new Response(pixels),
+              contentType: () => "application/octet-stream",
+              image: () => new Blob([pixels]).stream(),
+            };
+          },
+        };
+        return transformer;
+      },
+    } as ImagesBinding;
+    expect(await verifyPngWhiteBackgroundWithImagesBinding(images, pngFixture(1536, 864), 1536, 864)).toBe(true);
+    expect(await verifyPngOpaqueCoverageWithImagesBinding(images, pngFixture(2256, 960), 2256, 960)).toBe(true);
+    expect(formats).toEqual(["rgba", "rgba"]);
+  });
+
+  it.each([
+    [9523, "image_transformation_service_unavailable", true],
+    [9422, "image_transformation_quota_exceeded", false],
+  ])("surfaces Images error %s instead of returning a failed QA result", async (providerCode, code, retryable) => {
+    const images = {
+      input() {
+        const transformer = {
+          transform() { return transformer; },
+          draw() { return transformer; },
+          async output(): Promise<ImageTransformationResult> {
+            throw Object.assign(new Error("synthetic Images failure"), { code: providerCode });
+          },
+        };
+        return transformer;
+      },
+    } as ImagesBinding;
+    await expect(verifyPngWhiteBackgroundWithImagesBinding(images, pngFixture(1536, 864), 1536, 864)).rejects.toMatchObject({
+      name: "ImageTransformationServiceError", code, retryable, providerCode,
+    });
   });
 });
 

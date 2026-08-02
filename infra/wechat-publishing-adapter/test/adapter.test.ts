@@ -219,6 +219,19 @@ describe("wechat publishing adapter", () => {
     expect(mock.calls[1].url.searchParams.get("type")).toBe("image");
   });
 
+  it("rejects an oversized image declaration before decoding or calling WeChat", async () => {
+    const bucket = new Bucket(); const instance = new WechatOperationAgent(state(), await configuredEnv(bucket));
+    const mock = providerMock(); vi.stubGlobal("fetch", mock.fetcher);
+    const receipt = await resolve(instance);
+    const response = await instance.fetch(new Request("https://internal", { method: "POST", body: requestBody("upload_image", "oversized-image", 1, receipt, {
+      operation_id: "oversized-image", image_base64: "iVBORw0KGgo=", byte_length: 8 * 1024 * 1024 + 1,
+      byte_hash: `sha256:${"a".repeat(64)}`, mime: "image/png", slot_id: "body_01", purpose: "body",
+    }) }));
+    expect(response.status).toBe(400);
+    expect(mock.calls).toHaveLength(0);
+    expect(bucket.puts).toBe(0);
+  });
+
   it("reuses the account/kind/byte upload cache across distinct operations", async () => {
     const instance = new WechatOperationAgent(state(), await configuredEnv());
     const mock = providerMock(); vi.stubGlobal("fetch", mock.fetcher);
