@@ -3500,7 +3500,7 @@ describe("Wave2B publishing runtime boundary", () => {
     expect(nonRetry.retry_count).toBe(1);
   });
 
-  it("recognizes Cloudflare 10400, reconciles create-response loss, and confirms one workflow", async () => {
+  it("recognizes Cloudflare runtime not-found, reconciles create-response loss, and confirms one workflow", async () => {
     const suffix = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
     const runId = `runtime-v3-workflow-unknown-${suffix}`;
     const articleId = `${runId}-article`;
@@ -3522,7 +3522,7 @@ describe("Wave2B publishing runtime boundary", () => {
     const workflow = {
       get: async () => ({ status: async () => {
         statusCalls += 1;
-        if (!workflowCreated) throw new Error("workflows.api.error.instance.not_found [code: 10400]");
+        if (!workflowCreated) throw new Error("(instance.not_found) Instance not found");
         if (statusCalls === 2) throw new Error("workflow status temporarily unavailable");
         return { status: "queued" };
       } }),

@@ -13,6 +13,7 @@
 
 | 时间 | 功能更新 |
 | --- | --- |
+| 2026-08-02 23:56 CST | 五 Agent 启动恢复可精确识别 Cloudflare Worker 运行时的 `(instance.not_found) Instance not found` 错误并安全创建缺失的 Workflow。 |
 | 2026-08-02 23:40 CST | 五 Agent 启动对无法分类的 Cloudflare Workflow 查询结果增加不含账号、凭据和内容的有界诊断，使线上旧任务恢复可精确区分异常与未知状态。 |
 | 2026-08-02 23:06 CST | 五 Agent 旧任务恢复可识别 Cloudflare 实际返回的 Workflow 不存在消息，并让 Mining 正确校验脱敏后的启动响应以继续生成公众号草稿。 |
 | 2026-08-02 22:43 CST | Mining 的五 Agent 启动重试现在记录每次服务端错误码与最终暂停原因，使线上卡住任务可以精确定位而不暴露凭据。 |

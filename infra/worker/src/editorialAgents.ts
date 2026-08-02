@@ -643,6 +643,7 @@ function timestampAtOrAfter(previous: string, candidate: string): string {
 function isCloudflareWorkflowInstanceNotFoundMessage(value: unknown): boolean {
   if (typeof value !== "string") return false;
   const message = value.trim();
+  if (message === "(instance.not_found) Instance not found") return true;
   const signature = "workflows.api.error.instance.not_found";
   if (!message.includes(signature)) return false;
   const codes = [...message.matchAll(/\[code:\s*([0-9]+)\]/gi)].map(match => match[1]);
