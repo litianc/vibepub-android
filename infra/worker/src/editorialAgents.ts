@@ -607,7 +607,10 @@ function isStructuredWorkflowNotFound(error: unknown): boolean {
     const record = current as Record<string, unknown>;
     const status = record.status;
     const code = record.code;
+    // Cloudflare Workflows returns provider code 10400 when a deterministic
+    // instance ID has not been created yet.
     if (status === 404 || status === "404" || code === 404 || code === "404" ||
+        code === 10400 || code === "10400" ||
         code === "NOT_FOUND" || code === "WORKFLOW_NOT_FOUND") return true;
     current = record.cause;
   }
