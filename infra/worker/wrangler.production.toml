@@ -3,6 +3,9 @@ main = "src/index.ts"
 compatibility_date = "2026-06-24"
 compatibility_flags = ["nodejs_compat"]
 
+[limits]
+cpu_ms = 10_000
+
 routes = [
   { pattern = "vibepub.litianc.cn", custom_domain = true }
 ]

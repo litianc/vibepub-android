@@ -260,7 +260,7 @@ function sourcePath(outputDirectory, packagePath) {
 function renderMain(manifest, outputDirectory) {
   const main = manifest.main;
   return [
-    `name = ${quote(main.name)}\nmain = ${quote(sourcePath(outputDirectory, "infra/worker/src/index.ts"))}\ncompatibility_date = "2026-06-24"\ncompatibility_flags = ["nodejs_compat"]\nworkers_dev = true\npreview_urls = false\n`,
+    `name = ${quote(main.name)}\nmain = ${quote(sourcePath(outputDirectory, "infra/worker/src/index.ts"))}\ncompatibility_date = "2026-06-24"\ncompatibility_flags = ["nodejs_compat"]\nworkers_dev = true\npreview_urls = false\n\n[limits]\ncpu_ms = 10_000\n`,
     "send_email = [{ name = \"EMAIL\" }]\n",
     r2("FILES_BUCKET", main.files_bucket),
     vars({
