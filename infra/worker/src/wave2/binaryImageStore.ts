@@ -30,6 +30,7 @@ const PNG_SIGNATURE = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
 export const MAX_PROVIDER_PNG_BYTES = 8 * 1024 * 1024;
 export const MAX_PROVIDER_BASE64_CHARS = Math.ceil(MAX_PROVIDER_PNG_BYTES / 3) * 4;
 const MAX_PROVIDER_PIXEL_COUNT = 3_000_000;
+const MAX_NORMALIZED_PNG_BYTES = 8 * 1024 * 1024;
 const FIXED_PROVIDER_CANVAS = { width: 1536, height: 1024 } as const;
 type PngNormalizationOptions = {
   backgroundRgb?: readonly [number, number, number];
@@ -37,6 +38,23 @@ type PngNormalizationOptions = {
 };
 
 type PngInfo = { width: number; height: number; bitDepth: number; colorType: number; interlace: number; idat: Uint8Array[] };
+type PngHeader = Omit<PngInfo, "idat">;
+
+function readPngHeader(bytes: Uint8Array): PngHeader {
+  if (bytes.byteLength < 33 || !PNG_SIGNATURE.every((value, index) => bytes[index] === value)) throw new BinaryImageStoreError("binary_readback_mismatch", "image is not a PNG", 422);
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const isHeader = view.getUint32(8) === 13 && bytes[12] === 73 && bytes[13] === 72 && bytes[14] === 68 && bytes[15] === 82;
+  if (!isHeader) throw new BinaryImageStoreError("binary_readback_mismatch", "PNG IHDR is invalid", 422);
+  const width = view.getUint32(16);
+  const height = view.getUint32(20);
+  const bitDepth = bytes[24];
+  const colorType = bytes[25];
+  const compression = bytes[26];
+  const filter = bytes[27];
+  const interlace = bytes[28];
+  if (!width || !height || compression !== 0 || filter !== 0) throw new BinaryImageStoreError("binary_readback_mismatch", "PNG dimensions or encoding are invalid", 422);
+  return { width, height, bitDepth, colorType, interlace };
+}
 
 function crc32(bytes: Uint8Array): number {
   let crc = 0xffffffff;
@@ -86,7 +104,7 @@ function readPng(bytes: Uint8Array): PngInfo {
 }
 
 function readPngDimensions(bytes: Uint8Array): { width: number; height: number } {
-  const info = readPng(bytes);
+  const info = readPngHeader(bytes);
   return { width: info.width, height: info.height };
 }
 
@@ -294,6 +312,164 @@ export async function normalizePngToExactDimensions(
     }
   }
   return encodeRgbaPng(targetRgba, targetWidth, targetHeight);
+}
+
+async function readBoundedImageStream(stream: ReadableStream<Uint8Array>, maxBytes: number): Promise<Uint8Array> {
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+  try {
+    while (true) {
+      const current = await reader.read();
+      if (current.done) break;
+      length += current.value.byteLength;
+      if (length > maxBytes) {
+        try { await reader.cancel(); } catch { /* reject the oversized output below */ }
+        throw new BinaryImageStoreError("binary_readback_mismatch", "image transformation output exceeds its byte limit", 422);
+      }
+      chunks.push(current.value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const output = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) { output.set(chunk, offset); offset += chunk.byteLength; }
+  return output;
+}
+
+function normalizationGeometryAllowed(info: PngHeader, targetWidth: number, targetHeight: number): boolean {
+  const pixelCount = info.width * info.height;
+  if (!Number.isSafeInteger(pixelCount) || pixelCount > MAX_PROVIDER_PIXEL_COUNT) return false;
+  const targetRatio = targetWidth / targetHeight;
+  const ratioDrift = Math.abs(info.width / info.height - targetRatio) / targetRatio;
+  const widthScale = info.width / targetWidth;
+  const heightScale = info.height / targetHeight;
+  const isBoundedTargetScale = ratioDrift <= 0.005 && widthScale >= 0.75 && widthScale <= 1.25 && heightScale >= 0.75 && heightScale <= 1.25;
+  return isBoundedTargetScale || (info.width === FIXED_PROVIDER_CANVAS.width && info.height === FIXED_PROVIDER_CANVAS.height);
+}
+
+function colorHex(rgb: readonly [number, number, number]): string {
+  return `#${rgb.map(value => value.toString(16).padStart(2, "0")).join("")}`;
+}
+
+/** Uses Cloudflare Images so large provider PNGs do not consume Worker CPU. */
+export async function normalizePngWithImagesBinding(
+  images: ImagesBinding,
+  bytes: Uint8Array,
+  targetWidth: number,
+  targetHeight: number,
+  options: PngNormalizationOptions = {},
+): Promise<Uint8Array> {
+  if (!images || typeof images.input !== "function" || !Number.isSafeInteger(targetWidth) || !Number.isSafeInteger(targetHeight) || targetWidth < 1 || targetHeight < 1 || targetWidth > 2256 || targetHeight > 960) {
+    throw new BinaryImageStoreError("binary_readback_mismatch", "image transformation binding or target dimensions are invalid", 422);
+  }
+  const backgroundRgb = options.backgroundRgb ?? [255, 255, 255];
+  const padding = options.padding ?? "solid";
+  if (!Array.isArray(backgroundRgb) || backgroundRgb.length !== 3 || backgroundRgb.some(value => !Number.isInteger(value) || value < 0 || value > 255) || (padding !== "solid" && padding !== "edge")) {
+    throw new BinaryImageStoreError("binary_readback_mismatch", "image normalization options are invalid", 422);
+  }
+  if (bytes.byteLength > MAX_PROVIDER_PNG_BYTES) throw new BinaryImageStoreError("binary_readback_mismatch", "provider PNG exceeds the normalization byte limit", 422);
+  const info = readPngHeader(bytes);
+  if (info.bitDepth !== 8 || info.interlace !== 0 || ![0, 2, 4, 6].includes(info.colorType) || !normalizationGeometryAllowed(info, targetWidth, targetHeight)) {
+    throw new BinaryImageStoreError("binary_readback_mismatch", "provider image dimensions or encoding are outside the bounded normalization contract", 422);
+  }
+  const background = colorHex(backgroundRgb);
+  try {
+    const transformed = await images.input(new Blob([bytes]).stream())
+      .transform({ width: targetWidth, height: targetHeight, fit: "pad", background })
+      .output({ format: "image/png", background, anim: false });
+    const output = await readBoundedImageStream(transformed.image(), MAX_NORMALIZED_PNG_BYTES);
+    const outputInfo = readPngHeader(output);
+    if (outputInfo.width !== targetWidth || outputInfo.height !== targetHeight || outputInfo.bitDepth !== 8 || outputInfo.interlace !== 0 || ![0, 2, 4, 6].includes(outputInfo.colorType)) {
+      throw new BinaryImageStoreError("binary_readback_mismatch", "image transformation output does not match the exact PNG contract", 422);
+    }
+    return output;
+  } catch (error) {
+    if (error instanceof BinaryImageStoreError) throw error;
+    throw new BinaryImageStoreError("binary_readback_mismatch", "Cloudflare Images could not normalize the provider PNG", 422);
+  }
+}
+
+async function samplePngPixels(images: ImagesBinding, bytes: Uint8Array, width: number, height: number): Promise<{ width: number; height: number; colorType: number; pixels: Uint8Array; channels: number }> {
+  const expectedRgbaLength = width * height * 4;
+  try {
+    const raw = await images.input(new Blob([bytes]).stream())
+      .transform({ width, height, fit: "squeeze" })
+      .output({ format: "rgba", anim: false });
+    const pixels = await readBoundedImageStream(raw.image(), expectedRgbaLength);
+    if (pixels.byteLength !== expectedRgbaLength) throw new BinaryImageStoreError("binary_readback_mismatch", "image QA sample length is invalid", 422);
+    return { width, height, colorType: 6, pixels, channels: 4 };
+  } catch {
+    // Miniflare does not implement raw Images output, so local tests use a
+    // tiny PNG fallback. Production uses the raw path to minimize Worker CPU.
+    const transformed = await images.input(new Blob([bytes]).stream())
+      .transform({ width, height, fit: "squeeze" })
+      .output({ format: "image/png", anim: false });
+    const output = await readBoundedImageStream(transformed.image(), 64 * 1024);
+    const info = readPng(output);
+    if (info.width !== width || info.height !== height) throw new BinaryImageStoreError("binary_readback_mismatch", "image QA sample dimensions are invalid", 422);
+    const decoded = await inflatePngPixels(info);
+    return { width, height, colorType: info.colorType, ...decoded };
+  }
+}
+
+export async function verifyPngOpaqueCoverageWithImagesBinding(images: ImagesBinding, bytes: Uint8Array, expectedWidth: number, expectedHeight: number): Promise<boolean> {
+  try {
+    const info = readPngHeader(bytes);
+    if (info.width !== expectedWidth || info.height !== expectedHeight) return false;
+    const sample = await samplePngPixels(images, bytes, 94, 40);
+    let opaque = 0;
+    for (let index = 0; index < sample.width * sample.height; index += 1) {
+      const at = index * sample.channels;
+      const alpha = sample.colorType === 4 ? sample.pixels[at + 1] : sample.colorType === 6 ? sample.pixels[at + 3] : 255;
+      if (alpha === 255) opaque += 1;
+    }
+    return opaque / (sample.width * sample.height) >= OPAQUE_PIXEL_THRESHOLD;
+  } catch {
+    return false;
+  }
+}
+
+export async function verifyPngWhiteBackgroundWithImagesBinding(images: ImagesBinding, bytes: Uint8Array, expectedWidth: number, expectedHeight: number): Promise<boolean> {
+  try {
+    const info = readPngHeader(bytes);
+    if (info.width !== expectedWidth || info.height !== expectedHeight) return false;
+    const width = 96;
+    const height = 54;
+    const sample = await samplePngPixels(images, bytes, width, height);
+    const borderWidth = Math.max(1, Math.floor(width * WHITE_BACKGROUND_BORDER_FRACTION));
+    const borderHeight = Math.max(1, Math.floor(height * WHITE_BACKGROUND_BORDER_FRACTION));
+    let opaque = 0;
+    let white = 0;
+    let nonWhite = 0;
+    let borderPixels = 0;
+    let borderOpaque = 0;
+    let borderWhite = 0;
+    for (let index = 0; index < width * height; index += 1) {
+      const at = index * sample.channels;
+      const x = index % width;
+      const y = Math.floor(index / width);
+      const isBorder = x < borderWidth || x >= width - borderWidth || y < borderHeight || y >= height - borderHeight;
+      if (isBorder) borderPixels += 1;
+      const alpha = sample.colorType === 4 ? sample.pixels[at + 1] : sample.colorType === 6 ? sample.pixels[at + 3] : 255;
+      if (alpha !== 255) continue;
+      opaque += 1;
+      const red = sample.pixels[at];
+      const green = sample.colorType === 0 || sample.colorType === 4 ? red : sample.pixels[at + 1];
+      const blue = sample.colorType === 0 || sample.colorType === 4 ? red : sample.pixels[at + 2];
+      const isWhite = red >= WHITE_BACKGROUND_MIN_CHANNEL && green >= WHITE_BACKGROUND_MIN_CHANNEL && blue >= WHITE_BACKGROUND_MIN_CHANNEL;
+      if (isWhite) white += 1; else nonWhite += 1;
+      if (isBorder) {
+        borderOpaque += 1;
+        if (isWhite) borderWhite += 1;
+      }
+    }
+    return opaque / (width * height) >= OPAQUE_PIXEL_THRESHOLD && nonWhite > 0 && white / opaque >= WHITE_BACKGROUND_MIN_COVERAGE && borderPixels > 0 &&
+      borderOpaque / borderPixels >= OPAQUE_PIXEL_THRESHOLD && borderWhite / borderOpaque >= WHITE_BACKGROUND_THRESHOLD;
+  } catch {
+    return false;
+  }
 }
 
 export async function verifyPngWhiteBackground(bytes: Uint8Array, expectedWidth: number, expectedHeight: number): Promise<boolean> {

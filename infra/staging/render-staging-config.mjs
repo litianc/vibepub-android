@@ -232,6 +232,10 @@ function r2(binding, bucket) {
   return `[[r2_buckets]]\nbinding = ${quote(binding)}\nbucket_name = ${quote(bucket)}\n`;
 }
 
+function images(binding) {
+  return `[images]\nbinding = ${quote(binding)}\n`;
+}
+
 function service(binding, name) {
   return `[[services]]\nbinding = ${quote(binding)}\nservice = ${quote(name)}\n`;
 }
@@ -260,9 +264,10 @@ function sourcePath(outputDirectory, packagePath) {
 function renderMain(manifest, outputDirectory) {
   const main = manifest.main;
   return [
-    `name = ${quote(main.name)}\nmain = ${quote(sourcePath(outputDirectory, "infra/worker/src/index.ts"))}\ncompatibility_date = "2026-06-24"\ncompatibility_flags = ["nodejs_compat"]\nworkers_dev = true\npreview_urls = false\n\n[limits]\ncpu_ms = 10_000\n`,
+    `name = ${quote(main.name)}\nmain = ${quote(sourcePath(outputDirectory, "infra/worker/src/index.ts"))}\ncompatibility_date = "2026-06-24"\ncompatibility_flags = ["nodejs_compat"]\nworkers_dev = true\npreview_urls = false\n`,
     "send_email = [{ name = \"EMAIL\" }]\n",
     r2("FILES_BUCKET", main.files_bucket),
+    images("IMAGES"),
     vars({
       ...metadataVars(),
       PUBLIC_BASE_URL: main.public_base_url,

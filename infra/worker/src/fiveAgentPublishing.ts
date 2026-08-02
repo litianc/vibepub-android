@@ -67,7 +67,7 @@ import {
   VisualContractError,
 } from "./wave2/visualContracts";
 import { putImmutableVisualArtifact, readImmutableVisualArtifact, VisualArtifactStoreError } from "./wave2/visualArtifactStore";
-import { BinaryImageStoreError, MAX_PROVIDER_BASE64_CHARS, MAX_PROVIDER_PNG_BYTES, describeImmutableBinaryImage, normalizePngToExactDimensions, putImmutableBinaryImage, readExistingImmutableBinaryImage, readImmutableBinaryImage, verifyPngOpaqueCoverage, verifyPngWhiteBackground } from "./wave2/binaryImageStore";
+import { BinaryImageStoreError, MAX_PROVIDER_BASE64_CHARS, MAX_PROVIDER_PNG_BYTES, describeImmutableBinaryImage, normalizePngWithImagesBinding, putImmutableBinaryImage, readExistingImmutableBinaryImage, readImmutableBinaryImage, verifyPngOpaqueCoverageWithImagesBinding, verifyPngWhiteBackgroundWithImagesBinding } from "./wave2/binaryImageStore";
 import { callVisualImageService, callVisualPlanService, reconcileVisualImageService, reconcileVisualPlanService } from "./wave2/visualServiceClients";
 import {
   WAVE2D_SCHEMA_VERSION,
@@ -1933,8 +1933,8 @@ async function verifyVisualAssetReadback(
     slot_id: slot.slot_id,
   });
   const whiteBackground = slot.purpose === "cover"
-    ? await verifyPngOpaqueCoverage(bytes, slot.width, slot.height)
-    : await verifyPngWhiteBackground(bytes, slot.width, slot.height);
+    ? await verifyPngOpaqueCoverageWithImagesBinding(env.IMAGES, bytes, slot.width, slot.height)
+    : await verifyPngWhiteBackgroundWithImagesBinding(env.IMAGES, bytes, slot.width, slot.height);
   if (asset.white_background_verified !== whiteBackground) throw new VisualContractError("visual_asset_contract_invalid", "visual asset QA claim does not match deterministic verification", 409);
   return { byte_hash: asset.byte_hash, white_background: whiteBackground };
 }
@@ -2050,13 +2050,16 @@ async function verifyVisualExecutionReadyForQa(
 
 function decodeBase64(value: unknown): Uint8Array {
   if (typeof value !== "string" || value.length === 0 || value.length > MAX_PROVIDER_BASE64_CHARS) throw new EditorialRuntimeError("visual_asset_contract_invalid", "image adapter did not return bounded PNG bytes", 502);
-  let binary: string;
+  const constructor = Uint8Array as typeof Uint8Array & { fromBase64?: (encoded: string) => Uint8Array };
+  let bytes: Uint8Array;
   try {
-    binary = atob(value);
+    if (typeof constructor.fromBase64 === "function") bytes = constructor.fromBase64(value);
+    else {
+      const binary = atob(value);
+      bytes = Uint8Array.from(binary, character => character.charCodeAt(0));
+    }
   } catch { throw new EditorialRuntimeError("visual_asset_contract_invalid", "image adapter returned invalid bytes", 502); }
-  if (binary.length > MAX_PROVIDER_PNG_BYTES) throw new EditorialRuntimeError("visual_asset_contract_invalid", "image adapter returned oversized PNG bytes", 502);
-  const bytes = new Uint8Array(binary.length);
-  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  if (bytes.byteLength > MAX_PROVIDER_PNG_BYTES) throw new EditorialRuntimeError("visual_asset_contract_invalid", "image adapter returned oversized PNG bytes", 502);
   return bytes;
 }
 
@@ -2585,7 +2588,7 @@ export async function runVisualProductionPhase(input: {
         if (!call.response && !existingBinary) throw new EditorialRuntimeError("external_side_effect_unknown", "visual image result requires binary reconciliation", 503);
         const result = call.response as Record<string, unknown> | null;
         const imageBytes = result
-          ? await normalizePngToExactDimensions(decodeBase64(result.bytes_base64 ?? result.b64_json), slot.width, slot.height, slot.purpose === "cover"
+          ? await normalizePngWithImagesBinding(env.IMAGES, decodeBase64(result.bytes_base64 ?? result.b64_json), slot.width, slot.height, slot.purpose === "cover"
             ? { backgroundRgb: [0xde, 0xd9, 0xcf], padding: "edge" }
             : { backgroundRgb: [255, 255, 255], padding: "solid" })
           : existingBinary!.bytes;
@@ -2594,8 +2597,8 @@ export async function runVisualProductionPhase(input: {
           run_id: params.run_id, frozen_payload_hash: planPayload.frozen_payload_hash, slot_id: slot.slot_id,
         });
         const whiteBackgroundVerified = slot.purpose === "cover"
-          ? await verifyPngOpaqueCoverage(imageBytes, slot.width, slot.height)
-          : await verifyPngWhiteBackground(imageBytes, slot.width, slot.height);
+          ? await verifyPngOpaqueCoverageWithImagesBinding(env.IMAGES, imageBytes, slot.width, slot.height)
+          : await verifyPngWhiteBackgroundWithImagesBinding(env.IMAGES, imageBytes, slot.width, slot.height);
         const payload: VisualAssetPayload = {
           protocol_version: "visual_asset.v2", article_id: params.article_id, run_id: params.run_id, recording_id: params.recording_id,
           frozen_artifact_id: planPayload.frozen_artifact_id, frozen_payload_hash: planPayload.frozen_payload_hash,
@@ -3861,6 +3864,8 @@ async function requireWechatAccount(
 }
 
 function base64(bytes: Uint8Array): string {
+  const native = bytes as Uint8Array & { toBase64?: () => string };
+  if (typeof native.toBase64 === "function") return native.toBase64();
   let value = "";
   const chunk = 0x8000;
   for (let offset = 0; offset < bytes.byteLength; offset += chunk) {

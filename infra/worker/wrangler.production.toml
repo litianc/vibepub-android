@@ -3,9 +3,6 @@ main = "src/index.ts"
 compatibility_date = "2026-06-24"
 compatibility_flags = ["nodejs_compat"]
 
-[limits]
-cpu_ms = 10_000
-
 routes = [
   { pattern = "vibepub.litianc.cn", custom_domain = true }
 ]
@@ -17,6 +14,9 @@ send_email = [
 [[r2_buckets]]
 binding = "FILES_BUCKET"
 bucket_name = "vibepub-files"
+
+[images]
+binding = "IMAGES"
 
 [vars]
 PUBLIC_BASE_URL = "https://vibepub.litianc.cn"

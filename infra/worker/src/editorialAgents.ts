@@ -139,6 +139,7 @@ export type EditorialAgentState = {
 export type EditorialRuntimeEnv = Cloudflare.Env & {
   DB: D1Database;
   FILES_BUCKET: R2Bucket;
+  IMAGES: ImagesBinding;
   EDITORIAL_COORDINATOR: DurableObjectNamespace<EditorialCoordinatorAgent>;
   V3_TENANT_SCOPE?: string;
   FIVE_AGENT_PUBLISHING_V3?: string;

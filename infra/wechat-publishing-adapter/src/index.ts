@@ -258,7 +258,11 @@ function mediaHostAllowed(env: Env, value: unknown): value is string {
   return allowed.length > 0 && allowed.includes(url.hostname.toLowerCase());
 }
 function decodeBase64(value: string): Uint8Array {
-  try { return Uint8Array.from(atob(value), char => char.charCodeAt(0)); }
+  try {
+    const constructor = Uint8Array as typeof Uint8Array & { fromBase64?: (encoded: string) => Uint8Array };
+    if (typeof constructor.fromBase64 === "function") return constructor.fromBase64(value);
+    return Uint8Array.from(atob(value), char => char.charCodeAt(0));
+  }
   catch { throw new AdapterError("invalid_request", 400); }
 }
 function assertOperationPayload(input: ParsedInput): void {
@@ -289,6 +293,8 @@ async function decrypt(env: Env, ciphertext: string): Promise<string> {
   if (version !== "v1" || !ivEncoded || !bodyEncoded || !env.CREDENTIAL_ENCRYPTION_KEY?.trim()) throw new AdapterError("wechat_publishing_account_unavailable", 409);
   const fromBase64 = (value: string): Uint8Array => {
     const normalized = value.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(value.length / 4) * 4, "=");
+    const constructor = Uint8Array as typeof Uint8Array & { fromBase64?: (encoded: string) => Uint8Array };
+    if (typeof constructor.fromBase64 === "function") return constructor.fromBase64(normalized);
     const binary = atob(normalized); return Uint8Array.from(binary, char => char.charCodeAt(0));
   };
   const secretHash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(env.CREDENTIAL_ENCRYPTION_KEY.trim()));

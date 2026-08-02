@@ -65,7 +65,8 @@ test("renders five complete isolated staging Wrangler targets from a synthetic m
   assert.match(configs["main.wrangler.toml"], /name = "vibepub-api-staging"/);
   assert.match(configs["main.wrangler.toml"], /main = "\.\.\/.*infra\/worker\/src\/index\.ts"/);
   assert.match(configs["main.wrangler.toml"], /workers_dev = true\npreview_urls = false/);
-  assert.match(configs["main.wrangler.toml"], /\[limits\]\ncpu_ms = 10_000/);
+  assert.match(configs["main.wrangler.toml"], /\[images\]\nbinding = "IMAGES"/);
+  assert.doesNotMatch(configs["main.wrangler.toml"], /\[limits\]/);
   assert.doesNotMatch(configs["main.wrangler.toml"], /^routes\s*=/m);
   assert.match(configs["main.wrangler.toml"], /FIVE_AGENT_PUBLISHING_V3 = "false"/);
   assert.match(configs["main.wrangler.toml"], /WECHAT_DRAFT_SYNC_V3_ALLOWLIST = ""/);

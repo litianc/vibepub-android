@@ -167,16 +167,25 @@ async function buildSyntheticVisualPng(width: number, height: number, mode: "val
   }
   if (mode === "valid") {
     // The stable prompt hash gives each slot distinct bytes while preserving
-    // byte-for-byte cache hits for the same content across runs.
+    // byte-for-byte cache hits for the same content across runs. Keep the
+    // mark large enough to survive the production QA thumbnail transform.
     let marker = 0;
     for (const character of seed) marker = (marker * 31 + character.charCodeAt(0)) >>> 0;
-    const x = marker % width;
-    const y = Math.floor(marker / width) % height;
-    const offset = y * rowLength + 1 + x * 4;
-    raw[offset] = 17;
-    raw[offset + 1] = 17;
-    raw[offset + 2] = 17;
-    raw[offset + 3] = 255;
+    const markWidth = Math.max(2, Math.floor(width * 0.08));
+    const markHeight = Math.max(2, Math.floor(height * 0.08));
+    const xRange = Math.max(1, Math.floor(width * 0.6) - markWidth);
+    const yRange = Math.max(1, Math.floor(height * 0.6) - markHeight);
+    const left = Math.floor(width * 0.2) + marker % xRange;
+    const top = Math.floor(height * 0.2) + Math.floor(marker / Math.max(1, width)) % yRange;
+    for (let y = top; y < Math.min(height, top + markHeight); y += 1) {
+      for (let x = left; x < Math.min(width, left + markWidth); x += 1) {
+        const offset = y * rowLength + 1 + x * 4;
+        raw[offset] = 17;
+        raw[offset + 1] = 17;
+        raw[offset + 2] = 17;
+        raw[offset + 3] = 255;
+      }
+    }
   }
   const compressed = new Uint8Array(await new Response(new Blob([raw]).stream().pipeThrough(new CompressionStream("deflate"))).arrayBuffer());
   const crc32 = (bytes: Uint8Array): number => {
@@ -200,6 +209,41 @@ async function buildSyntheticVisualPng(width: number, height: number, mode: "val
   let offset = 0; for (const part of parts) { output.set(part, offset); offset += part.byteLength; }
   let binary = ""; for (let index = 0; index < output.byteLength; index += 0x8000) binary += String.fromCharCode(...output.slice(index, Math.min(index + 0x8000, output.byteLength)));
   return btoa(binary);
+}
+
+function backgroundAwareImagesBinding(delegate: ImagesBinding): ImagesBinding {
+  return {
+    input(stream: ReadableStream<Uint8Array>) {
+      const transforms: ImageTransform[] = [];
+      const transformer = {
+        transform(transform: ImageTransform) {
+          transforms.push(transform);
+          return transformer;
+        },
+        draw() {
+          return transformer;
+        },
+        async output(options: ImageOutputOptions): Promise<ImageTransformationResult> {
+          const coverComposite = transforms.some(transform => transform.width === 2256 && transform.height === 960 && transform.fit === "pad" && transform.background === "#ded9cf") &&
+            options.format === "image/png" && options.background === "#ded9cf";
+          if (coverComposite) {
+            const base64 = await syntheticVisualPng(2256, 960, "valid", "transparent-cover-composite");
+            const binary = atob(base64);
+            const bytes = Uint8Array.from(binary, character => character.charCodeAt(0));
+            return {
+              response: () => new Response(bytes, { headers: { "content-type": "image/png" } }),
+              contentType: () => "image/png",
+              image: () => new Blob([bytes]).stream(),
+            };
+          }
+          let delegated = delegate.input(stream);
+          for (const transform of transforms) delegated = delegated.transform(transform);
+          return delegated.output(options);
+        },
+      };
+      return transformer;
+    },
+  } as ImagesBinding;
 }
 
 async function hashJson(value: unknown): Promise<string> {
@@ -870,6 +914,9 @@ async function executeSyntheticScenario(
     WECHAT_PUBLISHING_ADAPTER: wechatAdapter,
     GLM_MODEL: "glm-5.2",
   });
+  if (options.visualCoverTransparent) {
+    Object.defineProperty(testEnv, "IMAGES", { value: backgroundAwareImagesBinding(runtimeEnv.IMAGES), configurable: true });
+  }
   expect(wechatDraftFeatureEnabled(testEnv, userId, workspaceId)).toBe(options.wechat === true);
   if (artifactUnknown) {
     const realBucket = runtimeEnv.FILES_BUCKET;
@@ -2182,7 +2229,7 @@ describe("Wave2B publishing runtime boundary", () => {
 
   it("normalizes an approved provider-scaled cover and completes visual production", async () => {
     const visual = await executeSyntheticScenario("p2_pass", undefined, false, { visual: true, visualCoverScaledByProvider: true });
-    expect(visual.result).toMatchObject({ state: "visual_ready" });
+    expect(visual.result, JSON.stringify({ result: visual.result, projection: visual.projection })).toMatchObject({ state: "visual_ready" });
     expect(visual.projection).toMatchObject({ state: "visual_ready", error_code: null, next_action: null });
   });
 

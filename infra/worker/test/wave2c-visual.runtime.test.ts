@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { env as runtimeEnv } from "cloudflare:test";
 import {
   ACTIVE_VISUAL_PINS,
   BODY_PROJECT_ADAPTER_MANIFEST,
@@ -17,11 +18,14 @@ import { canonicalJson } from "../src/wave2/artifactContracts";
 import {
   BinaryImageStoreError,
   MAX_PROVIDER_BASE64_CHARS,
+  normalizePngWithImagesBinding,
   normalizePngToExactDimensions,
   putImmutableBinaryImage,
   readExistingImmutableBinaryImage,
   verifyPngOpaqueCoverage,
+  verifyPngOpaqueCoverageWithImagesBinding,
   verifyPngWhiteBackground,
+  verifyPngWhiteBackgroundWithImagesBinding,
 } from "../src/wave2/binaryImageStore";
 import { callVisualImageService, callVisualPlanService, reconcileVisualImageService, type VisualImageServiceEnv } from "../src/wave2/visualServiceClients";
 import { putImmutableVisualArtifact, VisualArtifactStoreError } from "../src/wave2/visualArtifactStore";
@@ -422,6 +426,17 @@ describe("Wave2C visual planning and immutable contracts", () => {
     await expect(normalizePngToExactDimensions(new Uint8Array(8 * 1024 * 1024 + 1), 2256, 960)).rejects.toMatchObject({ code: "binary_readback_mismatch" });
     const inflateBomb = await rgbaPngFixture(3, 3, 255, 6, undefined, new Uint8Array(1024));
     await expect(normalizePngToExactDimensions(inflateBomb, 4, 4)).rejects.toMatchObject({ code: "binary_readback_mismatch" });
+  });
+
+  it("normalizes and samples provider canvases through the Cloudflare Images binding", async () => {
+    const bodySource = await rgbaPngFixture(1536, 864, 255, 6, (x, y) =>
+      x >= 400 && x < 1100 && y >= 250 && y < 650 ? [17, 17, 17, 255] : [255, 255, 255, 255]);
+    const body = await normalizePngWithImagesBinding(runtimeEnv.IMAGES, bodySource, 1536, 864, { backgroundRgb: [255, 255, 255], padding: "solid" });
+    expect(await verifyPngWhiteBackgroundWithImagesBinding(runtimeEnv.IMAGES, body, 1536, 864)).toBe(true);
+    const coverSource = await rgbaPngFixture(1800, 766, 255, 6, (x, y) =>
+      x >= 400 && x < 1400 && y >= 150 && y < 620 ? [17, 17, 17, 255] : [0xde, 0xd9, 0xcf, 255]);
+    const cover = await normalizePngWithImagesBinding(runtimeEnv.IMAGES, coverSource, 2256, 960, { backgroundRgb: [0xde, 0xd9, 0xcf], padding: "edge" });
+    expect(await verifyPngOpaqueCoverageWithImagesBinding(runtimeEnv.IMAGES, cover, 2256, 960)).toBe(true);
   });
 });
 

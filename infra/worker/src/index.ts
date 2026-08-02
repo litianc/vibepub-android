@@ -40,6 +40,7 @@ export {
 
 export interface Env {
   FILES_BUCKET: R2Bucket;
+  IMAGES: ImagesBinding;
   DB: D1Database;
   FILES_TOKEN?: string;
   MINING_SERVICE_TOKEN?: string;
