@@ -16,6 +16,7 @@ import {
 import { canonicalJson } from "../src/wave2/artifactContracts";
 import {
   BinaryImageStoreError,
+  MAX_PROVIDER_BASE64_CHARS,
   normalizePngToExactDimensions,
   putImmutableBinaryImage,
   readExistingImmutableBinaryImage,
@@ -132,16 +133,26 @@ function pngFixture(width: number, height: number): Uint8Array {
   return bytes;
 }
 
-async function rgbaPngFixture(width: number, height: number, alpha: number, colorType: 2 | 6 = 6): Promise<Uint8Array> {
+async function rgbaPngFixture(
+  width: number,
+  height: number,
+  alpha: number,
+  colorType: 2 | 6 = 6,
+  pixel?: (x: number, y: number) => readonly [number, number, number, number],
+  rawOverride?: Uint8Array,
+): Promise<Uint8Array> {
   const channels = colorType === 2 ? 3 : 4;
   const rowLength = width * channels + 1;
-  const raw = new Uint8Array(rowLength * height);
-  for (let y = 0; y < height; y += 1) {
-    raw[y * rowLength] = 0;
-    for (let x = 0; x < width; x += 1) {
-      const offset = y * rowLength + 1 + x * channels;
-      raw[offset] = 255; raw[offset + 1] = 255; raw[offset + 2] = 255;
-      if (colorType === 6) raw[offset + 3] = alpha;
+  const raw = rawOverride ?? new Uint8Array(rowLength * height);
+  if (!rawOverride) {
+    for (let y = 0; y < height; y += 1) {
+      raw[y * rowLength] = 0;
+      for (let x = 0; x < width; x += 1) {
+        const offset = y * rowLength + 1 + x * channels;
+        const value = pixel?.(x, y) ?? [255, 255, 255, alpha];
+        raw[offset] = value[0]; raw[offset + 1] = value[1]; raw[offset + 2] = value[2];
+        if (colorType === 6) raw[offset + 3] = value[3];
+      }
     }
   }
   const compressed = new Uint8Array(await new Response(new Blob([raw]).stream().pipeThrough(new CompressionStream("deflate"))).arrayBuffer());
@@ -164,6 +175,46 @@ async function rgbaPngFixture(width: number, height: number, alpha: number, colo
   const output = new Uint8Array(parts.reduce((sum, part) => sum + part.byteLength, 0));
   let offset = 0; for (const part of parts) { output.set(part, offset); offset += part.byteLength; }
   return output;
+}
+
+async function decodeEncodedRgbaFixture(bytes: Uint8Array): Promise<{ width: number; height: number; pixels: Uint8Array }> {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let offset = 8;
+  let width = 0;
+  let height = 0;
+  const idat: Uint8Array[] = [];
+  while (offset + 12 <= bytes.byteLength) {
+    const length = view.getUint32(offset);
+    const type = new TextDecoder().decode(bytes.slice(offset + 4, offset + 8));
+    const dataStart = offset + 8;
+    const dataEnd = dataStart + length;
+    if (type === "IHDR") {
+      width = view.getUint32(dataStart);
+      height = view.getUint32(dataStart + 4);
+      if (bytes[dataStart + 8] !== 8 || bytes[dataStart + 9] !== 6) throw new Error("expected encoded RGBA fixture");
+    } else if (type === "IDAT") {
+      idat.push(bytes.slice(dataStart, dataEnd));
+    } else if (type === "IEND") {
+      break;
+    }
+    offset = dataEnd + 4;
+  }
+  const compressed = new Uint8Array(idat.reduce((sum, item) => sum + item.byteLength, 0));
+  let cursor = 0;
+  for (const item of idat) { compressed.set(item, cursor); cursor += item.byteLength; }
+  const raw = new Uint8Array(await new Response(new Blob([compressed]).stream().pipeThrough(new DecompressionStream("deflate"))).arrayBuffer());
+  const rowBytes = width * 4;
+  if (!width || !height || raw.byteLength !== height * (rowBytes + 1)) throw new Error("invalid encoded RGBA fixture");
+  const pixels = new Uint8Array(width * height * 4);
+  for (let y = 0; y < height; y += 1) {
+    if (raw[y * (rowBytes + 1)] !== 1) throw new Error("expected Sub-filtered RGBA fixture");
+    for (let x = 0; x < rowBytes; x += 1) {
+      const target = y * rowBytes + x;
+      const left = x >= 4 ? pixels[target - 4] : 0;
+      pixels[target] = (raw[y * (rowBytes + 1) + x + 1] + left) & 255;
+    }
+  }
+  return { width, height, pixels };
 }
 
 async function visualObject(plan: VisualPlanPayload, kind: "visual_plan" | "visual_asset" | "visual_qa_report", payload: any, inputIds: string[], key: string, binaryStorageRef?: string): Promise<VisualArtifactObject> {
@@ -325,16 +376,42 @@ describe("Wave2C visual planning and immutable contracts", () => {
     expect(await verifyPngWhiteBackground(nearTransparent, 2, 2)).toBe(false);
   });
 
-  it("fits bounded provider canvases without cropping or stretching before exact binary validation", async () => {
+  it("fits only bounded or approved provider canvases without cropping or stretching", async () => {
     const source = await rgbaPngFixture(3, 3, 255, 2);
     const normalized = await normalizePngToExactDimensions(source, 4, 4);
     expect(normalized).not.toBe(source);
     expect(await verifyPngOpaqueCoverage(normalized, 4, 4)).toBe(true);
-    expect(await normalizePngToExactDimensions(normalized, 4, 4)).toBe(normalized);
-    const fixedProviderCanvas = await rgbaPngFixture(6, 4, 255, 2);
-    const wideCover = await normalizePngToExactDimensions(fixedProviderCanvas, 9, 4);
-    expect(await verifyPngOpaqueCoverage(wideCover, 9, 4)).toBe(true);
+    expect(await normalizePngToExactDimensions(normalized, 4, 4)).toEqual(normalized);
+
+    const fixedProviderCanvas = await rgbaPngFixture(1536, 1024, 255, 6, (x, y) => {
+      if (x < 16) return y < 512 ? [255, 0, 0, 255] : [255, 0, 0, 0];
+      if (x >= 504 && x < 520) return [0, 255, 0, 255];
+      if (x >= 1520) return [0, 0, 255, 255];
+      return [255, 255, 255, 255];
+    });
+    const wideCover = await normalizePngToExactDimensions(fixedProviderCanvas, 2256, 960, { backgroundRgb: [0xde, 0xd9, 0xcf], padding: "edge" });
+    const cover = await decodeEncodedRgbaFixture(wideCover);
+    const coverPixel = (x: number, y: number) => Array.from(cover.pixels.slice((y * cover.width + x) * 4, (y * cover.width + x) * 4 + 4));
+    expect([cover.width, cover.height]).toEqual([2256, 960]);
+    expect(coverPixel(0, 100)).toEqual([255, 0, 0, 255]);
+    expect(coverPixel(408, 100)).toEqual([255, 0, 0, 255]);
+    expect(coverPixel(888, 100)).toEqual([0, 255, 0, 255]);
+    expect(coverPixel(2255, 100)).toEqual([0, 0, 255, 255]);
+    expect(coverPixel(0, 800)).toEqual([0xde, 0xd9, 0xcf, 255]);
+    expect(cover.pixels.every((value, index) => index % 4 !== 3 || value === 255)).toBe(true);
+
+    const body = await normalizePngToExactDimensions(fixedProviderCanvas, 1536, 864, { backgroundRgb: [255, 255, 255], padding: "solid" });
+    const bodyPixels = await decodeEncodedRgbaFixture(body);
+    const bodyPixel = (x: number, y: number) => Array.from(bodyPixels.pixels.slice((y * bodyPixels.width + x) * 4, (y * bodyPixels.width + x) * 4 + 4));
+    expect(bodyPixel(0, 100)).toEqual([255, 255, 255, 255]);
+    expect(bodyPixel(120, 100)).toEqual([255, 0, 0, 255]);
+
+    await expect(normalizePngToExactDimensions(await rgbaPngFixture(6, 6, 255, 2), 9, 4)).rejects.toMatchObject({ code: "binary_readback_mismatch" });
     await expect(normalizePngToExactDimensions(await rgbaPngFixture(2, 2, 255), 4, 4)).rejects.toMatchObject({ code: "binary_readback_mismatch" });
+    await expect(normalizePngToExactDimensions(pngFixture(2700, 1149), 2256, 960)).rejects.toMatchObject({ code: "binary_readback_mismatch" });
+    await expect(normalizePngToExactDimensions(new Uint8Array(8 * 1024 * 1024 + 1), 2256, 960)).rejects.toMatchObject({ code: "binary_readback_mismatch" });
+    const inflateBomb = await rgbaPngFixture(3, 3, 255, 6, undefined, new Uint8Array(1024));
+    await expect(normalizePngToExactDimensions(inflateBomb, 4, 4)).rejects.toMatchObject({ code: "binary_readback_mismatch" });
   });
 });
 
@@ -351,6 +428,29 @@ describe("Wave2C controlled image service boundary", () => {
     await expect(callVisualPlanService(noToken, { operation_id: "plan-2" })).rejects.toMatchObject({ code: "service_unconfigured", retryable: false });
     expect(calls).toBe(0);
     await expect(callVisualImageService({ VISUAL_PRODUCTION_TOKEN: "visual-token" }, { operation_id: "image-no-binding", attempt: 1, prompt: "synthetic", size: "1536x864" })).rejects.toMatchObject({ code: "service_unconfigured", retryable: false });
+  });
+
+  it("rejects an oversized adapter base64 result before workflow decoding", async () => {
+    const prompt = "synthetic";
+    const binding: Fetcher = {
+      fetch: async () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          protocol_version: "vibepub.visual.v3",
+          operation: "image",
+          operation_id: "image-oversized",
+          attempt: 1,
+          result: {
+            adapter_version: "visual-generation.adapter.1.0.0",
+            model_version: "gpt-image-2",
+            prompt_hash: await hash(prompt),
+            b64_json: "A".repeat(MAX_PROVIDER_BASE64_CHARS + 1),
+          },
+        }),
+      } as Response),
+    };
+    await expect(callVisualImageService({ IMAGE_GENERATION_ADAPTER: binding, VISUAL_PRODUCTION_TOKEN: "visual-token" }, { operation_id: "image-oversized", attempt: 1, prompt, size: "1536x864" })).rejects.toMatchObject({ code: "service_invalid_response", retryable: false });
   });
 
   it.each([[408, true], [429, true], [500, false], [502, false], [503, false], [504, true]])("classifies visual adapter status %s without using body to upgrade retryability", async (status, retryable) => {

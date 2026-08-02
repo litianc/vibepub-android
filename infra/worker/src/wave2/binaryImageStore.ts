@@ -27,6 +27,14 @@ export class BinaryImageStoreError extends Error {
 }
 
 const PNG_SIGNATURE = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+export const MAX_PROVIDER_PNG_BYTES = 8 * 1024 * 1024;
+export const MAX_PROVIDER_BASE64_CHARS = Math.ceil(MAX_PROVIDER_PNG_BYTES / 3) * 4;
+const MAX_PROVIDER_PIXEL_COUNT = 3_000_000;
+const FIXED_PROVIDER_CANVAS = { width: 1536, height: 1024 } as const;
+type PngNormalizationOptions = {
+  backgroundRgb?: readonly [number, number, number];
+  padding?: "solid" | "edge";
+};
 
 type PngInfo = { width: number; height: number; bitDepth: number; colorType: number; interlace: number; idat: Uint8Array[] };
 
@@ -100,15 +108,35 @@ async function inflatePngPixels(info: PngInfo): Promise<{ pixels: Uint8Array; ch
   const compressed = new Uint8Array(info.idat.reduce((total, item) => total + item.byteLength, 0));
   let cursor = 0;
   for (const item of info.idat) { compressed.set(item, cursor); cursor += item.byteLength; }
-  let raw: Uint8Array;
-  try {
-    raw = new Uint8Array(await new Response(new Blob([compressed]).stream().pipeThrough(new DecompressionStream("deflate"))).arrayBuffer());
-  } catch {
-    throw new BinaryImageStoreError("binary_readback_mismatch", "PNG pixels cannot be decompressed", 422);
-  }
   const channels = info.colorType === 0 ? 1 : info.colorType === 2 ? 3 : info.colorType === 4 ? 2 : 4;
   const rowBytes = info.width * channels;
-  if (raw.byteLength !== info.height * (rowBytes + 1)) throw new BinaryImageStoreError("binary_readback_mismatch", "PNG pixel length is invalid", 422);
+  const expectedLength = info.height * (rowBytes + 1);
+  if (!Number.isSafeInteger(expectedLength) || expectedLength > MAX_PROVIDER_PIXEL_COUNT * 4 + info.height) {
+    throw new BinaryImageStoreError("binary_readback_mismatch", "PNG pixel length exceeds the normalization limit", 422);
+  }
+  const raw = new Uint8Array(expectedLength);
+  let rawOffset = 0;
+  try {
+    const reader = new Blob([compressed]).stream().pipeThrough(new DecompressionStream("deflate")).getReader();
+    try {
+      while (true) {
+        const current = await reader.read();
+        if (current.done) break;
+        if (rawOffset + current.value.byteLength > expectedLength) {
+          try { await reader.cancel(); } catch { /* reject the oversized stream below */ }
+          throw new BinaryImageStoreError("binary_readback_mismatch", "PNG decompressed beyond its declared pixel length", 422);
+        }
+        raw.set(current.value, rawOffset);
+        rawOffset += current.value.byteLength;
+      }
+    } finally {
+      reader.releaseLock();
+    }
+  } catch (error) {
+    if (error instanceof BinaryImageStoreError) throw error;
+    throw new BinaryImageStoreError("binary_readback_mismatch", "PNG pixels cannot be decompressed", 422);
+  }
+  if (rawOffset !== expectedLength) throw new BinaryImageStoreError("binary_readback_mismatch", "PNG pixel length is invalid", 422);
   const pixels = new Uint8Array(info.height * rowBytes);
   for (let y = 0; y < info.height; y += 1) {
     const filter = raw[y * (rowBytes + 1)];
@@ -169,18 +197,41 @@ async function encodeRgbaPng(rgba: Uint8Array, width: number, height: number): P
 /**
  * The approved provider may apply a pixel cap or return its fixed 3:2 canvas.
  * Fit that canvas inside the requested dimensions and fill the unused area
- * from its edge background so text and illustrations are neither stretched
- * nor cropped before the immutable exact-dimension contract is evaluated.
+ * from its approved solid or edge background so text and illustrations are
+ * neither stretched nor cropped before the immutable exact-dimension contract
+ * is evaluated.
  */
-export async function normalizePngToExactDimensions(bytes: Uint8Array, targetWidth: number, targetHeight: number): Promise<Uint8Array> {
+export async function normalizePngToExactDimensions(
+  bytes: Uint8Array,
+  targetWidth: number,
+  targetHeight: number,
+  options: PngNormalizationOptions = {},
+): Promise<Uint8Array> {
   if (!Number.isSafeInteger(targetWidth) || !Number.isSafeInteger(targetHeight) || targetWidth < 1 || targetHeight < 1 || targetWidth > 2256 || targetHeight > 960) {
     throw new BinaryImageStoreError("binary_readback_mismatch", "target image dimensions are invalid", 422);
   }
+  const backgroundRgb = options.backgroundRgb ?? [255, 255, 255];
+  const padding = options.padding ?? "solid";
+  if (!Array.isArray(backgroundRgb) || backgroundRgb.length !== 3 || backgroundRgb.some(value => !Number.isInteger(value) || value < 0 || value > 255) || (padding !== "solid" && padding !== "edge")) {
+    throw new BinaryImageStoreError("binary_readback_mismatch", "image normalization options are invalid", 422);
+  }
+  if (bytes.byteLength > MAX_PROVIDER_PNG_BYTES) {
+    throw new BinaryImageStoreError("binary_readback_mismatch", "provider PNG exceeds the normalization byte limit", 422);
+  }
   const info = readPng(bytes);
-  if (info.width === targetWidth && info.height === targetHeight) return bytes;
+  const pixelCount = info.width * info.height;
+  if (!Number.isSafeInteger(pixelCount) || pixelCount > MAX_PROVIDER_PIXEL_COUNT) {
+    throw new BinaryImageStoreError("binary_readback_mismatch", "provider PNG exceeds the normalization pixel limit", 422);
+  }
+  if (info.width === targetWidth && info.height === targetHeight && info.colorType !== 4 && info.colorType !== 6) return bytes;
+  const sourceRatio = info.width / info.height;
+  const targetRatio = targetWidth / targetHeight;
+  const ratioDrift = Math.abs(sourceRatio - targetRatio) / targetRatio;
   const widthScale = info.width / targetWidth;
   const heightScale = info.height / targetHeight;
-  if (widthScale < 0.6 || widthScale > 1.5 || heightScale < 0.6 || heightScale > 1.5) {
+  const isBoundedTargetScale = ratioDrift <= 0.005 && widthScale >= 0.75 && widthScale <= 1.25 && heightScale >= 0.75 && heightScale <= 1.25;
+  const isFixedProviderCanvas = info.width === FIXED_PROVIDER_CANVAS.width && info.height === FIXED_PROVIDER_CANVAS.height;
+  if (!isBoundedTargetScale && !isFixedProviderCanvas) {
     throw new BinaryImageStoreError("binary_readback_mismatch", "provider image dimensions are outside the bounded normalization contract", 422);
   }
   const { pixels, channels } = await inflatePngPixels(info);
@@ -189,10 +240,15 @@ export async function normalizePngToExactDimensions(bytes: Uint8Array, targetWid
     const source = index * channels;
     const target = index * 4;
     const gray = pixels[source];
-    sourceRgba[target] = gray;
-    sourceRgba[target + 1] = info.colorType === 0 || info.colorType === 4 ? gray : pixels[source + 1];
-    sourceRgba[target + 2] = info.colorType === 0 || info.colorType === 4 ? gray : pixels[source + 2];
-    sourceRgba[target + 3] = info.colorType === 4 ? pixels[source + 1] : info.colorType === 6 ? pixels[source + 3] : 255;
+    const red = gray;
+    const green = info.colorType === 0 || info.colorType === 4 ? gray : pixels[source + 1];
+    const blue = info.colorType === 0 || info.colorType === 4 ? gray : pixels[source + 2];
+    const alpha = info.colorType === 4 ? pixels[source + 1] : info.colorType === 6 ? pixels[source + 3] : 255;
+    const inverseAlpha = 255 - alpha;
+    sourceRgba[target] = Math.round((red * alpha + backgroundRgb[0] * inverseAlpha) / 255);
+    sourceRgba[target + 1] = Math.round((green * alpha + backgroundRgb[1] * inverseAlpha) / 255);
+    sourceRgba[target + 2] = Math.round((blue * alpha + backgroundRgb[2] * inverseAlpha) / 255);
+    sourceRgba[target + 3] = 255;
   }
   const fitScale = Math.min(targetWidth / info.width, targetHeight / info.height);
   const fittedWidth = Math.max(1, Math.min(targetWidth, Math.round(info.width * fitScale)));
@@ -200,13 +256,23 @@ export async function normalizePngToExactDimensions(bytes: Uint8Array, targetWid
   const offsetX = Math.floor((targetWidth - fittedWidth) / 2);
   const offsetY = Math.floor((targetHeight - fittedHeight) / 2);
   const targetRgba = new Uint8Array(targetWidth * targetHeight * 4);
+  for (let target = 0; target < targetRgba.byteLength; target += 4) {
+    targetRgba[target] = backgroundRgb[0];
+    targetRgba[target + 1] = backgroundRgb[1];
+    targetRgba[target + 2] = backgroundRgb[2];
+    targetRgba[target + 3] = 255;
+  }
   for (let y = 0; y < targetHeight; y += 1) {
+    const insideY = y >= offsetY && y < offsetY + fittedHeight;
+    if (padding === "solid" && !insideY) continue;
     const fittedY = Math.max(0, Math.min(fittedHeight - 1, y - offsetY));
     const sourceY = Math.max(0, Math.min(info.height - 1, (fittedY + 0.5) * info.height / fittedHeight - 0.5));
     const y0 = Math.floor(sourceY);
     const y1 = Math.min(info.height - 1, y0 + 1);
     const yWeight = sourceY - y0;
     for (let x = 0; x < targetWidth; x += 1) {
+      const insideX = x >= offsetX && x < offsetX + fittedWidth;
+      if (padding === "solid" && !insideX) continue;
       const fittedX = Math.max(0, Math.min(fittedWidth - 1, x - offsetX));
       const sourceX = Math.max(0, Math.min(info.width - 1, (fittedX + 0.5) * info.width / fittedWidth - 0.5));
       const x0 = Math.floor(sourceX);

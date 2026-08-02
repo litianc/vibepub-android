@@ -3081,11 +3081,20 @@ describe("Wave2B publishing runtime boundary", () => {
     expect(visual.visualReplayDelta?.json_objects).toBe(1);
   });
 
-  it.each([
-    ["cover transparency", { visualCoverTransparent: true }],
-    ["body non-white", { visualBodyNonWhite: true }],
-  ])("persists a complete QA failure report for %s", async (_label, fault) => {
-    const visual = await executeSyntheticScenario("p2_pass", undefined, false, { visual: true, ...fault });
+  it("composites provider cover transparency onto the approved opaque background", async () => {
+    const visual = await executeSyntheticScenario("p2_pass", undefined, false, { visual: true, visualCoverTransparent: true });
+    expect(visual.result).toMatchObject({ state: "visual_ready" });
+    expect(visual.projection).toMatchObject({ state: "visual_ready", progress_percent: 80, error_code: null });
+    expect(visual.visualCalls).toBe(4);
+    const coordinator = runtimeEnv.EDITORIAL_COORDINATOR.getByName(await coordinatorShardName(visual.userId, visual.workspaceId, visual.articleId, visual.runId));
+    const ledger = await coordinator.getFiveAgentVisualLedger(visual.runId, visual.userId, visual.workspaceId);
+    expect(ledger.artifacts).toHaveLength(5);
+    expect(ledger.receipt_ids).toHaveLength(5);
+    expect(ledger.artifacts.find(item => item.kind === "visual_qa_report")?.payload_summary.qa_decision).toBe("pass");
+  });
+
+  it("persists a complete QA failure report for a non-white body image", async () => {
+    const visual = await executeSyntheticScenario("p2_pass", undefined, false, { visual: true, visualBodyNonWhite: true });
     expect(visual.result).toMatchObject({ state: "needs_action" });
     expect(visual.projection).toMatchObject({ state: "needs_action", error_code: "visual_qa_failed", next_action: "review_visual_assets" });
     expect(visual.visualCalls).toBe(4);

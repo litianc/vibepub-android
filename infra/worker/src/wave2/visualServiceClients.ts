@@ -1,4 +1,5 @@
 import { InternalServiceError } from "./serviceClients";
+import { MAX_PROVIDER_BASE64_CHARS } from "./binaryImageStore";
 
 export type VisualImageServiceEnv = {
   IMAGE_GENERATION_ADAPTER?: Fetcher;
@@ -52,7 +53,7 @@ async function invokeVisual(env: VisualImageServiceEnv, operation: "plan" | "ima
     const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(slots)));
     const expectedPromptHash = `sha256:${Array.from(new Uint8Array(digest)).map(byte => byte.toString(16).padStart(2, "0")).join("")}`;
     if (result.prompt_hash !== expectedPromptHash) throw new InternalServiceError("service_invalid_response", 502, false);
-  } else if (typeof result.b64_json !== "string" || result.b64_json.length === 0) {
+  } else if (typeof result.b64_json !== "string" || result.b64_json.length === 0 || result.b64_json.length > MAX_PROVIDER_BASE64_CHARS) {
     throw new InternalServiceError("service_invalid_response", 502, false);
   }
   return { operation, operation_id: body.operation_id as string, attempt: Number(body.attempt), result };

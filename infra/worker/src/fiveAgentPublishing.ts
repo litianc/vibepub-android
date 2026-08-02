@@ -67,7 +67,7 @@ import {
   VisualContractError,
 } from "./wave2/visualContracts";
 import { putImmutableVisualArtifact, readImmutableVisualArtifact, VisualArtifactStoreError } from "./wave2/visualArtifactStore";
-import { BinaryImageStoreError, describeImmutableBinaryImage, normalizePngToExactDimensions, putImmutableBinaryImage, readExistingImmutableBinaryImage, readImmutableBinaryImage, verifyPngOpaqueCoverage, verifyPngWhiteBackground } from "./wave2/binaryImageStore";
+import { BinaryImageStoreError, MAX_PROVIDER_BASE64_CHARS, MAX_PROVIDER_PNG_BYTES, describeImmutableBinaryImage, normalizePngToExactDimensions, putImmutableBinaryImage, readExistingImmutableBinaryImage, readImmutableBinaryImage, verifyPngOpaqueCoverage, verifyPngWhiteBackground } from "./wave2/binaryImageStore";
 import { callVisualImageService, callVisualPlanService, reconcileVisualImageService, reconcileVisualPlanService } from "./wave2/visualServiceClients";
 import {
   WAVE2D_SCHEMA_VERSION,
@@ -2049,11 +2049,15 @@ async function verifyVisualExecutionReadyForQa(
 }
 
 function decodeBase64(value: unknown): Uint8Array {
-  if (typeof value !== "string" || value.length === 0) throw new EditorialRuntimeError("visual_asset_contract_invalid", "image adapter did not return PNG bytes", 502);
+  if (typeof value !== "string" || value.length === 0 || value.length > MAX_PROVIDER_BASE64_CHARS) throw new EditorialRuntimeError("visual_asset_contract_invalid", "image adapter did not return bounded PNG bytes", 502);
+  let binary: string;
   try {
-    const binary = atob(value);
-    return Uint8Array.from(binary, character => character.charCodeAt(0));
+    binary = atob(value);
   } catch { throw new EditorialRuntimeError("visual_asset_contract_invalid", "image adapter returned invalid bytes", 502); }
+  if (binary.length > MAX_PROVIDER_PNG_BYTES) throw new EditorialRuntimeError("visual_asset_contract_invalid", "image adapter returned oversized PNG bytes", 502);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return bytes;
 }
 
 async function visualFailure(
@@ -2581,7 +2585,9 @@ export async function runVisualProductionPhase(input: {
         if (!call.response && !existingBinary) throw new EditorialRuntimeError("external_side_effect_unknown", "visual image result requires binary reconciliation", 503);
         const result = call.response as Record<string, unknown> | null;
         const imageBytes = result
-          ? await normalizePngToExactDimensions(decodeBase64(result.bytes_base64 ?? result.b64_json), slot.width, slot.height)
+          ? await normalizePngToExactDimensions(decodeBase64(result.bytes_base64 ?? result.b64_json), slot.width, slot.height, slot.purpose === "cover"
+            ? { backgroundRgb: [0xde, 0xd9, 0xcf], padding: "edge" }
+            : { backgroundRgb: [255, 255, 255], padding: "solid" })
           : existingBinary!.bytes;
         const expectedBinary = existingBinary?.metadata ?? await describeImmutableBinaryImage(binaryKey, imageBytes, {
           mime: "image/png", width: slot.width, height: slot.height, user_id: params.user_id, workspace_id: params.workspace_id,

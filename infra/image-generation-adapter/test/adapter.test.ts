@@ -7,18 +7,24 @@ class FakeBucket {
   failNextResultPut = false;
   failReads = false;
   headMetadataOverride: Record<string, string> | null = null;
+  sizeOverride: number | null = null;
+  textReads = 0;
 
   async get(key: string): Promise<any> {
     if (this.failReads) throw new Error("read outcome unknown");
     const value = this.objects.get(key);
     if (!value) return null;
-    return { size: new TextEncoder().encode(value.bytes).byteLength, customMetadata: { ...value.metadata }, text: async () => value.bytes };
+    return {
+      size: this.sizeOverride ?? new TextEncoder().encode(value.bytes).byteLength,
+      customMetadata: { ...value.metadata },
+      text: async () => { this.textReads += 1; return value.bytes; },
+    };
   }
 
   async head(key: string): Promise<any> {
     const value = this.objects.get(key);
     if (!value) return null;
-    return { size: new TextEncoder().encode(value.bytes).byteLength, customMetadata: this.headMetadataOverride || { ...value.metadata } };
+    return { size: this.sizeOverride ?? new TextEncoder().encode(value.bytes).byteLength, customMetadata: this.headMetadataOverride || { ...value.metadata } };
   }
 
   async put(key: string, value: string, options: any): Promise<any> {
@@ -183,6 +189,34 @@ describe("controlled visual adapter", () => {
     expect(providerCalls).toBe(1);
     expect(seenUrl).toBe("https://gateway.example/v1/images/generations");
     expect(seenAuth).toBe("Bearer synthetic-provider-token");
+  });
+
+  it("rejects an oversized legacy R2 image result before reading or replaying its body", async () => {
+    let providerCalls = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      providerCalls += 1;
+      return new Response(JSON.stringify({ data: [{ b64_json: "synthetic-image" }] }), { status: 200 });
+    }));
+    const results = bucket();
+    const durable = durableEnv(results);
+    const first = await adapter.fetch(request("/internal/v3/visual/image", "visual-token", imageBody("legacy-oversized-result")), durable);
+    expect(first.status).toBe(200);
+    const textReadsBeforeReplay = results.textReads;
+    results.sizeOverride = 12 * 1024 * 1024;
+    const replay = await adapter.fetch(request("/internal/v3/visual/image", "visual-token", imageBody("legacy-oversized-result")), durable);
+    expect(replay.status).toBe(503);
+    expect(results.textReads).toBe(textReadsBeforeReplay);
+    expect(providerCalls).toBe(1);
+  });
+
+  it("rejects a provider body declared beyond the bounded PNG response budget", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("{}", {
+      status: 200,
+      headers: { "content-length": String(12 * 1024 * 1024) },
+    })));
+    const response = await adapter.fetch(request("/internal/v3/visual/image", "visual-token", imageBody("oversized-provider")), durableEnv(bucket()));
+    expect(response.status).toBe(502);
+    expect(await response.json()).toEqual({ error: { code: "invalid_provider_response", retryable: false } });
   });
 
   it("allows attempts 2 and 3 only after durable retryable outcomes", async () => {

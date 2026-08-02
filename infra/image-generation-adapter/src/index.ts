@@ -48,7 +48,10 @@ const IMAGE_CANARY_MAX_OPERATIONS = 3;
 const IMAGE_CANARY_MAX_TTL_MS = 60 * 60 * 1000;
 const IMAGE_CANARY_RECONCILE_GRACE_MS = 60 * 60 * 1000;
 const PROVIDER_TIMEOUT_MS = 90_000;
-const PROVIDER_MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
+const MAX_PROVIDER_PNG_BYTES = 8 * 1024 * 1024;
+const MAX_PROVIDER_BASE64_CHARS = Math.ceil(MAX_PROVIDER_PNG_BYTES / 3) * 4;
+const MAX_SERIALIZED_IMAGE_RESULT_BYTES = MAX_PROVIDER_BASE64_CHARS + 64 * 1024;
+const PROVIDER_MAX_RESPONSE_BYTES = MAX_SERIALIZED_IMAGE_RESULT_BYTES;
 
 class KnownAdapterError extends Error {
   constructor(public readonly detail: { code: string; status: number; retryable: boolean }) {
@@ -234,18 +237,26 @@ function validRecord(value: unknown): value is R2StoredRecord {
     ["intent", "success", "failed"].includes((value as R2StoredRecord).status));
 }
 
+function hasBoundedImageResult(record: R2StoredRecord): boolean {
+  if (record.operation !== "image" || record.status !== "success") return true;
+  const encoded = record.result?.b64_json;
+  return typeof encoded === "string" && encoded.length > 0 && encoded.length <= MAX_PROVIDER_BASE64_CHARS;
+}
+
 async function readRecord(bucket: R2Bucket, key: string): Promise<R2StoredRecord | null> {
   let object: R2ObjectBody | null;
   try { object = await bucket.get(key); } catch { throw new ReconciliationRequiredError(); }
   if (!object) return null;
+  if (object.size > MAX_SERIALIZED_IMAGE_RESULT_BYTES) throw new ReconciliationRequiredError();
   let head: R2Object | null;
   try { head = await bucket.head(key); } catch { throw new ReconciliationRequiredError(); }
   if (!head) throw new ReconciliationRequiredError();
+  if (head.size > MAX_SERIALIZED_IMAGE_RESULT_BYTES) throw new ReconciliationRequiredError();
   let raw: string;
   try { raw = await object.text(); } catch { throw new ReconciliationRequiredError(); }
   try {
     const parsed: unknown = JSON.parse(raw);
-    if (!validRecord(parsed)) throw new Error("invalid record");
+    if (!validRecord(parsed) || !hasBoundedImageResult(parsed)) throw new Error("invalid record");
     const canonical = canonicalJson(parsed);
     if (raw !== canonical) throw new Error("record bytes are not canonical");
     const recordHash = await sha256(raw);
@@ -336,6 +347,7 @@ async function readPriorTerminalResult(bucket: R2Bucket, operationId: string, op
 }
 
 function resultResponse(operation: Operation, operationId: string, _requestedAttempt: number, record: R2StoredRecord): Response {
+  if (!hasBoundedImageResult(record)) return json({ error: { code: "invalid_provider_response", retryable: false } }, 502);
   if (record.status === "success" && record.result) return json({ protocol_version: PROTOCOL, operation, operation_id: operationId, attempt: record.attempt, result: record.result });
   return json({ error: { code: record.error_code || "adapter_failed", retryable: record.retryable === true } }, record.status_code || 500);
 }
@@ -542,7 +554,7 @@ async function processOperation(env: Env, operation: Operation, shaped: ShapedOp
       return resultResponse(operation, shaped.operationId, shaped.attempt, record);
     }
     const encoded = providerBody.data?.[0]?.b64_json;
-    if (typeof encoded !== "string" || encoded.length === 0) {
+    if (typeof encoded !== "string" || encoded.length === 0 || encoded.length > MAX_PROVIDER_BASE64_CHARS) {
       record = { operation_id: shaped.operationId, operation, attempt: shaped.attempt, request_hash: requestHash, logical_request_hash: logicalRequestHash, status: "failed", status_code: 502, error_code: "invalid_provider_response", retryable: false };
       await putImmutableRecord(bucket, currentKeys.result, record);
       return resultResponse(operation, shaped.operationId, shaped.attempt, record);
