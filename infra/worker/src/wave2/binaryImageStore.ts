@@ -91,6 +91,9 @@ function readPngDimensions(bytes: Uint8Array): { width: number; height: number }
 }
 
 const WHITE_BACKGROUND_THRESHOLD = 0.98;
+const WHITE_BACKGROUND_MIN_CHANNEL = 248;
+const WHITE_BACKGROUND_BORDER_FRACTION = 0.05;
+const WHITE_BACKGROUND_MIN_COVERAGE = 0.35;
 const OPAQUE_PIXEL_THRESHOLD = 0.98;
 
 function paeth(a: number, b: number, c: number): number {
@@ -305,20 +308,37 @@ async function verifyPngWhiteBackgroundUnsafe(bytes: Uint8Array, expectedWidth: 
   const info = readPng(bytes);
   if (info.width !== expectedWidth || info.height !== expectedHeight) return false;
   const { pixels, channels } = await inflatePngPixels(info);
-  let white = 0;
   let opaque = 0;
+  let white = 0;
   let nonWhite = 0;
+  let borderPixels = 0;
+  let borderOpaque = 0;
+  let borderWhite = 0;
+  const borderWidth = Math.max(1, Math.floor(info.width * WHITE_BACKGROUND_BORDER_FRACTION));
+  const borderHeight = Math.max(1, Math.floor(info.height * WHITE_BACKGROUND_BORDER_FRACTION));
   for (let index = 0; index < info.width * info.height; index += 1) {
     const at = index * channels;
     const alpha = info.colorType === 4 ? pixels[at + 1] : info.colorType === 6 ? pixels[at + 3] : 255;
     const red = pixels[at];
     const green = info.colorType === 0 || info.colorType === 4 ? red : pixels[at + 1];
     const blue = info.colorType === 0 || info.colorType === 4 ? red : pixels[at + 2];
+    const x = index % info.width;
+    const y = Math.floor(index / info.width);
+    const isBorder = x < borderWidth || x >= info.width - borderWidth || y < borderHeight || y >= info.height - borderHeight;
+    if (isBorder) borderPixels += 1;
     if (alpha !== 255) continue;
     opaque += 1;
-    if (red === 255 && green === 255 && blue === 255) white += 1; else nonWhite += 1;
+    const isWhite = red >= WHITE_BACKGROUND_MIN_CHANNEL && green >= WHITE_BACKGROUND_MIN_CHANNEL && blue >= WHITE_BACKGROUND_MIN_CHANNEL;
+    if (isWhite) white += 1; else nonWhite += 1;
+    if (isBorder) {
+      borderOpaque += 1;
+      if (isWhite) borderWhite += 1;
+    }
   }
-  return opaque / (info.width * info.height) >= OPAQUE_PIXEL_THRESHOLD && opaque > 0 && nonWhite > 0 && white / opaque >= WHITE_BACKGROUND_THRESHOLD;
+  return opaque / (info.width * info.height) >= OPAQUE_PIXEL_THRESHOLD &&
+    nonWhite > 0 && white / opaque >= WHITE_BACKGROUND_MIN_COVERAGE && borderPixels > 0 &&
+    borderOpaque / borderPixels >= OPAQUE_PIXEL_THRESHOLD &&
+    borderWhite / borderOpaque >= WHITE_BACKGROUND_THRESHOLD;
 }
 
 export async function verifyPngOpaqueCoverage(bytes: Uint8Array, expectedWidth: number, expectedHeight: number): Promise<boolean> {

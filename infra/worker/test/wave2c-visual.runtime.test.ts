@@ -374,6 +374,15 @@ describe("Wave2C visual planning and immutable contracts", () => {
     const nearTransparent = await rgbaPngFixture(2, 2, 1);
     expect(await verifyPngOpaqueCoverage(nearTransparent, 2, 2)).toBe(false);
     expect(await verifyPngWhiteBackground(nearTransparent, 2, 2)).toBe(false);
+    const illustratedNearWhite = await rgbaPngFixture(100, 100, 255, 6, (x, y) =>
+      x >= 20 && x < 80 && y >= 20 && y < 80 ? [17, 17, 17, 255] : [252, 252, 252, 255]);
+    expect(await verifyPngWhiteBackground(illustratedNearWhite, 100, 100)).toBe(true);
+    const tintedBackground = await rgbaPngFixture(100, 100, 255, 6, (x, y) =>
+      x >= 40 && x < 60 && y >= 40 && y < 60 ? [17, 17, 17, 255] : [238, 242, 246, 255]);
+    expect(await verifyPngWhiteBackground(tintedBackground, 100, 100)).toBe(false);
+    const whiteFrameAroundDarkCanvas = await rgbaPngFixture(100, 100, 255, 6, (x, y) =>
+      x >= 5 && x < 95 && y >= 5 && y < 95 ? [32, 64, 96, 255] : [255, 255, 255, 255]);
+    expect(await verifyPngWhiteBackground(whiteFrameAroundDarkCanvas, 100, 100)).toBe(false);
   });
 
   it("fits only bounded or approved provider canvases without cropping or stretching", async () => {
@@ -405,6 +414,7 @@ describe("Wave2C visual planning and immutable contracts", () => {
     const bodyPixel = (x: number, y: number) => Array.from(bodyPixels.pixels.slice((y * bodyPixels.width + x) * 4, (y * bodyPixels.width + x) * 4 + 4));
     expect(bodyPixel(0, 100)).toEqual([255, 255, 255, 255]);
     expect(bodyPixel(120, 100)).toEqual([255, 0, 0, 255]);
+    expect(await verifyPngWhiteBackground(body, 1536, 864)).toBe(true);
 
     await expect(normalizePngToExactDimensions(await rgbaPngFixture(6, 6, 255, 2), 9, 4)).rejects.toMatchObject({ code: "binary_readback_mismatch" });
     await expect(normalizePngToExactDimensions(await rgbaPngFixture(2, 2, 255), 4, 4)).rejects.toMatchObject({ code: "binary_readback_mismatch" });
