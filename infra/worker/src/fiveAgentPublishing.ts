@@ -421,7 +421,7 @@ function assertReviewManifestPins(review: ArtifactObject, manifest: FrozenManife
   }
 }
 
-async function manifestFor(input: FiveAgentStartBody & { user_id: string; workspace_id: string; model_version?: string }): Promise<Record<string, unknown>> {
+async function manifestFor(input: FiveAgentStartBody & { user_id: string; workspace_id: string; payload_hash: string; model_version?: string }): Promise<Record<string, unknown>> {
   const skillPins = {
     ...PUBLICATION_SKILL_PINS,
     style: input.profile_pins.style,
@@ -446,6 +446,7 @@ async function manifestFor(input: FiveAgentStartBody & { user_id: string; worksp
     adapter_pins: skillPins.adapter_pins,
     model_pins: skillPins.model_pins,
     idempotency_key: `run:${input.run_id}`,
+    payload_hash: input.payload_hash,
   };
 }
 
@@ -6005,10 +6006,17 @@ export async function handleFiveAgentPublishingInternalRoute(
         Number(existingCanonical.recording_id) === body.recording_id
         ? existingCanonical.created_at
         : new Date().toISOString();
-      const manifest = await manifestFor({ ...body, user_id: userId, workspace_id: workspaceId, model_version: env.GLM_MODEL });
       const payloadHash = await hashJson({ ...body, user_id: userId, workspace_id: workspaceId });
+      const manifest = await manifestFor({
+        ...body, user_id: userId, workspace_id: workspaceId,
+        payload_hash: payloadHash, model_version: env.GLM_MODEL,
+      });
       const manifestJson = canonicalJson(manifest);
       const manifestHash = await sha256(new TextEncoder().encode(manifestJson));
+      const legacyManifest = { ...manifest };
+      delete legacyManifest.payload_hash;
+      const legacyManifestJson = canonicalJson(legacyManifest);
+      const legacyManifestHash = await sha256(new TextEncoder().encode(legacyManifestJson));
       const runInput: FiveAgentRunInput = {
         run_id: body.run_id,
         article_id: body.article_id,
@@ -6041,6 +6049,17 @@ export async function handleFiveAgentPublishingInternalRoute(
         userId, workspaceId, idempotencyKey: `five-agent:${body.run_id}`, payloadHash,
       });
       const coordinator = await startCoordinator(env, runInput);
+      const existingDoRun = await coordinator.findFiveAgentRun(body.run_id, userId, workspaceId) as Record<string, unknown> | null;
+      if (existingDoRun && (existingDoRun.manifest_hash !== manifestHash || existingDoRun.manifest_json !== manifestJson) &&
+          existingDoRun.manifest_hash === legacyManifestHash && existingDoRun.manifest_json === legacyManifestJson) {
+        const workflowStatus = await coordinator.getFiveAgentWorkflowStatus(body.run_id, runInput.workflow_id);
+        if (workflowStatus !== "not_found") return startHoldResponse(existingDoRun, briefMetadata);
+        await coordinator.upgradeLegacyFiveAgentRunManifest({
+          ...runInput,
+          legacy_manifest_hash: legacyManifestHash,
+          legacy_manifest_json: legacyManifestJson,
+        });
+      }
       await coordinator.startFiveAgentRun(runInput, false);
       let current = await coordinator.getFiveAgentRun(body.run_id, userId, workspaceId) as Record<string, unknown>;
       let briefStorageReconciled = false;

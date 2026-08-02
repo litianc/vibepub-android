@@ -445,6 +445,46 @@ function safeJson(value: unknown): string {
   return canonicalJson(value);
 }
 
+const FIVE_AGENT_MANIFEST_KEYS = [
+  "schema_version", "run_id", "article_id", "recording_id", "user_id", "workspace_id",
+  "workflow_version", "policy_version", "agent_versions", "skill_pins", "adapter_pins",
+  "model_pins", "idempotency_key", "payload_hash",
+] as const;
+
+async function validateFiveAgentManifest(input: FiveAgentRunInput): Promise<Record<string, unknown>> {
+  if (!WAVE2B_OPAQUE_RE.test(input.run_id) || !WAVE2B_OPAQUE_RE.test(input.workflow_id) ||
+      !WAVE2B_OPAQUE_RE.test(input.user_id) || !WAVE2B_OPAQUE_RE.test(input.workspace_id) ||
+      !WAVE2B_OPAQUE_RE.test(input.article_id) || !Number.isSafeInteger(input.recording_id) || input.recording_id < 1) {
+    throw new EditorialRuntimeError("invalid_opaque_id", "Wave2B run identity is invalid", 400);
+  }
+  let manifest: Record<string, unknown>;
+  try { manifest = JSON.parse(input.manifest_json) as Record<string, unknown>; } catch {
+    throw new EditorialRuntimeError("manifest_invalid", "Wave2B manifest is invalid", 400);
+  }
+  const agentVersions = manifest.agent_versions as Record<string, unknown> | undefined;
+  const skillPins = manifest.skill_pins as Record<string, unknown> | undefined;
+  const adapterPins = manifest.adapter_pins as Record<string, unknown> | undefined;
+  const modelPins = manifest.model_pins as Record<string, unknown> | undefined;
+  const manifestPinsValid = isExactWave2PublicationSkillPins(skillPins) &&
+    canonicalJson(skillPins?.adapter_pins) === canonicalJson(adapterPins) &&
+    canonicalJson(skillPins?.model_pins) === canonicalJson(modelPins);
+  if (safeJson(manifest) !== input.manifest_json || await hashText(input.manifest_json) !== input.manifest_hash ||
+      Object.keys(manifest).length !== FIVE_AGENT_MANIFEST_KEYS.length ||
+      Object.keys(manifest).some(key => !(FIVE_AGENT_MANIFEST_KEYS as readonly string[]).includes(key)) ||
+      manifest.schema_version !== "editorial-orchestration.v3" || manifest.run_id !== input.run_id ||
+      manifest.article_id !== input.article_id || manifest.user_id !== input.user_id ||
+      manifest.workspace_id !== input.workspace_id || manifest.recording_id !== input.recording_id ||
+      manifest.workflow_version !== "editorial-workflow.v3" || manifest.policy_version !== "editorial-policy.v3" ||
+      manifest.idempotency_key !== `run:${input.run_id}` || manifest.payload_hash !== input.payload_hash ||
+      canonicalJson(agentVersions) !== canonicalJson(PUBLICATION_AGENT_VERSIONS) || !manifestPinsValid ||
+      canonicalJson(adapterPins) !== canonicalJson(PUBLICATION_WAVE2_ADAPTER_PINS) ||
+      !modelPins || typeof modelPins.writing !== "string" || modelPins.writing.length === 0 ||
+      modelPins.writing.length > 120 || modelPins.editorial_review !== "rules-only") {
+    throw new EditorialRuntimeError("manifest_invalid", "Wave2B manifest is not an allowlisted canonical identity", 409);
+  }
+  return manifest;
+}
+
 function envelopeIdentityMaterial(metadata: FiveAgentEnvelopeMetadata): Record<string, unknown> {
   return {
     schema_version: metadata.schema_version,
@@ -1463,32 +1503,7 @@ export class EditorialCoordinatorAgent extends Agent<EditorialRuntimeEnv, Editor
 
   public async startFiveAgentRun(input: FiveAgentRunInput, startWorkflow = true): Promise<Record<string, unknown>> {
     this.ensureSchema();
-    if (!WAVE2B_OPAQUE_RE.test(input.run_id) || !WAVE2B_OPAQUE_RE.test(input.workflow_id) ||
-        !WAVE2B_OPAQUE_RE.test(input.user_id) || !WAVE2B_OPAQUE_RE.test(input.workspace_id) ||
-        !WAVE2B_OPAQUE_RE.test(input.article_id) || !Number.isSafeInteger(input.recording_id) || input.recording_id < 1) {
-      throw new EditorialRuntimeError("invalid_opaque_id", "Wave2B run identity is invalid", 400);
-    }
-    let manifest: Record<string, unknown>;
-    try { manifest = JSON.parse(input.manifest_json) as Record<string, unknown>; } catch { throw new EditorialRuntimeError("manifest_invalid", "Wave2B manifest is invalid", 400); }
-    const manifestKeys = ["schema_version", "run_id", "article_id", "recording_id", "user_id", "workspace_id", "workflow_version", "policy_version", "agent_versions", "skill_pins", "adapter_pins", "model_pins", "idempotency_key"];
-    const agentVersions = manifest.agent_versions as Record<string, unknown> | undefined;
-    const skillPins = manifest.skill_pins as Record<string, unknown> | undefined;
-    const adapterPins = manifest.adapter_pins as Record<string, unknown> | undefined;
-    const modelPins = manifest.model_pins as Record<string, unknown> | undefined;
-    const expectedAgentVersions = canonicalJson(PUBLICATION_AGENT_VERSIONS);
-    const stylePin = skillPins?.style as Record<string, unknown> | undefined;
-    const manifestPinsValid = isExactWave2PublicationSkillPins(skillPins) &&
-      canonicalJson(skillPins?.adapter_pins) === canonicalJson(adapterPins) && canonicalJson(skillPins?.model_pins) === canonicalJson(modelPins);
-    if (safeJson(manifest) !== input.manifest_json || await hashText(input.manifest_json) !== input.manifest_hash ||
-        manifest.run_id !== input.run_id || manifest.article_id !== input.article_id ||
-        manifest.user_id !== input.user_id || manifest.workspace_id !== input.workspace_id ||
-        manifest.recording_id !== input.recording_id || manifest.workflow_version !== "editorial-workflow.v3" ||
-        manifest.policy_version !== "editorial-policy.v3" || Object.keys(manifest).some(key => !manifestKeys.includes(key)) ||
-        canonicalJson(agentVersions) !== expectedAgentVersions || !manifestPinsValid ||
-        canonicalJson(adapterPins) !== canonicalJson(PUBLICATION_WAVE2_ADAPTER_PINS) ||
-        !modelPins || typeof modelPins.writing !== "string" || modelPins.writing.length === 0 || modelPins.writing.length > 120 || modelPins.editorial_review !== "rules-only") {
-      throw new EditorialRuntimeError("manifest_invalid", "Wave2B manifest is not an allowlisted canonical identity", 409);
-    }
+    await validateFiveAgentManifest(input);
     const existing = this.wave2bRun(input.run_id, input.user_id, input.workspace_id);
     if (existing) {
       if (existing.manifest_hash !== input.manifest_hash || existing.payload_hash !== input.payload_hash ||
@@ -1523,6 +1538,115 @@ export class EditorialCoordinatorAgent extends Agent<EditorialRuntimeEnv, Editor
     });
     if (!startWorkflow) return { run: this.wave2bRun(input.run_id, input.user_id, input.workspace_id), replayed: false };
     return await this.startFiveAgentWorkflowInternal(input, false);
+  }
+
+  public async upgradeLegacyFiveAgentRunManifest(input: FiveAgentRunInput & {
+    legacy_manifest_hash: string;
+    legacy_manifest_json: string;
+  }): Promise<{ replayed: boolean; manifest_hash: string }> {
+    this.ensureSchema();
+    const manifest = await validateFiveAgentManifest(input);
+    let legacyManifest: Record<string, unknown>;
+    try { legacyManifest = JSON.parse(input.legacy_manifest_json) as Record<string, unknown>; } catch {
+      throw new EditorialRuntimeError("legacy_manifest_invalid", "Wave2B legacy manifest is invalid", 409);
+    }
+    const expectedLegacyManifest = { ...manifest };
+    delete expectedLegacyManifest.payload_hash;
+    if (safeJson(legacyManifest) !== input.legacy_manifest_json ||
+        await hashText(input.legacy_manifest_json) !== input.legacy_manifest_hash ||
+        safeJson(expectedLegacyManifest) !== input.legacy_manifest_json) {
+      throw new EditorialRuntimeError("legacy_manifest_invalid", "Wave2B legacy manifest does not match the canonical identity", 409);
+    }
+
+    const current = this.wave2bRun(input.run_id, input.user_id, input.workspace_id);
+    if (!current || current.article_id !== input.article_id || Number(current.recording_id) !== input.recording_id ||
+        current.workflow_id !== input.workflow_id || current.payload_hash !== input.payload_hash ||
+        current.created_at !== input.created_at) {
+      throw new EditorialRuntimeError("legacy_manifest_upgrade_not_safe", "Wave2B legacy manifest run identity is not exact", 409);
+    }
+    if (current.manifest_hash === input.manifest_hash && current.manifest_json === input.manifest_json) {
+      return { replayed: true, manifest_hash: input.manifest_hash };
+    }
+    // Historical repair is limited to a confirmed pre-start hold: one Brief
+    // may exist, but no model, visual, Workflow, or WeChat side effect may exist.
+    const workflowStatus = await this.reconcileFiveAgentWorkflow(input.workflow_id);
+    if (workflowStatus.state !== "not_found") {
+      throw new EditorialRuntimeError("legacy_manifest_upgrade_not_safe", "Wave2B workflow absence is not confirmed", 409);
+    }
+    if (current.manifest_hash !== input.legacy_manifest_hash || current.manifest_json !== input.legacy_manifest_json ||
+        current.state !== "queued" || current.run_status !== "active" || Number(current.progress_percent) !== 0 ||
+        current.resume_state !== null || current.last_successful_state !== "queued" ||
+        Number(current.last_successful_progress_percent) !== 0 || Number(current.retry_count) !== 0 ||
+        Number(current.state_revision) !== 0 || Number(current.revision_count) !== 0 ||
+        current.approval_state !== "not_required" || current.next_action !== null || current.error_code !== null) {
+      throw new EditorialRuntimeError("legacy_manifest_upgrade_not_safe", "Wave2B legacy manifest run has already advanced", 409);
+    }
+
+    const start = this.wave2bStartLedger(input.workflow_id, input.run_id);
+    const workflowStart = this.sql<{ status: string }>`SELECT status FROM editorial_wave2b_workflow_starts
+      WHERE workflow_id = ${input.workflow_id} AND run_id = ${input.run_id} LIMIT 1`[0];
+    const startEvents = this.sql<{ event_type: string; idempotency_key: string; evidence_hash: string }>`
+      SELECT event_type, idempotency_key, evidence_hash FROM editorial_wave2b_start_events
+      WHERE workflow_id = ${input.workflow_id} AND run_id = ${input.run_id} ORDER BY created_at, event_id`;
+    const startReceiptCount = Number(this.sql<{ count: number }>`SELECT count(*) AS count FROM editorial_wave2b_start_receipts
+      WHERE workflow_id = ${input.workflow_id} AND run_id = ${input.run_id}`[0]?.count || 0);
+    const runEvents = this.sql<{ event_type: string; state: string; state_revision: number; artifact_id: string | null; payload_hash: string | null; summary_json: string }>`
+      SELECT event_type, state, state_revision, artifact_id, payload_hash, summary_json FROM editorial_wave2b_events
+      WHERE run_id = ${input.run_id} ORDER BY seq`;
+    const artifacts = this.sql<{ envelope_json: string }>`SELECT envelope_json FROM editorial_wave2b_outbox
+      WHERE run_id = ${input.run_id} ORDER BY created_at, artifact_id`;
+    const callCount = Number(this.sql<{ count: number }>`SELECT count(*) AS count FROM editorial_wave2b_calls
+      WHERE run_id = ${input.run_id}`[0]?.count || 0);
+    const callResultCount = Number(this.sql<{ count: number }>`SELECT count(*) AS count FROM editorial_wave2b_call_results
+      WHERE run_id = ${input.run_id}`[0]?.count || 0);
+    const visualCount = Number(this.sql<{ count: number }>`SELECT
+      (SELECT count(*) FROM editorial_wave2c_visual_artifacts WHERE run_id = ${input.run_id}) +
+      (SELECT count(*) FROM editorial_wave2c_visual_receipts WHERE run_id = ${input.run_id}) +
+      (SELECT count(*) FROM editorial_wave2c_visual_events WHERE run_id = ${input.run_id}) AS count`[0]?.count || 0);
+    const wechatCount = Number(this.sql<{ count: number }>`SELECT
+      (SELECT count(*) FROM editorial_wave2d_wechat_artifacts WHERE run_id = ${input.run_id}) +
+      (SELECT count(*) FROM editorial_wave2d_wechat_receipts WHERE run_id = ${input.run_id}) +
+      (SELECT count(*) FROM editorial_wave2d_wechat_events WHERE run_id = ${input.run_id}) AS count`[0]?.count || 0);
+    const expectedStartEvidenceHash = await hashJson({
+      workflow_id: input.workflow_id, run_id: input.run_id,
+      event_type: "start_reconciliation_required", start_status: "workflow_create_unknown",
+      error_code: "external_side_effect_unknown", next_action: "reconcile_external_side_effect",
+    });
+    let briefEnvelope: Record<string, unknown> | null = null;
+    try { briefEnvelope = artifacts.length === 1 ? JSON.parse(artifacts[0].envelope_json) as Record<string, unknown> : null; } catch {}
+    if (!start || start.status !== "needs_action" || start.start_status !== "workflow_create_unknown" ||
+        start.error_code !== "external_side_effect_unknown" || start.next_action !== "reconcile_external_side_effect" ||
+        workflowStart?.status !== "unknown" || startReceiptCount !== 0 || startEvents.length !== 1 ||
+        startEvents[0].event_type !== "start_reconciliation_required" ||
+        startEvents[0].idempotency_key !== `start-required:${input.workflow_id}:workflow_create_unknown` ||
+        startEvents[0].evidence_hash !== expectedStartEvidenceHash || runEvents.length !== 1 ||
+        runEvents[0].event_type !== "run_queued" || runEvents[0].state !== "queued" ||
+        Number(runEvents[0].state_revision) !== 0 || runEvents[0].artifact_id !== null ||
+        runEvents[0].payload_hash !== input.payload_hash ||
+        runEvents[0].summary_json !== safeJson({ workflow_version: "editorial-workflow.v3" }) ||
+        !briefEnvelope || briefEnvelope.kind !== "article_brief" || briefEnvelope.run_id !== input.run_id ||
+        briefEnvelope.article_id !== input.article_id || Number(briefEnvelope.recording_id) !== input.recording_id ||
+        briefEnvelope.user_id !== input.user_id || briefEnvelope.workspace_id !== input.workspace_id ||
+        callCount !== 0 || callResultCount !== 0 || visualCount !== 0 || wechatCount !== 0) {
+      throw new EditorialRuntimeError("legacy_manifest_upgrade_not_safe", "Wave2B legacy manifest has side effects or non-canonical start evidence", 409);
+    }
+
+    this.transactionSync(() => {
+      const locked = this.wave2bRun(input.run_id, input.user_id, input.workspace_id);
+      if (!locked || locked.manifest_hash !== input.legacy_manifest_hash ||
+          locked.manifest_json !== input.legacy_manifest_json || locked.payload_hash !== input.payload_hash ||
+          locked.workflow_id !== input.workflow_id || locked.state !== "queued" || Number(locked.state_revision) !== 0) {
+        throw new EditorialRuntimeError("legacy_manifest_upgrade_not_safe", "Wave2B legacy manifest changed during reconciliation", 409);
+      }
+      this.sql`UPDATE editorial_wave2b_runs SET manifest_hash = ${input.manifest_hash}, manifest_json = ${input.manifest_json}
+        WHERE run_id = ${input.run_id} AND user_id = ${input.user_id} AND workspace_id = ${input.workspace_id}
+          AND manifest_hash = ${input.legacy_manifest_hash} AND manifest_json = ${input.legacy_manifest_json}`;
+      const upgraded = this.wave2bRun(input.run_id, input.user_id, input.workspace_id);
+      if (!upgraded || upgraded.manifest_hash !== input.manifest_hash || upgraded.manifest_json !== input.manifest_json) {
+        throw new EditorialRuntimeError("legacy_manifest_upgrade_not_safe", "Wave2B legacy manifest upgrade did not commit exactly", 409);
+      }
+    });
+    return { replayed: false, manifest_hash: input.manifest_hash };
   }
 
   public async startFiveAgentWorkflow(input: FiveAgentRunInput & {
@@ -1863,10 +1987,10 @@ export class EditorialCoordinatorAgent extends Agent<EditorialRuntimeEnv, Editor
     return { replayed: prepared.replayed && finalized.replayed, receipt_id: prepared.receipt_id };
   }
 
-  public async getFiveAgentRun(runId: string, userId: string, workspaceId: string): Promise<Record<string, unknown>> {
+  public async findFiveAgentRun(runId: string, userId: string, workspaceId: string): Promise<Record<string, unknown> | null> {
     this.ensureSchema();
     const row = this.wave2bRun(runId, userId, workspaceId);
-    if (!row) throw new EditorialRuntimeError("run_not_found", "Wave2B run not found", 404);
+    if (!row) return null;
     const artifacts = this.sql<{ count: number }>`SELECT count(*) AS count FROM editorial_wave2b_outbox WHERE run_id = ${runId}`[0]?.count || 0;
     const receipts = this.sql<{ count: number }>`SELECT count(*) AS count FROM editorial_wave2b_receipts WHERE run_id = ${runId}`[0]?.count || 0;
     const calls = this.sql<{ count: number }>`SELECT count(*) AS count FROM editorial_wave2b_calls WHERE run_id = ${runId}`[0]?.count || 0;
@@ -1884,6 +2008,12 @@ export class EditorialCoordinatorAgent extends Agent<EditorialRuntimeEnv, Editor
       start_next_action: start?.next_action || null,
       artifact_count: Number(artifacts), receipt_count: Number(receipts), call_intent_count: Number(calls),
     };
+  }
+
+  public async getFiveAgentRun(runId: string, userId: string, workspaceId: string): Promise<Record<string, unknown>> {
+    const row = await this.findFiveAgentRun(runId, userId, workspaceId);
+    if (!row) throw new EditorialRuntimeError("run_not_found", "Wave2B run not found", 404);
+    return row;
   }
 
   public async listFiveAgentCallAttempts(runId: string, userId: string, workspaceId: string): Promise<Array<{

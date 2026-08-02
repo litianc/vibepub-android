@@ -1726,6 +1726,7 @@ describe("Wave2B publishing runtime boundary", () => {
       adapter_pins: { ...PUBLICATION_WAVE2_ADAPTER_PINS },
       model_pins: { writing: "glm-5.2", editorial_review: "rules-only" },
     };
+    const payloadHash = await sha256Text(`run:${runId}`);
     const manifest = {
       schema_version: "editorial-orchestration.v3",
       run_id: runId,
@@ -1740,6 +1741,7 @@ describe("Wave2B publishing runtime boundary", () => {
       adapter_pins: skillPins.adapter_pins,
       model_pins: skillPins.model_pins,
       idempotency_key: `run:${runId}`,
+      payload_hash: payloadHash,
     };
     const manifestJson = canonicalJson(manifest);
     const coordinator = runtimeEnv.EDITORIAL_COORDINATOR.getByName(
@@ -1752,7 +1754,7 @@ describe("Wave2B publishing runtime boundary", () => {
       recording_id: recordingId,
       user_id: userId,
       workspace_id: workspaceId,
-      payload_hash: await sha256Text(`run:${runId}`),
+      payload_hash: payloadHash,
       manifest_hash: await sha256Text(manifestJson),
       manifest_json: manifestJson,
       workflow_id: workflowId,
@@ -1772,7 +1774,7 @@ describe("Wave2B publishing runtime boundary", () => {
         recording_id: recordingId,
         user_id: userId,
         workspace_id: workspaceId,
-        payload_hash: await sha256Text(`run:${runId}`),
+        payload_hash: payloadHash,
         manifest_hash: await sha256Text(manifestJson),
         manifest_json: manifestJson,
         workflow_id: workflowId,
@@ -1807,6 +1809,7 @@ describe("Wave2B publishing runtime boundary", () => {
       adapter_pins: { ...PUBLICATION_WAVE2_ADAPTER_PINS },
       model_pins: { writing: "glm-5.2", editorial_review: "rules-only" },
     };
+    const payloadHash = await sha256Text(`run:${runId}`);
     const manifest = {
       schema_version: "editorial-orchestration.v3",
       run_id: runId,
@@ -1821,6 +1824,7 @@ describe("Wave2B publishing runtime boundary", () => {
       adapter_pins: skillPins.adapter_pins,
       model_pins: skillPins.model_pins,
       idempotency_key: `run:${runId}`,
+      payload_hash: payloadHash,
     };
     const manifestJson = canonicalJson(manifest);
     const coordinator = runtimeEnv.EDITORIAL_COORDINATOR.getByName(await coordinatorShardName(userId, workspaceId, articleId, runId));
@@ -1830,12 +1834,29 @@ describe("Wave2B publishing runtime boundary", () => {
       recording_id: recordingId,
       user_id: userId,
       workspace_id: workspaceId,
-      payload_hash: await sha256Text(`run:${runId}`),
+      payload_hash: payloadHash,
       manifest_hash: await sha256Text(manifestJson),
       manifest_json: manifestJson,
       workflow_id: workflowId,
       created_at: "2026-07-20T00:00:00.000Z",
     }, false);
+    const legacyManifest = { ...manifest };
+    delete legacyManifest.payload_hash;
+    const legacyManifestJson = canonicalJson(legacyManifest);
+    await expect(coordinator.upgradeLegacyFiveAgentRunManifest({
+      run_id: runId,
+      article_id: articleId,
+      recording_id: recordingId,
+      user_id: userId,
+      workspace_id: workspaceId,
+      payload_hash: payloadHash,
+      manifest_hash: await sha256Text(manifestJson),
+      manifest_json: manifestJson,
+      legacy_manifest_hash: await sha256Text(legacyManifestJson),
+      legacy_manifest_json: legacyManifestJson,
+      workflow_id: workflowId,
+      created_at: "2026-07-20T00:00:00.000Z",
+    })).resolves.toEqual({ replayed: true, manifest_hash: await sha256Text(manifestJson) });
 
     const brief = await metadataFor(runId, articleId, recordingId, userId, workspaceId, "article_brief", [], "2026-07-20T00:00:01.000Z");
     const draft = await metadataFor(runId, articleId, recordingId, userId, workspaceId, "article_draft", [brief.artifact_id], "2026-07-20T00:00:02.000Z");
@@ -3366,6 +3387,7 @@ describe("Wave2B publishing runtime boundary", () => {
   it("replays durable failed adapter attempts without a new call and projects their count", async () => {
     const runId = `runtime-v3-failed-${Date.now()}`;
     const coordinator = runtimeEnv.EDITORIAL_COORDINATOR.getByName(`runtime-v3-${runId}`);
+    const payloadHash = await sha256Text(`run:${runId}`);
     const manifest = canonicalJson({
       schema_version: "editorial-orchestration.v3",
       run_id: runId,
@@ -3385,6 +3407,7 @@ describe("Wave2B publishing runtime boundary", () => {
       adapter_pins: { ...PUBLICATION_WAVE2_ADAPTER_PINS },
       model_pins: { writing: "glm-5.2", editorial_review: "rules-only" },
       idempotency_key: `run:${runId}`,
+      payload_hash: payloadHash,
     });
     await coordinator.startFiveAgentRun({
       run_id: runId,
@@ -3392,7 +3415,7 @@ describe("Wave2B publishing runtime boundary", () => {
       recording_id: 1902,
       user_id: "runtime_v3_user",
       workspace_id: "runtime_v3_workspace",
-      payload_hash: await sha256Text(`run:${runId}`),
+      payload_hash: payloadHash,
       manifest_hash: await sha256Text(manifest),
       manifest_json: manifest,
       workflow_id: `five-agent-${runId}`,
@@ -3563,6 +3586,12 @@ describe("Wave2B publishing runtime boundary", () => {
     expect(confirmedRun).toMatchObject({
       state: "queued", state_revision: 0, start_ledger_status: "started", start_status: "workflow_started",
     });
+    expect(JSON.parse(String(confirmedRun.manifest_json))).toMatchObject({
+      payload_hash: confirmedRun.payload_hash,
+    });
+    const publicationIdentity = await runtimeEnv.DB.prepare(`SELECT source_manifest_hash FROM publication_runs WHERE run_id = ?`)
+      .bind(runId).first<{ source_manifest_hash: string }>();
+    expect(publicationIdentity?.source_manifest_hash).toBe(confirmedRun.manifest_hash);
     const evidence = await coordinator.getFiveAgentStartEvidence(runId, `five-agent-${runId}`);
     expect(evidence.events.map(event => event.event_type)).toEqual([
       "start_reconciliation_required", "start_reconciled", "workflow_start_confirmed",
