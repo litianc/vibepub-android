@@ -16,6 +16,7 @@ import {
 import { canonicalJson } from "../src/wave2/artifactContracts";
 import {
   BinaryImageStoreError,
+  normalizePngToExactDimensions,
   putImmutableBinaryImage,
   readExistingImmutableBinaryImage,
   verifyPngOpaqueCoverage,
@@ -131,14 +132,16 @@ function pngFixture(width: number, height: number): Uint8Array {
   return bytes;
 }
 
-async function rgbaPngFixture(width: number, height: number, alpha: number): Promise<Uint8Array> {
-  const rowLength = width * 4 + 1;
+async function rgbaPngFixture(width: number, height: number, alpha: number, colorType: 2 | 6 = 6): Promise<Uint8Array> {
+  const channels = colorType === 2 ? 3 : 4;
+  const rowLength = width * channels + 1;
   const raw = new Uint8Array(rowLength * height);
   for (let y = 0; y < height; y += 1) {
     raw[y * rowLength] = 0;
     for (let x = 0; x < width; x += 1) {
-      const offset = y * rowLength + 1 + x * 4;
-      raw[offset] = 255; raw[offset + 1] = 255; raw[offset + 2] = 255; raw[offset + 3] = alpha;
+      const offset = y * rowLength + 1 + x * channels;
+      raw[offset] = 255; raw[offset + 1] = 255; raw[offset + 2] = 255;
+      if (colorType === 6) raw[offset + 3] = alpha;
     }
   }
   const compressed = new Uint8Array(await new Response(new Blob([raw]).stream().pipeThrough(new CompressionStream("deflate"))).arrayBuffer());
@@ -156,7 +159,7 @@ async function rgbaPngFixture(width: number, height: number, alpha: number): Pro
     return value;
   };
   const ihdr = new Uint8Array(13); const view = new DataView(ihdr.buffer);
-  view.setUint32(0, width); view.setUint32(4, height); ihdr.set([8, 6, 0, 0, 0], 8);
+  view.setUint32(0, width); view.setUint32(4, height); ihdr.set([8, colorType, 0, 0, 0], 8);
   const parts = [new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]), chunk("IHDR", ihdr), chunk("IDAT", compressed), chunk("IEND", new Uint8Array())];
   const output = new Uint8Array(parts.reduce((sum, part) => sum + part.byteLength, 0));
   let offset = 0; for (const part of parts) { output.set(part, offset); offset += part.byteLength; }
@@ -320,6 +323,16 @@ describe("Wave2C visual planning and immutable contracts", () => {
     const nearTransparent = await rgbaPngFixture(2, 2, 1);
     expect(await verifyPngOpaqueCoverage(nearTransparent, 2, 2)).toBe(false);
     expect(await verifyPngWhiteBackground(nearTransparent, 2, 2)).toBe(false);
+  });
+
+  it("normalizes bounded provider scale drift before exact binary validation", async () => {
+    const source = await rgbaPngFixture(3, 3, 255, 2);
+    const normalized = await normalizePngToExactDimensions(source, 4, 4);
+    expect(normalized).not.toBe(source);
+    expect(await verifyPngOpaqueCoverage(normalized, 4, 4)).toBe(true);
+    expect(await normalizePngToExactDimensions(normalized, 4, 4)).toBe(normalized);
+    await expect(normalizePngToExactDimensions(source, 4, 3)).rejects.toMatchObject({ code: "binary_readback_mismatch" });
+    await expect(normalizePngToExactDimensions(await rgbaPngFixture(2, 2, 255), 4, 4)).rejects.toMatchObject({ code: "binary_readback_mismatch" });
   });
 });
 

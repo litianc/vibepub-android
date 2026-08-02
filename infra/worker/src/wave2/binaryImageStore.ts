@@ -93,6 +93,135 @@ function paeth(a: number, b: number, c: number): number {
   return pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
 }
 
+async function inflatePngPixels(info: PngInfo): Promise<{ pixels: Uint8Array; channels: number }> {
+  if (info.bitDepth !== 8 || info.interlace !== 0 || ![0, 2, 4, 6].includes(info.colorType) || info.idat.length === 0) {
+    throw new BinaryImageStoreError("binary_readback_mismatch", "PNG pixel format is unsupported", 422);
+  }
+  const compressed = new Uint8Array(info.idat.reduce((total, item) => total + item.byteLength, 0));
+  let cursor = 0;
+  for (const item of info.idat) { compressed.set(item, cursor); cursor += item.byteLength; }
+  let raw: Uint8Array;
+  try {
+    raw = new Uint8Array(await new Response(new Blob([compressed]).stream().pipeThrough(new DecompressionStream("deflate"))).arrayBuffer());
+  } catch {
+    throw new BinaryImageStoreError("binary_readback_mismatch", "PNG pixels cannot be decompressed", 422);
+  }
+  const channels = info.colorType === 0 ? 1 : info.colorType === 2 ? 3 : info.colorType === 4 ? 2 : 4;
+  const rowBytes = info.width * channels;
+  if (raw.byteLength !== info.height * (rowBytes + 1)) throw new BinaryImageStoreError("binary_readback_mismatch", "PNG pixel length is invalid", 422);
+  const pixels = new Uint8Array(info.height * rowBytes);
+  for (let y = 0; y < info.height; y += 1) {
+    const filter = raw[y * (rowBytes + 1)];
+    if (filter > 4) throw new BinaryImageStoreError("binary_readback_mismatch", "PNG row filter is invalid", 422);
+    const sourceStart = y * (rowBytes + 1) + 1;
+    const targetStart = y * rowBytes;
+    for (let x = 0; x < rowBytes; x += 1) {
+      const target = targetStart + x;
+      const left = x >= channels ? pixels[target - channels] : 0;
+      const up = y > 0 ? pixels[target - rowBytes] : 0;
+      const upperLeft = y > 0 && x >= channels ? pixels[target - rowBytes - channels] : 0;
+      const value = raw[sourceStart + x];
+      pixels[target] = filter === 0 ? value : filter === 1 ? (value + left) & 255 : filter === 2 ? (value + up) & 255 : filter === 3 ? (value + Math.floor((left + up) / 2)) & 255 : (value + paeth(left, up, upperLeft)) & 255;
+    }
+  }
+  return { pixels, channels };
+}
+
+function pngChunk(type: "IHDR" | "IDAT" | "IEND", data: Uint8Array): Uint8Array {
+  const typeBytes = new TextEncoder().encode(type);
+  const chunk = new Uint8Array(12 + data.byteLength);
+  const view = new DataView(chunk.buffer);
+  view.setUint32(0, data.byteLength);
+  chunk.set(typeBytes, 4);
+  chunk.set(data, 8);
+  view.setUint32(8 + data.byteLength, crc32(chunk.slice(4, 8 + data.byteLength)));
+  return chunk;
+}
+
+function joinBytes(parts: Uint8Array[]): Uint8Array {
+  const output = new Uint8Array(parts.reduce((total, part) => total + part.byteLength, 0));
+  let offset = 0;
+  for (const part of parts) { output.set(part, offset); offset += part.byteLength; }
+  return output;
+}
+
+async function encodeRgbaPng(rgba: Uint8Array, width: number, height: number): Promise<Uint8Array> {
+  const rowBytes = width * 4;
+  const filtered = new Uint8Array(height * (rowBytes + 1));
+  for (let y = 0; y < height; y += 1) {
+    const sourceStart = y * rowBytes;
+    const targetStart = y * (rowBytes + 1);
+    filtered[targetStart] = 1;
+    for (let x = 0; x < rowBytes; x += 1) {
+      const left = x >= 4 ? rgba[sourceStart + x - 4] : 0;
+      filtered[targetStart + x + 1] = (rgba[sourceStart + x] - left) & 255;
+    }
+  }
+  const compressed = new Uint8Array(await new Response(new Blob([filtered]).stream().pipeThrough(new CompressionStream("deflate"))).arrayBuffer());
+  const header = new Uint8Array(13);
+  const view = new DataView(header.buffer);
+  view.setUint32(0, width);
+  view.setUint32(4, height);
+  header.set([8, 6, 0, 0, 0], 8);
+  return joinBytes([PNG_SIGNATURE, pngChunk("IHDR", header), pngChunk("IDAT", compressed), pngChunk("IEND", new Uint8Array())]);
+}
+
+/**
+ * The approved provider can preserve the requested aspect ratio while applying
+ * a bounded pixel cap. Normalize that deterministic scale drift before the
+ * immutable exact-dimension contract is evaluated.
+ */
+export async function normalizePngToExactDimensions(bytes: Uint8Array, targetWidth: number, targetHeight: number): Promise<Uint8Array> {
+  if (!Number.isSafeInteger(targetWidth) || !Number.isSafeInteger(targetHeight) || targetWidth < 1 || targetHeight < 1 || targetWidth > 2256 || targetHeight > 960) {
+    throw new BinaryImageStoreError("binary_readback_mismatch", "target image dimensions are invalid", 422);
+  }
+  const info = readPng(bytes);
+  if (info.width === targetWidth && info.height === targetHeight) return bytes;
+  const sourceRatio = info.width / info.height;
+  const targetRatio = targetWidth / targetHeight;
+  const ratioDrift = Math.abs(sourceRatio - targetRatio) / targetRatio;
+  const widthScale = info.width / targetWidth;
+  const heightScale = info.height / targetHeight;
+  if (ratioDrift > 0.005 || widthScale < 0.75 || widthScale > 1.25 || heightScale < 0.75 || heightScale > 1.25) {
+    throw new BinaryImageStoreError("binary_readback_mismatch", "provider image dimensions are outside the bounded normalization contract", 422);
+  }
+  const { pixels, channels } = await inflatePngPixels(info);
+  const sourceRgba = new Uint8Array(info.width * info.height * 4);
+  for (let index = 0; index < info.width * info.height; index += 1) {
+    const source = index * channels;
+    const target = index * 4;
+    const gray = pixels[source];
+    sourceRgba[target] = gray;
+    sourceRgba[target + 1] = info.colorType === 0 || info.colorType === 4 ? gray : pixels[source + 1];
+    sourceRgba[target + 2] = info.colorType === 0 || info.colorType === 4 ? gray : pixels[source + 2];
+    sourceRgba[target + 3] = info.colorType === 4 ? pixels[source + 1] : info.colorType === 6 ? pixels[source + 3] : 255;
+  }
+  const targetRgba = new Uint8Array(targetWidth * targetHeight * 4);
+  for (let y = 0; y < targetHeight; y += 1) {
+    const sourceY = Math.max(0, Math.min(info.height - 1, (y + 0.5) * info.height / targetHeight - 0.5));
+    const y0 = Math.floor(sourceY);
+    const y1 = Math.min(info.height - 1, y0 + 1);
+    const yWeight = sourceY - y0;
+    for (let x = 0; x < targetWidth; x += 1) {
+      const sourceX = Math.max(0, Math.min(info.width - 1, (x + 0.5) * info.width / targetWidth - 0.5));
+      const x0 = Math.floor(sourceX);
+      const x1 = Math.min(info.width - 1, x0 + 1);
+      const xWeight = sourceX - x0;
+      const target = (y * targetWidth + x) * 4;
+      const topLeft = (y0 * info.width + x0) * 4;
+      const topRight = (y0 * info.width + x1) * 4;
+      const bottomLeft = (y1 * info.width + x0) * 4;
+      const bottomRight = (y1 * info.width + x1) * 4;
+      for (let channel = 0; channel < 4; channel += 1) {
+        const top = sourceRgba[topLeft + channel] * (1 - xWeight) + sourceRgba[topRight + channel] * xWeight;
+        const bottom = sourceRgba[bottomLeft + channel] * (1 - xWeight) + sourceRgba[bottomRight + channel] * xWeight;
+        targetRgba[target + channel] = Math.round(top * (1 - yWeight) + bottom * yWeight);
+      }
+    }
+  }
+  return encodeRgbaPng(targetRgba, targetWidth, targetHeight);
+}
+
 export async function verifyPngWhiteBackground(bytes: Uint8Array, expectedWidth: number, expectedHeight: number): Promise<boolean> {
   try {
     return await verifyPngWhiteBackgroundUnsafe(bytes, expectedWidth, expectedHeight);
@@ -103,44 +232,20 @@ export async function verifyPngWhiteBackground(bytes: Uint8Array, expectedWidth:
 
 async function verifyPngWhiteBackgroundUnsafe(bytes: Uint8Array, expectedWidth: number, expectedHeight: number): Promise<boolean> {
   const info = readPng(bytes);
-  if (info.width !== expectedWidth || info.height !== expectedHeight || info.bitDepth !== 8 || info.interlace !== 0 || ![0, 2, 4, 6].includes(info.colorType) || info.idat.length === 0) return false;
-  const compressed = new Uint8Array(info.idat.reduce((total, item) => total + item.byteLength, 0));
-  let cursor = 0;
-  for (const item of info.idat) { compressed.set(item, cursor); cursor += item.byteLength; }
-  let raw: Uint8Array;
-  try { raw = new Uint8Array(await new Response(new Blob([compressed]).stream().pipeThrough(new DecompressionStream("deflate"))).arrayBuffer()); }
-  catch { return false; }
-  const channels = info.colorType === 0 ? 1 : info.colorType === 2 ? 3 : info.colorType === 4 ? 2 : 4;
-  const bytesPerPixel = channels;
-  const rowBytes = info.width * bytesPerPixel;
-  if (raw.byteLength !== info.height * (rowBytes + 1)) return false;
-  const previous = new Uint8Array(rowBytes);
+  if (info.width !== expectedWidth || info.height !== expectedHeight) return false;
+  const { pixels, channels } = await inflatePngPixels(info);
   let white = 0;
   let opaque = 0;
   let nonWhite = 0;
-  for (let y = 0; y < info.height; y += 1) {
-    const filter = raw[y * (rowBytes + 1)];
-    if (filter > 4) return false;
-    const row = new Uint8Array(rowBytes);
-    const start = y * (rowBytes + 1) + 1;
-    for (let x = 0; x < rowBytes; x += 1) {
-      const left = x >= bytesPerPixel ? row[x - bytesPerPixel] : 0;
-      const up = previous[x];
-      const upperLeft = x >= bytesPerPixel ? previous[x - bytesPerPixel] : 0;
-      const value = raw[start + x];
-      row[x] = filter === 0 ? value : filter === 1 ? (value + left) & 255 : filter === 2 ? (value + up) & 255 : filter === 3 ? (value + Math.floor((left + up) / 2)) & 255 : (value + paeth(left, up, upperLeft)) & 255;
-    }
-    for (let x = 0; x < info.width; x += 1) {
-      const at = x * bytesPerPixel;
-      const alpha = info.colorType === 4 ? row[at + 1] : info.colorType === 6 ? row[at + 3] : 255;
-      const red = row[at];
-      const green = info.colorType === 0 || info.colorType === 4 ? red : row[at + 1];
-      const blue = info.colorType === 0 || info.colorType === 4 ? red : row[at + 2];
-      if (alpha !== 255) continue;
-      opaque += 1;
-      if (red === 255 && green === 255 && blue === 255) white += 1; else nonWhite += 1;
-    }
-    previous.set(row);
+  for (let index = 0; index < info.width * info.height; index += 1) {
+    const at = index * channels;
+    const alpha = info.colorType === 4 ? pixels[at + 1] : info.colorType === 6 ? pixels[at + 3] : 255;
+    const red = pixels[at];
+    const green = info.colorType === 0 || info.colorType === 4 ? red : pixels[at + 1];
+    const blue = info.colorType === 0 || info.colorType === 4 ? red : pixels[at + 2];
+    if (alpha !== 255) continue;
+    opaque += 1;
+    if (red === 255 && green === 255 && blue === 255) white += 1; else nonWhite += 1;
   }
   return opaque / (info.width * info.height) >= OPAQUE_PIXEL_THRESHOLD && opaque > 0 && nonWhite > 0 && white / opaque >= WHITE_BACKGROUND_THRESHOLD;
 }
@@ -155,37 +260,13 @@ export async function verifyPngOpaqueCoverage(bytes: Uint8Array, expectedWidth: 
 
 async function verifyPngOpaqueCoverageUnsafe(bytes: Uint8Array, expectedWidth: number, expectedHeight: number): Promise<boolean> {
   const info = readPng(bytes);
-  if (info.width !== expectedWidth || info.height !== expectedHeight || info.bitDepth !== 8 || info.interlace !== 0 || ![0, 2, 4, 6].includes(info.colorType) || info.idat.length === 0) return false;
-  const compressed = new Uint8Array(info.idat.reduce((total, item) => total + item.byteLength, 0));
-  let cursor = 0;
-  for (const item of info.idat) { compressed.set(item, cursor); cursor += item.byteLength; }
-  let raw: Uint8Array;
-  try { raw = new Uint8Array(await new Response(new Blob([compressed]).stream().pipeThrough(new DecompressionStream("deflate"))).arrayBuffer()); }
-  catch { return false; }
-  const channels = info.colorType === 0 ? 1 : info.colorType === 2 ? 3 : info.colorType === 4 ? 2 : 4;
-  const bytesPerPixel = channels;
-  const rowBytes = info.width * bytesPerPixel;
-  if (raw.byteLength !== info.height * (rowBytes + 1)) return false;
-  const previous = new Uint8Array(rowBytes);
+  if (info.width !== expectedWidth || info.height !== expectedHeight) return false;
+  const { pixels, channels } = await inflatePngPixels(info);
   let opaque = 0;
-  for (let y = 0; y < info.height; y += 1) {
-    const filter = raw[y * (rowBytes + 1)];
-    if (filter > 4) return false;
-    const row = new Uint8Array(rowBytes);
-    const start = y * (rowBytes + 1) + 1;
-    for (let x = 0; x < rowBytes; x += 1) {
-      const left = x >= bytesPerPixel ? row[x - bytesPerPixel] : 0;
-      const up = previous[x];
-      const upperLeft = x >= bytesPerPixel ? previous[x - bytesPerPixel] : 0;
-      const value = raw[start + x];
-      row[x] = filter === 0 ? value : filter === 1 ? (value + left) & 255 : filter === 2 ? (value + up) & 255 : filter === 3 ? (value + Math.floor((left + up) / 2)) & 255 : (value + paeth(left, up, upperLeft)) & 255;
-    }
-    for (let x = 0; x < info.width; x += 1) {
-      const at = x * bytesPerPixel;
-      const alpha = info.colorType === 4 ? row[at + 1] : info.colorType === 6 ? row[at + 3] : 255;
-      if (alpha === 255) opaque += 1;
-    }
-    previous.set(row);
+  for (let index = 0; index < info.width * info.height; index += 1) {
+    const at = index * channels;
+    const alpha = info.colorType === 4 ? pixels[at + 1] : info.colorType === 6 ? pixels[at + 3] : 255;
+    if (alpha === 255) opaque += 1;
   }
   return opaque / (info.width * info.height) >= OPAQUE_PIXEL_THRESHOLD;
 }

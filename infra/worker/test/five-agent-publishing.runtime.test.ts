@@ -375,6 +375,7 @@ async function executeSyntheticScenario(
     visualAllowlistMismatch?: boolean;
     visualAdapterResponseLoss?: boolean;
     visualCoverTransparent?: boolean;
+    visualCoverScaledByProvider?: boolean;
     visualBodyNonWhite?: boolean;
     visualFailure?: "nonretry" | "retryable" | "unknown";
     visualPreCancelled?: boolean;
@@ -649,7 +650,8 @@ async function executeSyntheticScenario(
       const mode = size[0] === 2256
         ? (options.visualCoverTransparent ? "transparent" : "valid")
         : (options.visualBodyNonWhite ? "nonwhite" : "valid");
-      value.result.b64_json = await syntheticVisualPng(size[0], size[1], mode, `visual-fixture-slot-${visualImageFixtureOrdinal}`);
+      const fixtureSize = size[0] === 2256 && options.visualCoverScaledByProvider ? [1923, 818] as const : size;
+      value.result.b64_json = await syntheticVisualPng(fixtureSize[0], fixtureSize[1], mode, `visual-fixture-slot-${visualImageFixtureOrdinal}`);
       response = Response.json(value);
     }
     if (body && body.reconcile_only !== true) {
@@ -2171,6 +2173,12 @@ describe("Wave2B publishing runtime boundary", () => {
     expect((await runtimeEnv.FILES_BUCKET.list({ prefix: binaryPrefix })).objects).toHaveLength(6);
     const jsonPrefix = ledger.artifacts.find(item => item.kind === "visual_plan")!.artifact_key.split("/visual/")[0] + "/visual/";
     expect((await runtimeEnv.FILES_BUCKET.list({ prefix: jsonPrefix })).objects.filter((item: { key: string }) => item.key.endsWith(".json")).length).toBe(8);
+  });
+
+  it("normalizes an approved provider-scaled cover and completes visual production", async () => {
+    const visual = await executeSyntheticScenario("p2_pass", undefined, false, { visual: true, visualCoverScaledByProvider: true });
+    expect(visual.result).toMatchObject({ state: "visual_ready" });
+    expect(visual.projection).toMatchObject({ state: "visual_ready", error_code: null, next_action: null });
   });
 
   it("runs the normal visual result through private WeChat drafting with nine logical receipts", async () => {

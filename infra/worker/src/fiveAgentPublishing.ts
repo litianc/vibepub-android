@@ -67,7 +67,7 @@ import {
   VisualContractError,
 } from "./wave2/visualContracts";
 import { putImmutableVisualArtifact, readImmutableVisualArtifact, VisualArtifactStoreError } from "./wave2/visualArtifactStore";
-import { BinaryImageStoreError, describeImmutableBinaryImage, putImmutableBinaryImage, readExistingImmutableBinaryImage, readImmutableBinaryImage, verifyPngOpaqueCoverage, verifyPngWhiteBackground } from "./wave2/binaryImageStore";
+import { BinaryImageStoreError, describeImmutableBinaryImage, normalizePngToExactDimensions, putImmutableBinaryImage, readExistingImmutableBinaryImage, readImmutableBinaryImage, verifyPngOpaqueCoverage, verifyPngWhiteBackground } from "./wave2/binaryImageStore";
 import { callVisualImageService, callVisualPlanService, reconcileVisualImageService, reconcileVisualPlanService } from "./wave2/visualServiceClients";
 import {
   WAVE2D_SCHEMA_VERSION,
@@ -2571,7 +2571,9 @@ export async function runVisualProductionPhase(input: {
         });
         if (!call.response && !existingBinary) throw new EditorialRuntimeError("external_side_effect_unknown", "visual image result requires binary reconciliation", 503);
         const result = call.response as Record<string, unknown> | null;
-        const imageBytes = result ? decodeBase64(result.bytes_base64 ?? result.b64_json) : existingBinary!.bytes;
+        const imageBytes = result
+          ? await normalizePngToExactDimensions(decodeBase64(result.bytes_base64 ?? result.b64_json), slot.width, slot.height)
+          : existingBinary!.bytes;
         const expectedBinary = existingBinary?.metadata ?? await describeImmutableBinaryImage(binaryKey, imageBytes, {
           mime: "image/png", width: slot.width, height: slot.height, user_id: params.user_id, workspace_id: params.workspace_id,
           run_id: params.run_id, frozen_payload_hash: planPayload.frozen_payload_hash, slot_id: slot.slot_id,
