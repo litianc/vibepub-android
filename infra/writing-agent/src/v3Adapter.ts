@@ -376,6 +376,36 @@ async function validateInitialSource(request: V3WriteRequest): Promise<void> {
   if (request.source_hash !== undefined && (!validHash(request.source_hash) || request.source_hash !== actualHash)) fail("source_hash_mismatch", 409);
 }
 
+const MODEL_FIELD_RULES = `返回值必须严格遵守以下规则：
+- blocks 的 kind 只能是 paragraph、heading、quote、list、code、table；不得使用 header 或 subheading。
+- blocks 的 order 从 0 开始连续递增；每个 block 必须同时包含 block_id、kind、order、text、claim_ids、image_ref_ids，后两个字段即使为空也必须返回数组。
+- title_candidates 必须是非空字符串数组，selected_title 必须等于 title 且出现在 title_candidates 中。
+- cover_title 必须是包含 1-4 个字符串的数组，不能返回单个字符串。
+- claim_ledger 中每项必须同时包含 claim_id、block_id、classification、verification_status；classification 只能是 author_view、source_fact、external_fact，verification_status 只能是 not_required、pending、verified、failed。
+- blocks 中出现的每个 claim_id 必须在 claim_ledger 中恰好出现一次并指向该 block；没有可追踪主张时，两处都返回空数组。
+- 不要返回 body 或 text_hash，它们由 adapter 计算。`;
+
+const INITIAL_MODEL_OUTPUT_EXAMPLE = JSON.stringify({
+  title: "完整标题",
+  blocks: [{
+    block_id: "block_v1_1",
+    kind: "paragraph",
+    order: 0,
+    text: "段落正文",
+    claim_ids: ["claim_1"],
+    image_ref_ids: [],
+  }],
+  claim_ledger: [{
+    claim_id: "claim_1",
+    block_id: "block_v1_1",
+    classification: "source_fact",
+    verification_status: "pending",
+  }],
+  title_candidates: ["完整标题", "候选标题"],
+  selected_title: "完整标题",
+  cover_title: ["第一行", "第二行"],
+});
+
 function validateRequest(input: V3WriteRequest): V3WriteRequest {
   if (input.protocol_version !== V3_PROTOCOL_VERSION) fail("protocol_version_conflict", 409);
   if (input.mode !== "initial" && input.mode !== "revision") fail("invalid_request", 400);
@@ -386,7 +416,7 @@ function validateRequest(input: V3WriteRequest): V3WriteRequest {
 }
 
 function promptFor(request: V3WriteRequest, style: ResolvedStyleProfile): string {
-  if (request.mode === "initial") return `${style.body}\n\n请将以下受控素材写成结构化文章，返回完整 JSON：title、blocks（含 block_id、kind、order、text、claim_ids、image_ref_ids；body 与 text_hash 由 adapter 计算）、claim_ledger、title_candidates、selected_title、cover_title。claim_ledger 必须完整覆盖 blocks 中的 claim_ids。\n${request.source_text}`;
+  if (request.mode === "initial") return `${style.body}\n\n请将以下受控素材写成结构化文章，只返回一个 JSON 对象。${MODEL_FIELD_RULES}\n初次成文的 block_id 必须按 block_v1_1、block_v1_2 顺序生成，并与从 0 开始的 order 一一对应。\n结构示例：${INITIAL_MODEL_OUTPUT_EXAMPLE}\n受控素材：\n${request.source_text}`;
   const draft = request.current_draft!.payload;
   const dispatch = request.revision_dispatch!.payload;
   const currentDraftProjection = {
@@ -399,7 +429,7 @@ function promptFor(request: V3WriteRequest, style: ResolvedStyleProfile): string
     cover_title: draft.cover_title,
   };
   const revisionScope = { target: dispatch.target, target_block_ids: dispatch.target_block_ids, issue_codes: dispatch.issue_codes, instruction_text: dispatch.instruction_text };
-  return `${style.body}\n\n只修改 RevisionDispatch 指定的目标，未指定的标题、block 和 claim_ledger 条目必须逐字保留。返回完整 JSON：title、blocks（含 block_id、kind、order、text、claim_ids、image_ref_ids；body 与 text_hash 由 adapter 计算）、claim_ledger、title_candidates、selected_title、cover_title。claim_ledger 必须完整覆盖 blocks 中的 claim_ids。\n受控修订范围（canonical 白名单）：${canonical(revisionScope)}\n当前 Draft（canonical 白名单，只读）：${canonical(currentDraftProjection)}`;
+  return `${style.body}\n\n只修改 RevisionDispatch 指定的目标，未指定的标题、block 和 claim_ledger 条目必须逐字保留，只返回一个 JSON 对象。${MODEL_FIELD_RULES}\n修订时必须逐字保留当前 Draft 中每个 block 的 block_id 和 order，不得重新编号。\n受控修订范围（canonical 白名单）：${canonical(revisionScope)}\n当前 Draft（canonical 白名单，只读）：${canonical(currentDraftProjection)}`;
 }
 
 function modelError(status: number): V3WritingError {

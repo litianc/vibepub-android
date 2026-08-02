@@ -118,6 +118,8 @@ describe("WritingAgent V3 adapter", () => {
     });
     const requestBody = JSON.parse(calls[0]) as { messages: Array<{ content: string }>; thinking: { type: string } };
     expect(requestBody.messages[0].content).toContain(DEFAULT_STYLE_PROFILES[0].body);
+    expect(requestBody.messages[0].content).toContain("不得使用 header 或 subheading");
+    expect(requestBody.messages[0].content).toContain('"cover_title":["第一行","第二行"]');
     expect(requestBody.thinking).toEqual({ type: "disabled" });
     expect(result.formatting_skill).toEqual(V3_FORMATTING_SKILL);
     expect(result.profile_pins.style).toEqual(V3_DEFAULT_STYLE_PROFILE);
