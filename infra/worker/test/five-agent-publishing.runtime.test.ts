@@ -3522,9 +3522,7 @@ describe("Wave2B publishing runtime boundary", () => {
     const workflow = {
       get: async () => ({ status: async () => {
         statusCalls += 1;
-        if (!workflowCreated) {
-          throw Object.assign(new Error("workflows.api.error.instance.not_found"), { code: 10400 });
-        }
+        if (!workflowCreated) throw new Error("workflows.api.error.instance.not_found [code: 10400]");
         if (statusCalls === 2) throw new Error("workflow status temporarily unavailable");
         return { status: "queued" };
       } }),

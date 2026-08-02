@@ -654,6 +654,17 @@ function exactRunIdentity(
     row.article_id === marker.article_id && Number(row.recording_id) === marker.recording_id;
 }
 
+function exactStartResponseIdentity(
+  row: Record<string, unknown>,
+  expectedRunId: string,
+  marker: HandoffMarker,
+): boolean {
+  const ownerIsRedacted = row.user_id === undefined && row.workspace_id === undefined;
+  const ownerMatches = row.user_id === marker.user_id && row.workspace_id === marker.workspace_id;
+  return (ownerIsRedacted || ownerMatches) && row.run_id === expectedRunId &&
+    row.article_id === marker.article_id && Number(row.recording_id) === marker.recording_id;
+}
+
 function strictJsonRecord(value: unknown, code: string): Record<string, unknown> {
   if (typeof value !== "string") {
     throw new MiningV3HandoffError(code, 409, "V3 run manifest evidence is invalid");
@@ -1507,7 +1518,7 @@ async function startWithInvoker(
   const responseBody = body as Record<string, unknown>;
   const publicRun = responseBody.run;
   if (!publicRun || typeof publicRun !== "object" || Array.isArray(publicRun) ||
-      !exactRunIdentity(publicRun as Record<string, unknown>, expectedRunId, marker)) {
+      !exactStartResponseIdentity(publicRun as Record<string, unknown>, expectedRunId, marker)) {
     throw new MiningV3HandoffError("mining_handoff_start_response_invalid", 502, "V3 start response identity is invalid");
   }
   if (result.status === 202 && responseBody.workflow_status === "unknown") {

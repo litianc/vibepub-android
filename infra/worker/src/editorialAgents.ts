@@ -640,9 +640,19 @@ function timestampAtOrAfter(previous: string, candidate: string): string {
   return candidate;
 }
 
+function isCloudflareWorkflowInstanceNotFoundMessage(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  const message = value.trim();
+  const signature = "workflows.api.error.instance.not_found";
+  if (!message.includes(signature)) return false;
+  const codes = [...message.matchAll(/\[code:\s*([0-9]+)\]/gi)].map(match => match[1]);
+  return codes.length === 0 || codes.every(code => code === "10400");
+}
+
 function isStructuredWorkflowNotFound(error: unknown): boolean {
   let current: unknown = error;
-  for (let depth = 0; depth < 3 && current; depth += 1) {
+  for (let depth = 0; depth < 4 && current; depth += 1) {
+    if (typeof current === "string") return isCloudflareWorkflowInstanceNotFoundMessage(current);
     if (typeof current !== "object") return false;
     const record = current as Record<string, unknown>;
     const status = record.status;
@@ -652,7 +662,8 @@ function isStructuredWorkflowNotFound(error: unknown): boolean {
     if (status === 404 || status === "404" || code === 404 || code === "404" ||
         code === 10400 || code === "10400" ||
         code === "NOT_FOUND" || code === "WORKFLOW_NOT_FOUND") return true;
-    current = record.cause;
+    if (isCloudflareWorkflowInstanceNotFoundMessage(record.message)) return true;
+    current = record.cause ?? record.error;
   }
   return false;
 }

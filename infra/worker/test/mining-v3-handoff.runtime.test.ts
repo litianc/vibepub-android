@@ -839,8 +839,8 @@ describe("Mining V3 handoff Worker boundary", () => {
     const started = await miningV3HandoffTesting.startWithInvoker(env, textKey, String(handoff.handoff_id), undefined, async (_marker: unknown, _transcript: unknown) => {
       starts += 1;
       return Response.json({ run: {
-        run_id: evidence.runId, user_id: userId, workspace_id: workspaceId,
-        article_id: marker.article_id, recording_id: marker.recording_id, state: "queued",
+        run_id: evidence.runId, article_id: marker.article_id,
+        recording_id: marker.recording_id, state: "queued",
       } }, { status: 202 });
     });
     expect(started.status).toBe(202);
@@ -924,14 +924,17 @@ describe("Mining V3 handoff Worker boundary", () => {
       run_id: evidence.runId, user_id: userId, workspace_id: workspaceId,
       article_id: marker.article_id, recording_id: marker.recording_id,
     };
-    const queued = await miningV3HandoffTesting.startWithInvoker(env, sourceKey, marker.handoff_id, undefined, async () => Response.json({ run: { ...publicRun, state: "queued" } }, { status: 202 }));
+    const redactedRun = {
+      run_id: evidence.runId, article_id: marker.article_id, recording_id: marker.recording_id,
+    };
+    const queued = await miningV3HandoffTesting.startWithInvoker(env, sourceKey, marker.handoff_id, undefined, async () => Response.json({ run: { ...redactedRun, state: "queued" } }, { status: 202 }));
     expect(queued.status).toBe(202);
     expect(await queued.json()).toMatchObject({ decision: "accepted", run_id: evidence.runId });
 
     await setWorkflowCreateUnknownProof(state, marker, evidence);
     const hold = await miningV3HandoffTesting.startWithInvoker(env, sourceKey, marker.handoff_id, undefined, async () => Response.json({
       run: {
-        ...publicRun, state: "needs_action", start_ledger_status: "needs_action", start_status: "workflow_create_unknown",
+        ...redactedRun, state: "needs_action", start_ledger_status: "needs_action", start_status: "workflow_create_unknown",
         start_error_code: "external_side_effect_unknown", start_next_action: "reconcile_external_side_effect",
       }, workflow_status: "unknown",
     }, { status: 202 }));
@@ -939,7 +942,7 @@ describe("Mining V3 handoff Worker boundary", () => {
     expect(await hold.json()).toMatchObject({ decision: "accepted", run_id: evidence.runId });
 
     Object.assign(state, structuredClone(normalState));
-    await expect(miningV3HandoffTesting.startWithInvoker(env, sourceKey, marker.handoff_id, undefined, async () => Response.json({ run: { ...publicRun, run_id: "run_v3_other" } }, { status: 202 })))
+    await expect(miningV3HandoffTesting.startWithInvoker(env, sourceKey, marker.handoff_id, undefined, async () => Response.json({ run: { ...redactedRun, run_id: "run_v3_other" } }, { status: 202 })))
       .rejects.toMatchObject({ code: "mining_handoff_start_response_invalid", status: 502 });
 
     state.publication = null;
