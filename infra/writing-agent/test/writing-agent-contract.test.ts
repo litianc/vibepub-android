@@ -63,8 +63,11 @@ describe("WritingAgent Worker", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
       choices: [{ message: { content: JSON.stringify({
         title: "认证测试标题",
-        body: "认证测试正文。",
-        blocks: [{ block_id: "block_v1_1", kind: "paragraph", order: 0, text: "认证测试正文。", text_hash: await sha256Hex("认证测试正文。"), claim_ids: [], image_ref_ids: [] }],
+        body: "认证测试正文第一段。\n\n认证测试正文第二段。",
+        blocks: [
+          { block_id: "block_v1_1", kind: "paragraph", order: 0, text: "认证测试正文第一段。", text_hash: await sha256Hex("认证测试正文第一段。"), claim_ids: [], image_ref_ids: [] },
+          { block_id: "block_v1_2", kind: "paragraph", order: 1, text: "认证测试正文第二段。", text_hash: await sha256Hex("认证测试正文第二段。"), claim_ids: [], image_ref_ids: [] },
+        ],
         claim_ledger: [],
         title_candidates: ["认证测试标题"],
         selected_title: "认证测试标题",

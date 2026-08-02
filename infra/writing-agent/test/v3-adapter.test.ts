@@ -119,6 +119,7 @@ describe("WritingAgent V3 adapter", () => {
     const requestBody = JSON.parse(calls[0]) as { messages: Array<{ content: string }>; thinking: { type: string } };
     expect(requestBody.messages[0].content).toContain(DEFAULT_STYLE_PROFILES[0].body);
     expect(requestBody.messages[0].content).toContain("不得使用 header 或 subheading");
+    expect(requestBody.messages[0].content).toContain("至少生成两个内容不同的非空 block");
     expect(requestBody.messages[0].content).toContain('"cover_title":["第一行","第二行"]');
     expect(requestBody.thinking).toEqual({ type: "disabled" });
     expect(result.formatting_skill).toEqual(V3_FORMATTING_SKILL);
@@ -128,6 +129,47 @@ describe("WritingAgent V3 adapter", () => {
     expect(result.content_hash).toMatch(/^sha256:/);
     expect(result.body).toBe("第一段\n\n保留的第二段");
     expect(result.blocks[0].text_hash).toBe(await hash("第一段"));
+  });
+
+  it("splits one multi-sentence initial paragraph without adding text and keeps claim ownership exact", async () => {
+    const first = "先确认基础环境是否可用。";
+    const second = "然后我们做一个简单的测试，避免盲目排查。";
+    const source = "我们做一个简单的测试。";
+    const result = await runV3WritingAdapter(
+      { GLM_API_KEY: "synthetic" },
+      baseRequest({ source_text: source }),
+      async () => rawModelResponse({
+        title: "测试标题",
+        body: `${first}${second}`,
+        blocks: [{ block_id: "block_v1_1", kind: "paragraph", order: 0, text: `${first}${second}`, claim_ids: ["claim_1"], image_ref_ids: [] }],
+        claim_ledger: [{ claim_id: "claim_1", block_id: "block_v1_1", classification: "author_view", verification_status: "not_required" }],
+        title_candidates: ["测试标题"],
+        selected_title: "测试标题",
+        cover_title: ["测试标题"],
+      }),
+    );
+
+    expect(result.body.replaceAll("\n", "")).toBe(`${first}${second}`);
+    expect(result.blocks.map(block => block.text)).toEqual([first, second]);
+    expect(result.blocks.map(block => block.block_id)).toEqual(["block_v1_1", "block_v1_2"]);
+    expect(result.blocks[1].claim_ids).toEqual(["claim_1"]);
+    expect(result.claim_ledger).toEqual([{ claim_id: "claim_1", block_id: "block_v1_2", classification: "author_view", verification_status: "not_required" }]);
+  });
+
+  it("asks the workflow for a controlled retry when one initial block cannot be split", async () => {
+    await expect(runV3WritingAdapter(
+      { GLM_API_KEY: "synthetic" },
+      baseRequest(),
+      async () => rawModelResponse({
+        title: "测试标题",
+        body: "过短正文",
+        blocks: [{ block_id: "block_v1_1", kind: "paragraph", order: 0, text: "过短正文", claim_ids: [], image_ref_ids: [] }],
+        claim_ledger: [],
+        title_candidates: ["测试标题"],
+        selected_title: "测试标题",
+        cover_title: ["测试标题"],
+      }),
+    )).rejects.toMatchObject({ code: "upstream_retryable", retryable: true, status: 502 });
   });
 
   it("requires the exact protocol version before invoking the model", async () => {

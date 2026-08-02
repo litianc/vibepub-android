@@ -1226,6 +1226,15 @@ function visualIntegrityError(error: unknown): boolean {
     (error instanceof EditorialRuntimeError && (error.code === "visual_artifact_identity_conflict" || error.code === "visual_artifact_mirror_conflict" || error.code === "visual_artifact_metadata_invalid"));
 }
 
+function isInsufficientVisualPlanError(error: unknown): boolean {
+  if (error instanceof VisualContractError && error.code === "visual_plan_insufficient_unique_blocks") return true;
+  const record = error && typeof error === "object" ? error as { code?: unknown; message?: unknown } : null;
+  if (record?.code === "visual_plan_insufficient_unique_blocks") return true;
+  const message = String(record?.message || error || "");
+  return message.includes("visual_plan_insufficient_unique_blocks") ||
+    message.includes("visual planning requires enough unique non-blank blocks");
+}
+
 function adapterFailureMetadata(error: unknown, role: "writing" | "review"): { errorCode: string; nextAction: string; retryCount: number } {
   const exhausted = (error instanceof InternalServiceError && wave2bRetryable(error)) ||
     (error instanceof EditorialRuntimeError && error.code === "adapter_retry_exhausted");
@@ -2520,7 +2529,7 @@ export async function runVisualProductionPhase(input: {
     });
   } catch (error) {
     if (error instanceof VisualCancelledError) return { run_id: params.run_id, state: "cancelled", state_revision: Number(frozen.doStateRevision || 0), transcript_ref: transcript.ref, transcript_hash: transcript.hash, artifact_ids: priorArtifactIds };
-    if (error instanceof VisualContractError && error.code === "visual_plan_insufficient_unique_blocks") return visualHoldWithCode(env, coordinator, params, transcript, priorArtifactIds, "visual_plan_insufficient_unique_blocks", "revise_content_before_visuals", 12, 0);
+    if (isInsufficientVisualPlanError(error)) return visualHoldWithCode(env, coordinator, params, transcript, priorArtifactIds, "visual_plan_insufficient_unique_blocks", "revise_content_before_visuals", 12, 0);
     if (isVisualReconciliationHold(error)) return visualHold(env, coordinator, params, transcript, priorArtifactIds, 12, error instanceof EditorialRuntimeError ? error.retryCount : 1);
     if (visualIntegrityError(error)) return visualFailure(env, coordinator, params, transcript, priorArtifactIds, "visual_asset_contract_invalid", "retry_after_service_fix", 12);
     return visualFailure(env, coordinator, params, transcript, priorArtifactIds, error instanceof EditorialRuntimeError ? error.code : "visual_generation_non_retryable", "retry_after_service_fix", 12, error instanceof EditorialRuntimeError ? error.retryCount : 1);

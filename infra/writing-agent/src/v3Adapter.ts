@@ -211,6 +211,59 @@ async function normalizeBlocks(value: unknown, emptyBody?: string, requireTextHa
   return Promise.all(emptyBody.split(/\n{2,}/).map(blockFromText));
 }
 
+function splitParagraphAtNaturalBoundary(value: string): [string, string] | null {
+  const text = value.trim();
+  const midpoint = text.length / 2;
+  const boundaries = (pattern: RegExp): number[] => {
+    const indexes: number[] = [];
+    for (const match of text.matchAll(pattern)) {
+      const index = Number(match.index) + match[0].length;
+      if (index > 0 && index < text.length) indexes.push(index);
+    }
+    return indexes;
+  };
+  const choose = (indexes: number[]): [string, string] | null => {
+    const candidates = indexes
+      .map(index => [text.slice(0, index).trim(), text.slice(index).trim()] as [string, string])
+      .filter(parts => Array.from(parts[0]).length >= 8 && Array.from(parts[1]).length >= 8)
+      .sort((left, right) => Math.abs(left[0].length - midpoint) - Math.abs(right[0].length - midpoint));
+    return candidates[0] || null;
+  };
+  return choose(boundaries(/[。！？!?；;][”’」』）】]*/g)) ||
+    choose(boundaries(/[，,：:][”’」』）】]*/g));
+}
+
+async function ensureInitialVisualStructure(
+  blocks: V3Block[],
+  claims: V3ArticleDraft["claim_ledger"],
+  sourceText: string,
+): Promise<{ blocks: V3Block[]; claims: V3ArticleDraft["claim_ledger"] }> {
+  if (new Set(blocks.map(block => block.text_hash)).size >= 2) return { blocks, claims };
+  if (blocks.length !== 1) fail("upstream_retryable", 502, true);
+  const split = splitParagraphAtNaturalBoundary(blocks[0].text);
+  if (!split || split[0] === split[1]) fail("upstream_retryable", 502, true);
+
+  const source = sourceText.trim().replace(/[。！？!?；;，,：:\s]+$/g, "");
+  const claimBlockIndex = source && split[1].includes(source) && !split[0].includes(source) ? 1 : 0;
+  const normalizedBlocks = await Promise.all(split.map(async (text, index) => ({
+    ...blocks[0],
+    block_id: `block_v1_${index + 1}`,
+    order: index,
+    text,
+    text_hash: await hashText(text),
+    claim_ids: index === claimBlockIndex ? blocks[0].claim_ids : [],
+    image_ref_ids: index === 0 ? blocks[0].image_ref_ids : [],
+  } satisfies V3Block)));
+  const normalizedClaims = claims.map(claim => claim.block_id === blocks[0].block_id
+    ? { ...claim, block_id: normalizedBlocks[claimBlockIndex].block_id }
+    : claim);
+  assertClaimLedgerMatchesBlocks(normalizedBlocks, normalizedClaims);
+  return {
+    blocks: normalizedBlocks,
+    claims: normalizedClaims,
+  };
+}
+
 function assertClaimLedgerMatchesBlocks(blocks: V3Block[], ledger: V3ArticleDraft["claim_ledger"], errorCode = "invalid_model_response", status = 502): void {
   const blockIds = new Set(blocks.map(block => block.block_id));
   const ledgerClaims = new Map<string, string[]>();
@@ -260,15 +313,22 @@ async function normalizeModelDraft(value: unknown, request: V3WriteRequest, styl
   if (!value || typeof value !== "object") fail("invalid_model_response", 502);
   const record = value as Record<string, unknown>;
   const title = stringValue(record.title, "title", 2_000);
-  const blocks = await normalizeBlocks(record.blocks);
-  const body = blocks.map(block => block.text).join("\n\n");
-  if (record.body !== undefined && (typeof record.body !== "string" || record.body !== body)) fail("invalid_model_response", 502);
+  let blocks = await normalizeBlocks(record.blocks);
+  const modelBody = blocks.map(block => block.text).join("\n\n");
+  if (record.body !== undefined && (typeof record.body !== "string" || record.body !== modelBody)) fail("invalid_model_response", 502);
+  let claimLedger = normalizeClaims(record.claim_ledger, blocks);
   if (!Array.isArray(record.title_candidates) || record.title_candidates.length === 0 || record.title_candidates.length > 20 || record.title_candidates.some(item => typeof item !== "string" || item.length === 0 || item.length > 2_000)) fail("invalid_model_response", 502);
   const titleCandidates = record.title_candidates as string[];
   const selectedTitle = stringValue(record.selected_title, "selected_title", 2_000);
   if (!Array.isArray(record.cover_title) || record.cover_title.length < 1 || record.cover_title.length > 4 || record.cover_title.some(item => typeof item !== "string" || item.length === 0 || item.length > 2_000)) fail("invalid_model_response", 502);
   const coverTitle = record.cover_title as string[];
   validateTitleMetadata(title, titleCandidates, selectedTitle, coverTitle);
+  if (request.mode === "initial") {
+    const normalized = await ensureInitialVisualStructure(blocks, claimLedger, request.source_text || "");
+    blocks = normalized.blocks;
+    claimLedger = normalized.claims;
+  }
+  const body = blocks.map(block => block.text).join("\n\n");
   return {
     article_id: request.article_id,
     run_id: request.run_id,
@@ -285,7 +345,7 @@ async function normalizeModelDraft(value: unknown, request: V3WriteRequest, styl
     profile_pins: { style: { id: style.id, version: style.version }, formatting: V3_FORMATTING_SKILL },
     ...(style.id === V3_DEFAULT_STYLE_PROFILE.id ? {} : { style_profile_body_hash: style.bodyHash }),
     content_hash: await contentHash(title, body, blocks),
-    claim_ledger: normalizeClaims(record.claim_ledger, blocks),
+    claim_ledger: claimLedger,
     changed_block_ids: [],
     source_hash: validHash(request.source_hash) ? request.source_hash : await hashText(request.source_text || ""),
   };
@@ -391,8 +451,15 @@ const INITIAL_MODEL_OUTPUT_EXAMPLE = JSON.stringify({
     block_id: "block_v1_1",
     kind: "paragraph",
     order: 0,
-    text: "段落正文",
+    text: "第一段正文",
     claim_ids: ["claim_1"],
+    image_ref_ids: [],
+  }, {
+    block_id: "block_v1_2",
+    kind: "paragraph",
+    order: 1,
+    text: "第二段正文",
+    claim_ids: [],
     image_ref_ids: [],
   }],
   claim_ledger: [{
@@ -416,7 +483,7 @@ function validateRequest(input: V3WriteRequest): V3WriteRequest {
 }
 
 function promptFor(request: V3WriteRequest, style: ResolvedStyleProfile): string {
-  if (request.mode === "initial") return `${style.body}\n\n请将以下受控素材写成结构化文章，只返回一个 JSON 对象。${MODEL_FIELD_RULES}\n初次成文的 block_id 必须按 block_v1_1、block_v1_2 顺序生成，并与从 0 开始的 order 一一对应。\n结构示例：${INITIAL_MODEL_OUTPUT_EXAMPLE}\n受控素材：\n${request.source_text}`;
+  if (request.mode === "initial") return `${style.body}\n\n请将以下受控素材写成结构化文章，只返回一个 JSON 对象。${MODEL_FIELD_RULES}\n初次成文必须至少生成两个内容不同的非空 block，即使素材很短也要用两个自然段完整表达；block_id 必须按 block_v1_1、block_v1_2 顺序生成，并与从 0 开始的 order 一一对应。\n结构示例：${INITIAL_MODEL_OUTPUT_EXAMPLE}\n受控素材：\n${request.source_text}`;
   const draft = request.current_draft!.payload;
   const dispatch = request.revision_dispatch!.payload;
   const currentDraftProjection = {

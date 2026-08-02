@@ -372,6 +372,7 @@ async function executeSyntheticScenario(
     visualHistoricalScope?: boolean;
     visualPlanTamper?: boolean;
     visualInsufficientBlocks?: boolean;
+    visualStepErrorSerialization?: boolean;
     visualAllowlistMismatch?: boolean;
     visualAdapterResponseLoss?: boolean;
     visualCoverTransparent?: boolean;
@@ -1235,7 +1236,11 @@ async function executeSyntheticScenario(
           await checkpointRelease;
         }
         return value;
-      } catch (error) { lastError = error; }
+      } catch (error) {
+        lastError = options.visualStepErrorSerialization && stepName === "visual-plan"
+          ? new Error(error instanceof Error ? error.message : String(error))
+          : error;
+      }
     }
     throw lastError;
   };
@@ -3120,7 +3125,7 @@ describe("Wave2B publishing runtime boundary", () => {
   });
 
   it("holds after visual planning when there are not enough unique blocks", async () => {
-    const visual = await executeSyntheticScenario("p2_pass", undefined, false, { visual: true, visualInsufficientBlocks: true });
+    const visual = await executeSyntheticScenario("p2_pass", undefined, false, { visual: true, visualInsufficientBlocks: true, visualStepErrorSerialization: true });
     expect(visual.result).toMatchObject({ state: "needs_action" });
     expect(visual.projection).toMatchObject({ state: "needs_action", error_code: "visual_plan_insufficient_unique_blocks", next_action: "revise_content_before_visuals" });
     expect(visual.visualCalls).toBe(0);
