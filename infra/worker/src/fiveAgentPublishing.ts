@@ -151,6 +151,17 @@ export function visualProductionFeatureEnabled(env: EditorialRuntimeEnv, userId:
 
 function errorResponse(error: unknown): Response {
   if (error instanceof EditorialRuntimeError) return Response.json({ error: error.code }, { status: error.status });
+  const record = error && typeof error === "object" ? error as Record<string, unknown> : null;
+  const bounded = (value: unknown) => typeof value === "string" ? value.replace(/[\r\n]+/g, " ").slice(0, 240) : null;
+  let stringValue: string | null = null;
+  try { stringValue = bounded(String(error)); } catch { /* diagnostic only */ }
+  console.warn("five_agent_publishing_internal_error", JSON.stringify({
+    value_type: typeof error,
+    own_keys: record ? Object.getOwnPropertyNames(error).sort().slice(0, 16) : [],
+    name: bounded(record?.name),
+    message: bounded(record?.message),
+    string_value: stringValue,
+  }));
   return Response.json({ error: "five_agent_publishing_unavailable" }, { status: 503 });
 }
 

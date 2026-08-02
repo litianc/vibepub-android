@@ -1,5 +1,5 @@
 import { beforeAll, describe, expect, it } from "vitest";
-import { env } from "cloudflare:test";
+import { env, runInDurableObject } from "cloudflare:test";
 import worker from "../src/index";
 import {
   FiveAgentPublishingWorkflow,
@@ -3627,6 +3627,99 @@ describe("Wave2B publishing runtime boundary", () => {
     expect(replayLedger?.updated_at).toBe(confirmedLedger?.updated_at);
     expect(createCalls).toBe(1);
     expect(serviceAccess).toBe(0);
+  });
+
+  it("upgrades an exact pre-start legacy manifest before creating a missing workflow", async () => {
+    const suffix = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const runId = `runtime-v3-legacy-upgrade-${suffix}`;
+    const articleId = `${runId}-article`;
+    const userId = `runtime_v3_legacy_user_${suffix}`;
+    const workspaceId = `runtime_v3_legacy_workspace_${suffix}`;
+    const recordingId = 1912;
+    const transcriptRef = `runtime:v3:legacy-upgrade-${suffix}`;
+    const transcriptText = "synthetic exact legacy manifest upgrade";
+    const transcriptHash = await sha256Text(transcriptText);
+    await runtimeEnv.DB.prepare(`INSERT OR IGNORE INTO editorial_recording_scopes (recording_id, user_id, workspace_id) VALUES (?, ?, ?)`)
+      .bind(recordingId, userId, workspaceId).run();
+    await runtimeEnv.FILES_BUCKET.put(transcriptRef, transcriptText, {
+      customMetadata: { user_id: userId, workspace_id: workspaceId },
+    });
+
+    let lookup: "unknown" | "not_found" | "exists" = "unknown";
+    let createCalls = 0;
+    const workflow = {
+      get: async () => ({ status: async () => {
+        if (lookup === "unknown") throw new Error("workflow status temporarily unavailable");
+        if (lookup === "not_found") throw new Error("(instance.not_found) Instance not found");
+        return { status: "queued" };
+      } }),
+      create: async (input: { id: string }) => {
+        createCalls += 1;
+        lookup = "exists";
+        return { id: input.id };
+      },
+    };
+    const testEnv = Object.create(runtimeEnv);
+    Object.assign(testEnv, {
+      FIVE_AGENT_PUBLISHING_TOKEN: "dedicated-v3-token",
+      FIVE_AGENT_PUBLISHING_V3: "true",
+      FIVE_AGENT_PUBLISHING_V3_ALLOWLIST: `${userId}:${workspaceId}`,
+      FIVE_AGENT_PUBLISHING_WORKFLOW: workflow,
+      GLM_MODEL: "glm-5.2",
+    });
+    const body = publishingBody(runId, recordingId, transcriptRef, transcriptHash);
+    body.article_id = articleId;
+    const startRequest = () => new Request("https://example.test/api/internal/v3/publishing/runs", {
+      method: "POST",
+      headers: {
+        authorization: "Bearer dedicated-v3-token",
+        "x-vibepub-user-id": userId,
+        "x-vibepub-workspace-id": workspaceId,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+
+    const first = await worker.fetch(startRequest(), testEnv, {} as any);
+    expect(first.status).toBe(202);
+    expect((await first.json() as Record<string, any>).run).toMatchObject({
+      start_ledger_status: "needs_action", start_status: "workflow_create_unknown",
+    });
+    expect(createCalls).toBe(0);
+
+    const coordinator = runtimeEnv.EDITORIAL_COORDINATOR.getByName(await coordinatorShardName(userId, workspaceId, articleId, runId));
+    const canonicalRun = await coordinator.getFiveAgentRun(runId, userId, workspaceId) as Record<string, unknown>;
+    const legacyManifest = JSON.parse(String(canonicalRun.manifest_json)) as Record<string, unknown>;
+    delete legacyManifest.payload_hash;
+    const legacyManifestJson = canonicalJson(legacyManifest);
+    const legacyManifestHash = await sha256Text(legacyManifestJson);
+    await runInDurableObject(coordinator, (instance, state) => {
+      state.storage.sql.exec("DROP TRIGGER editorial_wave2b_runs_identity_guard");
+      state.storage.sql.exec("DROP TRIGGER editorial_wave2b_runs_state_guard");
+      state.storage.sql.exec(
+        "UPDATE editorial_wave2b_runs SET manifest_hash = ?, manifest_json = ? WHERE run_id = ?",
+        legacyManifestHash, legacyManifestJson, runId,
+      );
+      (instance as any).ensureSchema();
+    });
+
+    lookup = "not_found";
+    const resumed = await worker.fetch(startRequest(), testEnv, {} as any);
+    expect([200, 202]).toContain(resumed.status);
+    expectStartResponseShape(await resumed.json() as Record<string, any>, runId);
+    expect(createCalls).toBe(1);
+    expect(await coordinator.getFiveAgentRun(runId, userId, workspaceId)).toMatchObject({
+      manifest_hash: canonicalRun.manifest_hash,
+      manifest_json: canonicalRun.manifest_json,
+      start_ledger_status: "started",
+      start_status: "workflow_started",
+    });
+    await expect(runInDurableObject(coordinator, (_instance, state) => {
+      state.storage.sql.exec(
+        "UPDATE editorial_wave2b_runs SET manifest_hash = ?, state_revision = state_revision + 1 WHERE run_id = ?",
+        "tampered", runId,
+      );
+    })).rejects.toThrow("editorial_wave2b_run_identity_is_immutable");
   });
 
   it("fails closed when a workflow error only mentions 404 without structured not-found status", async () => {

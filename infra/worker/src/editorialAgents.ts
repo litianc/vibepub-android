@@ -931,6 +931,48 @@ export class EditorialCoordinatorAgent extends Agent<EditorialRuntimeEnv, Editor
   initialState = coordinatorInitialState();
   private failAfterTerminalMirrorOnce = false;
 
+  private installWave2bRunUpdateGuards(): void {
+    this.sql`DROP TRIGGER IF EXISTS editorial_wave2b_runs_identity_guard`;
+    this.sql`CREATE TRIGGER editorial_wave2b_runs_identity_guard
+      BEFORE UPDATE ON editorial_wave2b_runs
+      WHEN NEW.run_id <> OLD.run_id OR NEW.article_id <> OLD.article_id OR NEW.recording_id <> OLD.recording_id
+        OR NEW.user_id <> OLD.user_id OR NEW.workspace_id <> OLD.workspace_id
+        OR NEW.payload_hash <> OLD.payload_hash OR NEW.manifest_hash <> OLD.manifest_hash
+        OR NEW.manifest_json <> OLD.manifest_json OR NEW.created_at <> OLD.created_at
+        OR NEW.state_revision <= OLD.state_revision
+      BEGIN SELECT RAISE(ABORT, 'editorial_wave2b_run_identity_is_immutable'); END`;
+    this.sql`DROP TRIGGER IF EXISTS editorial_wave2b_runs_state_guard`;
+    this.sql`CREATE TRIGGER editorial_wave2b_runs_state_guard
+      BEFORE UPDATE ON editorial_wave2b_runs
+      WHEN NEW.state_revision <> OLD.state_revision + 1 OR NEW.revision_count < OLD.revision_count OR
+        NEW.progress_percent < OLD.progress_percent OR
+        NEW.last_successful_progress_percent < OLD.last_successful_progress_percent OR NOT (
+        NEW.state = OLD.state OR
+        (OLD.state = 'queued' AND NEW.state IN ('transcribing', 'needs_action', 'failed')) OR
+        (OLD.state = 'transcribing' AND NEW.state IN ('transcript_ready', 'failed')) OR
+        (OLD.state = 'transcript_ready' AND NEW.state IN ('writing', 'failed')) OR
+        (OLD.state = 'writing' AND NEW.state IN ('draft_generated', 'needs_action', 'failed')) OR
+        (OLD.state = 'draft_generated' AND NEW.state IN ('reviewing', 'failed')) OR
+        (OLD.state = 'reviewing' AND NEW.state IN ('revising', 'reviewed', 'needs_action', 'failed')) OR
+        (OLD.state = 'revising' AND NEW.state IN ('writing', 'needs_action', 'failed')) OR
+        (OLD.state = 'reviewed' AND NEW.state IN ('content_frozen', 'needs_action')) OR
+        (OLD.state = 'content_frozen' AND NEW.state IN ('visual_planning', 'needs_action', 'failed')) OR
+        (OLD.state = 'visual_planning' AND NEW.state IN ('visual_generating', 'needs_action', 'failed')) OR
+        (OLD.state = 'visual_generating' AND NEW.state IN ('visual_ready', 'needs_action', 'failed')) OR
+        (OLD.state = 'visual_ready' AND NEW.state IN ('formatting', 'needs_action', 'failed')) OR
+        (OLD.state = 'formatting' AND NEW.state IN ('visual_qa', 'needs_action', 'failed')) OR
+        (OLD.state = 'visual_qa' AND NEW.state IN ('draft_syncing', 'needs_action', 'failed')) OR
+        (OLD.state = 'draft_syncing' AND NEW.state IN ('draft_verifying', 'needs_action', 'failed')) OR
+        (OLD.state = 'draft_verifying' AND NEW.state IN ('draft_ready', 'needs_action', 'failed')) OR
+        (OLD.state = 'needs_action' AND NEW.state IN ('writing', 'reviewing', 'visual_planning', 'visual_generating', 'visual_ready', 'formatting', 'visual_qa', 'draft_syncing', 'draft_verifying', 'failed'))
+      ) OR
+        (NEW.state = 'needs_action' AND NEW.run_status <> 'needs_action') OR
+        (NEW.state = 'failed' AND NEW.run_status <> 'failed') OR
+        (NEW.state NOT IN ('needs_action', 'failed') AND NEW.run_status <> 'active') OR
+        (NEW.state = 'needs_action' AND NEW.progress_percent <> NEW.last_successful_progress_percent)
+      BEGIN SELECT RAISE(ABORT, 'editorial_wave2b_state_transition_invalid'); END`;
+  }
+
   async onStart(): Promise<void> {
     this.ensureSchema();
     const row = this.sql<EditorialAgentState>`
@@ -1285,46 +1327,9 @@ export class EditorialCoordinatorAgent extends Agent<EditorialRuntimeEnv, Editor
       BEFORE UPDATE ON editorial_phase2_terminal_receipts BEGIN SELECT RAISE(ABORT, 'editorial_phase2_terminal_receipts_are_append_only'); END`;
     this.sql`CREATE TRIGGER IF NOT EXISTS editorial_phase2_terminal_receipts_append_only_delete
       BEFORE DELETE ON editorial_phase2_terminal_receipts BEGIN SELECT RAISE(ABORT, 'editorial_phase2_terminal_receipts_are_append_only'); END`;
-    this.sql`CREATE TRIGGER IF NOT EXISTS editorial_wave2b_runs_identity_guard
-      BEFORE UPDATE ON editorial_wave2b_runs
-      WHEN NEW.run_id <> OLD.run_id OR NEW.article_id <> OLD.article_id OR NEW.recording_id <> OLD.recording_id
-        OR NEW.user_id <> OLD.user_id OR NEW.workspace_id <> OLD.workspace_id
-        OR NEW.payload_hash <> OLD.payload_hash OR NEW.manifest_hash <> OLD.manifest_hash
-        OR NEW.manifest_json <> OLD.manifest_json OR NEW.created_at <> OLD.created_at
-        OR NEW.state_revision <= OLD.state_revision
-      BEGIN SELECT RAISE(ABORT, 'editorial_wave2b_run_identity_is_immutable'); END`;
     // Recreate this guard on every DO schema check so evicted instances pick
     // up additive state-machine fixes without changing the table contract.
-    this.sql`DROP TRIGGER IF EXISTS editorial_wave2b_runs_state_guard`;
-    this.sql`CREATE TRIGGER editorial_wave2b_runs_state_guard
-      BEFORE UPDATE ON editorial_wave2b_runs
-      WHEN NEW.state_revision <> OLD.state_revision + 1 OR NEW.revision_count < OLD.revision_count OR
-        NEW.progress_percent < OLD.progress_percent OR
-        NEW.last_successful_progress_percent < OLD.last_successful_progress_percent OR NOT (
-        NEW.state = OLD.state OR
-        (OLD.state = 'queued' AND NEW.state IN ('transcribing', 'needs_action', 'failed')) OR
-        (OLD.state = 'transcribing' AND NEW.state IN ('transcript_ready', 'failed')) OR
-        (OLD.state = 'transcript_ready' AND NEW.state IN ('writing', 'failed')) OR
-        (OLD.state = 'writing' AND NEW.state IN ('draft_generated', 'needs_action', 'failed')) OR
-        (OLD.state = 'draft_generated' AND NEW.state IN ('reviewing', 'failed')) OR
-        (OLD.state = 'reviewing' AND NEW.state IN ('revising', 'reviewed', 'needs_action', 'failed')) OR
-        (OLD.state = 'revising' AND NEW.state IN ('writing', 'needs_action', 'failed')) OR
-        (OLD.state = 'reviewed' AND NEW.state IN ('content_frozen', 'needs_action')) OR
-        (OLD.state = 'content_frozen' AND NEW.state IN ('visual_planning', 'needs_action', 'failed')) OR
-        (OLD.state = 'visual_planning' AND NEW.state IN ('visual_generating', 'needs_action', 'failed')) OR
-        (OLD.state = 'visual_generating' AND NEW.state IN ('visual_ready', 'needs_action', 'failed')) OR
-        (OLD.state = 'visual_ready' AND NEW.state IN ('formatting', 'needs_action', 'failed')) OR
-        (OLD.state = 'formatting' AND NEW.state IN ('visual_qa', 'needs_action', 'failed')) OR
-        (OLD.state = 'visual_qa' AND NEW.state IN ('draft_syncing', 'needs_action', 'failed')) OR
-        (OLD.state = 'draft_syncing' AND NEW.state IN ('draft_verifying', 'needs_action', 'failed')) OR
-        (OLD.state = 'draft_verifying' AND NEW.state IN ('draft_ready', 'needs_action', 'failed')) OR
-        (OLD.state = 'needs_action' AND NEW.state IN ('writing', 'reviewing', 'visual_planning', 'visual_generating', 'visual_ready', 'formatting', 'visual_qa', 'draft_syncing', 'draft_verifying', 'failed'))
-      ) OR
-        (NEW.state = 'needs_action' AND NEW.run_status <> 'needs_action') OR
-        (NEW.state = 'failed' AND NEW.run_status <> 'failed') OR
-        (NEW.state NOT IN ('needs_action', 'failed') AND NEW.run_status <> 'active') OR
-        (NEW.state = 'needs_action' AND NEW.progress_percent <> NEW.last_successful_progress_percent)
-      BEGIN SELECT RAISE(ABORT, 'editorial_wave2b_state_transition_invalid'); END`;
+    this.installWave2bRunUpdateGuards();
     this.sql`CREATE TRIGGER IF NOT EXISTS editorial_wave2b_runs_append_only_delete
       BEFORE DELETE ON editorial_wave2b_runs BEGIN SELECT RAISE(ABORT, 'editorial_wave2b_runs_are_append_only'); END`;
     this.sql`CREATE TRIGGER IF NOT EXISTS editorial_wave2b_outbox_append_only_update
@@ -1678,12 +1683,21 @@ export class EditorialCoordinatorAgent extends Agent<EditorialRuntimeEnv, Editor
           locked.workflow_id !== input.workflow_id || locked.state !== "queued" || Number(locked.state_revision) !== 0) {
         throw new EditorialRuntimeError("legacy_manifest_upgrade_not_safe", "Wave2B legacy manifest changed during reconciliation", 409);
       }
-      this.sql`UPDATE editorial_wave2b_runs SET manifest_hash = ${input.manifest_hash}, manifest_json = ${input.manifest_json}
-        WHERE run_id = ${input.run_id} AND user_id = ${input.user_id} AND workspace_id = ${input.workspace_id}
-          AND manifest_hash = ${input.legacy_manifest_hash} AND manifest_json = ${input.legacy_manifest_json}`;
-      const upgraded = this.wave2bRun(input.run_id, input.user_id, input.workspace_id);
-      if (!upgraded || upgraded.manifest_hash !== input.manifest_hash || upgraded.manifest_json !== input.manifest_json) {
-        throw new EditorialRuntimeError("legacy_manifest_upgrade_not_safe", "Wave2B legacy manifest upgrade did not commit exactly", 409);
+      // The normal guards intentionally make manifest identity immutable. This
+      // is the sole migration path: all old/new evidence is checked twice, then
+      // both guards are removed and restored within one synchronous transaction.
+      this.sql`DROP TRIGGER editorial_wave2b_runs_identity_guard`;
+      this.sql`DROP TRIGGER editorial_wave2b_runs_state_guard`;
+      try {
+        this.sql`UPDATE editorial_wave2b_runs SET manifest_hash = ${input.manifest_hash}, manifest_json = ${input.manifest_json}
+          WHERE run_id = ${input.run_id} AND user_id = ${input.user_id} AND workspace_id = ${input.workspace_id}
+            AND manifest_hash = ${input.legacy_manifest_hash} AND manifest_json = ${input.legacy_manifest_json}`;
+        const upgraded = this.wave2bRun(input.run_id, input.user_id, input.workspace_id);
+        if (!upgraded || upgraded.manifest_hash !== input.manifest_hash || upgraded.manifest_json !== input.manifest_json) {
+          throw new EditorialRuntimeError("legacy_manifest_upgrade_not_safe", "Wave2B legacy manifest upgrade did not commit exactly", 409);
+        }
+      } finally {
+        this.installWave2bRunUpdateGuards();
       }
     });
     return { replayed: false, manifest_hash: input.manifest_hash };
