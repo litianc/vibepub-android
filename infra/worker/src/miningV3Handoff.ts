@@ -688,7 +688,7 @@ async function canonicalManifestHash(
   marker: HandoffMarker,
   expectedRunId: string,
   expectedPayloadHash: string,
-): Promise<string> {
+): Promise<{ manifestHash: string; legacyManifestHash: string }> {
   if (!exactRunIdentity(canonical, expectedRunId, marker) ||
       canonical.schema_version !== CANONICAL_EDITORIAL_SCHEMA_VERSION ||
       canonical.workflow_version !== FIVE_AGENT_PUBLISHING_WORKFLOW_VERSION ||
@@ -708,7 +708,7 @@ async function canonicalManifestHash(
         : skillPins.style_profile_body_hash !== marker.style_profile_body_hash)) {
     throw new MiningV3HandoffError("mining_handoff_identity_conflict", 409, "canonical V3 run pins conflict");
   }
-  return hashJson({
+  const manifest = {
     schema_version: canonical.schema_version,
     run_id: expectedRunId,
     article_id: marker.article_id,
@@ -723,7 +723,12 @@ async function canonicalManifestHash(
     model_pins: skillPins.model_pins,
     idempotency_key: canonical.idempotency_key,
     payload_hash: canonical.payload_hash,
-  });
+  };
+  const { payload_hash: _payloadHash, ...legacyManifest } = manifest;
+  return {
+    manifestHash: await hashJson(manifest),
+    legacyManifestHash: await hashJson(legacyManifest),
+  };
 }
 
 type PublicationStartEvent = {
@@ -1175,9 +1180,10 @@ async function proveCoordinatorStart(
   expectedRunId: string,
   payloadHash: string,
   manifestHash: string,
+  legacyManifestHash: string,
   publication: Record<string, unknown>,
   publicationEvents: readonly PublicationStartEvent[],
-): Promise<"confirmed" | "workflow_create_unknown"> {
+): Promise<"confirmed" | "workflow_create_unknown" | "legacy_manifest_upgrade_required"> {
   const workflowId = `five-agent-${expectedRunId}`;
   let coordinatorRun: Record<string, unknown>;
   let ledger: Record<string, unknown> | null;
@@ -1186,7 +1192,6 @@ async function proveCoordinatorStart(
     events: Array<{ event_type: string; idempotency_key: string; evidence_hash: string; created_at: string }>;
     receipts: Array<{ receipt_id: string; reconciliation_key: string; evidence_hash: string }>;
   };
-  let confirmation: { confirmed: boolean; event_id: string | null };
   let coordinatorEvents: CoordinatorMainEvent[];
   let coordinator: DurableObjectStub<EditorialCoordinatorAgent>;
   try {
@@ -1200,23 +1205,17 @@ async function proveCoordinatorStart(
     ledger = await coordinator.getFiveAgentStartLedger(expectedRunId, workflowId) as Record<string, unknown> | null;
     evidence = await coordinator.getFiveAgentStartEvidence(expectedRunId, workflowId) as typeof evidence;
     coordinatorEvents = await coordinator.listFiveAgentEvents(expectedRunId, marker.user_id, marker.workspace_id) as CoordinatorMainEvent[];
-    confirmation = await coordinator.getFiveAgentWorkflowStartConfirmation({
-        run_id: expectedRunId,
-        workflow_id: workflowId,
-        article_id: marker.article_id,
-        recording_id: marker.recording_id,
-        user_id: marker.user_id,
-        workspace_id: marker.workspace_id,
-        payload_hash: payloadHash,
-        manifest_hash: manifestHash,
-      });
   } catch (error) {
     if ((error as { status?: unknown })?.status === 409) {
       throw new MiningV3HandoffError("mining_handoff_identity_conflict", 409, "Coordinator V3 start identity conflicts");
     }
     throw new MiningV3HandoffError("mining_handoff_start_reconciliation_required", 503, "Coordinator V3 start evidence is unavailable");
   }
-  if (!isRecord(coordinatorRun) || !ledger || !exactCoordinatorRunIdentity(coordinatorRun, expectedRunId, marker, payloadHash, manifestHash)) {
+  const canonicalCoordinatorIdentity = isRecord(coordinatorRun) &&
+    exactCoordinatorRunIdentity(coordinatorRun, expectedRunId, marker, payloadHash, manifestHash);
+  const legacyCoordinatorIdentity = isRecord(coordinatorRun) &&
+    exactCoordinatorRunIdentity(coordinatorRun, expectedRunId, marker, payloadHash, legacyManifestHash);
+  if (!ledger || (!canonicalCoordinatorIdentity && !legacyCoordinatorIdentity)) {
     throw new MiningV3HandoffError("mining_handoff_identity_conflict", 409, "Coordinator V3 start identity conflicts");
   }
   if (ledger.start_status === "brief_storage_unknown") {
@@ -1255,6 +1254,45 @@ async function proveCoordinatorStart(
     evidence.receipts.length === 1 && evidence.receipts[0].receipt_id === `${workflowId}:start-reconcile:${reconciliationKey}` &&
     evidence.receipts[0].reconciliation_key === reconciliationKey &&
     evidence.receipts[0].evidence_hash === manifestHash;
+  const unknownLedger = ledger.status === "needs_action" && ledger.start_status === WORKFLOW_CREATE_UNKNOWN &&
+    ledger.error_code === EXTERNAL_SIDE_EFFECT_UNKNOWN && ledger.next_action === RECONCILE_EXTERNAL_SIDE_EFFECT &&
+    coordinatorRun.start_ledger_status === "needs_action" && coordinatorRun.start_status === WORKFLOW_CREATE_UNKNOWN &&
+    coordinatorRun.start_error_code === EXTERNAL_SIDE_EFFECT_UNKNOWN && coordinatorRun.start_next_action === RECONCILE_EXTERNAL_SIDE_EFFECT &&
+    evidence.workflow_start_status === "unknown";
+  const reconciledLedger = ledger.status === "reconciled" && ledger.start_status === WORKFLOW_CREATE_UNKNOWN &&
+    ledger.error_code === null && ledger.next_action === null &&
+    coordinatorRun.start_ledger_status === "reconciled" && coordinatorRun.start_status === "reconciled_resuming" &&
+    coordinatorRun.start_error_code === null && coordinatorRun.start_next_action === null &&
+    evidence.workflow_start_status === "reconciled";
+  const exactUnknownPrefix = prefix.status === "unknown" && publicationEvents.length === 2 && coordinatorEvents.length === 1 &&
+    exactStartEvidenceOrder(evidence.events, [START_RECOVERY_REQUIRED]) && evidence.receipts.length === 0 && unknownLedger &&
+    publication.state === "needs_action" && publication.error_code === EXTERNAL_SIDE_EFFECT_UNKNOWN &&
+    publication.next_action === RECONCILE_EXTERNAL_SIDE_EFFECT && publication.last_successful_state === "queued";
+  const exactRecoveryPrefix = prefix.status === "recovering" && publicationEvents.length >= 3 && publicationEvents.length <= 5 &&
+    coordinatorEvents.length === 1 && hasExactRequired && hasExactReconciled && exactStartEvidenceOrder(evidence.events, [START_RECOVERY_REQUIRED, START_RECOVERY_RECONCILED]) &&
+    (unknownLedger || reconciledLedger);
+  if (legacyCoordinatorIdentity) {
+    if (confirmationEvents.length === 0 && exactUnknownPrefix) return "legacy_manifest_upgrade_required";
+    throw new MiningV3HandoffError("mining_handoff_identity_conflict", 409, "legacy Coordinator V3 manifest is not safe to upgrade");
+  }
+  let confirmation: { confirmed: boolean; event_id: string | null };
+  try {
+    confirmation = await coordinator.getFiveAgentWorkflowStartConfirmation({
+      run_id: expectedRunId,
+      workflow_id: workflowId,
+      article_id: marker.article_id,
+      recording_id: marker.recording_id,
+      user_id: marker.user_id,
+      workspace_id: marker.workspace_id,
+      payload_hash: payloadHash,
+      manifest_hash: manifestHash,
+    });
+  } catch (error) {
+    if ((error as { status?: unknown })?.status === 409) {
+      throw new MiningV3HandoffError("mining_handoff_identity_conflict", 409, "Coordinator V3 start identity conflicts");
+    }
+    throw new MiningV3HandoffError("mining_handoff_start_reconciliation_required", 503, "Coordinator V3 start evidence is unavailable");
+  }
   if (confirmation.confirmed) {
     const expectedConfirmationHash = await hashJson({
       workflow_id: workflowId,
@@ -1282,23 +1320,6 @@ async function proveCoordinatorStart(
     await validateBusinessCrossMap(publicationEvents, coordinatorEvents, prefix.offset, expectedRunId, payloadHash);
     return "confirmed";
   }
-  const unknownLedger = ledger.status === "needs_action" && ledger.start_status === WORKFLOW_CREATE_UNKNOWN &&
-    ledger.error_code === EXTERNAL_SIDE_EFFECT_UNKNOWN && ledger.next_action === RECONCILE_EXTERNAL_SIDE_EFFECT &&
-    coordinatorRun.start_ledger_status === "needs_action" && coordinatorRun.start_status === WORKFLOW_CREATE_UNKNOWN &&
-    coordinatorRun.start_error_code === EXTERNAL_SIDE_EFFECT_UNKNOWN && coordinatorRun.start_next_action === RECONCILE_EXTERNAL_SIDE_EFFECT &&
-    evidence.workflow_start_status === "unknown";
-  const reconciledLedger = ledger.status === "reconciled" && ledger.start_status === WORKFLOW_CREATE_UNKNOWN &&
-    ledger.error_code === null && ledger.next_action === null &&
-    coordinatorRun.start_ledger_status === "reconciled" && coordinatorRun.start_status === "reconciled_resuming" &&
-    coordinatorRun.start_error_code === null && coordinatorRun.start_next_action === null &&
-    evidence.workflow_start_status === "reconciled";
-  const exactUnknownPrefix = prefix.status === "unknown" && publicationEvents.length === 2 && coordinatorEvents.length === 1 &&
-    exactStartEvidenceOrder(evidence.events, [START_RECOVERY_REQUIRED]) && evidence.receipts.length === 0 && unknownLedger &&
-    publication.state === "needs_action" && publication.error_code === EXTERNAL_SIDE_EFFECT_UNKNOWN &&
-    publication.next_action === RECONCILE_EXTERNAL_SIDE_EFFECT && publication.last_successful_state === "queued";
-  const exactRecoveryPrefix = prefix.status === "recovering" && publicationEvents.length >= 3 && publicationEvents.length <= 5 &&
-    coordinatorEvents.length === 1 && hasExactRequired && hasExactReconciled && exactStartEvidenceOrder(evidence.events, [START_RECOVERY_REQUIRED, START_RECOVERY_RECONCILED]) &&
-    (unknownLedger || reconciledLedger);
   if (confirmationEvents.length !== 0 || prefix.status === "normal" || (!exactUnknownPrefix && !exactRecoveryPrefix)) {
     throw new MiningV3HandoffError("mining_handoff_start_reconciliation_required", 503, "Workflow-create uncertainty is not durably proven");
   }
@@ -1341,7 +1362,7 @@ async function acceptedRunProof(env: MiningV3HandoffEnv, marker: HandoffMarker, 
       !exactRunIdentity(publication, expectedRunId, marker) || current.current_run_id !== expectedRunId) {
     throw new MiningV3HandoffError("mining_handoff_identity_conflict", 409, "canonical and publication V3 run identities do not agree");
   }
-  const manifestHash = await canonicalManifestHash(canonical, marker, expectedRunId, expectedPayloadHash);
+  const { manifestHash, legacyManifestHash } = await canonicalManifestHash(canonical, marker, expectedRunId, expectedPayloadHash);
   if (publication.schema_version !== PUBLICATION_SCHEMA_VERSION || publication.source_run_id !== expectedRunId ||
       publication.source_manifest_hash !== manifestHash || typeof publication.state !== "string" ||
       !Number.isSafeInteger(publication.state_revision) || Number(publication.state_revision) < 0) {
@@ -1383,7 +1404,10 @@ async function acceptedRunProof(env: MiningV3HandoffEnv, marker: HandoffMarker, 
   } catch {
     throw new MiningV3HandoffError("mining_handoff_start_reconciliation_required", 503, "V3 Brief R2 evidence cannot be verified");
   }
-  await proveCoordinatorStart(env, marker, expectedRunId, expectedPayloadHash, manifestHash, publication, publicationEvents);
+  const startProof = await proveCoordinatorStart(
+    env, marker, expectedRunId, expectedPayloadHash, manifestHash, legacyManifestHash, publication, publicationEvents,
+  );
+  if (startProof === "legacy_manifest_upgrade_required") return null;
   return {
     run_id: expectedRunId,
     article_id: marker.article_id,

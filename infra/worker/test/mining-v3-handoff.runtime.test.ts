@@ -92,6 +92,7 @@ type DbState = {
       receipts: Array<{ receipt_id: string; reconciliation_key: string; evidence_hash: string }>;
     };
     confirmation?: { confirmed: boolean; event_id: string | null };
+    confirmationError?: { status?: number };
     artifacts?: Array<Record<string, unknown>>;
   };
   historyProbe?: {
@@ -158,7 +159,10 @@ function testEnv(bucket: MemoryBucket, row = recording(), enabled = true, state:
             events: [],
             receipts: [],
           },
-          getFiveAgentWorkflowStartConfirmation: async () => state.coordinator?.confirmation || { confirmed: false, event_id: null },
+          getFiveAgentWorkflowStartConfirmation: async () => {
+            if (state.coordinator?.confirmationError) throw state.coordinator.confirmationError;
+            return state.coordinator?.confirmation || { confirmed: false, event_id: null };
+          },
           listFiveAgentEvents: async () => state.coordinator?.mainEvents || [],
           getFiveAgentArtifactLedger: async () => ({ artifacts: state.coordinator?.artifacts || [], receipt_ids: (state.coordinator?.artifacts || []).map(item => item.artifact_id) }),
         };
@@ -197,7 +201,7 @@ async function seedAcceptedRun(
   marker: any,
   transcriptText: string,
   state: DbState,
-): Promise<{ runId: string; briefId: string; briefHash: string; payloadHash: string; manifestHash: string }> {
+): Promise<{ runId: string; briefId: string; briefHash: string; payloadHash: string; manifestHash: string; legacyManifestHash: string }> {
   const transcript = await miningV3HandoffTesting.persistTranscript(testEnv(bucket, row), marker, transcriptText);
   const start = await miningV3HandoffTesting.startBody(marker, transcript);
   const createdAt = "2026-07-22T00:00:00.000Z";
@@ -228,6 +232,8 @@ async function seedAcceptedRun(
     payload_hash: payloadHash,
   };
   const manifestHash = await sha256(canonicalJson(manifest));
+  const { payload_hash: _payloadHash, ...legacyManifest } = manifest;
+  const legacyManifestHash = await sha256(canonicalJson(legacyManifest));
   const workflowId = `five-agent-${start.run_id}`;
   state.canonical = {
     run_id: start.run_id, user_id: marker.user_id, workspace_id: marker.workspace_id,
@@ -294,7 +300,14 @@ async function seedAcceptedRun(
     user_id: marker.user_id, workspace_id: marker.workspace_id,
     payload_hash: brief.envelope.payload_hash, storage_ref: brief.envelope.storage_ref,
   }];
-  return { runId: start.run_id, briefId: brief.envelope.artifact_id, briefHash: brief.envelope.payload_hash, payloadHash, manifestHash };
+  return {
+    runId: start.run_id,
+    briefId: brief.envelope.artifact_id,
+    briefHash: brief.envelope.payload_hash,
+    payloadHash,
+    manifestHash,
+    legacyManifestHash,
+  };
 }
 
 async function setWorkflowCreateUnknownProof(
@@ -1013,6 +1026,38 @@ describe("Mining V3 handoff Worker boundary", () => {
     const status = await invoke("status", { source_key: sourceKey, handoff_id: handoff.handoff_id }, env);
     expect(status.status).toBe(200);
     expect(await status.json()).toMatchObject({ decision: "accepted", run_id: evidence.runId });
+  });
+
+  it("routes only the exact unresolved legacy manifest back through the guarded start repair", async () => {
+    const bucket = new MemoryBucket();
+    seedSource(bucket);
+    const state: DbState = {};
+    const env = testEnv(bucket, recording(), true, state);
+    const eligible = await invoke("eligibility", { source_key: sourceKey }, env);
+    const handoff = await eligible.json() as Record<string, unknown>;
+    const markerKey = [...bucket.objects.keys()].find(key => key.includes("/markers/"))!;
+    const marker = JSON.parse(new TextDecoder().decode(bucket.objects.get(markerKey)!.bytes));
+    const proof = await seedAcceptedRun(bucket, recording(), marker, "legacy manifest transcript", state);
+    await setWorkflowCreateUnknownProof(state, marker, proof);
+    state.coordinator!.run = { ...state.coordinator!.run!, manifest_hash: proof.legacyManifestHash };
+    state.coordinator!.confirmationError = { status: 409 };
+    const transcript = (await miningV3HandoffTesting.existingTranscript(env, marker))!;
+
+    await expect(miningV3HandoffTesting.acceptedRunProof(env, marker, transcript)).resolves.toBeNull();
+    const status = await invoke("status", { source_key: sourceKey, handoff_id: handoff.handoff_id }, env);
+    expect(status.status).toBe(200);
+    expect(await status.json()).toMatchObject({ decision: "v3_pending_start", handoff_id: handoff.handoff_id });
+
+    state.coordinator!.run = { ...state.coordinator!.run!, manifest_hash: "sha256:" + "f".repeat(64) };
+    await expect(miningV3HandoffTesting.acceptedRunProof(env, marker, transcript))
+      .rejects.toMatchObject({ code: "mining_handoff_identity_conflict", status: 409 });
+
+    state.coordinator!.run = { ...state.coordinator!.run!, manifest_hash: proof.legacyManifestHash };
+    state.coordinator!.evidence!.receipts = [{
+      receipt_id: "unexpected", reconciliation_key: "unexpected", evidence_hash: proof.legacyManifestHash,
+    }];
+    await expect(miningV3HandoffTesting.acceptedRunProof(env, marker, transcript))
+      .rejects.toMatchObject({ code: "mining_handoff_identity_conflict", status: 409 });
   });
 
   it("accepts only exact unresolved and reconciled pre-start prefixes", async () => {
