@@ -649,6 +649,31 @@ function isCloudflareWorkflowInstanceNotFoundMessage(value: unknown): boolean {
   return codes.length === 0 || codes.every(code => code === "10400");
 }
 
+function boundedWorkflowDiagnosticValue(value: unknown): string | number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value !== "string") return null;
+  return value.replace(/[\r\n]+/g, " ").slice(0, 240);
+}
+
+function workflowLookupDiagnostic(error: unknown): Record<string, unknown> {
+  if (!error || (typeof error !== "object" && typeof error !== "function")) {
+    return { value_type: typeof error, value: boundedWorkflowDiagnosticValue(error) };
+  }
+  const record = error as Record<string, unknown>;
+  let stringValue: string | null = null;
+  try { stringValue = boundedWorkflowDiagnosticValue(String(error)) as string | null; } catch { /* diagnostic only */ }
+  return {
+    value_type: typeof error,
+    object_tag: Object.prototype.toString.call(error),
+    own_keys: Object.getOwnPropertyNames(error).sort().slice(0, 16),
+    name: boundedWorkflowDiagnosticValue(record.name),
+    message: boundedWorkflowDiagnosticValue(record.message),
+    code: boundedWorkflowDiagnosticValue(record.code),
+    status: boundedWorkflowDiagnosticValue(record.status),
+    string_value: stringValue,
+  };
+}
+
 function isStructuredWorkflowNotFound(error: unknown): boolean {
   let current: unknown = error;
   for (let depth = 0; depth < 4 && current; depth += 1) {
@@ -663,6 +688,9 @@ function isStructuredWorkflowNotFound(error: unknown): boolean {
         code === 10400 || code === "10400" ||
         code === "NOT_FOUND" || code === "WORKFLOW_NOT_FOUND") return true;
     if (isCloudflareWorkflowInstanceNotFoundMessage(record.message)) return true;
+    try {
+      if (isCloudflareWorkflowInstanceNotFoundMessage(String(current))) return true;
+    } catch { /* keep unknown provider errors fail-closed */ }
     current = record.cause ?? record.error;
   }
   return false;
@@ -1743,10 +1771,14 @@ export class EditorialCoordinatorAgent extends Agent<EditorialRuntimeEnv, Editor
     if (!binding) return { state: "unknown" };
     try {
       const response = await (await binding.get(workflowId)).status() as { status?: unknown };
-      if (response?.status === "unknown" || typeof response?.status !== "string") return { state: "unknown" };
+      if (response?.status === "unknown" || typeof response?.status !== "string") {
+        console.warn("five_agent_workflow_lookup_unknown", JSON.stringify({ phase: "status", response_status: response?.status ?? null }));
+        return { state: "unknown" };
+      }
       return { state: "exists", status: response.status };
     } catch (error) {
       if (isStructuredWorkflowNotFound(error)) return { state: "not_found" };
+      console.warn("five_agent_workflow_lookup_unknown", JSON.stringify({ phase: "exception", ...workflowLookupDiagnostic(error) }));
       return { state: "unknown" };
     }
   }
