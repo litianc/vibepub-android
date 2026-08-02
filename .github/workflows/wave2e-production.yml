@@ -38,7 +38,7 @@ jobs:
           node-version: "22"
       - name: Install locked dependencies
         run: |
-          for directory in infra/worker infra/review-agent infra/image-generation-adapter infra/wechat-publishing-adapter infra/mining; do
+          for directory in infra/worker infra/writing-agent infra/review-agent infra/image-generation-adapter infra/wechat-publishing-adapter infra/mining; do
             npm ci --prefix "$directory"
           done
       - name: Test and typecheck
@@ -46,6 +46,8 @@ jobs:
           npm test --prefix infra/worker
           npm run test:runtime --prefix infra/worker
           npm run typecheck --prefix infra/worker
+          npm test --prefix infra/writing-agent
+          npm run typecheck --prefix infra/writing-agent
           npm test --prefix infra/review-agent
           npm run typecheck --prefix infra/review-agent
           npm test --prefix infra/image-generation-adapter
@@ -56,6 +58,7 @@ jobs:
           npx --prefix infra/mining tsc --noEmit -p infra/mining/tsconfig.json
       - name: Dry-run exact Production targets
         run: |
+          npx --prefix infra/writing-agent wrangler deploy --dry-run --config infra/writing-agent/wrangler.toml
           npx --prefix infra/review-agent wrangler deploy --dry-run --config infra/review-agent/wrangler.toml
           npx --prefix infra/image-generation-adapter wrangler deploy --dry-run --config infra/image-generation-adapter/wrangler.production.toml
           npx --prefix infra/wechat-publishing-adapter wrangler deploy --dry-run --config infra/wechat-publishing-adapter/wrangler.production.toml
@@ -82,23 +85,26 @@ jobs:
       - name: Require Production credentials
         env:
           REVIEW_AGENT_TOKEN: ${{ secrets.REVIEW_AGENT_TOKEN }}
+          WRITING_AGENT_TOKEN: ${{ secrets.WRITING_AGENT_TOKEN }}
+          GLM_API_KEY: ${{ secrets.GLM_API_KEY }}
           VISUAL_PRODUCTION_TOKEN: ${{ secrets.VISUAL_PRODUCTION_TOKEN }}
           WECHAT_PUBLISHING_TOKEN: ${{ secrets.WECHAT_PUBLISHING_TOKEN }}
           MINING_V3_HANDOFF_TOKEN: ${{ secrets.MINING_V3_HANDOFF_TOKEN }}
           PUBLISHING_ACCOUNT_RESOLVER_TOKEN: ${{ secrets.PUBLISHING_ACCOUNT_RESOLVER_TOKEN }}
           GPT_IMAGE_API_KEY: ${{ secrets.GPT_IMAGE_API_KEY }}
         run: |
-          for name in CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_API_TOKEN REVIEW_AGENT_TOKEN VISUAL_PRODUCTION_TOKEN WECHAT_PUBLISHING_TOKEN MINING_V3_HANDOFF_TOKEN PUBLISHING_ACCOUNT_RESOLVER_TOKEN GPT_IMAGE_API_KEY; do
+          for name in CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_API_TOKEN WRITING_AGENT_TOKEN GLM_API_KEY REVIEW_AGENT_TOKEN VISUAL_PRODUCTION_TOKEN WECHAT_PUBLISHING_TOKEN MINING_V3_HANDOFF_TOKEN PUBLISHING_ACCOUNT_RESOLVER_TOKEN GPT_IMAGE_API_KEY; do
             test -n "${!name}" || { echo "::error::$name is required"; exit 1; }
           done
       - name: Install locked deployment dependencies
         run: |
-          for directory in infra/worker infra/review-agent infra/image-generation-adapter infra/wechat-publishing-adapter; do
+          for directory in infra/worker infra/writing-agent infra/review-agent infra/image-generation-adapter infra/wechat-publishing-adapter; do
             npm ci --prefix "$directory"
           done
       - name: Record Worker rollback baselines
         run: |
           npx --prefix infra/worker wrangler deployments list --json --config infra/worker/wrangler.production.toml > "$RUNNER_TEMP/main-before.json"
+          npx --prefix infra/writing-agent wrangler deployments list --json --config infra/writing-agent/wrangler.toml > "$RUNNER_TEMP/writing-before.json" 2>/dev/null || true
           npx --prefix infra/review-agent wrangler deployments list --json --config infra/review-agent/wrangler.toml > "$RUNNER_TEMP/review-before.json" 2>/dev/null || true
           npx --prefix infra/image-generation-adapter wrangler deployments list --json --config infra/image-generation-adapter/wrangler.production.toml > "$RUNNER_TEMP/image-before.json" 2>/dev/null || true
           npx --prefix infra/wechat-publishing-adapter wrangler deployments list --json --config infra/wechat-publishing-adapter/wrangler.production.toml > "$RUNNER_TEMP/wechat-before.json" 2>/dev/null || true
@@ -134,6 +140,15 @@ jobs:
       - name: Apply additive Production D1 migrations
         if: inputs.preapplied_migrations_sha256 == ''
         run: npx --prefix infra/worker wrangler d1 migrations apply vibepub-db --remote --config infra/worker/wrangler.production.toml
+      - name: Deploy private Writing Agent
+        env:
+          WRITING_AGENT_TOKEN: ${{ secrets.WRITING_AGENT_TOKEN }}
+          GLM_API_KEY: ${{ secrets.GLM_API_KEY }}
+        run: |
+          npx --prefix infra/writing-agent wrangler deploy --config infra/writing-agent/wrangler.toml --message "Five-Agent Production bootstrap ${GITHUB_SHA}"
+          printf '%s' "$WRITING_AGENT_TOKEN" | npx --prefix infra/writing-agent wrangler secret put WRITING_AGENT_TOKEN --config infra/writing-agent/wrangler.toml
+          printf '%s' "$GLM_API_KEY" | npx --prefix infra/writing-agent wrangler secret put GLM_API_KEY --config infra/writing-agent/wrangler.toml
+          npx --prefix infra/writing-agent wrangler deploy --config infra/writing-agent/wrangler.toml --message "Five-Agent Production ${GITHUB_SHA}" --var "DEPLOY_COMMIT:${GITHUB_SHA}" --var "DEPLOY_REF:${GITHUB_REF_NAME}" --var "DEPLOYED_AT:$(date -u +%Y-%m-%dT%H:%M:%SZ)"
       - name: Deploy private Review Agent
         env:
           REVIEW_AGENT_TOKEN: ${{ secrets.REVIEW_AGENT_TOKEN }}
@@ -161,12 +176,14 @@ jobs:
           npx --prefix infra/wechat-publishing-adapter wrangler deploy --config infra/wechat-publishing-adapter/wrangler.production.toml --message "Five-Agent Production ${GITHUB_SHA}" --var "DEPLOY_COMMIT:${GITHUB_SHA}" --var "DEPLOY_REF:${GITHUB_REF_NAME}" --var "DEPLOYED_AT:$(date -u +%Y-%m-%dT%H:%M:%SZ)"
       - name: Sync main Worker five-Agent secrets
         env:
+          WRITING_AGENT_TOKEN: ${{ secrets.WRITING_AGENT_TOKEN }}
           REVIEW_AGENT_TOKEN: ${{ secrets.REVIEW_AGENT_TOKEN }}
           VISUAL_PRODUCTION_TOKEN: ${{ secrets.VISUAL_PRODUCTION_TOKEN }}
           WECHAT_PUBLISHING_TOKEN: ${{ secrets.WECHAT_PUBLISHING_TOKEN }}
           MINING_V3_HANDOFF_TOKEN: ${{ secrets.MINING_V3_HANDOFF_TOKEN }}
           PUBLISHING_ACCOUNT_RESOLVER_TOKEN: ${{ secrets.PUBLISHING_ACCOUNT_RESOLVER_TOKEN }}
         run: |
+          printf '%s' "$WRITING_AGENT_TOKEN" | npx --prefix infra/worker wrangler secret put WRITING_AGENT_TOKEN --config infra/worker/wrangler.production.toml
           printf '%s' "$REVIEW_AGENT_TOKEN" | npx --prefix infra/worker wrangler secret put REVIEW_AGENT_TOKEN --config infra/worker/wrangler.production.toml
           printf '%s' "$VISUAL_PRODUCTION_TOKEN" | npx --prefix infra/worker wrangler secret put VISUAL_PRODUCTION_TOKEN --config infra/worker/wrangler.production.toml
           printf '%s' "$WECHAT_PUBLISHING_TOKEN" | npx --prefix infra/worker wrangler secret put WECHAT_PUBLISHING_TOKEN --config infra/worker/wrangler.production.toml

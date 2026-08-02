@@ -81,6 +81,7 @@ export type V3WriteRequest = {
   recording_id: number;
   source_text?: string;
   source_hash?: string;
+  source_text_hash?: string;
   current_draft?: CurrentDraft;
   review_report?: ReviewRef;
   revision_dispatch?: RevisionDispatchRef;
@@ -367,6 +368,11 @@ async function validateInitialSource(request: V3WriteRequest): Promise<void> {
   const source = stringValue(request.source_text, "source_text", 200_000);
   if (!source.trim()) fail("invalid_request", 400);
   const actualHash = await hashText(source);
+  if (request.source_text_hash !== undefined) {
+    if (!validHash(request.source_text_hash) || request.source_text_hash !== actualHash) fail("source_text_hash_mismatch", 409);
+    if (request.source_hash !== undefined && !validHash(request.source_hash)) fail("source_hash_mismatch", 409);
+    return;
+  }
   if (request.source_hash !== undefined && (!validHash(request.source_hash) || request.source_hash !== actualHash)) fail("source_hash_mismatch", 409);
 }
 

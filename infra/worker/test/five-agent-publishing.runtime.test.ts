@@ -1885,13 +1885,17 @@ describe("Wave2B publishing runtime boundary", () => {
     const transcriptRef = `runtime:v3:path-${suffix}`;
     const transcriptText = "Synthetic transcript for the Wave2B pass path.";
     const transcriptHash = await sha256Text(transcriptText);
+    const sourceHash = await sha256Text("Synthetic original recording bytes.");
     await runtimeEnv.FILES_BUCKET.put(transcriptRef, transcriptText, { customMetadata: { user_id: userId, workspace_id: workspaceId } });
 
     let writingCalls = 0;
     let reviewCalls = 0;
     const writing = serviceBinding(async (request) => {
       writingCalls += 1;
-      const input = await request.json() as { run_id: string; article_id: string; recording_id: number; source_hash: string };
+      const input = await request.json() as { run_id: string; article_id: string; recording_id: number; source_text: string; source_hash: string; source_text_hash: string };
+      expect(input.source_text).toBe(transcriptText);
+      expect(input.source_hash).toBe(sourceHash);
+      expect(input.source_text_hash).toBe(transcriptHash);
       return new Response(JSON.stringify({
         protocol_version: "vibepub.editorial.v3",
         result: await syntheticDraftPayload({ run_id: input.run_id, article_id: input.article_id, recording_id: input.recording_id, source_hash: input.source_hash }),
@@ -1939,6 +1943,7 @@ describe("Wave2B publishing runtime boundary", () => {
     });
     const body = publishingBody(runId, recordingId, transcriptRef, transcriptHash);
     body.article_id = articleId;
+    body.source_hash = sourceHash;
     const start = await worker.fetch(new Request("https://example.test/api/internal/v3/publishing/runs", {
       method: "POST",
       headers: {
@@ -1968,7 +1973,7 @@ describe("Wave2B publishing runtime boundary", () => {
       created_at: String(run.created_at),
       transcript_ref: transcriptRef,
       transcript_hash: transcriptHash,
-      source_hash: transcriptHash,
+      source_hash: sourceHash,
       brief_artifact_id: String(brief!.artifact_id),
       brief_artifact_key: String(brief!.artifact_key),
       brief_payload_hash: String(brief!.payload_hash),

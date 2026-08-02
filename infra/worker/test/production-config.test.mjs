@@ -36,8 +36,10 @@ test("enables Mining only with the dedicated handoff secret and a backup-first r
   const retainedBackup = productionWorkflow.indexOf("wrangler r2 object get \"$PRODUCTION_BACKUP_OBJECT\"");
   const retainedBackupCheck = productionWorkflow.indexOf("sha256sum -c -");
   const migration = productionWorkflow.indexOf("wrangler d1 migrations apply vibepub-db --remote");
+  const writingDeploy = productionWorkflow.indexOf("Deploy private Writing Agent");
+  const reviewDeploy = productionWorkflow.indexOf("Deploy private Review Agent");
   const mainDeploy = productionWorkflow.indexOf("Deploy all-tenant five-Agent main Worker");
-  assert.ok(backup >= 0 && migration > backup && mainDeploy > migration);
+  assert.ok(backup >= 0 && migration > backup && writingDeploy > migration && reviewDeploy > writingDeploy && mainDeploy > reviewDeploy);
   assert.ok(retainedBackup >= 0 && retainedBackupCheck > retainedBackup && migration > retainedBackupCheck);
   assert.match(productionWorkflow, /preexisting_backup_sha256:\s*\n\s*description:/);
   assert.match(productionWorkflow, /PRODUCTION_BACKUP_OBJECT: vibepub-production-backups\/d1\/vibepub-db\/2026-07-29T2129CST-before-five-agent-96aefad6\.sql/);
@@ -49,4 +51,9 @@ test("enables Mining only with the dedicated handoff secret and a backup-first r
   for (const config of ["infra/worker", "infra/image-generation-adapter", "infra/wechat-publishing-adapter"]) {
     assert.match(productionWorkflow, new RegExp(`${config.replaceAll("/", "\\/")}.*wrangler\\.production\\.toml`, "s"));
   }
+  assert.match(productionWorkflow, /npm test --prefix infra\/writing-agent/);
+  assert.match(productionWorkflow, /wrangler deploy --dry-run --config infra\/writing-agent\/wrangler\.toml/);
+  assert.match(productionWorkflow, /Require Production credentials[\s\S]*WRITING_AGENT_TOKEN:\s*\$\{\{ secrets\.WRITING_AGENT_TOKEN \}\}[\s\S]*GLM_API_KEY:\s*\$\{\{ secrets\.GLM_API_KEY \}\}/);
+  assert.match(productionWorkflow, /Deploy private Writing Agent[\s\S]*secret put WRITING_AGENT_TOKEN[\s\S]*secret put GLM_API_KEY/);
+  assert.match(productionWorkflow, /Sync main Worker five-Agent secrets[\s\S]*WRITING_AGENT_TOKEN:\s*\$\{\{ secrets\.WRITING_AGENT_TOKEN \}\}[\s\S]*secret put WRITING_AGENT_TOKEN/);
 });

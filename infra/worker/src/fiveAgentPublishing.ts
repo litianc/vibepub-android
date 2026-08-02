@@ -5110,6 +5110,7 @@ async function writeDraftThroughService(
         recording_id: params.recording_id,
         source_text: transcriptText,
         source_hash: params.source_hash,
+        source_text_hash: params.transcript_hash,
         formatting_skill_id: briefPayload.profile_pins.formatting?.id,
         formatting_skill_version: briefPayload.profile_pins.formatting?.version,
         style_profile_id: briefPayload.profile_pins.style?.id,

@@ -164,6 +164,25 @@ describe("WritingAgent V3 adapter", () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
+  it("keeps original-source identity separate from the exact transcript hash", async () => {
+    const sourceHash = await hash("synthetic original audio bytes");
+    const sourceTextHash = await hash("合成素材。");
+    const result = await runV3WritingAdapter(
+      { GLM_API_KEY: "synthetic" },
+      baseRequest({ source_hash: sourceHash, source_text_hash: sourceTextHash }),
+      async () => modelResponse("标题", "正文"),
+    );
+    expect(result.source_hash).toBe(sourceHash);
+
+    const fetchImpl = vi.fn(async () => modelResponse("不应调用", "不应调用"));
+    await expect(runV3WritingAdapter(
+      { GLM_API_KEY: "synthetic" },
+      baseRequest({ source_hash: sourceHash, source_text_hash: "sha256:" + "0".repeat(64) }),
+      fetchImpl,
+    )).rejects.toMatchObject({ code: "source_text_hash_mismatch", retryable: false });
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
   it("accepts an inline profile only when its body hash is bound", async () => {
     const body = "只保留合成测试风格。";
     const bodyHash = await hash(body);
