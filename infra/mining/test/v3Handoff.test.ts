@@ -98,8 +98,15 @@ describe("Mining V3 handoff client", () => {
       return json({ error: "unavailable" }, 503);
     };
     const result = await acceptMiningV3Handoff(sourceKey, { decision: "v3_pending_start", handoff_id: handoffId }, undefined, fetcher as typeof fetch);
-    expect(result.decision).toBe("v3_hold");
+    expect(result).toMatchObject({ decision: "v3_hold", reason: "unavailable" });
     // Each failed start gets exactly one status reconciliation; no unbounded replay.
     expect(calls).toBe(6);
+  });
+
+  it("rejects an unbounded diagnostic reason from the trusted status boundary", async () => {
+    await expect(readMiningV3Status(sourceKey, async () => json({
+      decision: "v3_hold",
+      reason: "x".repeat(161),
+    }) as any)).rejects.toMatchObject({ code: "mining_v3_handoff_malformed" });
   });
 });

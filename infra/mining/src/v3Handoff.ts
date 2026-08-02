@@ -12,6 +12,7 @@ export type MiningV3Status = {
   run_id?: string;
   transcript_ref?: string;
   transcript_hash?: string;
+  reason?: string;
 };
 
 export class MiningV3HandoffClientError extends Error {
@@ -42,6 +43,7 @@ function isStatus(value: unknown): value is MiningV3Status {
   const record = value as Record<string, unknown>;
   const decision = String(record.decision);
   if (!["legacy", "v3", "v3_pending_asr", "v3_pending_start", "accepted", "v3_hold"].includes(decision)) return false;
+  if (record.reason !== undefined && (typeof record.reason !== "string" || record.reason.length > 160)) return false;
   if (decision !== "accepted") return true;
   return typeof record.handoff_id === "string" && /^handoff_v3_[a-f0-9]{64}$/.test(record.handoff_id) &&
     typeof record.run_id === "string" && /^run_v3_[a-f0-9]{64}$/.test(record.run_id) &&
@@ -136,16 +138,19 @@ export async function acceptMiningV3Handoff(
       candidate = started;
     } catch (error) {
       if (!(error instanceof MiningV3HandoffClientError) || !error.retryable) throw error;
+      console.warn("Mining V3 start requires reconciliation", { attempt, code: error.code });
     }
     try {
       const reconciled = await reconcileStatus(sourceKey, handoffId, fetcher);
       if (reconciled.decision === "accepted" || reconciled.decision === "v3_hold") return reconciled;
       candidate = reconciled;
     } catch (error) {
-      if (attempt === 3 || !(error instanceof MiningV3HandoffClientError) || !error.retryable) return { decision: "v3_hold", handoff_id: handoffId };
+      if (!(error instanceof MiningV3HandoffClientError) || !error.retryable) return { decision: "v3_hold", handoff_id: handoffId };
+      console.warn("Mining V3 status requires reconciliation", { attempt, code: error.code });
+      if (attempt === 3) return { decision: "v3_hold", handoff_id: handoffId, reason: error.code };
     }
   }
-  return { decision: "v3_hold", handoff_id: handoffId };
+  return { decision: "v3_hold", handoff_id: handoffId, reason: "mining_v3_handoff_retry_budget_exhausted" };
 }
 
 export async function readMiningV3Status(sourceKey: string, fetcher?: FetchLike): Promise<MiningV3Status> {

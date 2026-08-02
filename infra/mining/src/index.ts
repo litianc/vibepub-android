@@ -691,6 +691,12 @@ async function processV3HandoffClaim(
     return "held";
   }
   if (decision.decision === "legacy") return "legacy";
+  console.log("V3 handoff eligibility", {
+    sourceKey: fileKey,
+    decision: decision.decision,
+    handoffId: decision.handoff_id,
+    reason: decision.reason,
+  });
 
   try {
     let status = decision;
@@ -700,6 +706,7 @@ async function processV3HandoffClaim(
       return "accepted";
     }
     if (status.decision === "v3_hold") {
+      console.warn("V3 handoff status remains held", { sourceKey: fileKey, reason: status.reason });
       await releaseMiningInput(userId, fileKey, claimId);
       return "held";
     }
@@ -720,6 +727,13 @@ async function processV3HandoffClaim(
       undefined,
       isSupportedTextSubmissionKey(fileKey),
     );
+    console.log("V3 handoff start outcome", {
+      sourceKey: fileKey,
+      decision: accepted.decision,
+      handoffId: accepted.handoff_id,
+      runId: accepted.run_id,
+      reason: accepted.reason,
+    });
     if (accepted.decision === "accepted") {
       await completeMiningInput(userId, fileKey, claimId);
       return "accepted";
