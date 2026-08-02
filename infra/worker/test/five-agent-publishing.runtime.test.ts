@@ -1659,7 +1659,7 @@ describe("Wave2B publishing runtime boundary", () => {
     expect(visualProductionFeatureEnabled(canary, userId, workspaceId, `run_v3_${"b".repeat(64)}`)).toBe(false);
     expect(publicationFeatureEnabled({ ...canary, DEPLOY_ENVIRONMENT: "production" }, userId, workspaceId, runId)).toBe(false);
     expect(publicationFeatureEnabled({ ...canary, STAGING_IMAGE_CANARY_EXPIRES_AT: new Date(Date.now() - 1).toISOString() }, userId, workspaceId, runId)).toBe(false);
-    expect(visualProductionFeatureEnabled({ ...canary, STAGING_IMAGE_CANARY_EXPIRES_AT: new Date(Date.now() + 60 * 60 * 1000 + 1).toISOString() }, userId, workspaceId, runId)).toBe(false);
+    expect(visualProductionFeatureEnabled({ ...canary, STAGING_IMAGE_CANARY_EXPIRES_AT: new Date(Date.now() + 61 * 60 * 1000).toISOString() }, userId, workspaceId, runId)).toBe(false);
   });
 
   it("rejects extra nested dynamic pin keys", () => {
