@@ -108,12 +108,19 @@ function isReadOperation(operation: Operation): boolean {
   return operation === "get_draft" || operation === "find_draft";
 }
 
+type ProviderFailure = {
+  kind: "transport" | "invalid_json" | "http_error" | "api_error";
+  response_status?: number;
+  provider_errcode?: number;
+};
+
 export class AdapterError extends Error {
   constructor(
     public readonly code: string,
     public readonly status: number,
     public readonly retryable = false,
     public readonly deliveryStatus?: "not_forwarded" | "rejected_before_commit" | "unknown",
+    public readonly providerFailure?: ProviderFailure,
   ) { super(code); }
 }
 
@@ -156,12 +163,9 @@ function errorResponse(error: unknown): Response {
   return json({ error: { code: value.code, retryable: value.retryable, ...(value.deliveryStatus ? { delivery_status: value.deliveryStatus } : {}) } }, value.status);
 }
 
-function logWechatProviderFailure(input: {
-  kind: "transport" | "invalid_json" | "http_error" | "api_error";
+function logWechatProviderFailure(input: ProviderFailure & {
   operation: Operation;
   path: string;
-  response_status?: number;
-  provider_errcode?: number;
   delivery_status?: "not_forwarded" | "rejected_before_commit";
 }): void {
   // Keep provider diagnostics useful without logging credentials, URLs with
@@ -669,14 +673,14 @@ export class WechatOperationAgent {
       response = await fetch(wechatUrl(account.provider_base, path, { access_token: accessToken, ...query }), { ...init, redirect: "manual" });
     } catch {
       logWechatProviderFailure({ kind: "transport", operation, path });
-      if (isReadOperation(operation)) throw new AdapterError("upstream_retryable", 503, true);
-      throw new AdapterError("external_side_effect_unknown", 503, false, "unknown");
+      if (isReadOperation(operation)) throw new AdapterError("upstream_retryable", 503, true, undefined, { kind: "transport" });
+      throw new AdapterError("external_side_effect_unknown", 503, false, "unknown", { kind: "transport" });
     }
     let body: Record<string, unknown>;
     try { body = await response.json() as Record<string, unknown>; }
     catch {
       logWechatProviderFailure({ kind: "invalid_json", operation, path, response_status: response.status });
-      throw new AdapterError("external_side_effect_unknown", 503, false, "unknown");
+      throw new AdapterError("external_side_effect_unknown", 503, false, "unknown", { kind: "invalid_json", response_status: response.status });
     }
     if (!response.ok) {
       const proof = deliveryStatus(response);
@@ -688,9 +692,9 @@ export class WechatOperationAgent {
         ...(proof ? { delivery_status: proof } : {}),
       });
       if (WECHAT_RETRY_STATUS.has(response.status) && (isReadOperation(operation) || proof)) {
-        throw new AdapterError("upstream_retryable", response.status, true, proof || undefined);
+        throw new AdapterError("upstream_retryable", response.status, true, proof || undefined, { kind: "http_error", response_status: response.status });
       }
-      throw new AdapterError("external_side_effect_unknown", 503, false, "unknown");
+      throw new AdapterError("external_side_effect_unknown", 503, false, "unknown", { kind: "http_error", response_status: response.status });
     }
     const errcode = Number(body.errcode || 0);
     if (errcode === 0) return body;
@@ -700,7 +704,10 @@ export class WechatOperationAgent {
     }
     if (errcode === 40014 || errcode === 42001) throw new AdapterError("wechat_access_token_rejected", 409);
     logWechatProviderFailure({ kind: "api_error", operation, path, response_status: response.status, provider_errcode: errcode });
-    throw classifyWechatErrcode(errcode, operation);
+    const classified = classifyWechatErrcode(errcode, operation);
+    throw new AdapterError(classified.code, classified.status, classified.retryable, classified.deliveryStatus, {
+      kind: "api_error", response_status: response.status, provider_errcode: errcode,
+    });
   }
 
   private async cachedUpload(account: ResolvedAccount, kind: "thumb" | "body", byteHash: string): Promise<ProviderResult | null> {
@@ -773,7 +780,30 @@ export class WechatOperationAgent {
       let fingerprintCandidates = 0;
       let scannedPages = 0;
       for (let page = 0; page < 3; page += 1) {
-        const body = await this.wechatRequest(account, "/cgi-bin/draft/batchget", { method: "POST", headers: { "content-type": "application/json" }, body: canonical({ offset: page * 20, count: 20, no_content: 0 }) }, "find_draft");
+        let body: Record<string, unknown>;
+        try {
+          body = await this.wechatRequest(account, "/cgi-bin/draft/batchget", { method: "POST", headers: { "content-type": "application/json" }, body: canonical({ offset: page * 20, count: 20, no_content: 0 }) }, "find_draft");
+        } catch (error) {
+          const value = error instanceof AdapterError ? error : null;
+          const diagnostic = canonical({
+            version: "wechat-draft-recovery-diagnostic.v1",
+            operation: "find_draft",
+            failed_stage: "batchget",
+            failed_page: page,
+            adapter_error_code: value?.code || "unexpected_error",
+            ...(value?.providerFailure || {}),
+          });
+          try {
+            await this.env.WECHAT_RESULTS_BUCKET.put(
+              `wechat-adapter/v1/diagnostics/${input.article_id}/find-draft.json`,
+              diagnostic,
+              { httpMetadata: { contentType: "application/json" } },
+            );
+          } catch {
+            console.warn("wechat_draft_recovery_diagnostic_unavailable", canonical({ operation: "find_draft" }));
+          }
+          throw error;
+        }
         const items = Array.isArray(body.item) ? body.item : [];
         scannedPages += 1;
         scannedItems += items.length;
