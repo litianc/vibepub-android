@@ -510,6 +510,47 @@ describe("wechat publishing adapter", () => {
     expect(tokenCalls).toBe(0);
   });
 
+  it("reclaims a legacy token intent without evidence while preserving fresh concurrency guards", async () => {
+    const bucket = new Bucket();
+    const durableState = state();
+    const instance = new WechatOperationAgent(durableState, await configuredEnv(bucket));
+    const receipt = await resolve(instance);
+    const intentKey = `wechat-token-intent:${receipt.account_binding_id}:${receipt.config_hash}:1:1`;
+    await durableState.storage.put(intentKey, { state: "intent" });
+    let tokenCalls = 0;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      const url = new URL(request.url);
+      if (url.pathname.endsWith("/cgi-bin/token")) {
+        tokenCalls += 1;
+        return Response.json({ access_token: "recovered-token", expires_in: 7200 });
+      }
+      expect(url.searchParams.get("access_token")).toBe("recovered-token");
+      return Response.json({ news_item: [{ title: "Title", content: "<p>Body</p>", thumb_media_id: "cover-media-1" }] });
+    }));
+    const recovered = await instance.fetch(new Request("https://internal", {
+      method: "POST",
+      body: requestBody("get_draft", "legacy-orphan-read", 1, receipt, { operation_id: "legacy-orphan-read", media_id: "draft-media-1" }),
+    }));
+    expect(recovered.status).toBe(200);
+    expect(tokenCalls).toBe(1);
+    expect([...bucket.values.keys()].filter(key => key.includes("/token-result/"))).toHaveLength(2);
+
+    const freshState = state();
+    const fresh = new WechatOperationAgent(freshState, await configuredEnv());
+    const freshReceipt = await resolve(fresh);
+    await freshState.storage.put(`wechat-token-intent:${freshReceipt.account_binding_id}:${freshReceipt.config_hash}:1:1`, {
+      state: "intent",
+      created_at_ms: Date.now(),
+    });
+    const guarded = await fresh.fetch(new Request("https://internal", {
+      method: "POST",
+      body: requestBody("get_draft", "fresh-orphan-read", 1, freshReceipt, { operation_id: "fresh-orphan-read", media_id: "draft-media-1" }),
+    }));
+    expect(guarded.status).toBe(503);
+    expect(tokenCalls).toBe(1);
+  });
+
   it("records controlled token read retries before completing the dependent read", async () => {
     const bucket = new Bucket();
     const instance = new WechatOperationAgent(state(), await configuredEnv(bucket));

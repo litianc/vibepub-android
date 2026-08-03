@@ -89,6 +89,7 @@ type TokenAttemptResult = {
 };
 type TokenIntent = {
   state: "intent" | "completed" | "failed";
+  created_at_ms?: number;
   result_ref?: string;
   result_hash?: string;
   retryable?: boolean;
@@ -102,6 +103,7 @@ const OPS = new Set<Operation>(["resolve_account", "upload_image", "write_draft"
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/;
 const HASH = /^sha256:[a-f0-9]{64}$/;
 const WECHAT_RETRY_STATUS = new Set([408, 429, 502, 503, 504]);
+const TOKEN_INTENT_STALE_MS = 30_000;
 function isReadOperation(operation: Operation): boolean {
   return operation === "get_draft" || operation === "find_draft";
 }
@@ -502,9 +504,30 @@ export class WechatOperationAgent {
           result = await this.readTokenAttemptResult(resolvedResultRef, account.config_hash);
         }
         if (!result) {
-          // A token request is read-only, but an intent without durable result
-          // is still not proof that a retry may safely skip this attempt.
-          throw new AdapterError("external_side_effect_unknown", 503, false, "unknown");
+          const createdAt = Number(existing.created_at_ms);
+          const stillRunning = existing.state === "intent" && Number.isFinite(createdAt) &&
+            Date.now() - createdAt < TOKEN_INTENT_STALE_MS;
+          if (existing.state !== "intent" || stillRunning) {
+            throw new AdapterError("external_side_effect_unknown", 503, false, "unknown");
+          }
+          // Access-token acquisition is read-only. Once its concurrency guard
+          // is stale, record a bounded failed attempt under the article scope
+          // and continue instead of preserving an unrecoverable legacy hold.
+          const abandoned: TokenAttemptResult = {
+            status: "failed",
+            retryable: true,
+            status_code: 503,
+            code: "upstream_retryable",
+          };
+          const abandonedHash = await this.writeTokenAttemptResult(resultRef, abandoned, account.config_hash);
+          await this.state.storage.put(intentKey, {
+            ...existing,
+            state: "failed",
+            result_ref: resultRef,
+            result_hash: abandonedHash,
+            retryable: true,
+          } satisfies TokenIntent);
+          continue;
         }
         const resultHash = await digest(canonical(result));
         if (existing.result_hash && existing.result_hash !== resultHash) {
@@ -522,7 +545,7 @@ export class WechatOperationAgent {
         }
         continue;
       }
-      await this.state.storage.put(intentKey, { state: "intent" } satisfies TokenIntent);
+      await this.state.storage.put(intentKey, { state: "intent", created_at_ms: Date.now() } satisfies TokenIntent);
       let result: TokenAttemptResult;
       try {
         const response = await fetch(wechatUrl(account.provider_base, "/cgi-bin/token", {
@@ -530,18 +553,16 @@ export class WechatOperationAgent {
         }), { method: "GET", redirect: "manual" });
         let body: Record<string, unknown>;
         try { body = await response.json() as Record<string, unknown>; }
-        // A truncated token response is not a controlled HTTP failure. Keep
-        // the intent unresolved rather than assuming a safe next attempt.
-        catch { throw new AdapterError("external_side_effect_unknown", 503, false, "unknown"); }
+        catch { throw new AdapterError("upstream_retryable", 503, true); }
         if (!response.ok) {
           if (WECHAT_RETRY_STATUS.has(response.status)) throw new AdapterError("upstream_retryable", response.status, true);
-          throw new AdapterError("external_side_effect_unknown", 503, false, "unknown");
+          throw new AdapterError("upstream_retryable", 503, true);
         }
         if (Number(body.errcode || 0) !== 0 || typeof body.access_token !== "string" || !Number.isFinite(Number(body.expires_in))) {
         // A token endpoint rejection proves that these credentials cannot be
         // used. It is not a draft-read error and must surface as account repair.
         if (typeof body.errcode === "number") throw new AdapterError("wechat_access_token_rejected", 409);
-          throw new AdapterError("external_side_effect_unknown", 503, false, "unknown");
+          throw new AdapterError("upstream_retryable", 503, true);
         }
         const token: CachedToken = {
           access_token: body.access_token,
@@ -554,7 +575,6 @@ export class WechatOperationAgent {
         // controlled HTTP failures are recorded as retryable attempts; a raw
         // fetch exception itself has no mutation to reconcile.
         const adapterError = error instanceof AdapterError ? error : new AdapterError("upstream_retryable", 503, true);
-        if (adapterError.code === "external_side_effect_unknown") throw adapterError;
         result = {
           status: "failed",
           retryable: adapterError.retryable,
