@@ -48,6 +48,7 @@ const IMAGE_CANARY_MAX_OPERATIONS = 3;
 const IMAGE_CANARY_MAX_TTL_MS = 60 * 60 * 1000;
 const IMAGE_CANARY_RECONCILE_GRACE_MS = 60 * 60 * 1000;
 const PROVIDER_TIMEOUT_MS = 90_000;
+const RETRYABLE_PROVIDER_STATUSES = new Set([408, 429, 502, 503, 504, 522, 524]);
 const MAX_PROVIDER_PNG_BYTES = 8 * 1024 * 1024;
 const MAX_PROVIDER_BASE64_CHARS = Math.ceil(MAX_PROVIDER_PNG_BYTES / 3) * 4;
 const MAX_SERIALIZED_IMAGE_RESULT_BYTES = MAX_PROVIDER_BASE64_CHARS + 64 * 1024;
@@ -542,7 +543,7 @@ async function processOperation(env: Env, operation: Operation, shaped: ShapedOp
       return json({ error: { code: "external_side_effect_unknown", retryable: false } }, 503);
     }
     if (!providerResponse.ok) {
-      const controlled = providerResponse.status === 408 || providerResponse.status === 429 || providerResponse.status === 502 || providerResponse.status === 503 || providerResponse.status === 504;
+      const controlled = RETRYABLE_PROVIDER_STATUSES.has(providerResponse.status);
       record = { operation_id: shaped.operationId, operation, attempt: shaped.attempt, request_hash: requestHash, logical_request_hash: logicalRequestHash, status: "failed", status_code: providerResponse.status, error_code: controlled ? "upstream_retryable" : "provider_error", retryable: controlled };
       await putImmutableRecord(bucket, currentKeys.result, record);
       return resultResponse(operation, shaped.operationId, shaped.attempt, record);

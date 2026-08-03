@@ -240,6 +240,24 @@ describe("controlled visual adapter", () => {
     expect(providerCalls).toBe(3);
   });
 
+  it.each([522, 524])("retries Cloudflare provider timeout status %s", async status => {
+    let providerCalls = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      providerCalls += 1;
+      if (providerCalls === 1) return new Response(JSON.stringify({ error: { message: "gateway timeout" } }), { status });
+      return new Response(JSON.stringify({ data: [{ b64_json: "synthetic-image" }] }), { status: 200 });
+    }));
+    const results = bucket();
+    const durable = durableEnv(results);
+    const operationId = `cloudflare-timeout-${status}`;
+    const first = await adapter.fetch(request("/internal/v3/visual/image", "visual-token", imageBody(operationId, 1)), durable);
+    expect(first.status).toBe(status);
+    expect(await first.json()).toEqual({ error: { code: "upstream_retryable", retryable: true } });
+    const second = await adapter.fetch(request("/internal/v3/visual/image", "visual-token", imageBody(operationId, 2)), durable);
+    expect(second.status).toBe(200);
+    expect(providerCalls).toBe(2);
+  });
+
   it("does not skip a missing retryable attempt", async () => {
     let providerCalls = 0;
     vi.stubGlobal("fetch", vi.fn(async () => {
