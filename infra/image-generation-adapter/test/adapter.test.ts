@@ -240,7 +240,7 @@ describe("controlled visual adapter", () => {
     expect(providerCalls).toBe(3);
   });
 
-  it.each([522, 524])("retries Cloudflare provider timeout status %s", async status => {
+  it.each([520, 521, 522, 523, 524])("retries Cloudflare provider gateway status %s", async status => {
     let providerCalls = 0;
     vi.stubGlobal("fetch", vi.fn(async () => {
       providerCalls += 1;
