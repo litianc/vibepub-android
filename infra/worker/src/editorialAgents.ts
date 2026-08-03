@@ -980,6 +980,23 @@ export class EditorialCoordinatorAgent extends Agent<EditorialRuntimeEnv, Editor
       BEGIN SELECT RAISE(ABORT, 'editorial_wave2b_state_transition_invalid'); END`;
   }
 
+  private installWave2bEventContractGuard(): void {
+    this.sql`DROP TRIGGER IF EXISTS editorial_wave2b_events_contract_guard`;
+    this.sql`CREATE TRIGGER editorial_wave2b_events_contract_guard
+      BEFORE INSERT ON editorial_wave2b_events
+      WHEN NOT (
+        NEW.event_type IN ('run_queued', 'transcription_started', 'transcript_ready', 'writing_started', 'draft_generated',
+          'review_started', 'reviewed', 'revision_requested', 'content_frozen', 'visual_planning', 'visual_generating',
+          'visual_ready', 'formatting', 'visual_qa', 'draft_syncing', 'draft_verifying', 'draft_ready',
+          'visual_plan_committed', 'visual_asset_committed', 'visual_qa_committed', 'wechat_artifact_committed', 'needs_action', 'failed', 'artifact_committed', 'action_retry')
+        AND (NEW.state_revision = 0 OR NEW.state_revision = (
+          SELECT state_revision FROM editorial_wave2b_runs WHERE run_id = NEW.run_id
+        ))
+        AND NEW.state = (SELECT state FROM editorial_wave2b_runs WHERE run_id = NEW.run_id)
+      )
+      BEGIN SELECT RAISE(ABORT, 'editorial_wave2b_event_contract_invalid'); END`;
+  }
+
   async onStart(): Promise<void> {
     this.ensureSchema();
     const row = this.sql<EditorialAgentState>`
@@ -1437,19 +1454,10 @@ export class EditorialCoordinatorAgent extends Agent<EditorialRuntimeEnv, Editor
       BEFORE INSERT ON editorial_wave2b_call_results
       WHEN NEW.run_id <> (SELECT run_id FROM editorial_wave2b_calls WHERE call_id = NEW.call_id)
       BEGIN SELECT RAISE(ABORT, 'editorial_wave2b_call_result_run_mismatch'); END`;
-    this.sql`CREATE TRIGGER IF NOT EXISTS editorial_wave2b_events_contract_guard
-      BEFORE INSERT ON editorial_wave2b_events
-      WHEN NOT (
-        NEW.event_type IN ('run_queued', 'transcription_started', 'transcript_ready', 'writing_started', 'draft_generated',
-          'review_started', 'reviewed', 'revision_requested', 'content_frozen', 'visual_planning', 'visual_generating',
-          'visual_ready', 'formatting', 'visual_qa', 'draft_syncing', 'draft_verifying', 'draft_ready',
-          'visual_plan_committed', 'visual_asset_committed', 'visual_qa_committed', 'wechat_artifact_committed', 'needs_action', 'failed', 'artifact_committed', 'action_retry')
-        AND (NEW.state_revision = 0 OR NEW.state_revision = (
-          SELECT state_revision FROM editorial_wave2b_runs WHERE run_id = NEW.run_id
-        ))
-        AND NEW.state = (SELECT state FROM editorial_wave2b_runs WHERE run_id = NEW.run_id)
-      )
-      BEGIN SELECT RAISE(ABORT, 'editorial_wave2b_event_contract_invalid'); END`;
+    // Older Coordinator objects retain the trigger body that existed when
+    // their SQLite database was created. Reinstall it so additive event types
+    // such as writing recovery work after an object is evicted and reloaded.
+    this.installWave2bEventContractGuard();
   }
 
   private transactionSync<T>(callback: () => T): T {

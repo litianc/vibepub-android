@@ -2236,6 +2236,14 @@ describe("Wave2B publishing runtime boundary", () => {
       .first<{ created_at: string }>();
     const retryCreatedAt = String(retryEvent?.created_at);
 
+    await runInDurableObject(coordinator, (_instance, state) => {
+      state.storage.sql.exec("DROP TRIGGER editorial_wave2b_events_contract_guard");
+      state.storage.sql.exec(`CREATE TRIGGER editorial_wave2b_events_contract_guard
+        BEFORE INSERT ON editorial_wave2b_events
+        WHEN NEW.event_type = 'action_retry'
+        BEGIN SELECT RAISE(ABORT, 'editorial_wave2b_event_contract_invalid'); END`);
+    });
+
     await expect(coordinator.resumeFiveAgentWritingAfterServiceFix({
       run_id: failed.runId,
       failed_state_revision: failedRevision,
