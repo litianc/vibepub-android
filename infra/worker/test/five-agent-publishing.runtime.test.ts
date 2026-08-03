@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { env, runInDurableObject } from "cloudflare:test";
 import worker from "../src/index";
 import {
@@ -23,14 +23,19 @@ import {
   deriveArtifactId,
   WAVE2_SCHEMA_VERSION,
 } from "../src/wave2/artifactContracts";
-import { applySystemPublicationTransition, projectPublicationTransition, publicationFeatureEnabled, publicationSourceFeatureEnabled, type PublicationRunRow } from "../src/publicationProjection";
+import { applySystemPublicationTransition, assertPublicationAction, projectPublicationTransition, publicationFeatureEnabled, publicationSourceFeatureEnabled, resumePublicationRun, type PublicationRunRow } from "../src/publicationProjection";
 import { coordinatorShardName, EditorialRuntimeError } from "../src/editorialAgents";
 import { wechatDraftFeatureEnabled } from "../src/wave2/wechatServiceClients";
 import { makeWechatArtifact } from "../src/wave2/wechatContracts";
 
 const runtimeEnv = env as any;
 const originalImageGenerationAdapter = runtimeEnv.IMAGE_GENERATION_ADAPTER;
+const originalFiveAgentPublishingWorkflow = runtimeEnv.FIVE_AGENT_PUBLISHING_WORKFLOW;
 let nextWechatFixtureRecordingId = 90_000;
+
+afterEach(() => {
+  runtimeEnv.FIVE_AGENT_PUBLISHING_WORKFLOW = originalFiveAgentPublishingWorkflow;
+});
 
 async function applySqlScript(script: string): Promise<void> {
   const statements = script
@@ -479,6 +484,8 @@ async function executeSyntheticScenario(
     wechatState?: StatefulWechatAdapter;
     wechatArticleId?: string;
     wechatDraftTitle?: string;
+    scope?: { userId: string; workspaceId: string; recordingId: number };
+    writingFailureMode?: "initial" | "revision";
   } = {},
 ): Promise<{
   runId: string;
@@ -523,11 +530,11 @@ async function executeSyntheticScenario(
   const suffix = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
   const runId = `runtime-v3-${scenario}-${suffix}`;
   const articleId = options.wechatArticleId || `runtime-v3-${scenario}-article-${suffix}`;
-  const userId = `runtime_v3_${scenario}_user`;
-  const workspaceId = `runtime_v3_${scenario}_workspace`;
-  const recordingId = options.wechat
+  const userId = options.scope?.userId || `runtime_v3_${scenario}_user`;
+  const workspaceId = options.scope?.workspaceId || `runtime_v3_${scenario}_workspace`;
+  const recordingId = options.scope?.recordingId ?? (options.wechat
     ? nextWechatFixtureRecordingId++
-    : scenario === "p0" ? 1905 : scenario === "p1_pass" ? 1906 : scenario === "p1_block" ? 1907 : scenario === "p0_round2" ? 1908 : 1909;
+    : scenario === "p0" ? 1905 : scenario === "p1_pass" ? 1906 : scenario === "p1_block" ? 1907 : scenario === "p0_round2" ? 1908 : 1909);
   const transcriptRef = `runtime:v3:${scenario}-${suffix}`;
   const transcriptText = `Synthetic transcript for ${scenario}.`;
   const transcriptHash = await sha256Text(transcriptText);
@@ -569,7 +576,10 @@ async function executeSyntheticScenario(
   const writing = serviceBinding(async (request) => {
     writingCalls += 1;
     const input = await request.json() as Record<string, any>;
-    if (failure?.role === "writing") {
+    const writingFailureMatches = !options.writingFailureMode ||
+      (options.writingFailureMode === "initial" && input.mode === "initial") ||
+      (options.writingFailureMode === "revision" && input.mode !== "initial");
+    if (failure?.role === "writing" && writingFailureMatches) {
       return Response.json({ error: {
         code: failure.retryable ? "upstream_timeout" : "unauthorized",
         retryable: failure.retryable,
@@ -1290,6 +1300,7 @@ async function executeSyntheticScenario(
   }
   workflowInstance._agent = workflowCoordinator;
   let wholeRunRestartInjected = false;
+  const cachedStepResults = new Map<string, unknown>();
   let checkpointReached: (() => void) | undefined;
   let releaseCheckpoint: (() => void) | undefined;
   const checkpoint = new Promise<void>(resolve => { checkpointReached = resolve; });
@@ -1302,6 +1313,7 @@ async function executeSyntheticScenario(
     for (let attempt = 0; attempt < attempts; attempt += 1) {
       try {
         const value = await closure();
+        cachedStepResults.set(stepName, value);
         const restartStep = options.visualWholeRunRestartAt === "plan" ? "visual-plan" : options.visualWholeRunRestartAt === "cover" ? "visual-asset-cover_01" : null;
         if (pauseAtCheckpoint && !wholeRunRestartInjected && restartStep === stepName) {
           wholeRunRestartInjected = true;
@@ -1642,6 +1654,7 @@ async function executeSyntheticScenario(
     visualIntentCheckpoint,
     testParams: params,
     testEnv,
+    workflowInstance,
   };
 }
 
@@ -2169,6 +2182,301 @@ describe("Wave2B publishing runtime boundary", () => {
       progress_percent: 50,
     });
   });
+
+  it("rearms an eligible initial-writing failure with a fresh call identity", async () => {
+    const failed = await executeSyntheticScenario("p2_pass", { role: "writing", retryable: false });
+    const coordinator = runtimeEnv.EDITORIAL_COORDINATOR.getByName(
+      await coordinatorShardName(failed.userId, failed.workspaceId, failed.articleId, failed.runId),
+    );
+    const failedRun = await coordinator.getFiveAgentRun(
+      failed.runId,
+      failed.userId,
+      failed.workspaceId,
+    ) as Record<string, unknown>;
+    const failedRevision = Number(failedRun.state_revision);
+    const failedProjection = await runtimeEnv.DB.prepare(`SELECT state_revision FROM publication_runs
+      WHERE run_id = ? AND user_id = ? AND workspace_id = ? LIMIT 1`)
+      .bind(failed.runId, failed.userId, failed.workspaceId)
+      .first<{ state_revision: number }>();
+    const retryKey = `runtime-writing-retry:${failed.runId}`;
+    const retryPayloadHash = await sha256Text(JSON.stringify({
+      action: "retry",
+      expected_state_revision: Number(failedProjection?.state_revision),
+      contract: "system.v1",
+    }));
+    const retried = await assertPublicationAction(
+      runtimeEnv.DB,
+      { userId: failed.userId, workspaceId: failed.workspaceId },
+      failed.runId,
+      "retry",
+      retryKey,
+      retryPayloadHash,
+      Number(failedProjection?.state_revision),
+    );
+    const retryRun = retried.run as Record<string, unknown>;
+    const retryEventRevision = Number(retryRun.state_revision);
+    const nextRetryCount = Number(retryRun.retry_count);
+    const resumePayloadHash = await sha256Text(JSON.stringify({
+      action: "resume",
+      expected_state_revision: retryEventRevision,
+      contract: "system.v1",
+      cause: "writing_service_fix_retry",
+    }));
+    await resumePublicationRun(
+      runtimeEnv.DB,
+      { userId: failed.userId, workspaceId: failed.workspaceId },
+      failed.runId,
+      `runtime-writing-resume:${failed.runId}`,
+      resumePayloadHash,
+      retryEventRevision,
+    );
+    const retryEvent = await runtimeEnv.DB.prepare(`SELECT created_at FROM publication_run_events
+      WHERE run_id = ? AND user_id = ? AND workspace_id = ? AND revision = ? LIMIT 1`)
+      .bind(failed.runId, failed.userId, failed.workspaceId, retryEventRevision)
+      .first<{ created_at: string }>();
+    const retryCreatedAt = String(retryEvent?.created_at);
+
+    await expect(coordinator.resumeFiveAgentWritingAfterServiceFix({
+      run_id: failed.runId,
+      failed_state_revision: failedRevision,
+      retry_count: nextRetryCount,
+      retry_event_revision: retryEventRevision,
+      payload_hash: retryPayloadHash,
+      created_at: retryCreatedAt,
+    })).resolves.toEqual({ replayed: false, state_revision: failedRevision + 1 });
+    await expect(coordinator.resumeFiveAgentWritingAfterServiceFix({
+      run_id: failed.runId,
+      failed_state_revision: failedRevision,
+      retry_count: nextRetryCount,
+      retry_event_revision: retryEventRevision,
+      payload_hash: retryPayloadHash,
+      created_at: retryCreatedAt,
+    })).resolves.toEqual({ replayed: true, state_revision: failedRevision + 1 });
+
+    const resumedRun = await coordinator.getFiveAgentRun(
+      failed.runId,
+      failed.userId,
+      failed.workspaceId,
+    ) as Record<string, unknown>;
+    expect(resumedRun).toMatchObject({
+      state: "writing",
+      state_revision: failedRevision + 1,
+      retry_count: nextRetryCount,
+      error_code: null,
+      next_action: null,
+    });
+    const events = await coordinator.listFiveAgentEvents(failed.runId, failed.userId, failed.workspaceId);
+    expect(events.at(-1)).toMatchObject({
+      event_type: "action_retry",
+      state: "writing",
+      state_revision: failedRevision + 1,
+      payload_hash: retryPayloadHash,
+    });
+
+    const artifacts = await coordinator.listFiveAgentArtifacts(failed.runId, failed.userId, failed.workspaceId);
+    const brief = artifacts.find(item => item.kind === "article_brief");
+    expect(brief).toBeDefined();
+    const oldCall = await coordinator.prepareFiveAgentCall({
+      run_id: failed.runId,
+      call_kind: "writing_initial",
+      idempotency_key: `draft:1:${brief!.artifact_id}`,
+      attempt: 1,
+      created_at: "2026-07-20T00:05:01.000Z",
+    });
+    expect(oldCall).toMatchObject({ status: "failed", error_code: "writing_adapter_non_retryable" });
+    const freshCall = await coordinator.prepareFiveAgentCall({
+      run_id: failed.runId,
+      call_kind: "writing_initial",
+      idempotency_key: `draft:1:${brief!.artifact_id}:retry:${retryEventRevision}`,
+      attempt: 1,
+      created_at: "2026-07-20T00:05:02.000Z",
+    });
+    expect(freshCall).toMatchObject({ status: "prepared" });
+    expect(freshCall.call_id).toContain(":attempt:1");
+  });
+
+  it("retries a failed writing run through the public route exactly once and completes the article", async () => {
+    const authToken = `runtime-retry-token-${Date.now()}`;
+    const failed = await executeSyntheticScenario("p2_pass", { role: "writing", retryable: false }, false, {
+      scope: {
+        userId: "default_user",
+        workspaceId: "vibepub-dogfood",
+        recordingId: nextWechatFixtureRecordingId++,
+      },
+    }) as Record<string, any>;
+    expect(failed.projection).toMatchObject({
+      state: "failed",
+      error_code: "writing_adapter_non_retryable",
+      next_action: "retry_after_service_fix",
+    });
+
+    let repairedWritingCalls = 0;
+    const repairedWriting = serviceBinding(async (request) => {
+      repairedWritingCalls += 1;
+      const input = await request.json() as Record<string, any>;
+      const draft = await syntheticDraftPayload({
+        run_id: input.run_id,
+        article_id: input.article_id,
+        recording_id: input.recording_id,
+        source_hash: input.source_hash,
+      });
+      return Response.json({ protocol_version: "vibepub.editorial.v3", result: draft });
+    });
+    const recoveryStatuses = new Map<string, string>();
+    const recoveryCreates: string[] = [];
+    const recoveryStatusReads: string[] = [];
+    let createResponseLossesRemaining = 1;
+    let createInFlight = false;
+    let overlappingCreates = false;
+    const recoveryWorkflowBinding = {
+      get: async (workflowId: string) => {
+        return {
+          status: async () => {
+            recoveryStatusReads.push(workflowId);
+            const status = recoveryStatuses.get(workflowId);
+            if (!status) throw Object.assign(new Error("workflow instance not found"), { code: 10400 });
+            return { status };
+          },
+        };
+      },
+      create: async (input: { id: string }) => {
+        if (createInFlight) overlappingCreates = true;
+        createInFlight = true;
+        recoveryCreates.push(input.id);
+        recoveryStatuses.set(input.id, "queued");
+        await new Promise(resolve => setTimeout(resolve, 1));
+        createInFlight = false;
+        if (createResponseLossesRemaining > 0) {
+          createResponseLossesRemaining -= 1;
+          throw new Error("synthetic Workflow create response loss");
+        }
+        return { id: input.id };
+      },
+    };
+    Object.assign(failed.testEnv, {
+      FILES_TOKEN: authToken,
+      WRITING_AGENT: repairedWriting,
+      FIVE_AGENT_PUBLISHING_WORKFLOW: recoveryWorkflowBinding,
+    });
+    runtimeEnv.FIVE_AGENT_PUBLISHING_WORKFLOW = recoveryWorkflowBinding;
+
+    const failedRevision = Number(failed.projection.state_revision);
+    const idempotencyKey = `runtime-public-writing-retry:${failed.runId}`;
+    const retryRequest = () => new Request(`https://example.test/api/publication-runs/${failed.runId}/retry`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": idempotencyKey,
+        "x-files-token": authToken,
+      },
+      body: JSON.stringify({ expected_state_revision: failedRevision }),
+    });
+
+    const first = await worker.fetch(retryRequest(), failed.testEnv, {} as any);
+    expect(first.status).toBe(200);
+    expect(await first.json()).toMatchObject({
+      action: "retry",
+      workflow_restart_requested: true,
+      run: { state: "writing", state_revision: failedRevision + 2 },
+    });
+    expect(recoveryCreates).toHaveLength(1);
+    const firstRecoveryId = recoveryCreates[0];
+    expect(recoveryStatusReads).toEqual([firstRecoveryId]);
+    recoveryStatuses.set(firstRecoveryId, "errored");
+
+    const concurrentResponses = await Promise.all([
+      worker.fetch(retryRequest(), failed.testEnv, {} as any),
+      worker.fetch(retryRequest(), failed.testEnv, {} as any),
+    ]);
+    const concurrentBodies = await Promise.all(concurrentResponses.map(response => response.json() as Promise<Record<string, any>>));
+    expect(concurrentResponses.map(response => response.status)).toEqual([200, 200]);
+    expect(concurrentBodies.every(body => body.action === "retry" && body.workflow_restart_requested === true)).toBe(true);
+    expect(recoveryCreates).toHaveLength(2);
+    expect(new Set(recoveryCreates).size).toBe(2);
+    const secondRecoveryId = recoveryCreates[1];
+    expect(recoveryStatuses.get(secondRecoveryId)).toBe("queued");
+    expect(recoveryStatusReads).toEqual([firstRecoveryId, firstRecoveryId, secondRecoveryId]);
+    expect(overlappingCreates).toBe(false);
+
+    const completed = await failed.workflowInstance.run(
+      { payload: failed.testParams, instanceId: secondRecoveryId },
+      { do: (...args: unknown[]) => (args.at(-1) as () => Promise<unknown>)() },
+    ) as Record<string, unknown>;
+    expect(completed.state).toBe("content_frozen");
+    expect(repairedWritingCalls).toBe(1);
+
+    const coordinator = runtimeEnv.EDITORIAL_COORDINATOR.getByName(
+      await coordinatorShardName(failed.userId, failed.workspaceId, failed.articleId, failed.runId),
+    );
+    const artifacts = await coordinator.listFiveAgentArtifacts(failed.runId, failed.userId, failed.workspaceId);
+    const draft = artifacts.find(item => item.kind === "article_draft");
+    const frozen = artifacts.find(item => item.kind === "frozen_article_version");
+    expect(draft).toBeDefined();
+    expect(frozen).toBeDefined();
+    const frozenObject = await failed.testEnv.FILES_BUCKET.get(frozen!.artifact_key);
+    expect(frozenObject).not.toBeNull();
+    const frozenPayload = JSON.parse(await frozenObject!.text()) as Record<string, any>;
+    expect(String(frozenPayload.payload?.body || "").length).toBeGreaterThan(0);
+    const projection = await failed.testEnv.DB.prepare(`SELECT state, progress_percent, error_code, next_action
+      FROM publication_runs WHERE run_id = ? AND user_id = ? AND workspace_id = ? LIMIT 1`)
+      .bind(failed.runId, failed.userId, failed.workspaceId)
+      .first<Record<string, unknown>>();
+    expect(projection).toMatchObject({ state: "content_frozen", error_code: null, next_action: null });
+
+    const replay = await worker.fetch(retryRequest(), failed.testEnv, {} as any);
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toMatchObject({
+      action: "retry",
+      replayed: true,
+      workflow_restart_requested: true,
+      run: { state: "content_frozen" },
+    });
+    expect(recoveryCreates).toHaveLength(2);
+    expect(new Set(recoveryCreates).size).toBe(2);
+    expect(repairedWritingCalls).toBe(1);
+  }, 20_000);
+
+  it("rejects initial-writing recovery for a failed revision without changing the run", async () => {
+    const authToken = `runtime-revision-retry-token-${Date.now()}`;
+    const failed = await executeSyntheticScenario("p1_pass", { role: "writing", retryable: false }, false, {
+      writingFailureMode: "revision",
+      scope: {
+        userId: "default_user",
+        workspaceId: "vibepub-dogfood",
+        recordingId: nextWechatFixtureRecordingId++,
+      },
+    }) as Record<string, any>;
+    expect(failed.projection).toMatchObject({
+      state: "failed",
+      error_code: "writing_adapter_non_retryable",
+      next_action: "retry_after_service_fix",
+    });
+    const revisionCoordinator = runtimeEnv.EDITORIAL_COORDINATOR.getByName(
+      await coordinatorShardName(failed.userId, failed.workspaceId, failed.articleId, failed.runId),
+    );
+    expect(await revisionCoordinator.getFiveAgentRun(failed.runId, failed.userId, failed.workspaceId)).toMatchObject({ revision_count: 1 });
+    Object.assign(failed.testEnv, { FILES_TOKEN: authToken });
+    const before = await failed.testEnv.DB.prepare(`SELECT state, state_revision, retry_count FROM publication_runs
+      WHERE run_id = ? AND user_id = ? AND workspace_id = ? LIMIT 1`)
+      .bind(failed.runId, failed.userId, failed.workspaceId)
+      .first<Record<string, unknown>>();
+    const response = await worker.fetch(new Request(`https://example.test/api/publication-runs/${failed.runId}/retry`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": `runtime-revision-writing-retry:${failed.runId}`,
+        "x-files-token": authToken,
+      },
+      body: JSON.stringify({ expected_state_revision: Number(before?.state_revision) }),
+    }), failed.testEnv, {} as any);
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ error: "publication_writing_retry_round_not_supported" });
+    const after = await failed.testEnv.DB.prepare(`SELECT state, state_revision, retry_count FROM publication_runs
+      WHERE run_id = ? AND user_id = ? AND workspace_id = ? LIMIT 1`)
+      .bind(failed.runId, failed.userId, failed.workspaceId)
+      .first<Record<string, unknown>>();
+    expect(after).toEqual(before);
+  }, 20_000);
 
   it("holds an unknown draft artifact write and replays the durable call without a provider call", async () => {
     const held = await executeSyntheticScenario("p2_pass", undefined, true);

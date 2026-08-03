@@ -4932,7 +4932,7 @@ async function verifyExactArtifactSet(
   const allowedDoEventTypes = new Set([
     "run_queued", "transcription_started", "transcript_ready", "writing_started", "draft_generated",
     "review_started", "reviewed", "revision_requested", "content_frozen", "needs_action", "failed",
-    "artifact_committed",
+    "artifact_committed", "action_retry",
   ]);
   const doEvents = await coordinator.listFiveAgentEvents(params.run_id, params.user_id, params.workspace_id);
   const doRun = await coordinator.getFiveAgentRun(params.run_id, params.user_id, params.workspace_id) as Record<string, unknown>;
@@ -5021,7 +5021,7 @@ async function verifyExactArtifactSet(
     "run_queued", "transcription_started", "transcript_ready", "writing_started", "draft_generated",
     "review_started", "review_pass", "review_revise", "review_block", "review_2_pass", "review_2_revise",
     "review_2_block", "revision_requested", "content_frozen", "needs_action", "failed", "start_reconciliation_required", "start_reconciled",
-    "start_reconciliation_retrying", "start_reconciliation_queued", "workflow_start_confirmed", "action_retry", "action_cancel",
+    "start_reconciliation_retrying", "start_reconciliation_queued", "workflow_start_confirmed", "action_retry", "action_resume", "action_cancel",
   ]);
   const currentProjection = await env.DB.prepare(`SELECT state_revision FROM publication_runs
       WHERE run_id = ? AND user_id = ? AND workspace_id = ? LIMIT 1`)
@@ -5091,11 +5091,23 @@ async function writeDraftThroughService(
   transcriptText: string,
   brief: ArtifactObject,
   createdAt: string,
+  retryEpoch = 0,
 ): Promise<PreparedArtifactMetadata> {
   const briefPayload = brief.payload as ArticleBrief;
-  const idempotencyKey = `draft:1:${brief.envelope.artifact_id}`;
+  const idempotencyKey = `draft:1:${brief.envelope.artifact_id}${retryEpoch > 0 ? `:retry:${retryEpoch}` : ""}`;
   const artifactId = await deriveArtifactId("article_draft", params.run_id, idempotencyKey);
   const artifactKeyValue = artifactKey(params.user_id, params.workspace_id, params.run_id, "article_draft", artifactId);
+  if (retryEpoch > 0) {
+    const briefMetadata = toArtifactMetadata(brief);
+    await verifyExactArtifactSet(
+      env,
+      coordinator,
+      params,
+      [briefMetadata],
+      [briefMetadata.artifact_id],
+      [briefMetadata.artifact_id],
+    );
+  }
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     let prepared: Awaited<ReturnType<EditorialCoordinatorAgent["prepareFiveAgentCall"]>>;
     try {
@@ -5695,6 +5707,58 @@ async function buildFrozenFromAccepted(
   });
 }
 
+type WritingServiceFixResume = {
+  doStateRevision: number;
+  projectionRevision: number;
+  retryEpoch: number;
+};
+
+async function resumeWritingAfterServiceFix(
+  env: EditorialRuntimeEnv,
+  coordinator: DurableObjectStub<EditorialCoordinatorAgent>,
+  params: FiveAgentWorkflowParams,
+  currentDoRun: Record<string, unknown> | null,
+): Promise<WritingServiceFixResume | null> {
+  if (!currentDoRun || !["failed", "writing"].includes(String(currentDoRun.state))) return null;
+  if (Number(currentDoRun.revision_count) !== 0) return null;
+  const projection = await env.DB.prepare(`SELECT state, state_revision, retry_count, last_successful_state
+    FROM publication_runs WHERE run_id = ? AND user_id = ? AND workspace_id = ? LIMIT 1`)
+    .bind(params.run_id, params.user_id, params.workspace_id)
+    .first<{ state: string; state_revision: number; retry_count: number; last_successful_state: string }>();
+  if (!projection || projection.state !== "writing" || projection.last_successful_state !== "writing" || Number(projection.retry_count) < 1) {
+    return null;
+  }
+  const revisionRequested = await env.DB.prepare(`SELECT 1 AS present FROM publication_run_events
+    WHERE run_id = ? AND user_id = ? AND workspace_id = ? AND event_type = 'revision_requested' LIMIT 1`)
+    .bind(params.run_id, params.user_id, params.workspace_id)
+    .first<{ present: number }>();
+  if (revisionRequested) return null;
+  const retryEvent = await env.DB.prepare(`SELECT revision, payload_hash, created_at
+    FROM publication_run_events
+    WHERE run_id = ? AND user_id = ? AND workspace_id = ? AND event_type = 'action_retry' AND retry_count = ?
+    ORDER BY revision DESC LIMIT 1`)
+    .bind(params.run_id, params.user_id, params.workspace_id, projection.retry_count)
+    .first<{ revision: number; payload_hash: string; created_at: string }>();
+  if (!retryEvent) {
+    throw new EditorialRuntimeError("writing_retry_evidence_missing", "writing retry event is unavailable", 409);
+  }
+  const currentRevision = Number(currentDoRun.state_revision);
+  const failedRevision = currentDoRun.state === "failed" ? currentRevision : currentRevision - 1;
+  const resumed = await coordinator.resumeFiveAgentWritingAfterServiceFix({
+    run_id: params.run_id,
+    failed_state_revision: failedRevision,
+    retry_count: Number(projection.retry_count),
+    retry_event_revision: Number(retryEvent.revision),
+    payload_hash: retryEvent.payload_hash,
+    created_at: retryEvent.created_at,
+  });
+  return {
+    doStateRevision: resumed.state_revision,
+    projectionRevision: Number(projection.state_revision),
+    retryEpoch: Number(retryEvent.revision),
+  };
+}
+
 export class FiveAgentPublishingWorkflow extends AgentWorkflow<EditorialCoordinatorAgent, FiveAgentWorkflowParams, FiveAgentWorkflowResult, EditorialRuntimeEnv> {
   async run(event: AgentWorkflowEvent<FiveAgentWorkflowParams>, step: AgentWorkflowStep): Promise<FiveAgentWorkflowResult> {
     const params = event.payload;
@@ -5716,7 +5780,11 @@ export class FiveAgentPublishingWorkflow extends AgentWorkflow<EditorialCoordina
       }
       return { run_id: params.run_id, workflow_id: params.workflow_id, event_id: confirmation.event_id };
     });
-    const confirmedCurrentRun = await coordinator.getFiveAgentRun(params.run_id, params.user_id, params.workspace_id) as Record<string, unknown> | null;
+    let confirmedCurrentRun = await coordinator.getFiveAgentRun(params.run_id, params.user_id, params.workspace_id) as Record<string, unknown> | null;
+    const writingServiceFixResume = await resumeWritingAfterServiceFix(this.env, coordinator, params, confirmedCurrentRun);
+    if (writingServiceFixResume) {
+      confirmedCurrentRun = await coordinator.getFiveAgentRun(params.run_id, params.user_id, params.workspace_id) as Record<string, unknown> | null;
+    }
     const visualResumeState = confirmedCurrentRun?.state === "content_frozen" || confirmedCurrentRun?.state === "visual_planning" ||
       confirmedCurrentRun?.state === "visual_generating" || confirmedCurrentRun?.state === "visual_ready" ||
       (confirmedCurrentRun?.state === "needs_action" && confirmedCurrentRun?.error_code === "external_side_effect_unknown" &&
@@ -5766,40 +5834,65 @@ export class FiveAgentPublishingWorkflow extends AgentWorkflow<EditorialCoordina
       return { ref: value.ref, hash: value.hash, length: value.length };
     });
     const currentDoRun = await coordinator.getFiveAgentRun(params.run_id, params.user_id, params.workspace_id) as Record<string, unknown> | null;
-    if (!currentDoRun || currentDoRun.state !== "queued" || Number(currentDoRun.state_revision) < 0) {
+    const writingRetryActive = writingServiceFixResume !== null &&
+      currentDoRun?.state === "writing";
+    if (!currentDoRun || (!writingRetryActive && currentDoRun.state !== "queued") || Number(currentDoRun.state_revision) < 0) {
       throw new EditorialRuntimeError("workflow_start_state_conflict", "Wave2B workflow must start from the durable queued run", 409);
     }
     const currentProjection = await this.env.DB.prepare(`SELECT state, state_revision, user_id, workspace_id
       FROM publication_runs WHERE run_id = ? AND user_id = ? AND workspace_id = ? LIMIT 1`)
       .bind(params.run_id, params.user_id, params.workspace_id)
       .first<{ state: string; state_revision: number; user_id: string; workspace_id: string }>();
-    if (!currentProjection || currentProjection.state !== "queued" ||
+    if (!currentProjection || (!writingRetryActive && currentProjection.state !== "queued") ||
+        (writingRetryActive && currentProjection.state !== "writing") ||
         currentProjection.user_id !== params.user_id || currentProjection.workspace_id !== params.workspace_id) {
       throw new EditorialRuntimeError("workflow_start_state_conflict", "Wave2B publication must start from the durable queued projection", 409);
     }
     let doStateRevision = Number(currentDoRun.state_revision);
     let projectionRevision = Number(currentProjection.state_revision);
-    const transcribing = await step.do("state-transcribing", retry, () => applySystemState(
-      this.env, coordinator, params, "transcribing", "transcription_started", doStateRevision, projectionRevision, 1, 1,
-    ));
-    doStateRevision = transcribing.doStateRevision;
-    projectionRevision = transcribing.projectionRevision;
-    const briefCommit = await step.do("commit-brief", retry, async () => {
-      const brief = await readArtifactFromR2(this.env, params, params.brief_artifact_id, params.brief_artifact_key, params.brief_payload_hash);
-      return persistArtifact(this.env, coordinator, params, brief, "transcript_ready", "transcript_ready", doStateRevision, projectionRevision);
-    });
-    doStateRevision = briefCommit.doStateRevision;
-    projectionRevision = briefCommit.projectionRevision;
-    const writing = await step.do("state-writing", retry, () => applySystemState(
-      this.env, coordinator, params, "writing", "writing_started", doStateRevision, projectionRevision, 2, 1,
-    ));
-    doStateRevision = writing.doStateRevision;
-    projectionRevision = writing.projectionRevision;
+    if (!writingRetryActive) {
+      const transcribing = await step.do("state-transcribing", retry, () => applySystemState(
+        this.env, coordinator, params, "transcribing", "transcription_started", doStateRevision, projectionRevision, 1, 1,
+      ));
+      doStateRevision = transcribing.doStateRevision;
+      projectionRevision = transcribing.projectionRevision;
+    }
+    const briefCommit = writingRetryActive
+      ? await step.do("recover-brief", retry, async () => {
+          const brief = await readArtifactFromR2(this.env, params, params.brief_artifact_id, params.brief_artifact_key, params.brief_payload_hash);
+          return { ...toArtifactMetadata(brief), doStateRevision, projectionRevision };
+        })
+      : await step.do("commit-brief", retry, async () => {
+          const brief = await readArtifactFromR2(this.env, params, params.brief_artifact_id, params.brief_artifact_key, params.brief_payload_hash);
+          return persistArtifact(this.env, coordinator, params, brief, "transcript_ready", "transcript_ready", doStateRevision, projectionRevision);
+        });
+    if (!writingRetryActive) {
+      doStateRevision = briefCommit.doStateRevision;
+      projectionRevision = briefCommit.projectionRevision;
+    }
+    if (writingServiceFixResume) {
+      doStateRevision = writingServiceFixResume.doStateRevision;
+      projectionRevision = writingServiceFixResume.projectionRevision;
+    } else {
+      const writing = await step.do("state-writing", retry, () => applySystemState(
+        this.env, coordinator, params, "writing", "writing_started", doStateRevision, projectionRevision, 2, 1,
+      ));
+      doStateRevision = writing.doStateRevision;
+      projectionRevision = writing.projectionRevision;
+    }
     const draftPrepared = await step.do("write-draft-1", retry, async () => {
       try {
         const transcriptValue = await readTranscript(this.env, params);
         const brief = await readArtifactFromR2(this.env, params, briefCommit.artifact_id, briefCommit.artifact_key, briefCommit.payload_hash);
-        return await writeDraftThroughService(this.env, coordinator, params, transcriptValue.text, brief, workflowTimestamp(params.created_at, 3_000));
+        return await writeDraftThroughService(
+          this.env,
+          coordinator,
+          params,
+          transcriptValue.text,
+          brief,
+          workflowTimestamp(params.created_at, 3_000),
+          writingServiceFixResume?.retryEpoch || 0,
+        );
       } catch (error) {
         if (isReconciliationHold(error)) return holdForReconciliation(this.env, coordinator, params, doStateRevision, projectionRevision, 3, transcript, [briefCommit.artifact_id]);
         if (!isAdapterFailure(error)) throw error;

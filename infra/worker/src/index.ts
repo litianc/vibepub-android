@@ -8,6 +8,7 @@ import {
   EditorialWechatPublishingAgent,
   EditorialWorkflow,
   EditorialWritingAgent,
+  coordinatorShardName,
   handleEditorialOrchestrationInternalRoute,
 } from "./editorialAgents";
 import type { EditorialRuntimeEnv, EditorialWorkflowParams } from "./editorialAgents";
@@ -24,6 +25,7 @@ import {
   publicationTenantFeatureEnabled,
   PublicationProjectionError,
   recordPublicationActionIntent,
+  resumePublicationRun,
 } from "./publicationProjection";
 
 export {
@@ -402,15 +404,24 @@ export default {
           payloadHash,
           expectedStateRevision,
         )
-        : assertPublicationAction(
-          env.DB,
-          auth,
-          runId,
-          action,
-          idempotencyKey,
-          payloadHash,
-          expectedStateRevision,
-        ));
+        : endpointAction === "retry"
+          ? retryPublicationWritingAfterServiceFix(
+            env,
+            auth,
+            runId,
+            idempotencyKey,
+            payloadHash,
+            expectedStateRevision,
+          )
+          : assertPublicationAction(
+            env.DB,
+            auth,
+            runId,
+            action,
+            idempotencyKey,
+            payloadHash,
+            expectedStateRevision,
+          ));
     }
 
     if (request.method === "POST" && isRecordingRevisionPath(url.pathname)) {
@@ -1510,6 +1521,191 @@ async function listRecordings(env: Env, auth: AuthContext): Promise<Response> {
     console.error("Failed to fetch from D1:", dbErr);
     return json({ error: "database_error", details: dbErr.message }, 500);
   }
+}
+
+async function retryPublicationWritingAfterServiceFix(
+  env: Env,
+  auth: AuthContext,
+  runId: string,
+  idempotencyKey: string,
+  payloadHash: string,
+  expectedStateRevision: number,
+): Promise<Record<string, unknown>> {
+  const candidate = await env.DB.prepare(`SELECT p.state, p.error_code, p.next_action,
+      EXISTS(SELECT 1 FROM publication_run_events e
+        WHERE e.run_id = p.run_id AND e.user_id = p.user_id AND e.workspace_id = p.workspace_id
+          AND e.event_type = 'revision_requested') AS has_revision_requested
+    FROM publication_runs p WHERE p.run_id = ? AND p.user_id = ? AND p.workspace_id = ? LIMIT 1`)
+    .bind(runId, auth.userId, auth.workspaceId)
+    .first<{ state: string; error_code: string | null; next_action: string | null; has_revision_requested: number }>();
+  if (
+    candidate?.state === "failed" &&
+    candidate.error_code === "writing_adapter_non_retryable" &&
+    candidate.next_action === "retry_after_service_fix" &&
+    Number(candidate.has_revision_requested) !== 0
+  ) {
+    throw new PublicationProjectionError(
+      "publication_writing_retry_round_not_supported",
+      "only the initial writing round can be restarted after a writing service fix",
+      409,
+    );
+  }
+  const retried = await assertPublicationAction(
+    env.DB,
+    auth,
+    runId,
+    "retry",
+    idempotencyKey,
+    payloadHash,
+    expectedStateRevision,
+  );
+  const retryRun = retried.run as Record<string, unknown> | undefined;
+  const retryRevision = Number(retryRun?.state_revision);
+  if (
+    retryRun?.state !== "retrying" ||
+    retryRun.last_successful_state !== "writing" ||
+    !Number.isSafeInteger(retryRevision) ||
+    retryRevision < 1
+  ) {
+    return retried;
+  }
+
+  const failureEvidence = await env.DB.prepare(`SELECT state, error_code, next_action
+    FROM publication_run_events
+    WHERE run_id = ? AND user_id = ? AND workspace_id = ? AND revision = ?
+    LIMIT 1`)
+    .bind(runId, auth.userId, auth.workspaceId, retryRevision - 1)
+    .first<{ state: string; error_code: string | null; next_action: string | null }>();
+  if (
+    failureEvidence?.state !== "failed" ||
+    failureEvidence.error_code !== "writing_adapter_non_retryable" ||
+    failureEvidence.next_action !== "retry_after_service_fix"
+  ) {
+    return retried;
+  }
+  const retryScope = await env.DB.prepare(`SELECT EXISTS(SELECT 1 FROM publication_run_events
+      WHERE run_id = ? AND user_id = ? AND workspace_id = ? AND event_type = 'revision_requested') AS has_revision_requested`)
+    .bind(runId, auth.userId, auth.workspaceId)
+    .first<{ has_revision_requested: number }>();
+  if (!retryScope || Number(retryScope.has_revision_requested) !== 0) {
+    throw new PublicationProjectionError(
+      "publication_writing_retry_round_not_supported",
+      "only the initial writing round can be restarted after a writing service fix",
+      409,
+    );
+  }
+  const retryEvidence = await env.DB.prepare(`SELECT event_type, state, retry_count, payload_hash, created_at
+    FROM publication_run_events
+    WHERE run_id = ? AND user_id = ? AND workspace_id = ? AND revision = ?
+    LIMIT 1`)
+    .bind(runId, auth.userId, auth.workspaceId, retryRevision)
+    .first<{ event_type: string; state: string; retry_count: number; payload_hash: string; created_at: string }>();
+  if (
+    retryEvidence?.event_type !== "action_retry" ||
+    retryEvidence.state !== "retrying" ||
+    Number(retryEvidence.retry_count) !== Number(retryRun.retry_count) ||
+    retryEvidence.payload_hash !== payloadHash ||
+    !Number.isFinite(Date.parse(retryEvidence.created_at))
+  ) {
+    throw new PublicationProjectionError(
+      "publication_writing_retry_evidence_invalid",
+      "writing retry evidence does not reconcile",
+      409,
+    );
+  }
+
+  const resumeKey = `auto-resume:${await sha256Hex(JSON.stringify({
+    run_id: runId,
+    retry_idempotency_key: idempotencyKey,
+    retry_revision: retryRevision,
+  }))}`;
+  const resumePayloadHash = `sha256:${await sha256Hex(JSON.stringify({
+    action: "resume",
+    expected_state_revision: retryRevision,
+    contract: "system.v1",
+    cause: "writing_service_fix_retry",
+  }))}`;
+  const resumed = await resumePublicationRun(
+    env.DB,
+    auth,
+    runId,
+    resumeKey,
+    resumePayloadHash,
+    retryRevision,
+  );
+  const resumedRun = resumed.run as Record<string, unknown> | undefined;
+  if (
+    resumedRun?.state !== "writing" ||
+    Number(resumedRun.state_revision) !== retryRevision + 1 ||
+    Number(resumedRun.retry_count) !== Number(retryRun.retry_count)
+  ) {
+    throw new PublicationProjectionError(
+      "publication_writing_retry_state_invalid",
+      "writing retry did not resume the expected publication state",
+      409,
+    );
+  }
+  const articleId = String(resumedRun.article_id || "");
+  if (!articleId) {
+    throw new PublicationProjectionError("publication_writing_retry_state_invalid", "writing retry article is unavailable", 409);
+  }
+  const workflowId = `five-agent-${runId}`;
+  const coordinator = env.EDITORIAL_COORDINATOR.getByName(
+    await coordinatorShardName(auth.userId, auth.workspaceId, articleId, runId),
+  );
+  const receiptInput = {
+    run_id: runId,
+    user_id: auth.userId,
+    workspace_id: auth.workspaceId,
+    workflow_id: workflowId,
+    retry_event_revision: retryRevision,
+    retry_count: Number(retryRun.retry_count),
+    payload_hash: payloadHash,
+  };
+  const receipt = await coordinator.getFiveAgentWritingRestartReceipt(receiptInput);
+  const currentResult = await getPublicationRun(env.DB, auth, runId);
+  const currentRun = currentResult.run as Record<string, unknown>;
+  const writingRetryStillPending = currentRun.state === "writing" && Number(currentRun.state_revision) === retryRevision + 1;
+  if (receipt.requested) {
+    return {
+      action: "retry",
+      run: currentRun,
+      replayed: true,
+      workflow_restart_requested: true,
+    };
+  }
+  if (!writingRetryStillPending) {
+    await coordinator.recordFiveAgentWritingRestartReceipt({
+      ...receiptInput,
+      retry_created_at: retryEvidence.created_at,
+      recorded_at: new Date().toISOString(),
+    });
+    return {
+      action: "retry",
+      run: currentRun,
+      replayed: true,
+      workflow_restart_requested: true,
+    };
+  }
+  const recovery = await coordinator.startFiveAgentWritingRecovery({
+    ...receiptInput,
+    retry_event_revision: retryRevision,
+    retry_created_at: retryEvidence.created_at,
+  });
+  if (!recovery.requested) {
+    throw new PublicationProjectionError(
+      "publication_workflow_restart_reconciliation_required",
+      "writing workflow restart requires another reconciliation attempt",
+      503,
+    );
+  }
+  const latest = await getPublicationRun(env.DB, auth, runId);
+  return {
+    action: "retry",
+    run: latest.run,
+    replayed: Boolean(retried.replayed && resumed.replayed),
+    workflow_restart_requested: true,
+  };
 }
 
 async function publicationRoute(factory: () => Promise<Record<string, unknown>>): Promise<Response> {

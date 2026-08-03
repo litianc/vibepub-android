@@ -965,7 +965,13 @@ export class EditorialCoordinatorAgent extends Agent<EditorialRuntimeEnv, Editor
         (OLD.state = 'visual_qa' AND NEW.state IN ('draft_syncing', 'needs_action', 'failed')) OR
         (OLD.state = 'draft_syncing' AND NEW.state IN ('draft_verifying', 'needs_action', 'failed')) OR
         (OLD.state = 'draft_verifying' AND NEW.state IN ('draft_ready', 'needs_action', 'failed')) OR
-        (OLD.state = 'needs_action' AND NEW.state IN ('writing', 'reviewing', 'visual_planning', 'visual_generating', 'visual_ready', 'formatting', 'visual_qa', 'draft_syncing', 'draft_verifying', 'failed'))
+        (OLD.state = 'needs_action' AND NEW.state IN ('writing', 'reviewing', 'visual_planning', 'visual_generating', 'visual_ready', 'formatting', 'visual_qa', 'draft_syncing', 'draft_verifying', 'failed')) OR
+        (OLD.state = 'failed' AND NEW.state = 'writing'
+          AND OLD.last_successful_state = 'writing'
+          AND OLD.error_code = 'writing_adapter_non_retryable'
+          AND OLD.next_action = 'retry_after_service_fix'
+          AND NEW.retry_count = OLD.retry_count + 1
+          AND NEW.error_code IS NULL AND NEW.next_action IS NULL)
       ) OR
         (NEW.state = 'needs_action' AND NEW.run_status <> 'needs_action') OR
         (NEW.state = 'failed' AND NEW.run_status <> 'failed') OR
@@ -1209,6 +1215,32 @@ export class EditorialCoordinatorAgent extends Agent<EditorialRuntimeEnv, Editor
       recorded_at TEXT NOT NULL,
       FOREIGN KEY(call_id) REFERENCES editorial_wave2b_calls(call_id)
     )`;
+    this.sql`CREATE TABLE IF NOT EXISTS editorial_wave2b_writing_restart_attempts (
+      attempt_id TEXT PRIMARY KEY,
+      restart_id TEXT NOT NULL,
+      run_id TEXT NOT NULL,
+      workflow_id TEXT NOT NULL,
+      recovery_workflow_id TEXT NOT NULL,
+      retry_event_revision INTEGER NOT NULL,
+      retry_count INTEGER NOT NULL,
+      payload_hash TEXT NOT NULL,
+      attempt INTEGER NOT NULL,
+      requested_at TEXT NOT NULL,
+      UNIQUE(restart_id, attempt),
+      UNIQUE(recovery_workflow_id),
+      FOREIGN KEY(run_id) REFERENCES editorial_wave2b_runs(run_id)
+    )`;
+    this.sql`CREATE TABLE IF NOT EXISTS editorial_wave2b_writing_restart_receipts (
+      restart_id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      workflow_id TEXT NOT NULL,
+      retry_event_revision INTEGER NOT NULL,
+      retry_count INTEGER NOT NULL,
+      payload_hash TEXT NOT NULL,
+      recorded_at TEXT NOT NULL,
+      UNIQUE(run_id, retry_event_revision),
+      FOREIGN KEY(run_id) REFERENCES editorial_wave2b_runs(run_id)
+    )`;
     this.sql`CREATE TABLE IF NOT EXISTS editorial_wave2b_events (
       seq INTEGER PRIMARY KEY AUTOINCREMENT,
       run_id TEXT NOT NULL,
@@ -1363,6 +1395,14 @@ export class EditorialCoordinatorAgent extends Agent<EditorialRuntimeEnv, Editor
       BEFORE UPDATE ON editorial_wave2b_call_results BEGIN SELECT RAISE(ABORT, 'editorial_wave2b_call_results_are_append_only'); END`;
     this.sql`CREATE TRIGGER IF NOT EXISTS editorial_wave2b_call_results_append_only_delete
       BEFORE DELETE ON editorial_wave2b_call_results BEGIN SELECT RAISE(ABORT, 'editorial_wave2b_call_results_are_append_only'); END`;
+    this.sql`CREATE TRIGGER IF NOT EXISTS editorial_wave2b_writing_restart_attempts_append_only_update
+      BEFORE UPDATE ON editorial_wave2b_writing_restart_attempts BEGIN SELECT RAISE(ABORT, 'editorial_wave2b_writing_restart_attempts_are_append_only'); END`;
+    this.sql`CREATE TRIGGER IF NOT EXISTS editorial_wave2b_writing_restart_attempts_append_only_delete
+      BEFORE DELETE ON editorial_wave2b_writing_restart_attempts BEGIN SELECT RAISE(ABORT, 'editorial_wave2b_writing_restart_attempts_are_append_only'); END`;
+    this.sql`CREATE TRIGGER IF NOT EXISTS editorial_wave2b_writing_restart_receipts_append_only_update
+      BEFORE UPDATE ON editorial_wave2b_writing_restart_receipts BEGIN SELECT RAISE(ABORT, 'editorial_wave2b_writing_restart_receipts_are_append_only'); END`;
+    this.sql`CREATE TRIGGER IF NOT EXISTS editorial_wave2b_writing_restart_receipts_append_only_delete
+      BEFORE DELETE ON editorial_wave2b_writing_restart_receipts BEGIN SELECT RAISE(ABORT, 'editorial_wave2b_writing_restart_receipts_are_append_only'); END`;
     this.sql`CREATE TRIGGER IF NOT EXISTS editorial_wave2b_events_append_only_update
       BEFORE UPDATE ON editorial_wave2b_events BEGIN SELECT RAISE(ABORT, 'editorial_wave2b_events_are_append_only'); END`;
     this.sql`CREATE TRIGGER IF NOT EXISTS editorial_wave2b_events_append_only_delete
@@ -1403,7 +1443,7 @@ export class EditorialCoordinatorAgent extends Agent<EditorialRuntimeEnv, Editor
         NEW.event_type IN ('run_queued', 'transcription_started', 'transcript_ready', 'writing_started', 'draft_generated',
           'review_started', 'reviewed', 'revision_requested', 'content_frozen', 'visual_planning', 'visual_generating',
           'visual_ready', 'formatting', 'visual_qa', 'draft_syncing', 'draft_verifying', 'draft_ready',
-          'visual_plan_committed', 'visual_asset_committed', 'visual_qa_committed', 'wechat_artifact_committed', 'needs_action', 'failed', 'artifact_committed')
+          'visual_plan_committed', 'visual_asset_committed', 'visual_qa_committed', 'wechat_artifact_committed', 'needs_action', 'failed', 'artifact_committed', 'action_retry')
         AND (NEW.state_revision = 0 OR NEW.state_revision = (
           SELECT state_revision FROM editorial_wave2b_runs WHERE run_id = NEW.run_id
         ))
@@ -2746,6 +2786,400 @@ export class EditorialCoordinatorAgent extends Agent<EditorialRuntimeEnv, Editor
         VALUES (${input.run_id}, ${input.event_type}, ${input.state}, ${input.state_revision}, NULL, ${input.payload_hash || null}, ${safeJson({ next_action: input.next_action || null, error_code: input.error_code || null })}, ${input.created_at})`;
     });
     return { replayed: false };
+  }
+
+  public async resumeFiveAgentWritingAfterServiceFix(input: {
+    run_id: string;
+    failed_state_revision: number;
+    retry_count: number;
+    retry_event_revision: number;
+    payload_hash: string;
+    created_at: string;
+  }): Promise<{ replayed: boolean; state_revision: number }> {
+    this.ensureSchema();
+    const current = this.wave2bRun(input.run_id);
+    if (!current) throw new EditorialRuntimeError("run_not_found", "Wave2B run not found", 404);
+    await this.verifyFiveAgentWritingRetryEvidence(current, input, true);
+    const resumedRevision = input.failed_state_revision + 1;
+    if (
+      current.state === "writing" &&
+      Number(current.state_revision) === resumedRevision &&
+      Number(current.retry_count) === input.retry_count
+    ) {
+      const event = this.sql<{ event_type: string; payload_hash: string | null; created_at: string }>`SELECT event_type, payload_hash, created_at
+        FROM editorial_wave2b_events WHERE run_id = ${input.run_id} AND state_revision = ${resumedRevision} LIMIT 1`[0];
+      if (event?.event_type === "action_retry" && event.payload_hash === input.payload_hash && event.created_at === input.created_at) {
+        return { replayed: true, state_revision: resumedRevision };
+      }
+      throw new EditorialRuntimeError("idempotency_conflict", "Wave2B writing retry replay conflicts", 409);
+    }
+    if (
+      current.state !== "failed" ||
+      Number(current.state_revision) !== input.failed_state_revision ||
+      current.last_successful_state !== "writing" ||
+      current.error_code !== "writing_adapter_non_retryable" ||
+      current.next_action !== "retry_after_service_fix" ||
+      Number(current.revision_count) !== 0
+    ) {
+      throw new EditorialRuntimeError("writing_retry_state_invalid", "Wave2B writing retry is not eligible", 409);
+    }
+    if (input.retry_count !== Number(current.retry_count) + 1) {
+      throw new EditorialRuntimeError("retry_count_invalid", "Wave2B writing retry count is not the next value", 409);
+    }
+    if (!/^sha256:[a-f0-9]{64}$/.test(input.payload_hash)) {
+      throw new EditorialRuntimeError("payload_hash_invalid", "Wave2B writing retry payload hash is invalid", 409);
+    }
+    const projected = deriveWave2BProjection(current, "writing");
+    this.transactionSync(() => {
+      const updated = this.sql<{ run_id: string }>`UPDATE editorial_wave2b_runs
+        SET state = 'writing', state_revision = ${resumedRevision},
+            run_status = ${projected.runStatus}, progress_percent = ${projected.progress},
+            resume_state = NULL, last_successful_state = ${projected.lastSuccessfulState},
+            last_successful_progress_percent = ${projected.lastSuccessfulProgress},
+            retry_count = ${input.retry_count}, next_action = NULL, error_code = NULL,
+            updated_at = ${input.created_at}
+        WHERE run_id = ${input.run_id} AND state = 'failed' AND state_revision = ${input.failed_state_revision}
+        RETURNING run_id`;
+      if (updated.length !== 1) throw new EditorialRuntimeError("stale_workflow_step", "Wave2B writing retry CAS failed", 409);
+      this.sql`INSERT INTO editorial_wave2b_events
+        (run_id, event_type, state, state_revision, artifact_id, payload_hash, summary_json, created_at)
+        VALUES (${input.run_id}, 'action_retry', 'writing', ${resumedRevision}, NULL, ${input.payload_hash},
+          ${safeJson({ retry_count: input.retry_count, resumed_from: "failed" })}, ${input.created_at})`;
+    });
+    return { replayed: false, state_revision: resumedRevision };
+  }
+
+  private async verifyFiveAgentWritingRetryEvidence(
+    current: Record<string, unknown>,
+    input: {
+      run_id: string;
+      retry_count: number;
+      retry_event_revision: number;
+      payload_hash: string;
+      created_at: string;
+    },
+    requireCurrentWriting: boolean,
+  ): Promise<{ state: string; state_revision: number; retry_count: number; last_successful_state: string; last_event_type: string }> {
+    if (!Number.isSafeInteger(input.retry_event_revision) || input.retry_event_revision < 1 ||
+        !Number.isSafeInteger(input.retry_count) || input.retry_count < 1 ||
+        !/^sha256:[a-f0-9]{64}$/.test(input.payload_hash) || !Number.isFinite(Date.parse(input.created_at))) {
+      throw new EditorialRuntimeError("writing_retry_evidence_invalid", "Wave2B writing retry evidence is invalid", 409);
+    }
+    const db = (this.env as EditorialRuntimeEnv & { DB?: D1Database }).DB;
+    if (!db) throw new EditorialRuntimeError("writing_retry_evidence_unavailable", "Wave2B writing retry evidence is unavailable", 503);
+    try {
+      const projection = await db.prepare(`SELECT state, state_revision, retry_count, last_successful_state, last_event_type
+        FROM publication_runs WHERE run_id = ? AND user_id = ? AND workspace_id = ? LIMIT 1`)
+        .bind(input.run_id, current.user_id, current.workspace_id)
+        .first<{ state: string; state_revision: number; retry_count: number; last_successful_state: string; last_event_type: string }>();
+      const events = await db.prepare(`SELECT revision, event_type, state, retry_count, next_action, error_code, payload_hash, created_at
+        FROM publication_run_events
+        WHERE run_id = ? AND user_id = ? AND workspace_id = ? AND revision BETWEEN ? AND ?
+        ORDER BY revision ASC`)
+        .bind(input.run_id, current.user_id, current.workspace_id, input.retry_event_revision - 1, input.retry_event_revision + 1)
+        .all<{ revision: number; event_type: string; state: string; retry_count: number; next_action: string | null; error_code: string | null; payload_hash: string; created_at: string }>();
+      const actions = await db.prepare(`SELECT action, expected_state_revision, payload_hash
+        FROM publication_run_actions
+        WHERE run_id = ? AND user_id = ? AND workspace_id = ? AND expected_state_revision IN (?, ?)
+        ORDER BY expected_state_revision ASC`)
+        .bind(input.run_id, current.user_id, current.workspace_id, input.retry_event_revision - 1, input.retry_event_revision)
+        .all<{ action: string; expected_state_revision: number; payload_hash: string }>();
+      const revisionRequested = await db.prepare(`SELECT 1 AS present FROM publication_run_events
+        WHERE run_id = ? AND user_id = ? AND workspace_id = ? AND event_type = 'revision_requested' LIMIT 1`)
+        .bind(input.run_id, current.user_id, current.workspace_id)
+        .first<{ present: number }>();
+      const [failed, retried, resumed] = events.results || [];
+      const [retryAction, resumeAction] = actions.results || [];
+      if (!projection || revisionRequested || Number(projection.state_revision) < input.retry_event_revision + 1 ||
+          (requireCurrentWriting && (projection.state !== "writing" || Number(projection.state_revision) !== input.retry_event_revision + 1 ||
+            Number(projection.retry_count) !== input.retry_count || projection.last_successful_state !== "writing" || projection.last_event_type !== "action_resume")) ||
+          (events.results || []).length !== 3 || Number(failed?.revision) !== input.retry_event_revision - 1 ||
+          failed?.event_type !== "failed" || failed.state !== "failed" || failed.error_code !== "writing_adapter_non_retryable" ||
+          failed.next_action !== "retry_after_service_fix" || Number(failed.retry_count) !== input.retry_count - 1 ||
+          Number(retried?.revision) !== input.retry_event_revision || retried.event_type !== "action_retry" || retried.state !== "retrying" ||
+          Number(retried.retry_count) !== input.retry_count || retried.payload_hash !== input.payload_hash || retried.created_at !== input.created_at ||
+          Number(resumed?.revision) !== input.retry_event_revision + 1 || resumed.event_type !== "action_resume" || resumed.state !== "writing" ||
+          Number(resumed.retry_count) !== input.retry_count || (actions.results || []).length !== 2 ||
+          retryAction?.action !== "retry" || Number(retryAction.expected_state_revision) !== input.retry_event_revision - 1 || retryAction.payload_hash !== input.payload_hash ||
+          resumeAction?.action !== "resume" || Number(resumeAction.expected_state_revision) !== input.retry_event_revision) {
+        throw new EditorialRuntimeError("writing_retry_evidence_invalid", "Wave2B writing retry evidence chain does not reconcile", 409);
+      }
+      return projection;
+    } catch (error) {
+      if (error instanceof EditorialRuntimeError) throw error;
+      throw new EditorialRuntimeError("writing_retry_evidence_unavailable", "Wave2B writing retry evidence is unavailable", 503);
+    }
+  }
+
+  public async startFiveAgentWritingRecovery(input: {
+    run_id: string;
+    user_id: string;
+    workspace_id: string;
+    workflow_id: string;
+    retry_event_revision: number;
+    retry_count: number;
+    payload_hash: string;
+    retry_created_at: string;
+  }): Promise<{ requested: boolean; replayed: boolean; workflow_status: string; attempt: number | null; recovery_workflow_id: string | null }> {
+    this.ensureSchema();
+    const scoped = this.wave2bRun(input.run_id);
+    if (!scoped || scoped.user_id !== input.user_id || scoped.workspace_id !== input.workspace_id || scoped.workflow_id !== input.workflow_id) {
+      throw new EditorialRuntimeError("run_not_found", "Wave2B writing restart run is not in the requested scope", 404);
+    }
+    const briefRows = this.sql<{ envelope_json: string; payload_hash: string; storage_ref: string }>`SELECT envelope_json, payload_hash, storage_ref
+      FROM editorial_wave2b_outbox WHERE run_id = ${input.run_id} ORDER BY created_at, artifact_id`;
+    const briefs = briefRows.flatMap(row => {
+      try {
+        const envelope = parseJson<FiveAgentEnvelopeMetadata>(row.envelope_json);
+        return envelope.kind === "article_brief" ? [{ row, envelope }] : [];
+      } catch {
+        return [];
+      }
+    });
+    if (briefs.length !== 1) {
+      throw new EditorialRuntimeError("writing_recovery_brief_invalid", "Wave2B writing recovery requires one canonical brief", 409);
+    }
+    const { row: briefRow, envelope: briefEnvelope } = briefs[0];
+    if (briefRow.payload_hash !== briefEnvelope.payload_hash || briefRow.storage_ref !== `r2://${briefEnvelope.artifact_key}` ||
+        briefEnvelope.run_id !== input.run_id || briefEnvelope.user_id !== input.user_id || briefEnvelope.workspace_id !== input.workspace_id ||
+        briefEnvelope.article_id !== scoped.article_id || Number(briefEnvelope.recording_id) !== Number(scoped.recording_id)) {
+      throw new EditorialRuntimeError("writing_recovery_brief_invalid", "Wave2B writing recovery brief does not reconcile", 409);
+    }
+    let storedBrief: R2ObjectBody | null;
+    try { storedBrief = await this.env.FILES_BUCKET.get(briefEnvelope.artifact_key); } catch {
+      throw new EditorialRuntimeError("writing_recovery_brief_unavailable", "Wave2B writing recovery brief read is unavailable", 503);
+    }
+    if (!storedBrief) throw new EditorialRuntimeError("writing_recovery_brief_unavailable", "Wave2B writing recovery brief is unavailable", 503);
+    let briefObject: Record<string, unknown>;
+    try { briefObject = parseJson<Record<string, unknown>>(await storedBrief.text()); } catch {
+      throw new EditorialRuntimeError("writing_recovery_brief_invalid", "Wave2B writing recovery brief bytes are invalid", 409);
+    }
+    const storedEnvelope = briefObject.envelope as Record<string, unknown> | undefined;
+    const briefPayload = briefObject.payload as Record<string, unknown> | undefined;
+    if (!storedEnvelope || !briefPayload || storedEnvelope.artifact_id !== briefEnvelope.artifact_id ||
+        storedEnvelope.run_id !== input.run_id || storedEnvelope.user_id !== input.user_id || storedEnvelope.workspace_id !== input.workspace_id ||
+        await hashJson(briefPayload) !== briefEnvelope.payload_hash || briefPayload.run_id !== input.run_id ||
+        briefPayload.article_id !== scoped.article_id || Number(briefPayload.recording_id) !== Number(scoped.recording_id)) {
+      throw new EditorialRuntimeError("writing_recovery_brief_invalid", "Wave2B writing recovery brief identity is invalid", 409);
+    }
+    const transcriptRef = String(briefPayload.transcript_ref || "");
+    const transcriptHash = String(briefPayload.transcript_hash || "");
+    const sourceHash = String(briefPayload.source_hash || "");
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$/.test(transcriptRef) ||
+        !/^sha256:[a-f0-9]{64}$/.test(transcriptHash) || !/^sha256:[a-f0-9]{64}$/.test(sourceHash)) {
+      throw new EditorialRuntimeError("writing_recovery_input_invalid", "Wave2B writing recovery transcript identity is invalid", 409);
+    }
+    const params: FiveAgentRunInput & {
+      transcript_ref: string; transcript_hash: string; source_hash: string;
+      brief_artifact_id: string; brief_artifact_key: string; brief_payload_hash: string;
+    } = {
+      run_id: input.run_id,
+      article_id: String(scoped.article_id),
+      recording_id: Number(scoped.recording_id),
+      user_id: input.user_id,
+      workspace_id: input.workspace_id,
+      payload_hash: String(scoped.payload_hash),
+      manifest_hash: String(scoped.manifest_hash),
+      manifest_json: String(scoped.manifest_json),
+      workflow_id: input.workflow_id,
+      created_at: String(scoped.created_at),
+      transcript_ref: transcriptRef,
+      transcript_hash: transcriptHash,
+      source_hash: sourceHash,
+      brief_artifact_id: briefEnvelope.artifact_id,
+      brief_artifact_key: briefEnvelope.artifact_key,
+      brief_payload_hash: briefEnvelope.payload_hash,
+    };
+    await validateFiveAgentManifest(params);
+    const durableContext = (this as any).ctx as DurableObjectState;
+    return durableContext.blockConcurrencyWhile(async () => {
+      const current = this.wave2bRun(params.run_id);
+      if (!current || current.user_id !== params.user_id || current.workspace_id !== params.workspace_id || current.workflow_id !== params.workflow_id) {
+        throw new EditorialRuntimeError("run_not_found", "Wave2B writing restart run is not in the requested scope", 404);
+      }
+      const restartId = `${params.run_id}:writing-restart:${input.retry_event_revision}`;
+      const receipt = this.sql<{ workflow_id: string; retry_count: number; payload_hash: string }>`SELECT workflow_id, retry_count, payload_hash
+        FROM editorial_wave2b_writing_restart_receipts WHERE restart_id = ${restartId} LIMIT 1`[0];
+      if (receipt) {
+        if (receipt.workflow_id !== params.workflow_id || Number(receipt.retry_count) !== input.retry_count || receipt.payload_hash !== input.payload_hash) {
+          throw new EditorialRuntimeError("writing_restart_receipt_conflict", "Wave2B writing restart receipt conflicts", 409);
+        }
+        return { requested: true, replayed: true, workflow_status: "receipt", attempt: null, recovery_workflow_id: null };
+      }
+      const recordReceipt = (recordedAt: string): void => {
+        this.transactionSync(() => {
+          const existing = this.sql<{ workflow_id: string; retry_count: number; payload_hash: string }>`SELECT workflow_id, retry_count, payload_hash
+            FROM editorial_wave2b_writing_restart_receipts WHERE restart_id = ${restartId} LIMIT 1`[0];
+          if (existing) {
+            if (existing.workflow_id !== params.workflow_id || Number(existing.retry_count) !== input.retry_count || existing.payload_hash !== input.payload_hash) {
+              throw new EditorialRuntimeError("writing_restart_receipt_conflict", "Wave2B writing restart receipt conflicts", 409);
+            }
+            return;
+          }
+          this.sql`INSERT INTO editorial_wave2b_writing_restart_receipts
+            (restart_id, run_id, workflow_id, retry_event_revision, retry_count, payload_hash, recorded_at)
+            VALUES (${restartId}, ${params.run_id}, ${params.workflow_id}, ${input.retry_event_revision}, ${input.retry_count}, ${input.payload_hash}, ${recordedAt})`;
+        });
+      };
+      const evidenceInput = {
+        run_id: params.run_id,
+        retry_count: input.retry_count,
+        retry_event_revision: input.retry_event_revision,
+        payload_hash: input.payload_hash,
+        created_at: input.retry_created_at,
+      };
+      let projection = await this.verifyFiveAgentWritingRetryEvidence(current, evidenceInput, false);
+      const isPending = () => projection.state === "writing" && Number(projection.state_revision) === input.retry_event_revision + 1;
+      if (!isPending()) {
+        recordReceipt(now());
+        return { requested: true, replayed: true, workflow_status: projection.state, attempt: null, recovery_workflow_id: null };
+      }
+      const activeStatuses = new Set(["queued", "running", "paused", "waiting", "waitingForPause"]);
+      const previous = this.sql<{ attempt: number; workflow_id: string; recovery_workflow_id: string; retry_count: number; payload_hash: string }>`
+        SELECT attempt, workflow_id, recovery_workflow_id, retry_count, payload_hash FROM editorial_wave2b_writing_restart_attempts
+        WHERE restart_id = ${restartId} ORDER BY attempt DESC LIMIT 1`[0];
+      if (previous && (previous.workflow_id !== params.workflow_id || Number(previous.retry_count) !== input.retry_count || previous.payload_hash !== input.payload_hash)) {
+        throw new EditorialRuntimeError("writing_restart_attempt_conflict", "Wave2B writing restart attempt conflicts", 409);
+      }
+      let attempt = Number(previous?.attempt || 0);
+      let recoveryWorkflowId = previous?.recovery_workflow_id || "";
+      if (previous) {
+        const known = await this.reconcileFiveAgentWorkflow(recoveryWorkflowId);
+        if (known.state === "unknown") {
+          return { requested: false, replayed: true, workflow_status: "unknown", attempt, recovery_workflow_id: recoveryWorkflowId };
+        }
+        if (known.state === "exists" && activeStatuses.has(known.status)) {
+          return { requested: true, replayed: true, workflow_status: known.status, attempt, recovery_workflow_id: recoveryWorkflowId };
+        }
+        if (known.state === "exists" && known.status === "complete") {
+          projection = await this.verifyFiveAgentWritingRetryEvidence(current, evidenceInput, false);
+          if (!isPending()) {
+            recordReceipt(now());
+            return { requested: true, replayed: true, workflow_status: projection.state, attempt, recovery_workflow_id: recoveryWorkflowId };
+          }
+          return { requested: false, replayed: true, workflow_status: "complete_pending", attempt, recovery_workflow_id: recoveryWorkflowId };
+        }
+        if (known.state === "exists" && !["errored", "terminated"].includes(known.status)) {
+          return { requested: false, replayed: true, workflow_status: known.status, attempt, recovery_workflow_id: recoveryWorkflowId };
+        }
+        if (known.state === "exists") recoveryWorkflowId = "";
+      }
+      if (!recoveryWorkflowId) {
+        attempt += 1;
+        recoveryWorkflowId = `five-agent-writing-recovery-${(await hashJson({
+          run_id: params.run_id,
+          retry_event_revision: input.retry_event_revision,
+          retry_payload_hash: input.payload_hash,
+          attempt,
+        })).slice("sha256:".length)}`;
+        const requestedAt = now();
+        this.sql`INSERT INTO editorial_wave2b_writing_restart_attempts
+          (attempt_id, restart_id, run_id, workflow_id, recovery_workflow_id, retry_event_revision, retry_count, payload_hash, attempt, requested_at)
+          VALUES (${`${restartId}:attempt:${attempt}`}, ${restartId}, ${params.run_id}, ${params.workflow_id}, ${recoveryWorkflowId},
+            ${input.retry_event_revision}, ${input.retry_count}, ${input.payload_hash}, ${attempt}, ${requestedAt})`;
+      }
+      try {
+        await this.runWorkflow("FIVE_AGENT_PUBLISHING_WORKFLOW", params, {
+          id: recoveryWorkflowId,
+          agentBinding: "EDITORIAL_COORDINATOR",
+          metadata: {
+            run_id: params.run_id,
+            article_id: params.article_id,
+            recording_id: params.recording_id,
+            user_id: params.user_id,
+            workspace_id: params.workspace_id,
+            manifest_hash: params.manifest_hash,
+            recovery_attempt: attempt,
+          },
+        });
+      } catch (error) {
+        const afterCreate = await this.reconcileFiveAgentWorkflow(recoveryWorkflowId);
+        if (afterCreate.state === "exists") {
+          return { requested: true, replayed: true, workflow_status: afterCreate.status, attempt, recovery_workflow_id: recoveryWorkflowId };
+        }
+        console.error("Failed to create writing recovery workflow:", error);
+        return {
+          requested: false,
+          replayed: false,
+          workflow_status: afterCreate.state === "not_found" ? "not_found" : "unknown",
+          attempt,
+          recovery_workflow_id: recoveryWorkflowId,
+        };
+      }
+      return { requested: true, replayed: false, workflow_status: "queued", attempt, recovery_workflow_id: recoveryWorkflowId };
+    });
+  }
+
+  public async getFiveAgentWritingRestartReceipt(input: {
+    run_id: string;
+    user_id: string;
+    workspace_id: string;
+    workflow_id: string;
+    retry_event_revision: number;
+    retry_count: number;
+    payload_hash: string;
+  }): Promise<{ requested: boolean; recorded_at: string | null }> {
+    this.ensureSchema();
+    const current = this.wave2bRun(input.run_id);
+    if (!current || current.user_id !== input.user_id || current.workspace_id !== input.workspace_id || current.workflow_id !== input.workflow_id) {
+      throw new EditorialRuntimeError("run_not_found", "Wave2B writing restart run is not in the requested scope", 404);
+    }
+    const restartId = `${input.run_id}:writing-restart:${input.retry_event_revision}`;
+    const receipt = this.sql<{ workflow_id: string; retry_count: number; payload_hash: string; recorded_at: string }>`SELECT workflow_id, retry_count, payload_hash, recorded_at
+      FROM editorial_wave2b_writing_restart_receipts WHERE restart_id = ${restartId} LIMIT 1`[0];
+    if (!receipt) return { requested: false, recorded_at: null };
+    if (receipt.workflow_id !== input.workflow_id || Number(receipt.retry_count) !== input.retry_count || receipt.payload_hash !== input.payload_hash) {
+      throw new EditorialRuntimeError("writing_restart_receipt_conflict", "Wave2B writing restart receipt conflicts", 409);
+    }
+    return { requested: true, recorded_at: receipt.recorded_at };
+  }
+
+  public async recordFiveAgentWritingRestartReceipt(input: {
+    run_id: string;
+    user_id: string;
+    workspace_id: string;
+    workflow_id: string;
+    retry_event_revision: number;
+    retry_count: number;
+    payload_hash: string;
+    retry_created_at: string;
+    recorded_at: string;
+  }): Promise<{ replayed: boolean }> {
+    this.ensureSchema();
+    const current = this.wave2bRun(input.run_id);
+    if (!current || current.user_id !== input.user_id || current.workspace_id !== input.workspace_id || current.workflow_id !== input.workflow_id) {
+      throw new EditorialRuntimeError("run_not_found", "Wave2B writing restart run is not in the requested scope", 404);
+    }
+    const recordedAtMs = Date.parse(input.recorded_at);
+    if (!Number.isFinite(recordedAtMs) || new Date(recordedAtMs).toISOString() !== input.recorded_at) {
+      throw new EditorialRuntimeError("writing_restart_receipt_invalid", "Wave2B writing restart receipt time is invalid", 409);
+    }
+    const projection = await this.verifyFiveAgentWritingRetryEvidence(current, {
+      run_id: input.run_id,
+      retry_count: input.retry_count,
+      retry_event_revision: input.retry_event_revision,
+      payload_hash: input.payload_hash,
+      created_at: input.retry_created_at,
+    }, false);
+    const projectionAdvanced = projection.state !== "writing" || Number(projection.state_revision) !== input.retry_event_revision + 1;
+    if (!projectionAdvanced) {
+      throw new EditorialRuntimeError("writing_restart_receipt_requires_progress", "Wave2B writing restart receipt requires publication progress", 409);
+    }
+    const restartId = `${input.run_id}:writing-restart:${input.retry_event_revision}`;
+    return this.transactionSync(() => {
+      const existing = this.sql<{ workflow_id: string; retry_count: number; payload_hash: string }>`SELECT workflow_id, retry_count, payload_hash
+        FROM editorial_wave2b_writing_restart_receipts WHERE restart_id = ${restartId} LIMIT 1`[0];
+      if (existing) {
+        if (existing.workflow_id !== input.workflow_id || Number(existing.retry_count) !== input.retry_count || existing.payload_hash !== input.payload_hash) {
+          throw new EditorialRuntimeError("writing_restart_receipt_conflict", "Wave2B writing restart receipt conflicts", 409);
+        }
+        return { replayed: true };
+      }
+      this.sql`INSERT INTO editorial_wave2b_writing_restart_receipts
+        (restart_id, run_id, workflow_id, retry_event_revision, retry_count, payload_hash, recorded_at)
+        VALUES (${restartId}, ${input.run_id}, ${input.workflow_id}, ${input.retry_event_revision}, ${input.retry_count}, ${input.payload_hash}, ${input.recorded_at})`;
+      return { replayed: false };
+    });
   }
 
   public async startRun(input: EditorialWorkflowParams): Promise<Record<string, unknown>> {

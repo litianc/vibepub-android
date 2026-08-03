@@ -1024,7 +1024,12 @@ export async function applyPublicationAction(
   }
 
   const revision = current.state_revision + 1;
-  const now = new Date().toISOString();
+  const wallClockNow = new Date().toISOString();
+  const currentEventTime = Date.parse(current.last_event_created_at || current.updated_at || current.created_at);
+  const wallClockTime = Date.parse(wallClockNow);
+  const now = Number.isFinite(currentEventTime) && wallClockTime <= currentEventTime
+    ? new Date(currentEventTime + 1).toISOString()
+    : wallClockNow;
   const eventId = `${runId}:event:${revision}`;
   const actionId = `${runId}:action:${idempotencyKey}`;
   const targetState = action === "retry"

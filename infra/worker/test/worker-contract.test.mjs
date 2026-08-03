@@ -449,6 +449,14 @@ test("publication action rejects a stale revision before writing an intent", asy
   let batchCalled = false;
   const db = {
     prepare(sql) {
+      if (sql.includes("SELECT p.state") && sql.includes("AS has_revision_requested")) {
+        return statement({ all: async () => ({ results: [{
+          state: "writing", error_code: null, next_action: null, has_revision_requested: 0,
+        }] }) });
+      }
+      if (sql.includes("AS has_revision_requested")) {
+        return statement({ all: async () => ({ results: [{ has_revision_requested: 0 }] }) });
+      }
       if (sql.includes("FROM publication_run_actions")) {
         return statement({ all: async () => ({ results: [] }) });
       }
@@ -476,6 +484,192 @@ test("publication action rejects a stale revision before writing an intent", asy
   assert.equal(batchCalled, false);
 });
 
+test("writing service retries require restart evidence and recover a failed receipt without restarting twice", async () => {
+  const expectedStateRevision = 8;
+  const retryRevision = expectedStateRevision + 1;
+  const retryCount = 2;
+  const idempotencyKey = "retry-writing-service-fix";
+  const payloadHash = `sha256:${createHash("sha256").update(JSON.stringify({
+    action: "retry",
+    expected_state_revision: expectedStateRevision,
+    contract: "system.v1",
+  })).digest("hex")}`;
+  const restarts = [];
+  const workflowIds = [];
+  let projectionState = "writing";
+  let projectionRevision = retryRevision + 1;
+  const db = {
+    prepare(sql) {
+      if (sql.includes("SELECT p.state") && sql.includes("AS has_revision_requested")) {
+        return statement({ all: async () => ({ results: [{
+          state: "writing", error_code: null, next_action: null, has_revision_requested: 0,
+        }] }) });
+      }
+      if (sql.includes("AS has_revision_requested")) {
+        return statement({ all: async () => ({ results: [{ has_revision_requested: 0 }] }) });
+      }
+      if (sql.includes("FROM publication_run_actions")) {
+        return statement({
+          all: async (values) => {
+            const actionKey = values[3];
+            const retryAction = actionKey === idempotencyKey;
+            const actionPayloadHash = retryAction
+              ? payloadHash
+              : `sha256:${createHash("sha256").update(JSON.stringify({
+                action: "resume",
+                expected_state_revision: retryRevision,
+                contract: "system.v1",
+                cause: "writing_service_fix_retry",
+              })).digest("hex")}`;
+            return {
+              results: [{
+                payload_hash: actionPayloadHash,
+                result_json: JSON.stringify({
+                  action: retryAction ? "retry" : "resume",
+                  run: {
+                    run_id: "synthetic-run",
+                    article_id: "synthetic-article",
+                    state: retryAction ? "retrying" : "writing",
+                    state_revision: retryAction ? retryRevision : retryRevision + 1,
+                    last_successful_state: "writing",
+                    retry_count: retryCount,
+                    error_code: null,
+                  },
+                  replayed: false,
+                }),
+              }],
+            };
+          },
+        });
+      }
+      if (sql.includes("FROM publication_run_events")) {
+        return statement({
+          all: async (values) => {
+            const revision = values[3];
+            assert.deepEqual(values.slice(0, 3), ["synthetic-run", "default_user", "vibepub-dogfood"]);
+            return { results: [revision === expectedStateRevision ? {
+              state: "failed", error_code: "writing_adapter_non_retryable", next_action: "retry_after_service_fix",
+            } : {
+              event_type: "action_retry", state: "retrying", retry_count: retryCount,
+              payload_hash: payloadHash, created_at: "2026-08-03T00:00:00.000Z",
+            }] };
+          },
+        });
+      }
+      if (sql.includes("FROM publication_runs")) {
+        return statement({
+          all: async () => ({ results: [publicationRunRow({
+            state: projectionState,
+            run_status: "active",
+            state_revision: projectionRevision,
+            retry_count: retryCount,
+            last_event_type: projectionState === "writing" ? "action_resume" : "review_started",
+            error_code: null,
+            next_action: null,
+          })] }),
+        });
+      }
+      throw new Error(`Unexpected writing retry SQL: ${sql}`);
+    },
+  };
+  let workflowStatus = "running";
+  let receiptRequested = false;
+  let receiptWriteFailures = 1;
+  const coordinator = {
+    async getFiveAgentWritingRestartReceipt() {
+      return { requested: receiptRequested, recorded_at: receiptRequested ? "2026-08-03T00:00:01.000Z" : null };
+    },
+    async startFiveAgentWritingRecovery(input) {
+      workflowIds.push(input.workflow_id);
+      if (workflowStatus === "running") {
+        return { requested: false, replayed: false, workflow_status: "running", attempt: null };
+      }
+      restarts.push({ from: { name: "write-draft-1", type: "do" } });
+      workflowStatus = "running";
+      await coordinator.recordFiveAgentWritingRestartReceipt();
+      return { requested: true, replayed: false, workflow_status: "restart_requested", attempt: 1 };
+    },
+    async recordFiveAgentWritingRestartReceipt() {
+      if (receiptWriteFailures > 0) {
+        receiptWriteFailures -= 1;
+        throw new Error("synthetic restart receipt write failure");
+      }
+      receiptRequested = true;
+      return { replayed: false };
+    },
+  };
+  const retryRequest = () => authorizedRequest("https://example.test/api/publication-runs/synthetic-run/retry", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Idempotency-Key": idempotencyKey },
+      body: JSON.stringify({ expected_state_revision: expectedStateRevision }),
+    });
+  const retryEnv = createEnv({
+    DB: db,
+    FIVE_AGENT_PUBLISHING_V3: "true",
+    FIVE_AGENT_PUBLISHING_V3_ALLOWLIST: "default_user:vibepub-dogfood",
+    EDITORIAL_COORDINATOR: { getByName: () => coordinator },
+  });
+
+  const ambiguousActive = await worker.fetch(retryRequest(), retryEnv, createExecutionContext());
+  assert.equal(ambiguousActive.status, 503);
+  assert.deepEqual(await ambiguousActive.json(), { error: "publication_workflow_restart_reconciliation_required" });
+  assert.deepEqual(workflowIds, ["five-agent-synthetic-run"]);
+  assert.deepEqual(restarts, []);
+
+  workflowStatus = "complete";
+  const originalConsoleError = console.error;
+  let failedReceipt;
+  console.error = () => {};
+  try {
+    failedReceipt = await worker.fetch(retryRequest(), retryEnv, createExecutionContext());
+  } finally {
+    console.error = originalConsoleError;
+  }
+  assert.equal(failedReceipt.status, 503);
+  assert.deepEqual(workflowIds, Array(2).fill("five-agent-synthetic-run"));
+  assert.deepEqual(restarts, [{ from: { name: "write-draft-1", type: "do" } }]);
+
+  const activeAfterRestart = await worker.fetch(retryRequest(), retryEnv, createExecutionContext());
+  assert.equal(activeAfterRestart.status, 503);
+  assert.deepEqual(await activeAfterRestart.json(), { error: "publication_workflow_restart_reconciliation_required" });
+  assert.deepEqual(workflowIds, Array(3).fill("five-agent-synthetic-run"));
+  assert.deepEqual(restarts, [{ from: { name: "write-draft-1", type: "do" } }]);
+
+  projectionState = "reviewing";
+  projectionRevision = retryRevision + 2;
+  const response = await worker.fetch(retryRequest(), retryEnv, createExecutionContext());
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(workflowIds, Array(3).fill("five-agent-synthetic-run"));
+  assert.deepEqual(restarts, [{ from: { name: "write-draft-1", type: "do" } }]);
+  const responseBody = await response.json();
+  assert.deepEqual({
+    action: responseBody.action,
+    replayed: responseBody.replayed,
+    workflow_restart_requested: responseBody.workflow_restart_requested,
+    run: {
+      run_id: responseBody.run.run_id,
+      article_id: responseBody.run.article_id,
+      state: responseBody.run.state,
+      state_revision: responseBody.run.state_revision,
+      last_successful_state: responseBody.run.last_successful_state,
+      retry_count: responseBody.run.retry_count,
+      error_code: responseBody.run.error_code,
+    },
+  }, {
+    action: "retry",
+    replayed: true,
+    workflow_restart_requested: true,
+    run: { run_id: "synthetic-run", article_id: "synthetic-article", state: "reviewing", state_revision: retryRevision + 2,
+      last_successful_state: "writing", retry_count: retryCount, error_code: null },
+  });
+
+  const receiptReplay = await worker.fetch(retryRequest(), retryEnv, createExecutionContext());
+  assert.equal(receiptReplay.status, 200);
+  assert.deepEqual(workflowIds, Array(3).fill("five-agent-synthetic-run"));
+  assert.deepEqual(restarts, [{ from: { name: "write-draft-1", type: "do" } }]);
+});
+
 test("public retry, cancel, and human action replays redact persisted provider error codes", async () => {
   for (const [path, action, contract] of [
     ["retry", "retry", "system.v1"],
@@ -490,6 +684,11 @@ test("public retry, cancel, and human action replays redact persisted provider e
     })).digest("hex")}`;
     const db = {
       prepare(sql) {
+        if (path === "retry" && sql.includes("SELECT p.state") && sql.includes("AS has_revision_requested")) {
+          return statement({ all: async () => ({ results: [{
+            state: "failed", error_code: "provider_internal_error_500", next_action: "retry", has_revision_requested: 0,
+          }] }) });
+        }
         if (sql.includes("FROM publication_run_actions")) {
           return statement({
             all: async () => ({
@@ -2318,6 +2517,7 @@ async function loadWorker() {
         "class EditorialReviewAgent {}",
         "class EditorialWorkflow {}",
         "class EditorialWritingAgent {}",
+        'const coordinatorShardName = async (userId, workspaceId, articleId, runId) => `${userId}:${workspaceId}:${articleId}:${runId}`;',
         'const handleEditorialOrchestrationInternalRoute = async () => new Response(JSON.stringify({ error: "editorial_workflow_disabled" }), { status: 404 });',
       ].join("\n"),
     );
