@@ -368,7 +368,18 @@ export default {
               error_code: call.error_code,
               retryable: call.retryable,
             }));
-          return { ...result, diagnostics: { wechat_calls: calls } };
+          const ledger = await coordinator.getFiveAgentWechatLedger(runId, auth.userId, auth.workspaceId);
+          const receiptIds = new Set(ledger.receipt_ids);
+          return {
+            ...result,
+            diagnostics: {
+              wechat_calls: calls,
+              wechat_artifacts: ledger.artifacts.map(artifact => ({
+                kind: artifact.kind,
+                receipt_present: receiptIds.has(artifact.artifact_id),
+              })),
+            },
+          };
         }
         return result;
       });
