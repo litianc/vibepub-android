@@ -768,16 +768,27 @@ export class WechatOperationAgent {
     }
     if (input.operation === "find_draft") {
       const candidates: ProviderResult[] = [];
+      let skippedInvalidCandidates = 0;
       for (let page = 0; page < 3; page += 1) {
         const body = await this.wechatRequest(account, "/cgi-bin/draft/batchget", { method: "POST", headers: { "content-type": "application/json" }, body: canonical({ offset: page * 20, count: 20, no_content: 0 }) }, "find_draft");
         const items = Array.isArray(body.item) ? body.item : [];
         for (const item of items) {
           if (!item || typeof item !== "object" || Array.isArray(item)) continue;
           const record = item as Record<string, unknown>;
-          const result = await this.parseDraft({ news_item: record.content && typeof record.content === "object" ? (record.content as Record<string, unknown>).news_item : record.news_item }, String(record.media_id || ""));
+          let result: ProviderResult;
+          try {
+            result = await this.parseDraft({ news_item: record.content && typeof record.content === "object" ? (record.content as Record<string, unknown>).news_item : record.news_item }, String(record.media_id || ""));
+          } catch (error) {
+            if (!(error instanceof AdapterError) || error.code !== "external_side_effect_unknown") throw error;
+            skippedInvalidCandidates += 1;
+            continue;
+          }
           if (this.matchesFingerprint(result, input.payload)) candidates.push(result);
         }
         if (items.length < 20) break;
+      }
+      if (skippedInvalidCandidates > 0) {
+        console.warn("wechat_draft_candidates_skipped", canonical({ operation: "find_draft", count: skippedInvalidCandidates }));
       }
       if (candidates.length !== 1) throw new AdapterError("draft_identity_unresolved", 409);
       await this.state.storage.put(`wechat-draft-map:${String(input.payload.draft_identity_hash)}`, candidates[0].media_id!);

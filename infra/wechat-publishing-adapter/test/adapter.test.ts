@@ -642,6 +642,29 @@ describe("wechat publishing adapter", () => {
     expect(response.status).toBe(200); expect(mock.calls.filter(call => call.url.pathname.endsWith("/draft/batchget"))).toHaveLength(1);
   });
 
+  it("skips an unrelated invalid draft while preserving exact identity recovery", async () => {
+    const html = "<p>Body</p>";
+    const instance = new WechatOperationAgent(state(), await configuredEnv());
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const mock = providerMock({ batch: [
+      { media_id: "old-draft", title: "Old", content: '<img src="https://untrusted.example/old.png"/>', thumb_media_id: "old-cover" },
+      { media_id: "target-draft", title: "Title", content: html, thumb_media_id: "cover-media-1" },
+    ] });
+    vi.stubGlobal("fetch", mock.fetcher);
+    const receipt = await resolve(instance);
+    const value = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(html));
+    const htmlHash = `sha256:${Array.from(new Uint8Array(value)).map(byte => byte.toString(16).padStart(2, "0")).join("")}`;
+    const response = await instance.fetch(new Request("https://internal", { method: "POST", body: requestBody("find_draft", "find-after-invalid", 1, receipt, {
+      operation_id: "find-after-invalid", draft_identity_hash: `sha256:${"d".repeat(64)}`, title: "Title", canonical_html: html, html_hash: htmlHash, thumb_media_id: "cover-media-1",
+    }) }));
+
+    expect(response.status).toBe(200);
+    expect((await response.json() as { result: { media_id: string } }).result.media_id).toBe("target-draft");
+    expect(mock.calls.filter(call => call.url.pathname.includes("/draft/add") || call.url.pathname.includes("/draft/update"))).toHaveLength(0);
+    expect(warning).toHaveBeenCalledWith("wechat_draft_candidates_skipped", canonical({ operation: "find_draft", count: 1 }));
+    warning.mockRestore();
+  });
+
   it("retries a read transport interruption through three durable attempts but keeps a write ambiguous", async () => {
     const instance = new WechatOperationAgent(state(), await configuredEnv());
     let reads = 0; let writes = 0;
