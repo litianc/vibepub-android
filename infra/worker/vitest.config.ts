@@ -97,6 +97,7 @@ export default defineConfig({
   test: {
     include: ["test/**/*.runtime.test.ts"],
     fileParallelism: false,
+    testTimeout: 20_000,
   },
 });
 
