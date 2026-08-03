@@ -155,6 +155,19 @@ function errorResponse(error: unknown): Response {
   const value = error instanceof AdapterError ? error : new AdapterError("external_side_effect_unknown", 503, false, "unknown");
   return json({ error: { code: value.code, retryable: value.retryable, ...(value.deliveryStatus ? { delivery_status: value.deliveryStatus } : {}) } }, value.status);
 }
+
+function logWechatProviderFailure(input: {
+  kind: "transport" | "invalid_json" | "http_error" | "api_error";
+  operation: Operation;
+  path: string;
+  response_status?: number;
+  provider_errcode?: number;
+  delivery_status?: "not_forwarded" | "rejected_before_commit";
+}): void {
+  // Keep provider diagnostics useful without logging credentials, URLs with
+  // access tokens, request bodies, article content, or provider messages.
+  console.warn("wechat_provider_failure", canonical(input));
+}
 function operationKey(operationId: string, attemptNumber: number, suffix: "result" | "upload-cache"): string {
   return `wechat-adapter/v1/${suffix}/${operationId}/${attemptNumber}.json`;
 }
@@ -655,13 +668,25 @@ export class WechatOperationAgent {
     try {
       response = await fetch(wechatUrl(account.provider_base, path, { access_token: accessToken, ...query }), { ...init, redirect: "manual" });
     } catch {
+      logWechatProviderFailure({ kind: "transport", operation, path });
       if (isReadOperation(operation)) throw new AdapterError("upstream_retryable", 503, true);
       throw new AdapterError("external_side_effect_unknown", 503, false, "unknown");
     }
     let body: Record<string, unknown>;
-    try { body = await response.json() as Record<string, unknown>; } catch { throw new AdapterError("external_side_effect_unknown", 503, false, "unknown"); }
+    try { body = await response.json() as Record<string, unknown>; }
+    catch {
+      logWechatProviderFailure({ kind: "invalid_json", operation, path, response_status: response.status });
+      throw new AdapterError("external_side_effect_unknown", 503, false, "unknown");
+    }
     if (!response.ok) {
       const proof = deliveryStatus(response);
+      logWechatProviderFailure({
+        kind: "http_error",
+        operation,
+        path,
+        response_status: response.status,
+        ...(proof ? { delivery_status: proof } : {}),
+      });
       if (WECHAT_RETRY_STATUS.has(response.status) && (isReadOperation(operation) || proof)) {
         throw new AdapterError("upstream_retryable", response.status, true, proof || undefined);
       }
@@ -674,6 +699,7 @@ export class WechatOperationAgent {
       return this.wechatRequest(account, path, init, operation, false, query);
     }
     if (errcode === 40014 || errcode === 42001) throw new AdapterError("wechat_access_token_rejected", 409);
+    logWechatProviderFailure({ kind: "api_error", operation, path, response_status: response.status, provider_errcode: errcode });
     throw classifyWechatErrcode(errcode, operation);
   }
 

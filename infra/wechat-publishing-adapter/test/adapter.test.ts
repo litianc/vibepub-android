@@ -666,6 +666,36 @@ describe("wechat publishing adapter", () => {
     expect(reads).toBe(3); expect(write.status).toBe(503); expect(writes).toBe(1);
   });
 
+  it("logs bounded provider error metadata without credentials, messages, or article content", async () => {
+    const instance = new WechatOperationAgent(state(), await configuredEnv());
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      const url = new URL(request.url);
+      if (url.pathname.endsWith("/cgi-bin/token")) return Response.json({ access_token: "provider-access-token", expires_in: 7200 });
+      return Response.json({ errcode: 45009, errmsg: "provider-secret diagnostic detail" });
+    }));
+    const receipt = await resolve(instance);
+    const response = await instance.fetch(new Request("https://internal", { method: "POST", body: requestBody("write_draft", "write-diagnostic", 1, receipt, {
+      operation_id: "write-diagnostic", draft_identity_hash: `sha256:${"d".repeat(64)}`, mutation: "add", title: "Private title", canonical_html: "<p>Private article body</p>", html_hash: `sha256:${"e".repeat(64)}`, thumb_media_id: "cover-media-1",
+    }) }));
+
+    expect(response.status).toBe(503);
+    const diagnostic = warning.mock.calls.find(call => call[0] === "wechat_provider_failure")?.[1];
+    expect(diagnostic).toBe(canonical({
+      kind: "api_error",
+      operation: "write_draft",
+      path: "/cgi-bin/draft/add",
+      response_status: 200,
+      provider_errcode: 45009,
+    }));
+    expect(String(diagnostic)).not.toContain("provider-secret");
+    expect(String(diagnostic)).not.toContain("provider-access-token");
+    expect(String(diagnostic)).not.toContain("Private title");
+    expect(String(diagnostic)).not.toContain("Private article body");
+    warning.mockRestore();
+  });
+
   it("classifies known read errors for reconciliation instead of as draft writes", async () => {
     const instance = new WechatOperationAgent(state(), await configuredEnv());
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
