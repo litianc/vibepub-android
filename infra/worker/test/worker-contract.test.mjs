@@ -1041,6 +1041,122 @@ test("returns the current user from an access-token session", async () => {
   });
 });
 
+test("refresh keeps a stable long-lived token and returns the user identity", async () => {
+  const updates = [];
+  const refreshToken = "stable-refresh-token";
+  const refreshHash = createHash("sha256").update(refreshToken).digest("hex");
+  const db = {
+    prepare(sql) {
+      if (sql.includes("FROM sessions s") && sql.includes("refresh_token_hash")) {
+        assert.match(sql, /s\.id AS session_id/);
+        assert.match(sql, /s\.user_id AS id/);
+        return statement({
+          all: async (values) => {
+            assert.deepEqual(values, [refreshHash]);
+            return { results: [{
+              session_id: "ses_refresh_1",
+              id: "usr_refresh_1",
+              refresh_expires_at: futureIso(),
+              revoked_at: null,
+              email: "refresh@example.com",
+              role: "user",
+              workspace_id: "ws_refresh",
+              status: "active",
+              email_verified_at: "2026-07-07T00:00:00.000Z",
+            }] };
+          },
+        });
+      }
+      if (sql.includes("UPDATE sessions")) {
+        return statement({
+          run: async (values) => {
+            updates.push(values);
+            return { meta: { changes: 1 } };
+          },
+        });
+      }
+      throw new Error(`Unexpected SQL: ${sql}`);
+    },
+  };
+
+  const request = () => worker.fetch(
+    new Request("https://example.test/api/auth/refresh", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ refresh_token: refreshToken }),
+    }),
+    createEnv({ DB: db }),
+    createExecutionContext(),
+  );
+  const first = await request();
+  const second = await request();
+  assert.equal(first.status, 200);
+  assert.equal(second.status, 200);
+  const firstBody = await first.json();
+  const secondBody = await second.json();
+  assert.equal(firstBody.user.id, "usr_refresh_1");
+  assert.equal(secondBody.user.id, "usr_refresh_1");
+  assert.equal(firstBody.tokens.refresh_token, refreshToken);
+  assert.equal(secondBody.tokens.refresh_token, refreshToken);
+  assert.notEqual(firstBody.tokens.access_token, secondBody.tokens.access_token);
+  assert.equal(updates.length, 2);
+  for (const values of updates) {
+    assert.equal(values[1], refreshHash);
+    assert.equal(values.at(-2), "ses_refresh_1");
+    assert.equal(values.at(-1), refreshHash);
+    const slidingDays = (Date.parse(values[3]) - Date.now()) / (24 * 60 * 60 * 1_000);
+    assert.ok(slidingDays > 364 && slidingDays <= 365);
+  }
+});
+
+test("refresh rejects a session revoked during renewal with an explicit auth error", async () => {
+  const refreshToken = "revoked-during-refresh";
+  const refreshHash = createHash("sha256").update(refreshToken).digest("hex");
+  const db = {
+    prepare(sql) {
+      if (sql.includes("FROM sessions s") && sql.includes("refresh_token_hash")) {
+        return statement({
+          all: async () => ({ results: [{
+            session_id: "ses_refresh_race",
+            id: "usr_refresh_race",
+            refresh_expires_at: futureIso(),
+            revoked_at: null,
+            email: "refresh-race@example.com",
+            role: "user",
+            workspace_id: "ws_refresh_race",
+            status: "active",
+            email_verified_at: "2026-07-07T00:00:00.000Z",
+          }] }),
+        });
+      }
+      if (sql.includes("UPDATE sessions")) {
+        assert.match(sql, /refresh_token_hash = \? AND revoked_at IS NULL/);
+        return statement({
+          run: async (values) => {
+            assert.equal(values.at(-1), refreshHash);
+            return { meta: { changes: 0 } };
+          },
+        });
+      }
+      throw new Error(`Unexpected SQL: ${sql}`);
+    },
+  };
+
+  const response = await worker.fetch(
+    new Request("https://example.test/api/auth/refresh", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ refresh_token: refreshToken }),
+    }),
+    createEnv({ DB: db }),
+    createExecutionContext(),
+  );
+
+  assert.equal(response.status, 401);
+  assert.equal(response.headers.get("x-vibepub-auth-error"), "invalid_refresh_token");
+  assert.deepEqual(await response.json(), { error: "invalid_refresh_token" });
+});
+
 test("blocks write APIs until the session email is verified", async () => {
   let putCalled = false;
   const db = sessionDb({

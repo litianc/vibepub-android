@@ -242,34 +242,32 @@ class AuthenticatedHttpClientTest {
     }
 
     @Test
-    fun requestClearsSessionWhenRefreshTokenIsRejected() = runBlocking {
-        listOf(400, 401, 403).forEach { refreshStatus ->
-            server?.stop(0)
-            serverExecutor?.shutdownNow()
-            val baseUrl = startServer(
-                protectedHits = AtomicInteger(0),
-                refreshHits = AtomicInteger(0),
-                refreshStatus = refreshStatus,
-            )
-            preferences.apiBaseUrl = baseUrl
-            preferences.saveAuthSession(testSession(accessToken = "expired-access", refreshToken = "expired-refresh"))
+    fun requestClearsSessionOnlyWhenRefreshTokenIsExplicitlyInvalid() = runBlocking {
+        val baseUrl = startServer(
+            protectedHits = AtomicInteger(0),
+            refreshHits = AtomicInteger(0),
+            refreshStatus = 401,
+            refreshBody = """{"error":"invalid_refresh_token"}""",
+            refreshErrorCode = "invalid_refresh_token",
+        )
+        preferences.apiBaseUrl = baseUrl
+        preferences.saveAuthSession(testSession(accessToken = "expired-access", refreshToken = "expired-refresh"))
 
-            val response = AuthenticatedHttpClient.request(
-                preferences = preferences,
-                url = URL("$baseUrl/api/protected"),
-                method = "GET",
-            )
+        val response = AuthenticatedHttpClient.request(
+            preferences = preferences,
+            url = URL("$baseUrl/api/protected"),
+            method = "GET",
+        )
 
-            assertEquals(401, response.statusCode)
-            assertFalse(preferences.isAuthenticated)
-            assertEquals("", preferences.accessToken)
-            assertEquals("", preferences.refreshToken)
-        }
+        assertEquals(401, response.statusCode)
+        assertFalse(preferences.isAuthenticated)
+        assertEquals("", preferences.accessToken)
+        assertEquals("", preferences.refreshToken)
     }
 
     @Test
-    fun refreshRateLimitAndServerErrorsDoNotClearSession() = runBlocking {
-        listOf(429, 500, 503).forEach { refreshStatus ->
+    fun refreshErrorsWithoutExplicitInvalidTokenDoNotClearSession() = runBlocking {
+        listOf(400, 401, 403, 429, 500, 503).forEach { refreshStatus ->
             server?.stop(0)
             serverExecutor?.shutdownNow()
             val protectedHits = AtomicInteger(0)
@@ -465,6 +463,7 @@ class AuthenticatedHttpClientTest {
         refreshHits: AtomicInteger,
         refreshStatus: Int?,
         refreshBody: String? = null,
+        refreshErrorCode: String? = null,
         onRefresh: () -> Unit = {},
         onProtected: (authHeader: String?) -> Pair<Int, String> = { authHeader ->
             if (authHeader == "Bearer fresh-access") {
@@ -513,6 +512,7 @@ class AuthenticatedHttpClientTest {
                 """{"error":"refresh failed"}""".toByteArray()
             }
             exchange.responseHeaders.add("Content-Type", "application/json")
+            refreshErrorCode?.let { exchange.responseHeaders.add("x-vibepub-auth-error", it) }
             exchange.sendResponseHeaders(refreshStatus, body.size.toLong())
             exchange.responseBody.use { it.write(body) }
         }

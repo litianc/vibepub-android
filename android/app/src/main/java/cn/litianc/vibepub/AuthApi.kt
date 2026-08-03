@@ -275,6 +275,7 @@ object AuthApi {
         }
 
         val status = connection.responseCode
+        val authErrorHeader = connection.getHeaderField("x-vibepub-auth-error").orEmpty()
         val responseBody = if (status in 200..299) {
             connection.inputStream.bufferedReader().use { it.readText() }
         } else {
@@ -285,6 +286,7 @@ object AuthApi {
             throw AuthApiException(
                 statusCode = status,
                 responseBody = responseBody,
+                errorCode = authErrorHeader,
                 userMessage = authFailureMessage(status, responseBody),
             )
         }
@@ -295,8 +297,11 @@ object AuthApi {
 class AuthApiException(
     val statusCode: Int,
     val responseBody: String,
+    errorCode: String = "",
     userMessage: String,
-) : IllegalStateException(userMessage)
+) : IllegalStateException(userMessage) {
+    val errorCode: String = errorCode.ifBlank { authErrorCode(responseBody) }
+}
 
 internal fun parseAuthSession(responseBody: String): AuthSession {
     val json = JSONObject(responseBody)
@@ -355,7 +360,7 @@ internal fun parseAdminUsers(responseBody: String): AdminUsersResult {
 internal fun authFailureMessage(status: Int, responseBody: String): String {
     val message = runCatching {
         JSONObject(responseBody.ifBlank { "{}" }).optString("message")
-            .ifBlank { JSONObject(responseBody.ifBlank { "{}" }).optString("error") }
+            .ifBlank { authErrorCode(responseBody) }
     }.getOrDefault("")
     return when (status) {
         400 -> if (message.isNotBlank()) message else "请求内容不完整"
@@ -366,6 +371,10 @@ internal fun authFailureMessage(status: Int, responseBody: String): String {
         else -> if (message.isNotBlank()) message else "账号请求失败 HTTP $status"
     }
 }
+
+internal fun authErrorCode(responseBody: String): String = runCatching {
+    JSONObject(responseBody.ifBlank { "{}" }).optString("error").trim()
+}.getOrDefault("")
 
 private fun JSONArray?.orEmptyObjects(): List<JSONObject> {
     if (this == null) return emptyList()

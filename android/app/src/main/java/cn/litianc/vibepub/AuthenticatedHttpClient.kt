@@ -216,7 +216,7 @@ object AuthenticatedHttpClient {
                 if (error is CancellationException) {
                     throw error
                 }
-                if (error is AuthApiException && error.statusCode in INVALID_REFRESH_TOKEN_STATUS_CODES) {
+                if (error is AuthApiException && isInvalidRefreshToken(error)) {
                     if (!preferences.clearAuthSessionIfMatches(failedSession)) {
                         throw sessionChangedException()
                     }
@@ -247,9 +247,7 @@ object AuthenticatedHttpClient {
         )
     }
 
-    private val INVALID_REFRESH_TOKEN_STATUS_CODES = setOf(
-        HttpURLConnection.HTTP_BAD_REQUEST,
-        HttpURLConnection.HTTP_UNAUTHORIZED,
-        HttpURLConnection.HTTP_FORBIDDEN,
-    )
+    private fun isInvalidRefreshToken(error: AuthApiException): Boolean =
+        error.statusCode == HttpURLConnection.HTTP_UNAUTHORIZED &&
+            error.errorCode == "invalid_refresh_token"
 }

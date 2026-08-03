@@ -144,7 +144,7 @@ const MAX_INLINE_STYLE_PROFILE_BODY_CHARS = 3_000;
 // Cloudflare Workers Web Crypto currently rejects PBKDF2 iteration counts above 100,000.
 const PASSWORD_ITERATIONS = 100_000;
 const ACCESS_TOKEN_TTL_MS = 60 * 60 * 1_000;
-const REFRESH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1_000;
+const REFRESH_TOKEN_TTL_MS = 365 * 24 * 60 * 60 * 1_000;
 const INVITATION_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
 const PASSWORD_RESET_TTL_MS = 30 * 60 * 1_000;
 const EMAIL_VERIFY_TTL_MS = 24 * 60 * 60 * 1_000;
@@ -512,7 +512,7 @@ async function refreshSession(request: Request, env: Env): Promise<Response> {
   const refreshHash = await sha256Hex(refreshToken);
   const session = await queryOne<any>(
     env,
-    `SELECT s.id, s.user_id, s.refresh_expires_at, s.revoked_at,
+    `SELECT s.id AS session_id, s.user_id AS id, s.refresh_expires_at, s.revoked_at,
             u.email, u.role, u.workspace_id, u.status, u.email_verified_at
      FROM sessions s
      JOIN users u ON u.id = s.user_id
@@ -520,14 +520,21 @@ async function refreshSession(request: Request, env: Env): Promise<Response> {
     [refreshHash],
   );
   if (!session || session.revoked_at || isPast(session.refresh_expires_at) || session.status === "disabled") {
-    return json({ error: "invalid_refresh_token" }, 401);
+    return json(
+      { error: "invalid_refresh_token" },
+      401,
+      { "x-vibepub-auth-error": "invalid_refresh_token" },
+    );
   }
 
-  const tokens = sessionTokens();
-  await env.DB.prepare(
+  // Keep the refresh token stable. A lost refresh response or a duplicate
+  // request can then replay safely instead of stranding the device on a token
+  // that the server has already rotated away.
+  const tokens = sessionTokens(refreshToken);
+  const updated = await env.DB.prepare(
     `UPDATE sessions
      SET access_token_hash = ?, refresh_token_hash = ?, access_expires_at = ?, refresh_expires_at = ?, updated_at = ?
-     WHERE id = ?`,
+     WHERE id = ? AND refresh_token_hash = ? AND revoked_at IS NULL`,
   )
     .bind(
       await sha256Hex(tokens.accessToken),
@@ -535,9 +542,17 @@ async function refreshSession(request: Request, env: Env): Promise<Response> {
       isoAfter(ACCESS_TOKEN_TTL_MS),
       isoAfter(REFRESH_TOKEN_TTL_MS),
       nowIso(),
-      session.id,
+      session.session_id,
+      refreshHash,
     )
     .run();
+  if (Number(updated.meta?.changes || 0) !== 1) {
+    return json(
+      { error: "invalid_refresh_token" },
+      401,
+      { "x-vibepub-auth-error": "invalid_refresh_token" },
+    );
+  }
 
   return json({
     user: publicUser(authFromUserRow(session)),
@@ -917,10 +932,10 @@ async function createSession(env: Env, userId: string): Promise<Record<string, u
   return publicTokens(tokens);
 }
 
-function sessionTokens(): { accessToken: string; refreshToken: string } {
+function sessionTokens(refreshToken = randomToken()): { accessToken: string; refreshToken: string } {
   return {
     accessToken: randomToken(),
-    refreshToken: randomToken(),
+    refreshToken,
   };
 }
 
@@ -2351,12 +2366,13 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
 }
 
-function json(body: unknown, status = 200): Response {
+function json(body: unknown, status = 200, extraHeaders: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(body, null, 2), {
     status,
     headers: {
       ...corsHeaders,
       "content-type": "application/json; charset=utf-8",
+      ...extraHeaders,
     },
   });
 }
