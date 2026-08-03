@@ -532,7 +532,7 @@ describe("Wave2C controlled image service boundary", () => {
     await expect(callVisualImageService({ IMAGE_GENERATION_ADAPTER: binding, VISUAL_PRODUCTION_TOKEN: "visual-token" }, { operation_id: "image-oversized", attempt: 1, prompt, size: "1536x864" })).rejects.toMatchObject({ code: "service_invalid_response", retryable: false });
   });
 
-  it.each([[408, "unknown", true], [429, "unknown", true], [500, "unknown", false], [502, "unknown", false], [503, "unknown", false], [504, "upstream_timeout", true], [521, "upstream_retryable", true], [522, "upstream_retryable", true], [523, "upstream_retryable", true]])("classifies visual adapter status %s with controlled error code %s", async (status, code, retryable) => {
+  it.each([[408, "unknown", true], [429, "unknown", true], [500, "unknown", false], [502, "unknown", false], [503, "unknown", false], [504, "upstream_timeout", true], [520, "upstream_retryable", false], [521, "upstream_retryable", true], [522, "upstream_retryable", false], [523, "upstream_retryable", true], [524, "upstream_retryable", false]])("classifies visual adapter status %s with controlled error code %s", async (status, code, retryable) => {
     const env: VisualImageServiceEnv = { IMAGE_GENERATION_ADAPTER: { fetch: async () => response(status, { error: { code, retryable: true } }) }, VISUAL_PRODUCTION_TOKEN: "visual-token" };
     await expect(callVisualImageService(env, { operation_id: "image-1", attempt: 1, prompt: "synthetic", size: "1536x864" })).rejects.toMatchObject({ status, retryable });
   });

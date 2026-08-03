@@ -240,7 +240,7 @@ describe("controlled visual adapter", () => {
     expect(providerCalls).toBe(3);
   });
 
-  it.each([521, 522, 523])("retries Cloudflare provider connection status %s", async status => {
+  it.each([521, 523])("retries Cloudflare provider connection status %s", async status => {
     let providerCalls = 0;
     vi.stubGlobal("fetch", vi.fn(async () => {
       providerCalls += 1;
@@ -258,7 +258,7 @@ describe("controlled visual adapter", () => {
     expect(providerCalls).toBe(2);
   });
 
-  it.each([520, 524])("holds ambiguous Cloudflare provider status %s without another provider call", async status => {
+  it.each([520, 522, 524])("holds ambiguous Cloudflare provider status %s without another provider call", async status => {
     let providerCalls = 0;
     vi.stubGlobal("fetch", vi.fn(async () => {
       providerCalls += 1;
@@ -274,6 +274,11 @@ describe("controlled visual adapter", () => {
     const nextAttempt = await adapter.fetch(request("/internal/v3/visual/image", "visual-token", imageBody(operationId, 2)), durable);
     expect(replay.status).toBe(503);
     expect(nextAttempt.status).toBe(503);
+    const reconcileBody = `${imageBody(operationId, 1).slice(0, -1)},"reconcile_only":true}`;
+    const reconciled = await adapter.fetch(request("/internal/v3/visual/image", "visual-token", reconcileBody), durable);
+    expect(reconciled.status).toBe(503);
+    expect(results.objects.has(`visual-adapter/v3/operations/${operationId}/attempt-1/intent.json`)).toBe(true);
+    expect(results.objects.has(`visual-adapter/v3/operations/${operationId}/attempt-1/result.json`)).toBe(false);
     expect(providerCalls).toBe(1);
   });
 

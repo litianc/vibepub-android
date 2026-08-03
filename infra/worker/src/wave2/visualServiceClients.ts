@@ -29,7 +29,7 @@ async function invokeVisual(env: VisualImageServiceEnv, operation: "plan" | "ima
     let code: string | undefined;
     let declaredRetryable = false;
     try { const value = await response.clone().json() as { error?: { code?: unknown; retryable?: unknown } }; code = typeof value.error?.code === "string" ? value.error.code : undefined; declaredRetryable = value.error?.retryable === true; } catch { /* redact upstream body */ }
-    const controlled = response.status >= 500 && response.status <= 599 && declaredRetryable && ["upstream_retryable", "upstream_timeout", "service_temporarily_unavailable"].includes(code || "");
+    const controlled = [502, 503, 504, 521, 523].includes(response.status) && declaredRetryable && ["upstream_retryable", "upstream_timeout", "service_temporarily_unavailable"].includes(code || "");
     throw new InternalServiceError("service_unavailable", response.status, response.status === 408 || response.status === 429 || controlled, code);
   }
   let value: unknown;
