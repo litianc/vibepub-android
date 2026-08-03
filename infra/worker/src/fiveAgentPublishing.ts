@@ -4595,7 +4595,13 @@ async function runWechatDraftPhaseInner(input: {
   let recoveredDraftCallId: string | null = null;
   const legacyDraftId = await existingWechatDraftClue(env, params);
   if (!legacyDraftId) {
-    const mappingOperationId = await wechatOperationId("get_draft", { phase: "verified-mapping", execution_scope: executionScope, draft_identity_hash: draftIdentity, package_payload_hash: packageMeta.payload_hash });
+    const mappingOperationId = await wechatOperationId("get_draft", {
+      phase: "verified-mapping",
+      execution_scope: executionScope,
+      reconciliation_cycle: input.reconciliation_cycle || "initial",
+      draft_identity_hash: draftIdentity,
+      package_payload_hash: packageMeta.payload_hash,
+    });
     const mappingLookup = await callWechatOperation(env, coordinator, params, "get_draft", {
       account_binding_id: account.account_binding_id,
       account_receipt_hash: account.account_receipt_hash,

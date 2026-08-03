@@ -458,6 +458,7 @@ async function executeSyntheticScenario(
     wechatAccountRejected?: boolean;
     wechatLegacyClue?: boolean;
     wechatSameContent?: boolean;
+    wechatMappingResponseLossResume?: boolean;
     wechatAddUnknown?: "unique" | "zero" | "multiple";
     wechatAddUnknownLaterUnique?: boolean;
     wechatAddUnknownTwoRecoveryCycles?: boolean;
@@ -561,6 +562,7 @@ async function executeSyntheticScenario(
   const syntheticWechatMappings = wechatState.mappings;
   let wechatReadbackDriftActive = options.wechatReadbackDrift === true;
   let wechatReadFailureActive = options.wechatReadFailure;
+  let wechatMappingResponseLost = false;
   let wechatAccountRejectedActive = options.wechatAccountRejected === true;
   let wechatConfigEpoch = 0;
   let projectionFaultTriggered = false;
@@ -795,6 +797,11 @@ async function executeSyntheticScenario(
     const payload = input.payload && typeof input.payload === "object" && !Array.isArray(input.payload)
       ? input.payload as Record<string, any>
       : {};
+    if (operation === "get_draft" && options.wechatMappingResponseLossResume && !wechatMappingResponseLost &&
+        typeof payload.media_id !== "string") {
+      wechatMappingResponseLost = true;
+      return Response.json({ error: { code: "external_side_effect_unknown", retryable: false } }, { status: 503 });
+    }
     if (operation === "upload_image") {
       const projection = await runtimeEnv.DB.prepare(`SELECT state FROM publication_runs WHERE run_id = ? AND user_id = ? AND workspace_id = ? LIMIT 1`)
         .bind(runId, userId, workspaceId).first<{ state: string }>();
@@ -1365,6 +1372,9 @@ async function executeSyntheticScenario(
         wechatAccountRejectedActive = false;
         wechatConfigEpoch = 1;
       }
+      result = await workflowInstance.run({ payload: params, instanceId: String(run.workflow_id) }, step) as Record<string, unknown>;
+    }
+    if (options.wechatMappingResponseLossResume && result.state === "needs_action") {
       result = await workflowInstance.run({ payload: params, instanceId: String(run.workflow_id) }, step) as Record<string, unknown>;
     }
     if ((options.wechatAddUnknownLaterUnique || options.wechatAddUnknownTwoRecoveryCycles) && result.state === "needs_action" && wechatState.lastUnknownAdd) {
@@ -2490,6 +2500,18 @@ describe("Wave2B publishing runtime boundary", () => {
     expect(drafted.wechatOperations).toMatchObject({ resolve_account: 1, upload_image: 3, get_draft: 1 });
     expect(drafted.wechatOperations.write_draft || 0).toBe(0);
     expect(drafted.wechatCalls).toBe(5);
+  });
+
+  it("resumes a lost verified-mapping response with a fresh read-only identity", async () => {
+    const resumed = await executeSyntheticScenario("p2_pass", undefined, false, {
+      visual: true,
+      wechat: true,
+      wechatMappingResponseLossResume: true,
+    });
+    expect(resumed.result).toMatchObject({ state: "draft_ready" });
+    expect(resumed.projection).toMatchObject({ state: "draft_ready", error_code: null, next_action: null });
+    expect(resumed.wechatOperations).toMatchObject({ upload_image: 6, get_draft: 3, write_draft: 1 });
+    expect(resumed.wechatProviderOperations).toMatchObject({ upload_image: 3, get_draft: 1, write_draft: 1 });
   });
 
   it("verifies a legacy recording clue before updating the same draft identity", async () => {
