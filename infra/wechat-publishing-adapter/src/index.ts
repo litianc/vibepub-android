@@ -813,6 +813,24 @@ export class WechatOperationAgent {
         fingerprint_candidates: fingerprintCandidates,
         exact_matches: candidates.length,
       }));
+      const diagnostic = canonical({
+        version: "wechat-draft-recovery-diagnostic.v1",
+        operation: "find_draft",
+        scanned_pages: scannedPages,
+        scanned_items: scannedItems,
+        skipped_invalid_candidates: skippedInvalidCandidates,
+        fingerprint_candidates: fingerprintCandidates,
+        exact_matches: candidates.length,
+      });
+      try {
+        await this.env.WECHAT_RESULTS_BUCKET.put(
+          `wechat-adapter/v1/diagnostics/${input.article_id}/find-draft.json`,
+          diagnostic,
+          { httpMetadata: { contentType: "application/json" } },
+        );
+      } catch {
+        console.warn("wechat_draft_recovery_diagnostic_unavailable", canonical({ operation: "find_draft" }));
+      }
       if (candidates.length !== 1) throw new AdapterError("draft_identity_unresolved", 409);
       await this.state.storage.put(`wechat-draft-map:${String(input.payload.draft_identity_hash)}`, candidates[0].media_id!);
       return candidates[0];
