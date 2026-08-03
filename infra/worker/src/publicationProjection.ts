@@ -509,7 +509,10 @@ export async function applySystemPublicationTransition(
     );
     compatibilityStatements.push(db.prepare(`UPDATE recordings SET
       wechat_draft_id = CASE WHEN wechat_draft_id IS NULL THEN ? ELSE wechat_draft_id END${coverSql}
-      WHERE id = ? AND user_id = ? AND workspace_id = ? AND (wechat_draft_id IS NULL OR wechat_draft_id = ?) ${coverGuard}
+      WHERE id = ? AND user_id = ?
+        AND EXISTS (SELECT 1 FROM editorial_recording_scopes s
+          WHERE s.recording_id = recordings.id AND s.user_id = recordings.user_id AND s.workspace_id = ?)
+        AND (wechat_draft_id IS NULL OR wechat_draft_id = ?) ${coverGuard}
         AND EXISTS (
           SELECT 1 FROM publication_runs
           WHERE run_id = ? AND user_id = ? AND workspace_id = ? AND state_revision = ?
@@ -519,7 +522,9 @@ export async function applySystemPublicationTransition(
         )`).bind(...values));
     // Every statement in this batch uses the same verified recording identity.
     // This prevents a cover conflict from committing draft_ready/event alone.
-    compatibilityExistsSql = ` AND EXISTS (SELECT 1 FROM recordings WHERE id = ? AND user_id = ? AND workspace_id = ? AND wechat_draft_id = ?${cover ? " AND cover_image_url = ?" : ""})`;
+    compatibilityExistsSql = ` AND EXISTS (SELECT 1 FROM recordings r WHERE r.id = ? AND r.user_id = ?
+      AND EXISTS (SELECT 1 FROM editorial_recording_scopes s WHERE s.recording_id = r.id AND s.user_id = r.user_id AND s.workspace_id = ?)
+      AND r.wechat_draft_id = ?${cover ? " AND r.cover_image_url = ?" : ""})`;
     compatibilityExistsValues = [compatibility.recordingId, input.auth.userId, input.auth.workspaceId, compatibility.wechatDraftId, ...(cover ? [cover] : [])];
   }
   let batch: D1Result[];

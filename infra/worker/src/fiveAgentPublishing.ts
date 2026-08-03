@@ -3992,8 +3992,9 @@ async function existingWechatDraftClue(
   env: EditorialRuntimeEnv,
   params: FiveAgentWorkflowParams,
 ): Promise<string | null> {
-  const row = await env.DB.prepare(`SELECT wechat_draft_id FROM recordings
-    WHERE id = ? AND user_id = ? AND workspace_id = ? LIMIT 1`)
+  const row = await env.DB.prepare(`SELECT r.wechat_draft_id FROM recordings r
+    JOIN editorial_recording_scopes s ON s.recording_id = r.id AND s.user_id = r.user_id
+    WHERE r.id = ? AND r.user_id = ? AND s.workspace_id = ? LIMIT 1`)
     .bind(params.recording_id, params.user_id, params.workspace_id)
     .first<{ wechat_draft_id: string | null }>();
   if (!row || row.wechat_draft_id === null || row.wechat_draft_id === "") return null;
@@ -4916,7 +4917,9 @@ export async function runWechatDraftPhase(input: {
       .map(item => String(item.payload_summary.slot_id));
     await verifyExactWechatArtifactSet(env, coordinator, params, activeSlots, readback.payload_summary.execution_scope);
     const evidence = await assertVerifiedWechatDraftReadyEvidence(env, coordinator, params, readback);
-    const recording = await env.DB.prepare(`SELECT wechat_draft_id, cover_image_url FROM recordings WHERE id = ? AND user_id = ? AND workspace_id = ? LIMIT 1`)
+    const recording = await env.DB.prepare(`SELECT r.wechat_draft_id, r.cover_image_url FROM recordings r
+      JOIN editorial_recording_scopes s ON s.recording_id = r.id AND s.user_id = r.user_id
+      WHERE r.id = ? AND r.user_id = ? AND s.workspace_id = ? LIMIT 1`)
       .bind(params.recording_id, params.user_id, params.workspace_id).first<{ wechat_draft_id: string | null; cover_image_url: string | null }>();
     if (projection?.state !== "draft_ready" || recording?.wechat_draft_id !== evidence.draftId ||
         (evidence.coverUrl !== undefined && recording?.cover_image_url !== evidence.coverUrl)) {
@@ -4926,7 +4929,9 @@ export async function runWechatDraftPhase(input: {
   }
   if (projection?.state === "draft_ready") {
     const readback = uniquePassingWechatReadback(wechatLedger.artifacts, wechatLedger.receipt_ids);
-    const recording = await env.DB.prepare(`SELECT wechat_draft_id, cover_image_url FROM recordings WHERE id = ? AND user_id = ? AND workspace_id = ? LIMIT 1`)
+    const recording = await env.DB.prepare(`SELECT r.wechat_draft_id, r.cover_image_url FROM recordings r
+      JOIN editorial_recording_scopes s ON s.recording_id = r.id AND s.user_id = r.user_id
+      WHERE r.id = ? AND r.user_id = ? AND s.workspace_id = ? LIMIT 1`)
       .bind(params.recording_id, params.user_id, params.workspace_id).first<{ wechat_draft_id: string | null; cover_image_url: string | null }>();
     if (!readback || !recording?.wechat_draft_id) throw new EditorialRuntimeError("wechat_artifact_reconciliation_required", "draft-ready receipt is missing", 503);
     const evidence = await assertVerifiedWechatDraftReadyEvidence(env, coordinator, params, readback);
