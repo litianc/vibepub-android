@@ -128,7 +128,7 @@ function readPngDimensions(bytes: Uint8Array): { width: number; height: number }
   return { width: info.width, height: info.height };
 }
 
-const WHITE_BACKGROUND_THRESHOLD = 0.98;
+const WHITE_BACKGROUND_BORDER_THRESHOLD = 0.95;
 const WHITE_BACKGROUND_MIN_CHANNEL = 248;
 const WHITE_BACKGROUND_BORDER_FRACTION = 0.05;
 const WHITE_BACKGROUND_MIN_COVERAGE = 0.35;
@@ -492,7 +492,7 @@ export async function verifyPngWhiteBackgroundWithImagesBinding(images: ImagesBi
       }
     }
     return opaque / (width * height) >= OPAQUE_PIXEL_THRESHOLD && nonWhite > 0 && white / opaque >= WHITE_BACKGROUND_MIN_COVERAGE && borderPixels > 0 &&
-      borderOpaque / borderPixels >= OPAQUE_PIXEL_THRESHOLD && borderWhite / borderOpaque >= WHITE_BACKGROUND_THRESHOLD;
+      borderOpaque / borderPixels >= OPAQUE_PIXEL_THRESHOLD && borderWhite / borderOpaque >= WHITE_BACKGROUND_BORDER_THRESHOLD;
   } catch (error) {
     if (error instanceof ImageTransformationServiceError) throw error;
     return false;
@@ -541,7 +541,7 @@ async function verifyPngWhiteBackgroundUnsafe(bytes: Uint8Array, expectedWidth: 
   return opaque / (info.width * info.height) >= OPAQUE_PIXEL_THRESHOLD &&
     nonWhite > 0 && white / opaque >= WHITE_BACKGROUND_MIN_COVERAGE && borderPixels > 0 &&
     borderOpaque / borderPixels >= OPAQUE_PIXEL_THRESHOLD &&
-    borderWhite / borderOpaque >= WHITE_BACKGROUND_THRESHOLD;
+    borderWhite / borderOpaque >= WHITE_BACKGROUND_BORDER_THRESHOLD;
 }
 
 export async function verifyPngOpaqueCoverage(bytes: Uint8Array, expectedWidth: number, expectedHeight: number): Promise<boolean> {

@@ -381,6 +381,12 @@ describe("Wave2C visual planning and immutable contracts", () => {
     const illustratedNearWhite = await rgbaPngFixture(100, 100, 255, 6, (x, y) =>
       x >= 20 && x < 80 && y >= 20 && y < 80 ? [17, 17, 17, 255] : [252, 252, 252, 255]);
     expect(await verifyPngWhiteBackground(illustratedNearWhite, 100, 100)).toBe(true);
+    const sparseEdgeCrossingLine = await rgbaPngFixture(96, 54, 255, 6, (_x, y) =>
+      y >= 25 && y < 28 ? [17, 17, 17, 255] : [254, 254, 254, 255]);
+    expect(await verifyPngWhiteBackground(sparseEdgeCrossingLine, 96, 54)).toBe(true);
+    const edgeDominatedByForeground = await rgbaPngFixture(96, 54, 255, 6, (_x, y) =>
+      y >= 23 && y < 31 ? [17, 17, 17, 255] : [254, 254, 254, 255]);
+    expect(await verifyPngWhiteBackground(edgeDominatedByForeground, 96, 54)).toBe(false);
     const tintedBackground = await rgbaPngFixture(100, 100, 255, 6, (x, y) =>
       x >= 40 && x < 60 && y >= 40 && y < 60 ? [17, 17, 17, 255] : [238, 242, 246, 255]);
     expect(await verifyPngWhiteBackground(tintedBackground, 100, 100)).toBe(false);
@@ -439,7 +445,7 @@ describe("Wave2C visual planning and immutable contracts", () => {
     expect(await verifyPngOpaqueCoverageWithImagesBinding(runtimeEnv.IMAGES, cover, 2256, 960)).toBe(true);
   });
 
-  it("uses raw RGBA samples on the production Images path", async () => {
+  it("uses raw RGBA samples and permits sparse foreground crossing the white edge", async () => {
     const formats: string[] = [];
     const images = {
       input() {
@@ -455,8 +461,10 @@ describe("Wave2C visual planning and immutable contracts", () => {
             if (options.format !== "rgba") throw new Error("unexpected fallback");
             const pixels = new Uint8Array(dimensions.width * dimensions.height * 4);
             for (let index = 0; index < dimensions.width * dimensions.height; index += 1) pixels.set([255, 255, 255, 255], index * 4);
-            const center = (Math.floor(dimensions.height / 2) * dimensions.width + Math.floor(dimensions.width / 2)) * 4;
-            pixels.set([17, 17, 17, 255], center);
+            const centerY = Math.floor(dimensions.height / 2);
+            for (let y = Math.max(0, centerY - 1); y <= Math.min(dimensions.height - 1, centerY + 1); y += 1) {
+              for (let x = 0; x < dimensions.width; x += 1) pixels.set([17, 17, 17, 255], (y * dimensions.width + x) * 4);
+            }
             return {
               response: () => new Response(pixels),
               contentType: () => "application/octet-stream",
