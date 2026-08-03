@@ -647,7 +647,7 @@ describe("wechat publishing adapter", () => {
     const instance = new WechatOperationAgent(state(), await configuredEnv());
     const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const mock = providerMock({ batch: [
-      { media_id: "old-draft", title: "Old", content: '<img src="https://untrusted.example/old.png"/>', thumb_media_id: "old-cover" },
+      { media_id: "old-draft", title: "Title", content: '<img src="https://untrusted.example/old.png"/>', thumb_media_id: "cover-media-1" },
       { media_id: "target-draft", title: "Title", content: html, thumb_media_id: "cover-media-1" },
     ] });
     vi.stubGlobal("fetch", mock.fetcher);

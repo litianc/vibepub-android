@@ -775,9 +775,19 @@ export class WechatOperationAgent {
         for (const item of items) {
           if (!item || typeof item !== "object" || Array.isArray(item)) continue;
           const record = item as Record<string, unknown>;
+          const newsItems = record.content && typeof record.content === "object"
+            ? (record.content as Record<string, unknown>).news_item
+            : record.news_item;
+          const first = Array.isArray(newsItems) ? newsItems[0] : null;
+          if (!first || typeof first !== "object" || Array.isArray(first)) {
+            skippedInvalidCandidates += 1;
+            continue;
+          }
+          const summary = first as Record<string, unknown>;
+          if (summary.title !== input.payload.title || summary.thumb_media_id !== input.payload.thumb_media_id) continue;
           let result: ProviderResult;
           try {
-            result = await this.parseDraft({ news_item: record.content && typeof record.content === "object" ? (record.content as Record<string, unknown>).news_item : record.news_item }, String(record.media_id || ""));
+            result = await this.parseDraft({ news_item: newsItems }, String(record.media_id || ""));
           } catch (error) {
             if (!(error instanceof AdapterError) || error.code !== "external_side_effect_unknown") throw error;
             skippedInvalidCandidates += 1;
