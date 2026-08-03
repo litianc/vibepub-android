@@ -915,16 +915,20 @@ export class WechatOperationAgent {
       if (existing.request_hash !== requestHash || existing.operation !== input.operation) throw new AdapterError("operation_conflict", 409);
       const result = await this.readResult(input.operation_id, input.attempt);
       if (result) return await this.response(result, account);
-      return json({ error: { code: "external_side_effect_unknown", retryable: false } }, 503);
+      // An interrupted read cannot have created or changed a WeChat draft, so
+      // it is safe to execute again even through the reconciliation endpoint.
+      // Writes keep the unresolved intent and must never be replayed.
+      if (!isReadOperation(input.operation)) return json({ error: { code: "external_side_effect_unknown", retryable: false } }, 503);
+    } else {
+      if (input.reconcile_only) return json({ error: { code: "external_side_effect_unknown", retryable: false } }, 503);
+      for (let number = 1; number < input.attempt; number += 1) {
+        const previous = await this.row(input.operation_id, number);
+        const result = previous ? await this.readResult(input.operation_id, number) : null;
+        if (!previous || !result || (result.status === "failed" && !result.retryable)) return json({ error: { code: "external_side_effect_unknown", retryable: false } }, 503);
+        if (result.status === "success") return await this.response(result, account);
+      }
+      await this.state.storage.put(`wechat-claim:${input.operation_id}:${input.attempt}`, { operation_id: input.operation_id, operation: input.operation, attempt: input.attempt, request_hash: requestHash, state: "intent" } satisfies Intent);
     }
-    if (input.reconcile_only) return json({ error: { code: "external_side_effect_unknown", retryable: false } }, 503);
-    for (let number = 1; number < input.attempt; number += 1) {
-      const previous = await this.row(input.operation_id, number);
-      const result = previous ? await this.readResult(input.operation_id, number) : null;
-      if (!previous || !result || (result.status === "failed" && !result.retryable)) return json({ error: { code: "external_side_effect_unknown", retryable: false } }, 503);
-      if (result.status === "success") return await this.response(result, account);
-    }
-    await this.state.storage.put(`wechat-claim:${input.operation_id}:${input.attempt}`, { operation_id: input.operation_id, operation: input.operation, attempt: input.attempt, request_hash: requestHash, state: "intent" } satisfies Intent);
     let result: StoredResult;
     try {
       result = { operation_id: input.operation_id, operation: input.operation, attempt: input.attempt, request_hash: requestHash, status: "success", retryable: false, status_code: 200, result: await this.executeProvider(input, account) };

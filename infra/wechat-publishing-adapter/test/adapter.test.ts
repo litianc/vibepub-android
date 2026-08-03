@@ -689,6 +689,43 @@ describe("wechat publishing adapter", () => {
     expect(reads).toBe(3); expect(write.status).toBe(503); expect(writes).toBe(1);
   });
 
+  it("replays an unresolved read intent during reconciliation but never replays a write", async () => {
+    const instance = new WechatOperationAgent(state(), await configuredEnv());
+    let reads = 0; let writes = 0;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      const url = new URL(request.url);
+      if (url.pathname.endsWith("/cgi-bin/token")) return Response.json({ access_token: "token-1", expires_in: 7200 });
+      if (url.pathname.endsWith("/cgi-bin/draft/get")) {
+        reads += 1;
+        return reads === 1
+          ? new Response("not-json", { status: 200, headers: { "content-type": "application/json" } })
+          : Response.json({ news_item: [{ title: "Title", content: "<p>Body</p>", thumb_media_id: "cover-media-1" }] });
+      }
+      if (url.pathname.endsWith("/cgi-bin/draft/add")) {
+        writes += 1;
+        return new Response("not-json", { status: 200, headers: { "content-type": "application/json" } });
+      }
+      return Response.json({ errcode: 48001 });
+    }));
+    const receipt = await resolve(instance);
+    const readBody = JSON.parse(requestBody("get_draft", "read-reconcile", 1, receipt, { operation_id: "read-reconcile", media_id: "draft-media-1" })) as Record<string, unknown>;
+    const firstRead = await instance.fetch(new Request("https://internal", { method: "POST", body: canonical(readBody) }));
+    const reconciledRead = await instance.fetch(new Request("https://internal", { method: "POST", body: canonical({ ...readBody, reconcile_only: true }) }));
+    const writeBody = JSON.parse(requestBody("write_draft", "write-reconcile", 1, receipt, {
+      operation_id: "write-reconcile", draft_identity_hash: `sha256:${"d".repeat(64)}`, mutation: "add", title: "Title", canonical_html: "<p>Body</p>", html_hash: `sha256:${"e".repeat(64)}`, thumb_media_id: "cover-media-1",
+    })) as Record<string, unknown>;
+    const firstWrite = await instance.fetch(new Request("https://internal", { method: "POST", body: canonical(writeBody) }));
+    const reconciledWrite = await instance.fetch(new Request("https://internal", { method: "POST", body: canonical({ ...writeBody, reconcile_only: true }) }));
+
+    expect(firstRead.status).toBe(503);
+    expect(reconciledRead.status).toBe(200);
+    expect(reads).toBe(2);
+    expect(firstWrite.status).toBe(503);
+    expect(reconciledWrite.status).toBe(503);
+    expect(writes).toBe(1);
+  });
+
   it("logs bounded provider error metadata without credentials, messages, or article content", async () => {
     const instance = new WechatOperationAgent(state(), await configuredEnv());
     const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
