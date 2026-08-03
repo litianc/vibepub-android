@@ -4164,6 +4164,8 @@ const WECHAT_RESUMABLE_HOLDS = new Set([
   "external_side_effect_unknown",
   "wechat_artifact_reconciliation_required",
   "draft_identity_unresolved",
+  "wechat_draft_identity_derivation_failed",
+  "wechat_draft_clue_unavailable",
   "draft_readback_mismatch",
   "draft_readback_unavailable",
 ]);
@@ -4688,7 +4690,12 @@ async function runWechatDraftPhaseInner(input: {
     throw new EditorialRuntimeError("wechat_html_contract_invalid", "rendered package failed deterministic QA", 422);
   }
   if (!uploads[0]?.media_id) throw new EditorialRuntimeError("wechat_image_upload_non_retryable", "cover upload did not return a media id", 502);
-  const draftIdentity = await deriveWechatDraftIdentity(account.account_binding_id, owner);
+  let draftIdentity: string;
+  try {
+    draftIdentity = await deriveWechatDraftIdentity(account.account_binding_id, owner);
+  } catch {
+    throw new EditorialRuntimeError("wechat_draft_identity_derivation_failed", "WeChat draft identity could not be derived", 409);
+  }
   const fingerprint = {
     draft_identity_hash: draftIdentity,
     title: packagePayload.title,
@@ -4698,7 +4705,13 @@ async function runWechatDraftPhaseInner(input: {
   };
   let verifiedDraft: Record<string, unknown> | null = null;
   let recoveredDraftCallId: string | null = null;
-  const legacyDraftId = await existingWechatDraftClue(env, params);
+  let legacyDraftId: string | null;
+  try {
+    legacyDraftId = await existingWechatDraftClue(env, params);
+  } catch (error) {
+    if (error instanceof EditorialRuntimeError) throw error;
+    throw new EditorialRuntimeError("wechat_draft_clue_unavailable", "stored WeChat draft clue could not be read", 503);
+  }
   if (!legacyDraftId) {
     const mappingOperationId = await wechatOperationId("get_draft", {
       phase: "verified-mapping",
@@ -4959,7 +4972,7 @@ export async function runWechatDraftPhase(input: {
     const code = error instanceof EditorialRuntimeError || error instanceof WechatPublishingServiceError || error instanceof WechatContractError
       ? error.code
       : "external_side_effect_unknown";
-    if (["external_side_effect_unknown", "wechat_artifact_reconciliation_required", "draft_readback_mismatch", "draft_readback_unavailable", "wechat_publishing_account_unavailable", "wechat_publishing_account_not_allowed", "wechat_publishing_account_rejected", "wechat_access_token_rejected", "draft_identity_unresolved"].includes(code)) {
+    if (["external_side_effect_unknown", "wechat_artifact_reconciliation_required", "draft_readback_mismatch", "draft_readback_unavailable", "wechat_publishing_account_unavailable", "wechat_publishing_account_not_allowed", "wechat_publishing_account_rejected", "wechat_access_token_rejected", "draft_identity_unresolved", "wechat_draft_identity_derivation_failed", "wechat_draft_clue_unavailable"].includes(code)) {
       const nextAction = code === "draft_readback_mismatch" || code === "draft_readback_unavailable" ? "reconcile_draft" :
         code === "draft_identity_unresolved" ? "reconcile_draft_identity" :
         code === "wechat_publishing_account_not_allowed" ? "request_account_enablement" :
