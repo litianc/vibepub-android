@@ -143,6 +143,12 @@ export type FiveAgentWorkflowResult = {
   artifact_ids: string[];
 };
 
+export type FrozenArticleRecordingProjection = {
+  title: string;
+  body: string;
+  processingStage: "ARTICLE_READY";
+};
+
 export function visualProductionFeatureEnabled(env: EditorialRuntimeEnv, userId: string, workspaceId: string, runId?: string): boolean {
   if (env.VISUAL_PRODUCTION_V3 !== "true") return false;
   return v3TenantAllowed(env, env.VISUAL_PRODUCTION_V3_ALLOWLIST, userId, workspaceId) &&
@@ -688,7 +694,7 @@ async function prepareArtifactStorage(
 
 async function readArtifactFromR2(
   env: EditorialRuntimeEnv,
-  params: FiveAgentWorkflowParams,
+  params: Pick<FiveAgentWorkflowParams, "run_id" | "user_id" | "workspace_id">,
   artifactId: string,
   artifactKeyValue: string,
   expectedPayloadHash?: string,
@@ -754,6 +760,103 @@ async function readArtifactFromR2(
     throw new EditorialRuntimeError("artifact_reconciliation_required", "artifact readback cannot be reconciled", 503);
   }
   return object;
+}
+
+async function mirrorFrozenArticleToRecording(
+  env: EditorialRuntimeEnv,
+  params: Pick<FiveAgentWorkflowParams, "run_id" | "recording_id" | "user_id" | "workspace_id">,
+  object: ArtifactObject,
+  options: { markRefreshed?: boolean } = {},
+): Promise<FrozenArticleRecordingProjection | null> {
+  if (object.envelope.kind !== "frozen_article_version") return null;
+  const frozen = object.payload as FrozenArticleVersion;
+  if (object.envelope.recording_id !== params.recording_id || frozen.recording_id !== params.recording_id) {
+    throw new EditorialRuntimeError("artifact_identity_conflict", "frozen article recording identity conflicts", 409);
+  }
+  const recordingExists = await env.DB.prepare(`SELECT r.id FROM recordings r
+    JOIN editorial_recording_scopes s ON s.recording_id = r.id AND s.user_id = r.user_id
+    WHERE r.id = ? AND r.user_id = ? AND s.workspace_id = ? LIMIT 1`)
+    .bind(params.recording_id, params.user_id, params.workspace_id)
+    .first<{ id: number }>();
+  // A deleted legacy recording must not invalidate the canonical artifact
+  // chain. There is no Android compatibility projection left to repair.
+  if (!recordingExists) return null;
+  await env.DB.prepare(`UPDATE recordings SET
+      article_title = ?, article_content = ?, processing_stage = 'ARTICLE_READY', error_message = NULL,
+      updated_at = CASE
+        WHEN ? = 0 AND COALESCE(article_title, '') = ? AND COALESCE(article_content, '') = ?
+          AND processing_stage = 'ARTICLE_READY' AND error_message IS NULL THEN updated_at
+        ELSE CURRENT_TIMESTAMP
+      END
+    WHERE id = ? AND user_id = ?
+      AND EXISTS (
+        SELECT 1 FROM editorial_recording_scopes
+        WHERE recording_id = ? AND user_id = ? AND workspace_id = ?
+      )
+      AND EXISTS (
+        SELECT 1 FROM publication_current_runs
+        WHERE current_run_id = ? AND recording_id = ? AND user_id = ? AND workspace_id = ?
+      )`)
+    .bind(
+      frozen.title, frozen.body, options.markRefreshed ? 1 : 0, frozen.title, frozen.body,
+      params.recording_id, params.user_id,
+      params.recording_id, params.user_id, params.workspace_id,
+      params.run_id, params.recording_id, params.user_id, params.workspace_id,
+    )
+    .run();
+  const mirrored = await env.DB.prepare(`SELECT r.article_title, r.article_content, r.processing_stage
+    FROM recordings r
+    JOIN editorial_recording_scopes s ON s.recording_id = r.id AND s.user_id = r.user_id
+    WHERE r.id = ? AND r.user_id = ? AND s.workspace_id = ? LIMIT 1`)
+    .bind(params.recording_id, params.user_id, params.workspace_id)
+    .first<{ article_title: string | null; article_content: string | null; processing_stage: string | null }>();
+  if (!mirrored || mirrored.article_title !== frozen.title || mirrored.article_content !== frozen.body ||
+      mirrored.processing_stage !== "ARTICLE_READY") {
+    throw new EditorialRuntimeError("recording_article_projection_unavailable", "frozen article was not mirrored to the recording", 503);
+  }
+  return { title: frozen.title, body: frozen.body, processingStage: "ARTICLE_READY" };
+}
+
+export async function reconcileFrozenArticleRecordingProjection(
+  env: EditorialRuntimeEnv,
+  scope: { recordingId: number; userId: string; workspaceId: string },
+): Promise<FrozenArticleRecordingProjection | null> {
+  const artifact = await env.DB.prepare(`SELECT a.artifact_id, a.run_id, a.recording_id, a.user_id,
+      a.workspace_id, a.payload_hash, a.storage_ref
+    FROM publication_current_runs c
+    JOIN editorial_artifacts a ON a.run_id = c.current_run_id
+      AND a.recording_id = c.recording_id AND a.user_id = c.user_id AND a.workspace_id = c.workspace_id
+    WHERE c.recording_id = ? AND c.user_id = ? AND c.workspace_id = ?
+      AND a.kind = 'frozen_article_version'
+    ORDER BY a.created_at DESC LIMIT 1`)
+    .bind(scope.recordingId, scope.userId, scope.workspaceId)
+    .first<{
+      artifact_id: string;
+      run_id: string;
+      recording_id: number;
+      user_id: string;
+      workspace_id: string;
+      payload_hash: string;
+      storage_ref: string;
+    }>();
+  if (!artifact) return null;
+  if (artifact.recording_id !== scope.recordingId || artifact.user_id !== scope.userId ||
+      artifact.workspace_id !== scope.workspaceId || !artifact.storage_ref.startsWith("r2://")) {
+    throw new EditorialRuntimeError("artifact_identity_conflict", "frozen article projection identity conflicts", 409);
+  }
+  const object = await readArtifactFromR2(
+    env,
+    { run_id: artifact.run_id, user_id: scope.userId, workspace_id: scope.workspaceId },
+    artifact.artifact_id,
+    artifact.storage_ref.slice("r2://".length),
+    artifact.payload_hash,
+  );
+  return mirrorFrozenArticleToRecording(env, {
+    run_id: artifact.run_id,
+    recording_id: scope.recordingId,
+    user_id: scope.userId,
+    workspace_id: scope.workspaceId,
+  }, object, { markRefreshed: true });
 }
 
 function workflowTimestamp(base: string, offsetMs: number): string {
@@ -1416,6 +1519,7 @@ async function persistArtifact(
     if (!currentEvent || currentDoRun.state !== targetState || currentProjection.state !== expectedProjectionState) {
       throw new EditorialRuntimeError("artifact_reconciliation_required", "Wave2B completed artifact layers do not match the target state", 503);
     }
+    await mirrorFrozenArticleToRecording(env, params, object);
     return {
       ...metadata,
       doStateRevision: Number(currentDoRun.state_revision),
@@ -1463,6 +1567,7 @@ async function persistArtifact(
     revision_count: transition.revisionCount,
   });
   await verifyExactArtifactSet(env, coordinator, params, fullSet, fullSet.map(item => item.artifact_id), fullSet.map(item => item.artifact_id));
+  await mirrorFrozenArticleToRecording(env, params, object);
   return { ...metadata, doStateRevision: doStateRevisionForWrite + 1, projectionRevision: currentEvent ? projectionRevisionForWrite : projection.run.state_revision };
 }
 

@@ -12,7 +12,11 @@ import {
   handleEditorialOrchestrationInternalRoute,
 } from "./editorialAgents";
 import type { EditorialRuntimeEnv, EditorialWorkflowParams } from "./editorialAgents";
-import { FiveAgentPublishingWorkflow, handleFiveAgentPublishingInternalRoute } from "./fiveAgentPublishing";
+import {
+  FiveAgentPublishingWorkflow,
+  handleFiveAgentPublishingInternalRoute,
+  reconcileFrozenArticleRecordingProjection,
+} from "./fiveAgentPublishing";
 import type { FiveAgentWorkflowParams } from "./fiveAgentPublishing";
 import { handleMiningV3HandoffInternalRoute } from "./miningV3Handoff";
 import {
@@ -444,9 +448,7 @@ export default {
 
     if (request.method === "GET" && url.pathname.startsWith("/api/transcripts/")) {
       const filename = safeDecodeURIComponent(url.pathname.slice("/api/transcripts/".length));
-      const safeName = sanitizeFileName(filename).replace(/\.[^/.]+$/, ".json");
-      const scoped = userScopedKey(auth.userId, "transcripts", safeName);
-      return getFile(env, auth, encodeURIComponent(scoped));
+      return getTranscript(env, auth, filename);
     }
 
     return json({ error: "not_found" }, 404);
@@ -2308,6 +2310,110 @@ async function getFile(env: Env, auth: AuthContext, encodedKey: string): Promise
   headers.set("cache-control", "private, max-age=60");
 
   return new Response(object.body, { headers });
+}
+
+type TranscriptRecordingProjection = {
+  id: number;
+  status: string;
+  raw_text: string | null;
+  article_title: string | null;
+  article_content: string | null;
+  processing_stage: string | null;
+  wechat_url: string | null;
+  wechat_draft_id: string | null;
+  cover_image_url: string | null;
+  error_message: string | null;
+};
+
+async function loadTranscriptRecordingProjection(
+  env: Env,
+  auth: AuthContext,
+  filename: string,
+): Promise<TranscriptRecordingProjection | null> {
+  const columns = `r.id, r.status, r.raw_text, r.article_title, r.article_content,
+    r.processing_stage, r.wechat_url, r.wechat_draft_id, r.cover_image_url, r.error_message`;
+  try {
+    return await env.DB.prepare(`SELECT ${columns}
+      FROM recordings r
+      JOIN editorial_recording_scopes s ON s.recording_id = r.id AND s.user_id = r.user_id
+      WHERE r.user_id = ? AND s.workspace_id = ? AND r.filename = ? LIMIT 1`)
+      .bind(auth.userId, auth.workspaceId, filename)
+      .first<TranscriptRecordingProjection>();
+  } catch (error) {
+    const message = String((error as { message?: unknown })?.message || error);
+    if (!message.includes("no such table: editorial_recording_scopes")) throw error;
+    return env.DB.prepare(`SELECT id, status, raw_text, article_title, article_content,
+        processing_stage, wechat_url, wechat_draft_id, cover_image_url, error_message
+      FROM recordings WHERE user_id = ? AND filename = ? LIMIT 1`)
+      .bind(auth.userId, filename)
+      .first<TranscriptRecordingProjection>();
+  }
+}
+
+async function getTranscript(env: Env, auth: AuthContext, filename: string): Promise<Response> {
+  const safeName = sanitizeFileName(filename).replace(/\.[^/.]+$/, ".json");
+  const key = userScopedKey(auth.userId, "transcripts", safeName);
+  if (!canAccessR2Key(auth, key)) return json({ error: "forbidden" }, 403);
+
+  const object = await env.FILES_BUCKET.get(key);
+  if (!object) return json({ error: "not_found" }, 404);
+  const originalText = await object.text();
+  let original: Record<string, unknown>;
+  try {
+    const parsed = JSON.parse(originalText) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return json({ error: "transcript_payload_invalid" }, 503, { "cache-control": "private, max-age=0" });
+    }
+    original = parsed as Record<string, unknown>;
+  } catch {
+    return json({ error: "transcript_payload_invalid" }, 503, { "cache-control": "private, max-age=0" });
+  }
+
+  let recording: TranscriptRecordingProjection | null = null;
+  try {
+    recording = await loadTranscriptRecordingProjection(env, auth, filename);
+  } catch (error) {
+    console.error("Failed to load transcript compatibility projection:", error);
+    return json({ error: "transcript_projection_unavailable" }, 503, { "cache-control": "private, max-age=0" });
+  }
+  if (!recording) return json(original, 200, { "cache-control": "private, max-age=0" });
+
+  let articleTitle = normalizeOptionalString(recording.article_title);
+  let articleContent = normalizeOptionalString(recording.article_content);
+  let processingStage = normalizeOptionalString(recording.processing_stage);
+  if (publicationTenantFeatureEnabled(env, auth.userId, auth.workspaceId)) {
+    try {
+      const frozen = await reconcileFrozenArticleRecordingProjection(
+        env as unknown as EditorialRuntimeEnv,
+        { recordingId: recording.id, userId: auth.userId, workspaceId: auth.workspaceId },
+      );
+      if (frozen) {
+        articleTitle = frozen.title;
+        articleContent = frozen.body;
+        processingStage = frozen.processingStage;
+      }
+    } catch (error) {
+      console.error("Failed to reconcile frozen article transcript projection:", error);
+      return json({ error: "transcript_projection_unavailable" }, 503, { "cache-control": "private, max-age=0" });
+    }
+  }
+
+  const merged: Record<string, unknown> = { ...original };
+  const putBoth = (camel: string, snake: string, value: string | null): void => {
+    if (!value) return;
+    merged[camel] = value;
+    merged[snake] = value;
+  };
+  putBoth("rawText", "raw_text", normalizeOptionalString(recording.raw_text));
+  putBoth("articleTitle", "article_title", articleTitle);
+  putBoth("articleContent", "article_content", articleContent);
+  putBoth("processingStage", "processing_stage", articleContent ? (processingStage || "ARTICLE_READY") : processingStage);
+  putBoth("wechatUrl", "wechat_url", normalizeRemoteReference(recording.wechat_url));
+  putBoth("wechatDraftId", "wechat_draft_id", normalizeRemoteReference(recording.wechat_draft_id));
+  putBoth("coverImageUrl", "cover_image_url", normalizeRemoteReference(recording.cover_image_url));
+  putBoth("errorMessage", "error_message", normalizeOptionalString(recording.error_message));
+  merged.status = recording.status;
+  return json(merged, 200, { "cache-control": "private, max-age=0" });
 }
 
 function canAccessR2Key(auth: AuthContext, key: string): boolean {

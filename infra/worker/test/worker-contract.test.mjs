@@ -17,6 +17,167 @@ test("rejects unauthorized API requests", async () => {
   assert.equal(response.status, 401);
 });
 
+test("transcript reads merge the generated article projection for the existing Android client", async () => {
+  const db = {
+    prepare(sql) {
+      assert.match(sql, /FROM recordings/);
+      return statement({
+        all: async () => ({
+          results: [{
+            id: 71,
+            status: "PROCESSING",
+            raw_text: "完整识别文本",
+            article_title: "整理后的标题",
+            article_content: "整理后的正文",
+            processing_stage: "ARTICLE_READY",
+            wechat_url: null,
+            wechat_draft_id: null,
+            cover_image_url: null,
+            error_message: null,
+          }],
+        }),
+      });
+    },
+  };
+  const response = await worker.fetch(
+    authorizedRequest("https://example.test/api/transcripts/voice.m4a"),
+    createEnv({
+      DB: db,
+      FILES_BUCKET: {
+        async get(key) {
+          assert.equal(key, "users/default_user/transcripts/voice.json");
+          return { text: async () => JSON.stringify({ rawText: "旧识别文本" }) };
+        },
+      },
+    }),
+    createExecutionContext(),
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("cache-control"), "private, max-age=0");
+  const body = await response.json();
+  assert.equal(body.rawText, "完整识别文本");
+  assert.equal(body.articleTitle, "整理后的标题");
+  assert.equal(body.article_content, "整理后的正文");
+  assert.equal(body.processingStage, "ARTICLE_READY");
+});
+
+test("transcript reads prefer the current frozen run over a non-empty stale recording body", async () => {
+  const db = {
+    prepare() {
+      return statement({
+        all: async () => ({ results: [{
+          id: 71,
+          status: "PROCESSING",
+          raw_text: "识别文本",
+          article_title: "上一轮标题",
+          article_content: "上一轮正文",
+          processing_stage: "ARTICLE_READY",
+          wechat_url: null,
+          wechat_draft_id: null,
+          cover_image_url: null,
+          error_message: null,
+        }] }),
+      });
+    },
+  };
+  const response = await worker.fetch(
+    authorizedRequest("https://example.test/api/transcripts/voice.m4a"),
+    {
+      ...publicationEnabledEnv(db),
+      TEST_FROZEN_RECORDING_PROJECTION: {
+        title: "当前轮标题",
+        body: "当前轮正文",
+        processingStage: "ARTICLE_READY",
+      },
+      FILES_BUCKET: { async get() { return { text: async () => JSON.stringify({ rawText: "识别文本" }) }; } },
+    },
+    createExecutionContext(),
+  );
+
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.articleTitle, "当前轮标题");
+  assert.equal(body.articleContent, "当前轮正文");
+});
+
+test("transcript reads retry instead of caching an empty body when D1 is unavailable", async () => {
+  const response = await worker.fetch(
+    authorizedRequest("https://example.test/api/transcripts/voice.m4a"),
+    createEnv({
+      DB: {
+        prepare() {
+          return statement({ first: async () => { throw new Error("D1 temporarily unavailable"); } });
+        },
+      },
+      FILES_BUCKET: {
+        async get() {
+          return { text: async () => JSON.stringify({ rawText: "已识别，但还没有正文" }) };
+        },
+      },
+    }),
+    createExecutionContext(),
+  );
+
+  assert.equal(response.status, 503);
+  assert.equal(response.headers.get("cache-control"), "private, max-age=0");
+  assert.equal((await response.json()).error, "transcript_projection_unavailable");
+});
+
+test("transcript reads support legacy recordings without a workspace_id column", async () => {
+  let attempts = 0;
+  const response = await worker.fetch(
+    authorizedRequest("https://example.test/api/transcripts/legacy.m4a"),
+    createEnv({
+      DB: {
+        prepare(sql) {
+          attempts += 1;
+          if (sql.includes("editorial_recording_scopes")) {
+            return statement({ first: async () => { throw new Error("D1_ERROR: no such table: editorial_recording_scopes"); } });
+          }
+          assert.doesNotMatch(sql, /workspace_id/);
+          return statement({
+            all: async () => ({ results: [{
+              id: 7,
+              status: "COMPLETED",
+              raw_text: "旧库识别文本",
+              article_title: "旧库标题",
+              article_content: "旧库正文",
+              processing_stage: "ARTICLE_READY",
+              wechat_url: null,
+              wechat_draft_id: null,
+              cover_image_url: null,
+              error_message: null,
+            }] }),
+          });
+        },
+      },
+      FILES_BUCKET: {
+        async get() {
+          return { text: async () => JSON.stringify({ rawText: "旧内容" }) };
+        },
+      },
+    }),
+    createExecutionContext(),
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(attempts, 2);
+  assert.equal((await response.json()).articleContent, "旧库正文");
+});
+
+test("transcript reads reject malformed R2 JSON so Android can retry", async () => {
+  const response = await worker.fetch(
+    authorizedRequest("https://example.test/api/transcripts/voice.m4a"),
+    createEnv({ FILES_BUCKET: { async get() { return { text: async () => "{broken" }; } } }),
+    createExecutionContext(),
+  );
+
+  assert.equal(response.status, 503);
+  assert.equal(response.headers.get("cache-control"), "private, max-age=0");
+  assert.equal((await response.json()).error, "transcript_payload_invalid");
+});
+
 test("editorial producer writes are behind the internal service boundary", async () => {
   const response = await worker.fetch(
     new Request("https://example.test/api/internal/editorial/versions", { method: "POST" }),
@@ -825,6 +986,53 @@ test("lists Android recording display fields including processing stage", async 
   assert.equal(body.recordings[0].processing_stage, "DRAFTING");
   assert.equal(body.recordings[0].wechat_draft_id, "MEDIA_ID_123");
   assert.equal(body.recordings[0].cover_image_url, "https://example.test/api/files/covers%2FVibePub-2026-06-29-160846-0m6s-Mon-Afternoon-Beijing-Chaoyang.png");
+});
+
+test("recording list marks a frozen five-Agent article ready so Android refreshes its transcript", async () => {
+  const startedAt = Date.now();
+  const db = {
+    prepare(sql) {
+      if (sql.includes("FROM publication_runs")) {
+        return statement({ all: async () => ({ results: [publicationRunRow({
+          recording_id: 71,
+          state: "needs_action",
+          run_status: "needs_action",
+          progress_percent: 96,
+          last_successful_state: "draft_syncing",
+          last_successful_progress_percent: 96,
+          next_action: "reconcile_external_side_effect",
+          updated_at: "2026-08-04T02:50:08.000Z",
+        })] }) });
+      }
+      if (sql.includes("FROM recordings")) {
+        return statement({ all: async () => ({ results: [{
+          id: 71,
+          filename: "voice.m4a",
+          status: "PROCESSING",
+          created_at: "2026-08-03T00:00:00.000Z",
+          updated_at: "2026-08-05T00:01:00.000Z",
+          article_title: null,
+          raw_text_preview: "识别文本",
+          processing_stage: "ASR",
+          wechat_url: null,
+          wechat_draft_id: null,
+          error_message: null,
+        }] }) });
+      }
+      throw new Error(`Unexpected article-ready list SQL: ${sql}`);
+    },
+  };
+  const response = await worker.fetch(
+    authorizedRequest("https://example.test/api/recordings"),
+    publicationEnabledEnv(db),
+    createExecutionContext(),
+  );
+
+  assert.equal(response.status, 200);
+  const recording = (await response.json()).recordings[0];
+  assert.equal(recording.processing_stage, "ARTICLE_READY");
+  assert.ok(Date.parse(recording.updated_at) >= startedAt + 1_500);
+  assert.equal(recording.status, "PROCESSING");
 });
 
 test("recording list exposes only the agreed publication projection fields", async () => {
@@ -2527,14 +2735,19 @@ async function loadWorker() {
   const fiveAgentStub = [
     "class FiveAgentPublishingWorkflow {}",
     'const handleFiveAgentPublishingInternalRoute = async () => new Response(JSON.stringify({ error: "editorial_workflow_disabled" }), { status: 404 });',
+    "const reconcileFrozenArticleRecordingProjection = async (env) => env.TEST_FROZEN_RECORDING_PROJECTION || null;",
   ].join("\n");
   const miningHandoffStub = [
     'const handleMiningV3HandoffInternalRoute = async () => new Response(JSON.stringify({ error: "mining_v3_handoff_unavailable" }), { status: 503 });',
   ].join("\n");
   const withFiveAgentStub = source
-    .replace(/import\s+\{\s*FiveAgentPublishingWorkflow,\s*handleFiveAgentPublishingInternalRoute\s*\}\s+from\s+"\.\/fiveAgentPublishing";/, fiveAgentStub)
+    .replace(/import\s+\{[^;]*FiveAgentPublishingWorkflow,[^;]*handleFiveAgentPublishingInternalRoute,[^;]*reconcileFrozenArticleRecordingProjection,[^;]*\}\s+from\s+"\.\/fiveAgentPublishing";/, fiveAgentStub)
     .replace(/import\s+\{\s*handleMiningV3HandoffInternalRoute\s*\}\s+from\s+"\.\/miningV3Handoff";/, miningHandoffStub);
-  return (await import(moduleDataUrl(withFiveAgentStub))).default;
+  try {
+    return (await import(moduleDataUrl(withFiveAgentStub))).default;
+  } catch (error) {
+    throw new Error(`failed to load Worker contract module: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 function transpile(source, fileName) {

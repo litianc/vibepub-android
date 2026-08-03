@@ -1233,6 +1233,19 @@ export async function enrichRecordingList(
       };
     }
     const publicRun = publicationResponse(row) as Record<string, unknown>;
+    const articleAvailable = Number(row.last_successful_progress_percent) >= publicationProgress("content_frozen");
+    const draftReady = row.state === "draft_ready";
+    const recordingUpdatedAt = String(recording.updated_at || "");
+    const publicationUpdatedAt = String(publicRun.updated_at || "");
+    const articleProjectionNeedsRefresh = articleAvailable && (
+      !draftReady || Date.parse(publicationUpdatedAt) > Date.parse(recordingUpdatedAt)
+    );
+    // Installed Android clients require the remote timestamp to be more than
+    // one second newer than their local transcript before downloading again.
+    // Keep active article runs refreshable until the final draft is durable.
+    const compatibilityUpdatedAt = articleProjectionNeedsRefresh
+      ? new Date(Date.now() + 2_000).toISOString()
+      : recordingUpdatedAt;
     const publicationSummary = {
       run_id: publicRun.run_id,
       state: publicRun.state,
@@ -1250,6 +1263,11 @@ export async function enrichRecordingList(
     };
     return {
       ...recording,
+      ...(articleAvailable ? {
+        processing_stage: draftReady ? "COMPLETED" : "ARTICLE_READY",
+        updated_at: compatibilityUpdatedAt,
+      } : {}),
+      ...(draftReady ? { status: "COMPLETED" } : {}),
       run_id: publicRun.run_id,
       publication_stage: publicRun.publication_stage,
       state_revision: publicRun.state_revision,

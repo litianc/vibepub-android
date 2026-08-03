@@ -7,6 +7,7 @@ import {
   isPrePersistenceIntegrityError,
   normalizeFiveAgentStartBody,
   persistWechatArtifactForVerification,
+  reconcileFrozenArticleRecordingProjection,
   reconcilePreStartHold,
   visualProductionFeatureEnabled,
 } from "../src/fiveAgentPublishing";
@@ -58,8 +59,14 @@ beforeAll(async () => {
       id INTEGER PRIMARY KEY,
       user_id TEXT NOT NULL,
       workspace_id TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'PROCESSING',
+      article_title TEXT,
+      article_content TEXT,
+      processing_stage TEXT,
       wechat_draft_id TEXT,
-      cover_image_url TEXT
+      cover_image_url TEXT,
+      error_message TEXT,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
     CREATE TABLE IF NOT EXISTS editorial_runs (
       run_id TEXT PRIMARY KEY,
@@ -1983,6 +1990,12 @@ describe("Wave2B publishing runtime boundary", () => {
     const transcriptHash = await sha256Text(transcriptText);
     const sourceHash = await sha256Text("Synthetic original recording bytes.");
     await runtimeEnv.FILES_BUCKET.put(transcriptRef, transcriptText, { customMetadata: { user_id: userId, workspace_id: workspaceId } });
+    await runtimeEnv.DB.prepare(`INSERT OR IGNORE INTO recordings
+      (id, user_id, workspace_id, status, processing_stage) VALUES (?, ?, ?, 'PROCESSING', 'ASR')`)
+      .bind(recordingId, userId, workspaceId).run();
+    await runtimeEnv.DB.prepare(`INSERT OR IGNORE INTO editorial_recording_scopes
+      (recording_id, user_id, workspace_id) VALUES (?, ?, ?)`)
+      .bind(recordingId, userId, workspaceId).run();
 
     let writingCalls = 0;
     let reviewCalls = 0;
@@ -2091,6 +2104,19 @@ describe("Wave2B publishing runtime boundary", () => {
     expect(ledger.receipt_ids).toHaveLength(4);
     const d1 = await runtimeEnv.DB.prepare(`SELECT count(*) AS count FROM editorial_artifacts WHERE run_id = ?`).bind(runId).first<{ count: number }>();
     expect(d1?.count).toBe(4);
+    const recording = await runtimeEnv.DB.prepare(`SELECT article_title, article_content, processing_stage
+      FROM recordings WHERE id = ? AND user_id = ? AND workspace_id = ?`)
+      .bind(recordingId, userId, workspaceId)
+      .first<{ article_title: string | null; article_content: string | null; processing_stage: string | null }>();
+    expect(recording?.article_title).toBeTruthy();
+    expect(recording?.article_content).toContain("A short synthetic paragraph.");
+    expect(recording?.processing_stage).toBe("ARTICLE_READY");
+
+    await runtimeEnv.DB.prepare(`UPDATE recordings SET article_title = '旧标题', article_content = '旧正文',
+      processing_stage = 'ASR' WHERE id = ? AND user_id = ? AND workspace_id = ?`)
+      .bind(recordingId, userId, workspaceId).run();
+    await expect(reconcileFrozenArticleRecordingProjection(testEnv, { recordingId, userId, workspaceId }))
+      .resolves.toMatchObject({ title: expect.any(String), body: expect.stringContaining("A short synthetic paragraph."), processingStage: "ARTICLE_READY" });
   });
 
   it("keeps exact artifact counts for first-round P0, one P1 revision, and second-round P1 block", async () => {
