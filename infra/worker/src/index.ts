@@ -350,6 +350,26 @@ export default {
         if (!publicationFeatureEnabled(env, auth.userId, auth.workspaceId, runId)) {
           throw new PublicationProjectionError("publication_workflow_disabled", "publication workflow disabled", 404);
         }
+        if (url.searchParams.get("diagnostics") === "wechat_calls") {
+          const run = result.run as Record<string, unknown>;
+          const articleId = String(run.article_id || "");
+          if (!articleId || !runId) {
+            throw new PublicationProjectionError("publication_run_unavailable", "publication run identity unavailable", 503);
+          }
+          const coordinator = env.EDITORIAL_COORDINATOR.getByName(
+            await coordinatorShardName(auth.userId, auth.workspaceId, articleId, runId),
+          );
+          const calls = (await coordinator.listFiveAgentCallAttempts(runId, auth.userId, auth.workspaceId))
+            .filter(call => call.call_kind.startsWith("wechat_"))
+            .map(call => ({
+              call_kind: call.call_kind,
+              attempt: call.attempt,
+              status: call.status,
+              error_code: call.error_code,
+              retryable: call.retryable,
+            }));
+          return { ...result, diagnostics: { wechat_calls: calls } };
+        }
         return result;
       });
     }
