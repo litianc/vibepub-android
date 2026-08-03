@@ -5041,7 +5041,7 @@ async function verifyExactArtifactSet(
 function wave2bRetryable(error: unknown): boolean {
   if (!(error instanceof InternalServiceError)) return false;
   if (error.status === 408 || error.status === 429) return true;
-  return (error.status === 502 || error.status === 503 || error.status === 504) &&
+  return ([502, 503, 504, 521, 522, 523].includes(error.status)) &&
     error.retryable &&
     (error.upstreamCode === undefined || error.upstreamCode === "upstream_retryable" || error.upstreamCode === "upstream_timeout" || error.upstreamCode === "service_temporarily_unavailable");
 }

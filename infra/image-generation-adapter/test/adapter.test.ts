@@ -240,7 +240,7 @@ describe("controlled visual adapter", () => {
     expect(providerCalls).toBe(3);
   });
 
-  it.each([520, 521, 522, 523, 524])("retries Cloudflare provider gateway status %s", async status => {
+  it.each([521, 522, 523])("retries Cloudflare provider connection status %s", async status => {
     let providerCalls = 0;
     vi.stubGlobal("fetch", vi.fn(async () => {
       providerCalls += 1;
@@ -256,6 +256,25 @@ describe("controlled visual adapter", () => {
     const second = await adapter.fetch(request("/internal/v3/visual/image", "visual-token", imageBody(operationId, 2)), durable);
     expect(second.status).toBe(200);
     expect(providerCalls).toBe(2);
+  });
+
+  it.each([520, 524])("holds ambiguous Cloudflare provider status %s without another provider call", async status => {
+    let providerCalls = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      providerCalls += 1;
+      return new Response(JSON.stringify({ error: { message: "ambiguous gateway response" } }), { status });
+    }));
+    const results = bucket();
+    const durable = durableEnv(results);
+    const operationId = `cloudflare-ambiguous-${status}`;
+    const first = await adapter.fetch(request("/internal/v3/visual/image", "visual-token", imageBody(operationId, 1)), durable);
+    expect(first.status).toBe(503);
+    expect(await first.json()).toEqual({ error: { code: "external_side_effect_unknown", retryable: false } });
+    const replay = await adapter.fetch(request("/internal/v3/visual/image", "visual-token", imageBody(operationId, 1)), durable);
+    const nextAttempt = await adapter.fetch(request("/internal/v3/visual/image", "visual-token", imageBody(operationId, 2)), durable);
+    expect(replay.status).toBe(503);
+    expect(nextAttempt.status).toBe(503);
+    expect(providerCalls).toBe(1);
   });
 
   it("does not skip a missing retryable attempt", async () => {
