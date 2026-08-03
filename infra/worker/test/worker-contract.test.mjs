@@ -101,6 +101,46 @@ test("transcript reads prefer the current frozen run over a non-empty stale reco
   assert.equal(body.articleContent, "当前轮正文");
 });
 
+test("transcript reads rebuild a missing legacy R2 JSON from the current frozen article", async () => {
+  const db = {
+    prepare() {
+      return statement({
+        all: async () => ({ results: [{
+          id: 71,
+          status: "PROCESSING",
+          raw_text: null,
+          article_title: null,
+          article_content: null,
+          processing_stage: "ASR",
+          wechat_url: null,
+          wechat_draft_id: null,
+          cover_image_url: null,
+          error_message: null,
+        }] }),
+      });
+    },
+  };
+  const response = await worker.fetch(
+    authorizedRequest("https://example.test/api/transcripts/missing.m4a"),
+    {
+      ...publicationEnabledEnv(db),
+      TEST_FROZEN_RECORDING_PROJECTION: {
+        title: "冻结稿标题",
+        body: "冻结稿正文",
+        processingStage: "ARTICLE_READY",
+      },
+      FILES_BUCKET: { async get() { return null; } },
+    },
+    createExecutionContext(),
+  );
+
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.articleTitle, "冻结稿标题");
+  assert.equal(body.articleContent, "冻结稿正文");
+  assert.equal(body.processingStage, "ARTICLE_READY");
+});
+
 test("transcript reads retry instead of caching an empty body when D1 is unavailable", async () => {
   const response = await worker.fetch(
     authorizedRequest("https://example.test/api/transcripts/voice.m4a"),

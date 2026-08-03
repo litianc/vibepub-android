@@ -2356,17 +2356,17 @@ async function getTranscript(env: Env, auth: AuthContext, filename: string): Pro
   if (!canAccessR2Key(auth, key)) return json({ error: "forbidden" }, 403);
 
   const object = await env.FILES_BUCKET.get(key);
-  if (!object) return json({ error: "not_found" }, 404);
-  const originalText = await object.text();
-  let original: Record<string, unknown>;
-  try {
-    const parsed = JSON.parse(originalText) as unknown;
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+  let original: Record<string, unknown> = {};
+  if (object) {
+    try {
+      const parsed = JSON.parse(await object.text()) as unknown;
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        return json({ error: "transcript_payload_invalid" }, 503, { "cache-control": "private, max-age=0" });
+      }
+      original = parsed as Record<string, unknown>;
+    } catch {
       return json({ error: "transcript_payload_invalid" }, 503, { "cache-control": "private, max-age=0" });
     }
-    original = parsed as Record<string, unknown>;
-  } catch {
-    return json({ error: "transcript_payload_invalid" }, 503, { "cache-control": "private, max-age=0" });
   }
 
   let recording: TranscriptRecordingProjection | null = null;
@@ -2376,7 +2376,11 @@ async function getTranscript(env: Env, auth: AuthContext, filename: string): Pro
     console.error("Failed to load transcript compatibility projection:", error);
     return json({ error: "transcript_projection_unavailable" }, 503, { "cache-control": "private, max-age=0" });
   }
-  if (!recording) return json(original, 200, { "cache-control": "private, max-age=0" });
+  if (!recording) {
+    return object
+      ? json(original, 200, { "cache-control": "private, max-age=0" })
+      : json({ error: "not_found" }, 404, { "cache-control": "private, max-age=0" });
+  }
 
   let articleTitle = normalizeOptionalString(recording.article_title);
   let articleContent = normalizeOptionalString(recording.article_content);
@@ -2396,6 +2400,9 @@ async function getTranscript(env: Env, auth: AuthContext, filename: string): Pro
       console.error("Failed to reconcile frozen article transcript projection:", error);
       return json({ error: "transcript_projection_unavailable" }, 503, { "cache-control": "private, max-age=0" });
     }
+  }
+  if (!object && !articleContent) {
+    return json({ error: "not_found" }, 404, { "cache-control": "private, max-age=0" });
   }
 
   const merged: Record<string, unknown> = { ...original };
