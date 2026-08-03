@@ -219,6 +219,23 @@ describe("wechat publishing adapter", () => {
     expect(mock.calls[1].url.searchParams.get("type")).toBe("image");
   });
 
+  it("upgrades an allowlisted WeChat HTTP media URL before caching and returning it", async () => {
+    const bucket = new Bucket(); const instance = new WechatOperationAgent(state(), await configuredEnv(bucket));
+    const mock = providerMock({ mediaUrl: "http://wechat.example/cover.png" }); vi.stubGlobal("fetch", mock.fetcher);
+    const receipt = await resolve(instance);
+    const bytes = Uint8Array.from(atob("iVBORw0KGgo="), char => char.charCodeAt(0));
+    const rawHash = await crypto.subtle.digest("SHA-256", bytes);
+    const byteHash = `sha256:${Array.from(new Uint8Array(rawHash)).map(byte => byte.toString(16).padStart(2, "0")).join("")}`;
+    const payload = { operation_id: "upgrade-cover-url", image_base64: "iVBORw0KGgo=", byte_length: 8, byte_hash: byteHash, mime: "image/png", slot_id: "cover_01", purpose: "cover" };
+    const first = await instance.fetch(new Request("https://internal", { method: "POST", body: requestBody("upload_image", "upgrade-cover-url", 1, receipt, payload) }));
+    const replay = await instance.fetch(new Request("https://internal", { method: "POST", body: requestBody("upload_image", "upgrade-cover-url", 1, receipt, payload) }));
+    expect(first.status).toBe(200); expect(replay.status).toBe(200);
+    await expect(first.json()).resolves.toMatchObject({ result: { media_url: "https://wechat.example/cover.png", media_id: "cover-media-1" } });
+    await expect(replay.json()).resolves.toMatchObject({ result: { media_url: "https://wechat.example/cover.png", media_id: "cover-media-1" } });
+    expect(mock.calls.filter(call => call.url.pathname.endsWith("/material/add_material"))).toHaveLength(1);
+    expect([...bucket.values.values()].some(value => value.includes("https://wechat.example/cover.png"))).toBe(true);
+  });
+
   it("rejects an oversized image declaration before decoding or calling WeChat", async () => {
     const bucket = new Bucket(); const instance = new WechatOperationAgent(state(), await configuredEnv(bucket));
     const mock = providerMock(); vi.stubGlobal("fetch", mock.fetcher);
@@ -246,7 +263,7 @@ describe("wechat publishing adapter", () => {
     expect(mock.calls.filter(call => call.url.pathname.endsWith("/media/uploadimg"))).toHaveLength(1);
   });
 
-  it.each(["https://evil.example/image.png", "https://wechat.example.evil/image.png", "https://127.0.0.1/image.png", "https://localhost/image.png", "https://[fd00::1]/image.png"])("rejects a non-allowlisted upload media URL %s before caching it", async (mediaUrl) => {
+  it.each(["https://evil.example/image.png", "http://evil.example/image.png", "http://wechat.example:8080/image.png", "https://wechat.example.evil/image.png", "https://127.0.0.1/image.png", "https://localhost/image.png", "https://[fd00::1]/image.png"])("rejects a non-allowlisted upload media URL %s before caching it", async (mediaUrl) => {
     const bucket = new Bucket(); const instance = new WechatOperationAgent(state(), await configuredEnv(bucket));
     const mock = providerMock({ mediaUrl }); vi.stubGlobal("fetch", mock.fetcher);
     const receipt = await resolve(instance);

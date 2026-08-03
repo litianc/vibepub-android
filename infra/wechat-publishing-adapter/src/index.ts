@@ -260,6 +260,18 @@ function mediaHostAllowed(env: Env, value: unknown): value is string {
     .map(item => item.trim().toLowerCase()).filter(Boolean);
   return allowed.length > 0 && allowed.includes(url.hostname.toLowerCase());
 }
+function normalizeProviderMediaUrl(env: Env, value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  let url: URL;
+  try { url = new URL(value); } catch { return null; }
+  if (url.protocol === "http:") {
+    if (url.port && url.port !== "80") return null;
+    url.protocol = "https:";
+    url.port = "";
+  }
+  const normalized = url.toString();
+  return mediaHostAllowed(env, normalized) ? normalized : null;
+}
 function decodeBase64(value: string): Uint8Array {
   try {
     if (value.length === 0 || value.length > MAX_UPLOAD_IMAGE_BASE64_CHARS) throw new AdapterError("invalid_request", 400);
@@ -655,9 +667,9 @@ export class WechatOperationAgent {
       const body = input.payload.purpose === "cover"
         ? await this.wechatRequest(account, "/cgi-bin/material/add_material", { method: "POST", body: form }, "upload_image", true, { type: "image" })
         : await this.wechatRequest(account, "/cgi-bin/media/uploadimg", { method: "POST", body: form }, "upload_image");
-      const mediaUrl = body.url ?? body.media_url;
+      const mediaUrl = normalizeProviderMediaUrl(this.env, body.url ?? body.media_url);
       const mediaId = body.media_id;
-      if (!mediaHostAllowed(this.env, mediaUrl) || (kind === "thumb" && !ID.test(String(mediaId || "")))) throw new AdapterError("wechat_image_upload_non_retryable", 422);
+      if (!mediaUrl || (kind === "thumb" && !ID.test(String(mediaId || "")))) throw new AdapterError("wechat_image_upload_non_retryable", 422);
       const result: ProviderResult = { media_url: mediaUrl, ...(kind === "thumb" ? { media_id: String(mediaId) } : {}) };
       await this.storeUploadCache(account, kind, String(input.payload.byte_hash), result);
       return result;
