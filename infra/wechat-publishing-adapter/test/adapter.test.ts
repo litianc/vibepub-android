@@ -42,11 +42,11 @@ async function configuredEnv(bucket = new Bucket(), providerUrl?: string): Promi
   return value;
 }
 
-type Receipt = { account_binding_id: string; receipt_hash: string };
-function requestBody(operation: string, operationId: string, attempt = 1, receipt?: Receipt, payload?: Record<string, unknown>) {
+type Receipt = { account_binding_id: string; config_hash: string; receipt_hash: string };
+function requestBody(operation: string, operationId: string, attempt = 1, receipt?: Receipt, payload?: Record<string, unknown>, articleId = "article-1") {
   return JSON.stringify({
     protocol_version: "vibepub.wechat.v3", operation, operation_id: operationId, attempt,
-    user_id: "user-1", workspace_id: "workspace-1", article_id: "article-1",
+    user_id: "user-1", workspace_id: "workspace-1", article_id: articleId,
     ...(receipt ? { account_binding_id: receipt.account_binding_id, account_receipt_hash: receipt.receipt_hash } : {}),
     payload: payload || (operation === "upload_image" ? {
       operation_id: operationId, image_base64: "iVBORw0KGgo=", byte_length: 8,
@@ -55,8 +55,8 @@ function requestBody(operation: string, operationId: string, attempt = 1, receip
   });
 }
 
-async function resolve(instance: WechatOperationAgent): Promise<Receipt> {
-  const response = await instance.fetch(new Request("https://internal", { method: "POST", body: requestBody("resolve_account", "resolve-1") }));
+async function resolve(instance: WechatOperationAgent, articleId = "article-1"): Promise<Receipt> {
+  const response = await instance.fetch(new Request("https://internal", { method: "POST", body: requestBody("resolve_account", "resolve-1", 1, undefined, undefined, articleId) }));
   expect(response.status).toBe(200);
   const body = await response.json() as { result: Receipt };
   return body.result;
@@ -431,6 +431,83 @@ describe("wechat publishing adapter", () => {
     expect(first.status).toBe(503); expect(second.status).toBe(503); expect(skipped.status).toBe(503);
     expect((await first.json() as { error: { delivery_status: string } }).error.delivery_status).toBe("rejected_before_commit");
     expect(calls.filter(call => call.pathname.endsWith("/draft/get"))).toHaveLength(2);
+  });
+
+  it("keeps token evidence isolated across article-scoped Durable Objects", async () => {
+    const bucket = new Bucket();
+    const first = new WechatOperationAgent(state(), await configuredEnv(bucket));
+    const second = new WechatOperationAgent(state(), await configuredEnv(bucket));
+    let tokenCalls = 0;
+    let draftReads = 0;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      const url = new URL(request.url);
+      if (url.pathname.endsWith("/cgi-bin/token")) return Response.json({ access_token: `token-${++tokenCalls}`, expires_in: 7200 });
+      if (url.pathname.endsWith("/cgi-bin/draft/get")) {
+        draftReads += 1;
+        return Response.json({ news_item: [{ title: "Title", content: "<p>Body</p>", thumb_media_id: "cover-media-1" }] });
+      }
+      return Response.json({ errcode: 48001 });
+    }));
+    const firstReceipt = await resolve(first, "article-a");
+    const secondReceipt = await resolve(second, "article-b");
+    const firstResponse = await first.fetch(new Request("https://internal", {
+      method: "POST",
+      body: requestBody("get_draft", "token-scope-a", 1, firstReceipt, { operation_id: "token-scope-a", media_id: "draft-media-a" }, "article-a"),
+    }));
+    const secondResponse = await second.fetch(new Request("https://internal", {
+      method: "POST",
+      body: requestBody("get_draft", "token-scope-b", 1, secondReceipt, { operation_id: "token-scope-b", media_id: "draft-media-b" }, "article-b"),
+    }));
+    expect(firstResponse.status).toBe(200);
+    expect(secondResponse.status).toBe(200);
+    expect(tokenCalls).toBe(2);
+    expect(draftReads).toBe(2);
+    expect([...bucket.values.keys()].filter(key => key.includes("/token-result/"))).toHaveLength(2);
+  });
+
+  it("reuses validated legacy token evidence after an in-place deployment", async () => {
+    const bucket = new Bucket();
+    const durableState = state();
+    const instance = new WechatOperationAgent(durableState, await configuredEnv(bucket));
+    const receipt = await resolve(instance);
+    const legacyResultRef = `wechat-adapter/v1/token-result/${receipt.account_binding_id}/${receipt.config_hash.slice(7)}/1/1.json`;
+    const legacyResult = canonical({
+      status: "success",
+      retryable: false,
+      status_code: 200,
+      token: {
+        access_token: "legacy-token",
+        expires_at: Date.now() + 3_600_000,
+        config_hash: receipt.config_hash,
+      },
+    });
+    bucket.values.set(legacyResultRef, legacyResult);
+    const legacyResultDigest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(legacyResult));
+    const legacyResultHash = `sha256:${Array.from(new Uint8Array(legacyResultDigest)).map(byte => byte.toString(16).padStart(2, "0")).join("")}`;
+    await durableState.storage.put(`wechat-token-intent:${receipt.account_binding_id}:${receipt.config_hash}:1:1`, {
+      state: "completed",
+      result_ref: legacyResultRef,
+      result_hash: legacyResultHash,
+      retryable: false,
+    });
+    let tokenCalls = 0;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      const url = new URL(request.url);
+      if (url.pathname.endsWith("/cgi-bin/token")) {
+        tokenCalls += 1;
+        return Response.json({ access_token: "unexpected-new-token", expires_in: 7200 });
+      }
+      expect(url.searchParams.get("access_token")).toBe("legacy-token");
+      return Response.json({ news_item: [{ title: "Title", content: "<p>Body</p>", thumb_media_id: "cover-media-1" }] });
+    }));
+    const response = await instance.fetch(new Request("https://internal", {
+      method: "POST",
+      body: requestBody("get_draft", "legacy-token-read", 1, receipt, { operation_id: "legacy-token-read", media_id: "draft-media-1" }),
+    }));
+    expect(response.status).toBe(200);
+    expect(tokenCalls).toBe(0);
   });
 
   it("records controlled token read retries before completing the dependent read", async () => {

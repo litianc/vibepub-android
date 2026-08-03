@@ -23,6 +23,7 @@ type AccountMaterial = { user_id: string; app_id: string; app_secret: string; pr
 type ResolvedAccount = {
   account: AccountMaterial;
   binding_id: string;
+  operation_scope_hash: string;
   config_hash: string;
   receipt_hash: string;
   provider_base: URL;
@@ -155,7 +156,10 @@ function errorResponse(error: unknown): Response {
 function operationKey(operationId: string, attemptNumber: number, suffix: "result" | "upload-cache"): string {
   return `wechat-adapter/v1/${suffix}/${operationId}/${attemptNumber}.json`;
 }
-function tokenResultKey(bindingId: string, configHash: string, generation: number, attemptNumber: number): string {
+function tokenResultKey(bindingId: string, configHash: string, operationScopeHash: string, generation: number, attemptNumber: number): string {
+  return `wechat-adapter/v1/token-result/${bindingId}/${configHash.slice(7)}/${operationScopeHash.slice(7)}/${generation}/${attemptNumber}.json`;
+}
+function legacyTokenResultKey(bindingId: string, configHash: string, generation: number, attemptNumber: number): string {
   return `wechat-adapter/v1/token-result/${bindingId}/${configHash.slice(7)}/${generation}/${attemptNumber}.json`;
 }
 function uploadCacheKey(bindingId: string, kind: "thumb" | "body", byteHash: string): string {
@@ -380,9 +384,12 @@ async function loadAccount(env: Env, userId: string, workspaceId: string, articl
   const providerBase = safeProviderBase(env, account.proxy_url);
   const bindingId = await deriveWechatAccountBindingId(userId, workspaceId, account.app_id);
   if (!accountAllowed(env, bindingId)) throw new AdapterError("wechat_publishing_account_not_allowed", 409);
-  const configHash = await digest(canonical({ app_id: account.app_id, provider_base_url: providerBase.toString(), updated_at: account.updated_at }));
+  const [configHash, operationScopeHash] = await Promise.all([
+    digest(canonical({ app_id: account.app_id, provider_base_url: providerBase.toString(), updated_at: account.updated_at })),
+    digest(canonical({ user_id: userId, workspace_id: workspaceId, account_binding_id: bindingId, article_id: articleId })),
+  ]);
   const receiptHash = await digest(canonical({ version: "wechat-account-resolution.v1", user_id: userId, workspace_id: workspaceId, article_id: articleId, account_binding_id: bindingId, config_hash: configHash }));
-  return { account, binding_id: bindingId, config_hash: configHash, receipt_hash: receiptHash, provider_base: providerBase, app_secret: account.app_secret };
+  return { account, binding_id: bindingId, operation_scope_hash: operationScopeHash, config_hash: configHash, receipt_hash: receiptHash, provider_base: providerBase, app_secret: account.app_secret };
 }
 
 function deliveryStatus(response: Response): "not_forwarded" | "rejected_before_commit" | null {
@@ -481,14 +488,30 @@ export class WechatOperationAgent {
     if (forceRefresh) await this.state.storage.put(generationKey, generation);
     for (let attemptNumber = 1; attemptNumber <= 3; attemptNumber += 1) {
       const intentKey = `wechat-token-intent:${account.binding_id}:${account.config_hash}:${generation}:${attemptNumber}`;
-      const resultRef = tokenResultKey(account.binding_id, account.config_hash, generation, attemptNumber);
+      const resultRef = tokenResultKey(account.binding_id, account.config_hash, account.operation_scope_hash, generation, attemptNumber);
       const existing = await this.state.storage.get<TokenIntent>(intentKey);
       if (existing) {
-        const result = await this.readTokenAttemptResult(resultRef, account.config_hash);
+        const legacyResultRef = legacyTokenResultKey(account.binding_id, account.config_hash, generation, attemptNumber);
+        if (existing.result_ref && existing.result_ref !== resultRef && existing.result_ref !== legacyResultRef) {
+          throw new AdapterError("external_side_effect_unknown", 503, false, "unknown");
+        }
+        let resolvedResultRef = existing.result_ref || resultRef;
+        let result = await this.readTokenAttemptResult(resolvedResultRef, account.config_hash);
+        if (!result && !existing.result_ref) {
+          resolvedResultRef = legacyResultRef;
+          result = await this.readTokenAttemptResult(resolvedResultRef, account.config_hash);
+        }
         if (!result) {
           // A token request is read-only, but an intent without durable result
           // is still not proof that a retry may safely skip this attempt.
           throw new AdapterError("external_side_effect_unknown", 503, false, "unknown");
+        }
+        const resultHash = await digest(canonical(result));
+        if (existing.result_hash && existing.result_hash !== resultHash) {
+          throw new AdapterError("external_side_effect_unknown", 503, false, "unknown");
+        }
+        if (existing.result_ref !== resolvedResultRef || existing.result_hash !== resultHash) {
+          await this.state.storage.put(intentKey, { ...existing, result_ref: resolvedResultRef, result_hash: resultHash });
         }
         if (result.status === "success" && result.token) {
           await this.state.storage.put(cacheKey, result.token);
@@ -821,9 +844,8 @@ export default {
         if (input.account_binding_id !== account.binding_id) throw new AdapterError("wechat_publishing_account_not_allowed", 409);
         if (input.account_receipt_hash !== account.receipt_hash) throw new AdapterError("wechat_account_receipt_invalid", 409);
       }
-      const shard = await digest(canonical({ user_id: input.user_id, workspace_id: input.workspace_id, account_binding_id: account.binding_id, article_id: input.article_id }));
       const reconcileOnly = request.url.endsWith("/reconcile");
-      return env.WECHAT_OPERATION.getByName(shard).fetch(new Request(request, { body: canonical({ ...raw, reconcile_only: reconcileOnly || input.reconcile_only }) }));
+      return env.WECHAT_OPERATION.getByName(account.operation_scope_hash).fetch(new Request(request, { body: canonical({ ...raw, reconcile_only: reconcileOnly || input.reconcile_only }) }));
     } catch (error) { return errorResponse(error); }
   },
 };
