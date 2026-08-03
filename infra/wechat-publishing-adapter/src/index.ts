@@ -769,9 +769,14 @@ export class WechatOperationAgent {
     if (input.operation === "find_draft") {
       const candidates: ProviderResult[] = [];
       let skippedInvalidCandidates = 0;
+      let scannedItems = 0;
+      let fingerprintCandidates = 0;
+      let scannedPages = 0;
       for (let page = 0; page < 3; page += 1) {
         const body = await this.wechatRequest(account, "/cgi-bin/draft/batchget", { method: "POST", headers: { "content-type": "application/json" }, body: canonical({ offset: page * 20, count: 20, no_content: 0 }) }, "find_draft");
         const items = Array.isArray(body.item) ? body.item : [];
+        scannedPages += 1;
+        scannedItems += items.length;
         for (const item of items) {
           if (!item || typeof item !== "object" || Array.isArray(item)) continue;
           const record = item as Record<string, unknown>;
@@ -785,6 +790,7 @@ export class WechatOperationAgent {
           }
           const summary = first as Record<string, unknown>;
           if (summary.title !== input.payload.title || summary.thumb_media_id !== input.payload.thumb_media_id) continue;
+          fingerprintCandidates += 1;
           let result: ProviderResult;
           try {
             result = await this.parseDraft({ news_item: newsItems }, String(record.media_id || ""));
@@ -800,6 +806,13 @@ export class WechatOperationAgent {
       if (skippedInvalidCandidates > 0) {
         console.warn("wechat_draft_candidates_skipped", canonical({ operation: "find_draft", count: skippedInvalidCandidates }));
       }
+      console.warn("wechat_draft_recovery_scan", canonical({
+        operation: "find_draft",
+        scanned_pages: scannedPages,
+        scanned_items: scannedItems,
+        fingerprint_candidates: fingerprintCandidates,
+        exact_matches: candidates.length,
+      }));
       if (candidates.length !== 1) throw new AdapterError("draft_identity_unresolved", 409);
       await this.state.storage.put(`wechat-draft-map:${String(input.payload.draft_identity_hash)}`, candidates[0].media_id!);
       return candidates[0];
