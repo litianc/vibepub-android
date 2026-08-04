@@ -374,9 +374,9 @@ export default {
           const readbacks = [...ledger.artifacts].reverse().filter(artifact =>
             artifact.kind === "wechat_draft_readback_qa" && receiptIds.has(artifact.artifact_id)
           );
-          const readback = readbacks.find(artifact => artifact.payload_summary.decision === "pass") || readbacks[0];
           let readbackChecks: Record<string, boolean | number | string> | null = null;
-          if (readback?.storage_ref.startsWith("r2://")) {
+          for (const readback of readbacks) {
+            if (!readback.storage_ref.startsWith("r2://")) continue;
             const object = await env.FILES_BUCKET.get(readback.storage_ref.slice("r2://".length));
             const parsed = object ? await object.json().catch(() => null) as Record<string, unknown> | null : null;
             const payload = parsed?.payload && typeof parsed.payload === "object" && !Array.isArray(parsed.payload)
@@ -395,6 +395,7 @@ export default {
                 thumb: checks.thumb === true,
                 article_index: Number(checks.article_index),
               };
+              if (readbackChecks.decision === "pass") break;
             }
           }
           return {
