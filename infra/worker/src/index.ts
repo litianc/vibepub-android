@@ -402,6 +402,7 @@ export default {
               wechat_calls: calls,
               wechat_artifacts: ledger.artifacts.map(artifact => ({
                 kind: artifact.kind,
+                storage_ref: artifact.storage_ref,
                 receipt_present: receiptIds.has(artifact.artifact_id),
               })),
               readback_checks: readbackChecks,
