@@ -363,6 +363,7 @@ export default {
             .filter(call => call.call_kind.startsWith("wechat_"))
             .map(call => ({
               call_kind: call.call_kind,
+              operation_id: call.idempotency_key,
               attempt: call.attempt,
               status: call.status,
               error_code: call.error_code,
