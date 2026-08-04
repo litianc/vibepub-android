@@ -554,6 +554,13 @@ async function executeSyntheticScenario(
       options.wechatLegacyClue ? "legacy-draft-synthetic" : null,
       options.wechatCoverCasConflict ? "https://wechat.example/pre-existing-cover.png" : null,
     ).run();
+  await runtimeEnv.DB.prepare(`INSERT OR IGNORE INTO editorial_recording_scopes
+    (recording_id, user_id, workspace_id) VALUES (?, ?, ?)`)
+    .bind(recordingId, userId, workspaceId).run();
+  const recordingScope = await runtimeEnv.DB.prepare(`SELECT recording_id FROM editorial_recording_scopes
+    WHERE recording_id = ? AND user_id = ? AND workspace_id = ? LIMIT 1`)
+    .bind(recordingId, userId, workspaceId).first<{ recording_id: number }>();
+  expect(recordingScope?.recording_id).toBe(recordingId);
   let writingCalls = 0;
   let reviewCalls = 0;
   let visualCalls = 0;
