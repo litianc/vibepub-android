@@ -370,6 +370,31 @@ export default {
             }));
           const ledger = await coordinator.getFiveAgentWechatLedger(runId, auth.userId, auth.workspaceId);
           const receiptIds = new Set(ledger.receipt_ids);
+          const readback = [...ledger.artifacts].reverse().find(artifact =>
+            artifact.kind === "wechat_draft_readback_qa" && receiptIds.has(artifact.artifact_id)
+          );
+          let readbackChecks: Record<string, boolean | number | string> | null = null;
+          if (readback?.storage_ref.startsWith("r2://")) {
+            const object = await env.FILES_BUCKET.get(readback.storage_ref.slice("r2://".length));
+            const parsed = object ? await object.json().catch(() => null) as Record<string, unknown> | null : null;
+            const payload = parsed?.payload && typeof parsed.payload === "object" && !Array.isArray(parsed.payload)
+              ? parsed.payload as Record<string, unknown>
+              : null;
+            const checks = payload?.checks && typeof payload.checks === "object" && !Array.isArray(payload.checks)
+              ? payload.checks as Record<string, unknown>
+              : null;
+            if (checks) {
+              readbackChecks = {
+                decision: payload?.decision === "pass" ? "pass" : "failed",
+                media: checks.media === true,
+                title: checks.title === true,
+                html: checks.html === true,
+                urls: checks.urls === true,
+                thumb: checks.thumb === true,
+                article_index: Number(checks.article_index),
+              };
+            }
+          }
           return {
             ...result,
             diagnostics: {
@@ -378,6 +403,7 @@ export default {
                 kind: artifact.kind,
                 receipt_present: receiptIds.has(artifact.artifact_id),
               })),
+              readback_checks: readbackChecks,
             },
           };
         }
