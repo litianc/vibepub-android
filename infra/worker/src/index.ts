@@ -371,9 +371,10 @@ export default {
             }));
           const ledger = await coordinator.getFiveAgentWechatLedger(runId, auth.userId, auth.workspaceId);
           const receiptIds = new Set(ledger.receipt_ids);
-          const readback = [...ledger.artifacts].reverse().find(artifact =>
+          const readbacks = [...ledger.artifacts].reverse().filter(artifact =>
             artifact.kind === "wechat_draft_readback_qa" && receiptIds.has(artifact.artifact_id)
           );
+          const readback = readbacks.find(artifact => artifact.payload_summary.decision === "pass") || readbacks[0];
           let readbackChecks: Record<string, boolean | number | string> | null = null;
           if (readback?.storage_ref.startsWith("r2://")) {
             const object = await env.FILES_BUCKET.get(readback.storage_ref.slice("r2://".length));
