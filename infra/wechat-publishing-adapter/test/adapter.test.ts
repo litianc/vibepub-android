@@ -642,6 +642,24 @@ describe("wechat publishing adapter", () => {
     expect(response.status).toBe(200); expect(mock.calls.filter(call => call.url.pathname.endsWith("/draft/batchget"))).toHaveLength(1);
   });
 
+  it("normalizes deterministic WeChat image readback rewrites", async () => {
+    const expected = '<p>Body</p><img src="https://wechat.example/image/0?from=appmsg" alt="Illustration" style="display:block;width:100%;height:auto"/>';
+    const providerHtml = '<p>Body</p><img alt="Illustration" data-src="https://wechat.example/image/640?from=appmsg" style="display:block;width:100%;height:auto">';
+    const instance = new WechatOperationAgent(state(), await configuredEnv());
+    const mock = providerMock({ readHtml: providerHtml });
+    vi.stubGlobal("fetch", mock.fetcher);
+    const receipt = await resolve(instance);
+    const response = await instance.fetch(new Request("https://internal", {
+      method: "POST",
+      body: requestBody("get_draft", "normalized-readback", 1, receipt, { operation_id: "normalized-readback", media_id: "draft-media-1" }),
+    }));
+
+    expect(response.status).toBe(200);
+    const body = await response.json() as { result: { canonical_html: string; body_urls: string[] } };
+    expect(body.result.canonical_html).toBe(expected);
+    expect(body.result.body_urls).toEqual(["https://wechat.example/image/0?from=appmsg"]);
+  });
+
   it("skips an unrelated invalid draft while preserving exact identity recovery", async () => {
     const html = "<p>Body</p>";
     const instance = new WechatOperationAgent(state(), await configuredEnv());

@@ -270,6 +270,24 @@ function wechatUrl(base: URL, path: string, query: Record<string, string> = {}):
 function canonicalWechatHtml(value: string): string {
   return value.replace(/\r\n?/g, "\n").trim();
 }
+function canonicalWechatProviderHtml(env: Env, value: string): string {
+  return canonicalWechatHtml(value).replace(/<img\b[^>]*\/?\s*>/gi, tag => {
+    const attributes = new Map<string, string>();
+    for (const match of tag.matchAll(/([A-Za-z_:][A-Za-z0-9_.:-]*)\s*=\s*(["'])(.*?)\2/g)) {
+      attributes.set(match[1].toLowerCase(), match[3]);
+    }
+    const source = attributes.get("data-src");
+    if (!source) return tag;
+    const alt = attributes.get("alt");
+    const style = attributes.get("style");
+    if (!source || alt === undefined || style === undefined || !mediaHostAllowed(env, source)) {
+      throw new AdapterError("draft_readback_unavailable", 409);
+    }
+    const url = new URL(source);
+    if (/\/640$/.test(url.pathname)) url.pathname = url.pathname.replace(/\/640$/, "/0");
+    return `<img src="${url.toString()}" alt="${alt}" style="${style}"/>`;
+  });
+}
 function bodyUrls(html: string): string[] {
   return [...html.matchAll(/<img\b[^>]*\bsrc=["']([^"']+)["']/gi)].map(match => match[1]);
 }
@@ -874,14 +892,14 @@ export class WechatOperationAgent {
     if (!ID.test(mediaId) || !first || typeof first !== "object" || Array.isArray(first)) throw new AdapterError("external_side_effect_unknown", 503, false, "unknown");
     const article = first as Record<string, unknown>;
     if (typeof article.title !== "string" || typeof article.content !== "string" || !ID.test(String(article.thumb_media_id || ""))) throw new AdapterError("external_side_effect_unknown", 503, false, "unknown");
-    const canonicalHtml = canonicalWechatHtml(article.content);
+    const canonicalHtml = canonicalWechatProviderHtml(this.env, article.content);
     const urls = bodyUrls(canonicalHtml);
     if (urls.some(url => !mediaHostAllowed(this.env, url))) throw new AdapterError("external_side_effect_unknown", 503, false, "unknown");
     return { media_id: mediaId, title: article.title, canonical_html: canonicalHtml, html_hash: await digest(canonicalHtml), body_urls: urls, thumb_media_id: String(article.thumb_media_id), article_index: 0 };
   }
 
   private matchesFingerprint(result: ProviderResult, fingerprint: Record<string, unknown>): boolean {
-    return result.title === fingerprint.title && result.canonical_html === canonicalWechatHtml(String(fingerprint.canonical_html || "")) &&
+    return result.title === fingerprint.title && result.canonical_html === canonicalWechatProviderHtml(this.env, String(fingerprint.canonical_html || "")) &&
       result.html_hash === fingerprint.html_hash && result.thumb_media_id === fingerprint.thumb_media_id;
   }
 
