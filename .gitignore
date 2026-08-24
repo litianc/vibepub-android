@@ -1,4 +1,5 @@
 .omx/
+.agents/skills/
 
 # Android / Gradle
 .gradle/
@@ -18,26 +19,39 @@ secrets/
 *.jks
 *.keystore
 *.p12
+*.p8
+*.pem
+*.key
+*.token
+credentials*.json
+credentials*.txt
+token*.txt
 
-# Generated test evidence and downloaded APKs
-artifacts/android-device-visual/
-artifacts/android-device-readiness/
-artifacts/android-experience-readiness/
-artifacts/android-db-inspect/
-artifacts/android-install/
-artifacts/android-install-local/
-artifacts/android-install-timeout-test/
-artifacts/apk/
-artifacts/ci-test-*/
-artifacts/ci-test-report-*/
-artifacts/device-debug/
-artifacts/generated-covers/
-artifacts/mining-*.log
-artifacts/revision-image-smoke-*/
-artifacts/vibepub-debug-apk/
+# Generated test evidence, media, and downloaded APKs
+artifacts/
+outputs/
+test-artifacts/
+*.apk
+*.log
+*.hprof
+screenshot*.png
+screenshot*.jpg
+screenshot*.jpeg
+screenshot*.webp
+screen-capture*.png
+screen_capture*.png
+ui-dump*.xml
+ui_dump*.xml
+window-dump*.xml
+window_dump*.xml
 
 # macOS / IDE
 .DS_Store
 .idea/
 *.iml
 .env
+.env.*
+!.env.example
+!.env.template
+!*.example.env
+!*.template.env

@@ -6,12 +6,26 @@ on:
     branches:
       - main
     paths:
+      - ".codex/skills/**"
+      - ".gitignore"
+      - "AGENTS.md"
+      - "CONTEXT.md"
+      - "docs/agents/**"
+      - "docs/release-batch-extraction.md"
       - "scripts/**"
+      - "skills-lock.json"
       - "docs/android-*.md"
       - ".github/workflows/test-infrastructure.yml"
   pull_request:
     paths:
+      - ".codex/skills/**"
+      - ".gitignore"
+      - "AGENTS.md"
+      - "CONTEXT.md"
+      - "docs/agents/**"
+      - "docs/release-batch-extraction.md"
       - "scripts/**"
+      - "skills-lock.json"
       - "docs/android-*.md"
       - ".github/workflows/test-infrastructure.yml"
 
@@ -25,6 +39,9 @@ jobs:
 
       - name: Check shell script syntax
         run: find scripts -name '*.sh' -print0 | xargs -0 -n1 bash -n
+
+      - name: Check repository hygiene
+        run: scripts/check-repository-hygiene.sh
 
       - name: Check help commands
         run: |

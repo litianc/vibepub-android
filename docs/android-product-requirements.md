@@ -177,7 +177,7 @@ Backend `processingStage` should refine the info surface:
 - Completed recordings show article content and `COMPLETED`-quality status on both workbench and detail.
 - Failed recordings show a clear reason and a path to retry or fix configuration.
 - The app contains no Apple, iCloud, or TestFlight copy in user-facing Android surfaces.
-- The latest install source remains GitHub Releases, and `artifacts/MANIFEST.md` points to the current APK.
+- The latest install source remains GitHub Releases, and `docs/android-release-manifest.md` points to the current APK.
 
 ## Product Risks
 
