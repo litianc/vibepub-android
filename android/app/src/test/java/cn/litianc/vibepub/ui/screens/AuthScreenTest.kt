@@ -7,6 +7,7 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
 import cn.litianc.vibepub.AppPreferences
+import cn.litianc.vibepub.BuildConfig
 import com.sun.net.httpserver.HttpServer
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -30,6 +31,26 @@ class AuthScreenTest {
     @After
     fun tearDown() {
         server?.stop(0)
+    }
+
+    @Test
+    fun submitPersistsEnvironmentApiDefaultWhenPreferenceIsAbsent() {
+        val rawPreferences = composeTestRule.activity.getSharedPreferences("vibepub", 0)
+        rawPreferences.edit().remove("api_base_url").commit()
+        val preferences = AppPreferences(composeTestRule.activity)
+
+        composeTestRule.setContent {
+            AuthScreen(preferences = preferences, onAuthenticated = {})
+        }
+        composeTestRule.onNodeWithTag("AuthSubmitButton").performClick()
+
+        composeTestRule.waitUntil(timeoutMillis = 2_000L) {
+            rawPreferences.contains("api_base_url")
+        }
+        assertEquals(
+            BuildConfig.DEFAULT_API_BASE_URL,
+            rawPreferences.getString("api_base_url", null),
+        )
     }
 
     @Test

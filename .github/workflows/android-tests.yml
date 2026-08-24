@@ -7,10 +7,12 @@ on:
       - main
     paths:
       - "android/**"
+      - "scripts/verify-android-environment-apks.sh"
       - ".github/workflows/android-tests.yml"
   pull_request:
     paths:
       - "android/**"
+      - "scripts/verify-android-environment-apks.sh"
       - ".github/workflows/android-tests.yml"
 
 jobs:
@@ -40,8 +42,46 @@ jobs:
         with:
           gradle-version: "9.4.1"
 
-      - name: Run automated tests
-        run: gradle -p android :app:testDebugUnitTest
+      - name: Run Production unit tests
+        run: gradle -p android :app:testDebugUnitTest -PVIBEPUB_ENVIRONMENT=production
+
+      - name: Run Staging unit tests
+        run: gradle -p android :app:testDebugUnitTest -PVIBEPUB_ENVIRONMENT=staging -PVIBEPUB_STAGING_API_BASE_URL=https://staging.vibepub.invalid -PVIBEPUB_ALLOW_TEST_INVALID_STAGING_API=true
+
+      - name: Reject unsafe Staging API origins
+        run: |
+          for api_base_url in \
+            https://vibepub.litianc.cn. \
+            https://vibepub.litianc.cn.:443 \
+            https://VIBEPUB.LITIANC.CN./ \
+            https://staging.vibepub.invalid; do
+            if gradle -p android help \
+              -PVIBEPUB_ENVIRONMENT=staging \
+              -PVIBEPUB_STAGING_API_BASE_URL="$api_base_url"; then
+              echo "Accepted unsafe Staging API origin" >&2
+              exit 1
+            fi
+          done
+
+          for api_base_url in https://invalid https://invalid.; do
+            if gradle -p android help \
+              -PVIBEPUB_ENVIRONMENT=staging \
+              -PVIBEPUB_STAGING_API_BASE_URL="$api_base_url" \
+              -PVIBEPUB_ALLOW_TEST_INVALID_STAGING_API=true; then
+              echo "Accepted reserved exact invalid hostname" >&2
+              exit 1
+            fi
+          done
+
+      - name: Verify Production and Staging APK identities
+        run: |
+          gradle -p android :app:assembleDebug -PVIBEPUB_ENVIRONMENT=production
+          cp android/app/build/outputs/apk/debug/app-debug.apk /tmp/vibepub-production.apk
+          gradle -p android :app:assembleDebug -PVIBEPUB_ENVIRONMENT=staging -PVIBEPUB_STAGING_API_BASE_URL=https://staging.vibepub.invalid -PVIBEPUB_ALLOW_TEST_INVALID_STAGING_API=true
+          ALLOW_SYNTHETIC_STAGING_API_URL=true scripts/verify-android-environment-apks.sh \
+            /tmp/vibepub-production.apk \
+            android/app/build/outputs/apk/debug/app-debug.apk \
+            https://staging.vibepub.invalid
 
       - name: Upload Test Report
         if: always()

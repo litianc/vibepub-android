@@ -1,0 +1,188 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TMP_DIR="$(mktemp -d)"
+trap 'rm -rf "$TMP_DIR"' EXIT
+
+FAKE_ADB="$TMP_DIR/adb"
+cat > "$FAKE_ADB" <<EOF
+#!/usr/bin/env bash
+touch "$TMP_DIR/adb-was-called"
+exit 99
+EOF
+chmod +x "$FAKE_ADB"
+
+output="$TMP_DIR/output.txt"
+if ADB="$FAKE_ADB" \
+  "$ROOT_DIR/scripts/verify-android-environment-isolation.sh" \
+    "$TMP_DIR/production.apk" "$TMP_DIR/staging.apk" > "$output" 2>&1; then
+  echo "Isolation verifier passed without --serial." >&2
+  exit 1
+fi
+
+grep -Fq -- '--serial is required' "$output" || {
+  echo "Isolation verifier did not explain the required --serial." >&2
+  exit 1
+}
+[[ ! -e "$TMP_DIR/adb-was-called" ]] || {
+  echo "Isolation verifier called ADB before requiring --serial." >&2
+  exit 1
+}
+
+for production_alias in \
+  https://vibepub.litianc.cn. \
+  https://vibepub.litianc.cn.:443 \
+  https://VIBEPUB.LITIANC.CN./; do
+  rm -f "$TMP_DIR/adb-was-called"
+  if ADB="$FAKE_ADB" \
+    "$ROOT_DIR/scripts/verify-android-environment-isolation.sh" \
+      "$TMP_DIR/production.apk" "$TMP_DIR/staging.apk" \
+      --serial synthetic-device --staging-api-url "$production_alias" > "$output" 2>&1; then
+    echo "Isolation verifier accepted a trailing-dot Production API alias." >&2
+    exit 1
+  fi
+  grep -Fq 'real isolated Staging HTTPS API URL' "$output"
+  [[ ! -e "$TMP_DIR/adb-was-called" ]]
+done
+
+touch "$TMP_DIR/production.apk" "$TMP_DIR/staging.apk"
+
+FAKE_AAPT="$TMP_DIR/aapt"
+cat > "$FAKE_AAPT" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+apk="$3"
+environment="$(basename "$apk" .apk)"
+if [[ "$2" == "badging" ]]; then
+  if [[ "$environment" == "production" ]]; then
+    echo "package: name='cn.litianc.vibepub' versionCode='2' versionName='test'"
+    echo "application-label:'VibePub'"
+  else
+    echo "package: name='cn.litianc.vibepub.staging' versionCode='2' versionName='test'"
+    echo "application-label:'VibePub Staging'"
+  fi
+else
+  if [[ "$environment" == "production" ]]; then
+    echo 'A: android:scheme="vibepub" (Raw: "vibepub")'
+    echo 'A: android:name="cn.litianc.vibepub.DEFAULT_API_BASE_URL" (Raw: "cn.litianc.vibepub.DEFAULT_API_BASE_URL")'
+    echo 'A: android:value="https://vibepub.litianc.cn" (Raw: "https://vibepub.litianc.cn")'
+  else
+    echo 'A: android:scheme="vibepub-staging" (Raw: "vibepub-staging")'
+    echo 'A: android:name="cn.litianc.vibepub.DEFAULT_API_BASE_URL" (Raw: "cn.litianc.vibepub.DEFAULT_API_BASE_URL")'
+    staging_api_base_url="${FAKE_STAGING_API_BASE_URL:-https://staging.example.test}"
+    echo "A: android:value=\"$staging_api_base_url\" (Raw: \"$staging_api_base_url\")"
+  fi
+fi
+EOF
+chmod +x "$FAKE_AAPT"
+
+for production_alias in \
+  https://vibepub.litianc.cn. \
+  https://vibepub.litianc.cn.:443 \
+  https://VIBEPUB.LITIANC.CN./; do
+  if AAPT="$FAKE_AAPT" \
+    "$ROOT_DIR/scripts/verify-android-environment-apks.sh" \
+      "$TMP_DIR/production.apk" "$TMP_DIR/staging.apk" "$production_alias" > "$output" 2>&1; then
+    echo "APK verifier accepted a trailing-dot Production API alias." >&2
+    exit 1
+  fi
+  grep -Fq 'must not be Production' "$output"
+done
+
+for exact_invalid in https://invalid https://invalid.; do
+  if ALLOW_SYNTHETIC_STAGING_API_URL=true \
+    FAKE_STAGING_API_BASE_URL="$exact_invalid" AAPT="$FAKE_AAPT" \
+    "$ROOT_DIR/scripts/verify-android-environment-apks.sh" \
+      "$TMP_DIR/production.apk" "$TMP_DIR/staging.apk" "$exact_invalid" > "$output" 2>&1; then
+    echo "APK verifier accepted the exact invalid hostname." >&2
+    exit 1
+  fi
+  grep -Fq 'must not use the exact invalid hostname' "$output"
+done
+
+ALLOW_SYNTHETIC_STAGING_API_URL=true \
+  FAKE_STAGING_API_BASE_URL=https://staging.vibepub.invalid AAPT="$FAKE_AAPT" \
+  "$ROOT_DIR/scripts/verify-android-environment-apks.sh" \
+    "$TMP_DIR/production.apk" "$TMP_DIR/staging.apk" \
+    https://staging.vibepub.invalid > "$output"
+
+FAKE_ADB_LOG="$TMP_DIR/adb.log"
+cat > "$FAKE_ADB" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+printf '%s\n' "$*" >> "${FAKE_ADB_LOG:?}"
+shift 2
+
+case "$1" in
+  get-state)
+    echo device
+    ;;
+  install)
+    [[ "$2" == "--user" && "$3" == "10" ]]
+    echo Success
+    ;;
+  shell)
+    if [[ "$2" == "cmd" && "$3" == "package" && "$4" == "list" && "$5" == "packages" ]]; then
+      if [[ "$6" == "-U" ]]; then
+        package="$9"
+        if [[ "$package" == "cn.litianc.vibepub" ]]; then
+          echo "package:$package uid:10101"
+        else
+          echo "package:$package uid:10102"
+        fi
+      else
+        package="$8"
+        echo "package:$package"
+      fi
+    elif [[ "$2" == "am" && "$3" == "get-current-user" ]]; then
+      echo 10
+    elif [[ "$2" == "pm" && "$3" == "clear" ]]; then
+      echo Success
+    fi
+    ;;
+  exec-out)
+    [[ "$2" == "run-as" && "$3" == "--user" && "$4" == "10" ]]
+    package="$5"
+    remote_command="$8"
+    if [[ "$remote_command" == *"preferences=shared_prefs/vibepub.xml"* ]]; then
+      [[ "$package" == "cn.litianc.vibepub" ]]
+    else
+      printf '%064d %064d\n' 0 1
+    fi
+    ;;
+  uninstall)
+    echo Success
+    ;;
+esac
+EOF
+chmod +x "$FAKE_ADB"
+
+login_output="$TMP_DIR/login-output.txt"
+if AAPT="$FAKE_AAPT" \
+  ADB="$FAKE_ADB" \
+  FAKE_ADB_LOG="$FAKE_ADB_LOG" \
+    "$ROOT_DIR/scripts/verify-android-environment-isolation.sh" \
+      "$TMP_DIR/production.apk" "$TMP_DIR/staging.apk" \
+      --serial synthetic-device \
+      --staging-api-url https://staging.example.test > "$login_output" 2>&1; then
+  echo "Isolation verifier passed while Staging was logged out." >&2
+  exit 1
+fi
+
+grep -Fq 'Log into both Production and Staging' "$login_output" || {
+  echo "Isolation verifier did not give safe login instructions." >&2
+  exit 1
+}
+if grep -Eq 'pm clear|uninstall' "$FAKE_ADB_LOG"; then
+  echo "Isolation verifier changed Staging before both apps were logged in." >&2
+  exit 1
+fi
+if grep -Eq 'access_token|private-test-token|shared_prefs/' "$login_output"; then
+  echo "Isolation verifier exposed private login data." >&2
+  exit 1
+fi
+
+echo "Android environment isolation safety tests passed."
