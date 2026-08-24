@@ -5,9 +5,9 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPO="${REPO:-litianc/vibepub-android}"
 SOURCE="${SOURCE:-release}"
 RELEASE_PATTERN="${RELEASE_PATTERN:-build-*}"
-APK_ASSET_NAME="${APK_ASSET_NAME:-app-debug.apk}"
+APK_ASSET_NAME="${APK_ASSET_NAME:-VibePub-*.apk}"
 WORKFLOW="${WORKFLOW:-Android Build & Release}"
-ARTIFACT_NAME="${ARTIFACT_NAME:-vibepub-debug-apk}"
+ARTIFACT_NAME="${ARTIFACT_NAME:-vibepub-release-apk}"
 OUT_DIR="${OUT_DIR:-$ROOT_DIR/artifacts/apk/latest}"
 MAX_ATTEMPTS="${MAX_ATTEMPTS:-3}"
 
@@ -21,9 +21,9 @@ Environment:
   SOURCE         release or artifact. Default: release.
   RELEASE_PATTERN
                  Release tag glob for SOURCE=release. Default: build-*.
-  APK_ASSET_NAME APK asset name for SOURCE=release. Default: app-debug.apk.
+  APK_ASSET_NAME APK asset glob for SOURCE=release. Default: VibePub-*.apk.
   WORKFLOW       Workflow name. Default: Android Build & Release.
-  ARTIFACT_NAME  Artifact name. Default: vibepub-debug-apk.
+  ARTIFACT_NAME  Artifact name. Default: vibepub-release-apk.
   OUT_DIR        Destination directory. Default: artifacts/apk/latest.
   MAX_ATTEMPTS   GitHub API/download attempts. Default: 3.
 EOF

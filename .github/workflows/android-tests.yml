@@ -7,10 +7,16 @@ on:
       - main
     paths:
       - "android/**"
+      - "scripts/manage-android-version.mjs"
+      - "scripts/manage-android-version.test.mjs"
+      - "scripts/android-version-workflows.test.mjs"
       - ".github/workflows/android-tests.yml"
   pull_request:
     paths:
       - "android/**"
+      - "scripts/manage-android-version.mjs"
+      - "scripts/manage-android-version.test.mjs"
+      - "scripts/android-version-workflows.test.mjs"
       - ".github/workflows/android-tests.yml"
 
 jobs:
@@ -20,6 +26,22 @@ jobs:
     steps:
       - name: Check out
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Validate Android version metadata
+        run: node scripts/manage-android-version.mjs check
+
+      - name: Require an Android version bump
+        if: github.event_name == 'pull_request' || github.event_name == 'push'
+        env:
+          BASE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        run: node scripts/manage-android-version.mjs check-git-ref "$BASE_REF"
 
       - name: Set up Java
         uses: actions/setup-java@v4

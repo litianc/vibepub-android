@@ -51,10 +51,9 @@ Needed from account:
 
 ### Android Signing
 
-Status: CI supports stable signing for the internal debug APK when Android
-signing secrets are configured. Without these secrets, GitHub Actions falls
-back to the runner debug key, but APKs from different runs may not update over
-each other on a real device.
+Status: CI requires stable signing for every versioned internal release APK.
+The release workflow stops when any signing secret is missing; it never falls
+back to a runner debug key.
 
 For a stable internal dogfood channel, generate and keep:
 
@@ -64,9 +63,15 @@ For a stable internal dogfood channel, generate and keep:
 - `ANDROID_KEY_ALIAS`
 - `ANDROID_KEY_PASSWORD`
 
-The Android build maps these secrets into `VIBEPUB_RELEASE_*` Gradle
-properties and signs `assembleDebug` with that key when present. Keep using the
-same keystore for all internal APKs so ADB can install updates in place.
+The Android build maps these secrets into `VIBEPUB_RELEASE_*` Gradle properties
+and signs `assembleRelease` with that key. Keep using the same keystore for all
+internal release APKs so ADB can install updates in place.
+
+`android/release-certificate.sha256` pins the expected signing certificate's
+public SHA-256 fingerprint. This fingerprint is not a password or private key.
+After building and naming the final APK, CI verifies its signature and requires
+that certificate fingerprint before it can upload or publish the APK. Changing
+the keystore requires a separately reviewed update to this public pin.
 
 ### ASR
 

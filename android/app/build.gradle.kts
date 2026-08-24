@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.plugin.compose")
@@ -7,6 +9,33 @@ plugins {
 ksp {
     arg("room.generateKotlin", "true")
 }
+
+val appVersionFile = rootProject.file("version.properties")
+require(appVersionFile.isFile) {
+    "Missing Android version source: ${appVersionFile.path}"
+}
+val appVersionProperties = Properties().apply {
+    appVersionFile.inputStream().use { load(it) }
+}
+val appVersionName = appVersionProperties.getProperty("VERSION_NAME")?.trim().orEmpty()
+require(appVersionName.isNotEmpty()) {
+    "Missing VERSION_NAME in android/version.properties; run the public version check for details"
+}
+val appVersionCode = appVersionProperties.getProperty("VERSION_CODE")?.trim()?.toIntOrNull()
+requireNotNull(appVersionCode) {
+    "Missing integer VERSION_CODE in android/version.properties; run the public version check for details"
+}
+
+val configuredGitCommit = providers.gradleProperty("VIBEPUB_GIT_COMMIT")
+val repositoryGitCommit = providers.exec {
+    commandLine("git", "rev-parse", "HEAD")
+    workingDir(rootProject.projectDir.parentFile)
+}.standardOutput.asText.map { it.trim() }
+val appGitCommit = configuredGitCommit.orElse(repositoryGitCommit).get().trim().lowercase()
+require(Regex("[0-9a-f]{7,40}").matches(appGitCommit)) {
+    "VIBEPUB_GIT_COMMIT must be 7 to 40 hexadecimal characters"
+}
+val appGitCommitShort = appGitCommit.take(12)
 
 val hasReleaseSigningConfig =
     providers.gradleProperty("VIBEPUB_RELEASE_STORE_FILE").orNull?.isNotBlank() == true &&
@@ -22,9 +51,11 @@ android {
         applicationId = "cn.litianc.vibepub"
         minSdk = 26
         targetSdk = 36
-        versionCode = 2
-        versionName = "0.1.1"
+        versionCode = appVersionCode
+        versionName = appVersionName
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        buildConfigField("String", "GIT_COMMIT", "\"$appGitCommitShort\"")
+        manifestPlaceholders["gitCommit"] = appGitCommitShort
     }
 
     buildFeatures {

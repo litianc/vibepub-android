@@ -126,62 +126,66 @@ permission error.
 
 ## Run A Visual Test
 
-Download `app-debug.apk` from GitHub Actions, or use an APK already on disk.
-Then run:
+Before Issue #26, there is no published managed release APK. Use an explicit
+stable-signed candidate already on disk:
 
 ```bash
-scripts/android-device-visual-test.sh /path/to/app-debug.apk
+CANDIDATE_APK=/absolute/path/to/VibePub-0.2.0-3-<commit>.apk
+AUTOMATION_MODE=ui-tap scripts/android-device-visual-test.sh "$CANDIDATE_APK"
 ```
 
-To download the latest successful debug APK automatically:
+When a successful Android Build & Release workflow artifact is valid for the
+candidate under test, it may be downloaded explicitly. An Actions artifact is a
+build output, not a published GitHub Release:
 
 ```bash
-scripts/download-latest-android-apk.sh
+CANDIDATE_APK="$(SOURCE=artifact scripts/download-latest-android-apk.sh | tail -n 1)"
 ```
 
-By default this downloads the latest internal GitHub Release asset, matching
-`docs/android-release-manifest.md`. To pull the latest successful workflow artifact
-instead, use `SOURCE=artifact scripts/download-latest-android-apk.sh`.
+Do not use the downloader's default `SOURCE=release` before Issue #26. The
+release manifest still records only the legacy, unmanaged APK, while the default
+managed asset pattern has nothing valid to download.
 
-To download the latest APK, install it on the connected device, and launch the
-app:
+To install the explicit candidate and launch the app:
 
 ```bash
-ANDROID_SERIAL=192.168.31.72:42327 scripts/install-latest-android-apk.sh
+ANDROID_SERIAL=192.168.31.72:42327 \
+  scripts/install-latest-android-apk.sh "$CANDIDATE_APK"
 ```
 
 Equivalent explicit serial form:
 
 ```bash
-scripts/install-latest-android-apk.sh --serial 192.168.31.72:42327
+scripts/install-latest-android-apk.sh --serial 192.168.31.72:42327 "$CANDIDATE_APK"
 ```
 
-If the installed app was signed with a different debug key, Android returns
+If the installed app was signed with a different key, Android returns
 `INSTALL_FAILED_UPDATE_INCOMPATIBLE`. ADB cannot update that package in place.
 Uninstall VibePub manually, or allow the script to clear app data and reinstall:
 
 ```bash
 ALLOW_UNINSTALL_ON_SIGNATURE_MISMATCH=true \
 ANDROID_SERIAL=192.168.31.72:42327 \
-scripts/install-latest-android-apk.sh
+scripts/install-latest-android-apk.sh "$CANDIDATE_APK"
 ```
 
 For the standard VibePub smoke test, prefer:
 
 ```bash
-scripts/run-android-device-smoke.sh
+AUTOMATION_MODE=ui-tap scripts/run-android-device-smoke.sh "$CANDIDATE_APK"
 ```
 
 To check whether the phone is ready before a full run:
 
 ```bash
-scripts/check-android-device-ready.sh /path/to/app-debug.apk
+scripts/check-android-device-ready.sh /path/to/VibePub-0.2.0-3-<commit>.apk
 ```
 
-If the phone blocks ADB installation, manually install the debug APK and run:
+If the phone blocks ADB installation, manually install the release APK and run:
 
 ```bash
-SKIP_INSTALL=true RESET_APP_DATA=false scripts/run-android-device-smoke.sh /path/to/app-debug.apk
+AUTOMATION_MODE=ui-tap SKIP_INSTALL=true RESET_APP_DATA=false \
+  scripts/run-android-device-smoke.sh /path/to/VibePub-0.2.0-3-<commit>.apk
 ```
 
 The script will:
@@ -208,6 +212,9 @@ artifacts/android-device-visual/<timestamp>/
 The default real-device smoke path uses debug-only audio fixture import. It
 keeps the test visual and end-to-end while avoiding Mac speaker, microphone, and
 room-noise flakiness:
+
+This lane uses the locally built `android/app/build/outputs/apk/debug/app-debug.apk`.
+That file is a test fixture, not the GitHub release artifact.
 
 1. ADB copies your prepared audio file into the app's private storage.
 2. The debug APK imports it as one local recording.

@@ -15,6 +15,10 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.VibePub">
+        <meta-data
+            android:name="cn.litianc.vibepub.GIT_COMMIT"
+            android:value="${gitCommit}" />
+
         <activity
             android:name=".MainActivity"
             android:exported="true"

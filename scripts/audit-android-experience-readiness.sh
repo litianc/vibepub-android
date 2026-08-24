@@ -242,8 +242,8 @@ require_pattern \
   "docs/e2e-acceptance-runbook.md"
 
 require_pattern \
-  "Artifact manifest points at a GitHub Release APK" \
-  'Latest Version|Release Digest|github.com/litianc/vibepub-android/releases/download/.*/app-debug.apk' \
+  "Artifact manifest defines the versioned GitHub Release APK contract" \
+  'VibePub-<version-name>-<version-code>-<git-commit>\.apk' \
   "docs/android-release-manifest.md"
 
 require_no_pattern \
