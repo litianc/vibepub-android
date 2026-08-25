@@ -154,8 +154,11 @@ function artifactName(version, commit) {
 
 function runApkTool(command, arguments_, label) {
   const result = spawnSync(command, arguments_, { encoding: "utf8" });
+  if (result.error) {
+    throw new Error(`${label} failed: ${result.error.message}`);
+  }
   if (result.status !== 0) {
-    const detail = result.stderr.trim() || result.stdout.trim() || `exit ${result.status}`;
+    const detail = result.stderr?.trim() || result.stdout?.trim() || `exit ${result.status}`;
     throw new Error(`${label} failed: ${detail}`);
   }
   return result.stdout;

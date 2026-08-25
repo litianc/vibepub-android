@@ -379,6 +379,18 @@ test("verify-apk accepts one final APK identity", (t) => {
   assert.match(result.stdout, /APK identity OK: VibePub-1\.2\.3-7-0123456789ab\.apk/);
 });
 
+test("verify-apk reports a missing APK inspection tool clearly", (t) => {
+  const versionFile = createFixture(t);
+  const fixture = createApkFixture(t);
+  fixture.aapt = path.join(path.dirname(fixture.aapt), "missing-aapt");
+
+  const result = runApkVerification(versionFile, fixture);
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /aapt badging failed:.*ENOENT/);
+  assert.doesNotMatch(result.stderr, /Cannot read properties of undefined/);
+});
+
 test("verify-apk rejects mismatched metadata, filename, commit, and signing certificate", (t) => {
   const versionFile = createFixture(t);
   const cases = [

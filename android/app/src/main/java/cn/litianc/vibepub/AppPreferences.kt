@@ -18,7 +18,8 @@ class AppPreferences(context: Context) {
     private val prefs = context.getSharedPreferences("vibepub", Context.MODE_PRIVATE)
 
     var apiBaseUrl: String
-        get() = prefs.getString(KEY_API_BASE_URL, DEFAULT_API_BASE_URL) ?: DEFAULT_API_BASE_URL
+        get() = prefs.getString(KEY_API_BASE_URL, BuildConfig.DEFAULT_API_BASE_URL)
+            ?: BuildConfig.DEFAULT_API_BASE_URL
         set(value) = prefs.edit().putString(KEY_API_BASE_URL, value.trim()).apply()
 
     var accessToken: String
@@ -333,7 +334,6 @@ class AppPreferences(context: Context) {
     }
 
     companion object {
-        const val DEFAULT_API_BASE_URL = "https://vibepub.litianc.cn"
         const val DEFAULT_USER_ID = "default_user"
         private const val KEY_API_BASE_URL = "api_base_url"
         private const val KEY_FILES_TOKEN = "files_token"

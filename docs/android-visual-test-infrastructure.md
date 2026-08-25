@@ -11,7 +11,7 @@ installing Android Studio, the full Android SDK, or an emulator on the Mac.
 The release-candidate test path is:
 
 1. Build a stable-signed candidate, or download a published managed APK after
-   Issue #26.
+   [“验收并发布第一个 Release Batch”](https://github.com/litianc/vibepub-android/issues/26).
 2. Install it on a USB-connected Android test phone.
 3. Inject test backend settings.
 4. Start screen recording.
@@ -176,7 +176,8 @@ Recommended:
 - For bug reproduction, keep the old APK evidence.
 - For fix verification, always test an APK built from the fix commit.
 
-After Issue #26 publishes the first managed APK, download the latest internal
+After [“验收并发布第一个 Release Batch”](https://github.com/litianc/vibepub-android/issues/26)
+publishes the first managed APK, download the latest internal
 release APK:
 
 ```bash

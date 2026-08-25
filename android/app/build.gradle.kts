@@ -1,3 +1,4 @@
+import java.net.URI
 import java.util.Properties
 
 plugins {
@@ -43,12 +44,63 @@ val hasReleaseSigningConfig =
         providers.gradleProperty("VIBEPUB_RELEASE_KEY_ALIAS").orNull?.isNotBlank() == true &&
         providers.gradleProperty("VIBEPUB_RELEASE_KEY_PASSWORD").orNull?.isNotBlank() == true
 
+val appEnvironment = providers.gradleProperty("VIBEPUB_ENVIRONMENT")
+    .orElse("production")
+    .get()
+    .trim()
+val productionApiBaseUrl = "https://vibepub.litianc.cn"
+val allowTestInvalidStagingApi = providers.gradleProperty("VIBEPUB_ALLOW_TEST_INVALID_STAGING_API")
+    .orNull == "true"
+fun validatedApiBaseUrl(rawValue: String, name: String): String {
+    val value = rawValue.trim().trimEnd('/')
+    val uri = runCatching { URI(value) }.getOrElse { error("$name must be a valid HTTPS URL") }
+    require(
+        uri.scheme == "https" && uri.host != null && uri.userInfo == null &&
+            uri.query == null && uri.fragment == null && (uri.path.isNullOrEmpty() || uri.path == "/"),
+    ) { "$name must be an HTTPS origin without credentials, path, query, or fragment" }
+    return value
+}
+
+fun canonicalApiHost(apiBaseUrl: String): String =
+    URI(apiBaseUrl).host.lowercase().trimEnd('.')
+
+data class AppEnvironment(
+    val applicationId: String,
+    val appLabel: String,
+    val authScheme: String,
+    val apiBaseUrl: String,
+)
+
+val environment = when (appEnvironment) {
+    "production" -> AppEnvironment("cn.litianc.vibepub", "VibePub", "vibepub", productionApiBaseUrl)
+    "staging" -> {
+        val stagingApiBaseUrl = providers.gradleProperty("VIBEPUB_STAGING_API_BASE_URL")
+            .orElse(providers.environmentVariable("STAGING_PUBLIC_BASE_URL"))
+            .orNull
+            ?.takeIf { it.isNotBlank() }
+            ?: error("Staging requires VIBEPUB_STAGING_API_BASE_URL or STAGING_PUBLIC_BASE_URL")
+        val validated = validatedApiBaseUrl(stagingApiBaseUrl, "Staging API base URL")
+        val stagingApiHost = canonicalApiHost(validated)
+        require(stagingApiHost != canonicalApiHost(productionApiBaseUrl)) {
+            "Staging API base URL must not be Production"
+        }
+        require(stagingApiHost != "invalid") {
+            "Staging API base URL must not use the exact invalid hostname"
+        }
+        require(!stagingApiHost.endsWith(".invalid") || allowTestInvalidStagingApi) {
+            "Staging .invalid API URLs require VIBEPUB_ALLOW_TEST_INVALID_STAGING_API=true"
+        }
+        AppEnvironment("cn.litianc.vibepub.staging", "VibePub Staging", "vibepub-staging", validated)
+    }
+    else -> error("VIBEPUB_ENVIRONMENT must be production or staging")
+}
+
 android {
     namespace = "cn.litianc.vibepub"
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "cn.litianc.vibepub"
+        applicationId = environment.applicationId
         minSdk = 26
         targetSdk = 36
         versionCode = appVersionCode
@@ -56,6 +108,11 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "GIT_COMMIT", "\"$appGitCommitShort\"")
         manifestPlaceholders["gitCommit"] = appGitCommitShort
+        manifestPlaceholders["appLabel"] = environment.appLabel
+        manifestPlaceholders["authScheme"] = environment.authScheme
+        manifestPlaceholders["defaultApiBaseUrl"] = environment.apiBaseUrl
+        buildConfigField("String", "AUTH_SCHEME", "\"${environment.authScheme}\"")
+        buildConfigField("String", "DEFAULT_API_BASE_URL", "\"${environment.apiBaseUrl}\"")
     }
 
     buildFeatures {

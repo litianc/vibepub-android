@@ -10,6 +10,10 @@ function readWorkflow(name) {
   return readFileSync(path.join(repositoryRoot, ".github", "workflows", name), "utf8");
 }
 
+function readScript(name) {
+  return readFileSync(path.join(repositoryRoot, "scripts", name), "utf8");
+}
+
 test("Android validation checks committed baselines for pull requests and main pushes", () => {
   const workflow = readWorkflow("android-tests.yml");
 
@@ -61,6 +65,7 @@ test("test infrastructure runs workflow contract tests for release workflow chan
     workflow,
     /node --test scripts\/manage-android-version\.test\.mjs scripts\/android-version-workflows\.test\.mjs/,
   );
+  assert.doesNotMatch(workflow, /verify-android-release-apk\.test\.mjs/);
 });
 
 test("release workflow verifies the copied APK identity and pinned certificate", () => {
@@ -81,6 +86,7 @@ test("release workflow verifies the copied APK identity and pinned certificate",
   const releaseIndex = workflow.indexOf("uses: softprops/action-gh-release@v2");
 
   assert.match(fingerprint, /^[0-9a-f]{64}$/);
+  assert.match(workflow, /build:\s+runs-on: ubuntu-latest\s+environment: android-release/);
   assert.match(workflow, /VIBEPUB_AAPT="\$ANDROID_HOME\/build-tools\/36\.0\.0\/aapt"/);
   assert.match(
     workflow,
@@ -90,4 +96,19 @@ test("release workflow verifies the copied APK identity and pinned certificate",
   assert.ok(copyIndex < verifyIndex, "the final copied APK must exist before verification");
   assert.ok(verifyIndex < uploadIndex, "an unverified APK must not be uploaded");
   assert.ok(verifyIndex < releaseIndex, "an unverified APK must not be published");
+});
+
+test("local Android builds preserve a caller-provided Java home", () => {
+  const script = readScript("build-android-local.sh");
+
+  assert.match(script, /JAVA_HOME="\$\{ANDROID_LOCAL_JAVA_HOME:-\$\{JAVA_HOME:-\$JDK21_HOME\}\}"/);
+});
+
+test("debug APK workflow skips only the release-certificate check", () => {
+  const workflow = readWorkflow("android-tests.yml");
+  const verifierIndex = workflow.indexOf("scripts/verify-android-environment-apks.sh");
+  const skipIndex = workflow.indexOf("--skip-release-certificate");
+
+  assert.notEqual(verifierIndex, -1);
+  assert.ok(verifierIndex < skipIndex, "the Debug identity check must explicitly skip release signing");
 });

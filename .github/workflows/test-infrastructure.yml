@@ -49,6 +49,14 @@ jobs:
       - name: Check shell script syntax
         run: find scripts -name '*.sh' -print0 | xargs -0 -n1 bash -n
 
+      - name: Check Android environment safety behavior
+        run: |
+          scripts/test-android-package-data-digest.sh
+          scripts/test-android-package-login-state.sh
+          scripts/test-android-package-session-me.sh
+          scripts/test-android-environment-isolation-safety.sh
+          scripts/test-android-environment-isolation-success.sh
+
       - name: Check repository hygiene
         run: scripts/check-repository-hygiene.sh
 
@@ -60,6 +68,10 @@ jobs:
           scripts/install-latest-android-apk.sh --help >/dev/null
           scripts/run-android-device-smoke.sh --help >/dev/null
           node scripts/manage-android-version.mjs --help >/dev/null
+          scripts/android-package-data-digest.sh --help >/dev/null
+          scripts/android-package-login-state.sh --help >/dev/null
+          scripts/android-package-session-me.sh --help >/dev/null
+          scripts/verify-android-environment-isolation.sh --help >/dev/null
 
       - name: Test Android version management
         run: node --test scripts/manage-android-version.test.mjs scripts/android-version-workflows.test.mjs

@@ -68,6 +68,10 @@ Official tag `vX.Y.Z` must match `VERSION_NAME`. Release APKs require the stable
 signing secrets; the workflow fails instead of publishing a differently signed
 candidate.
 
+Every release job uses the protected GitHub Environment `android-release`.
+Configure that Environment with a required reviewer so manual and tag-triggered
+publishing cannot continue until the recorded release approval is granted.
+
 The expected public signing-certificate SHA-256 fingerprint is pinned in
 `android/release-certificate.sha256`. Verify a final APK with:
 

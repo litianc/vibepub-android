@@ -49,7 +49,7 @@ internal fun authTokenPrefillFromIntent(intent: Intent?): AuthTokenPrefill? =
     authTokenPrefillFromUri(intent?.data)
 
 internal fun authTokenPrefillFromUri(uri: Uri?): AuthTokenPrefill? {
-    if (uri?.scheme != "vibepub" || uri.host != "auth") return null
+    if (uri?.scheme != BuildConfig.AUTH_SCHEME || uri.host != "auth") return null
     val token = uri.getQueryParameter("token")?.trim().orEmpty()
     if (token.isBlank()) return null
     val mode = when (uri.pathSegments.firstOrNull()) {

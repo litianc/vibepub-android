@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ANDROID_HOME="${ANDROID_HOME:-/opt/homebrew/share/android-commandlinetools}"
 ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
 JDK21_HOME="/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home"
-JAVA_HOME="${ANDROID_LOCAL_JAVA_HOME:-$JDK21_HOME}"
+JAVA_HOME="${ANDROID_LOCAL_JAVA_HOME:-${JAVA_HOME:-$JDK21_HOME}}"
 TASK="${1:-all}"
 if [[ $# -gt 0 ]]; then
   shift
@@ -15,7 +15,7 @@ GRADLE_ARGS=("$@")
 usage() {
   cat <<EOF
 Usage:
-  scripts/build-android-local.sh [test|assemble|all] [gradle args...]
+  scripts/build-android-local.sh [test|assemble|release|all] [gradle args...]
 
 Runs Android Gradle tasks with the local minimal SDK and JDK 21, matching the
 GitHub Actions Android test environment without requiring Android Studio or an
@@ -28,7 +28,8 @@ Examples:
 Environment:
   ANDROID_HOME             Default: /opt/homebrew/share/android-commandlinetools
   ANDROID_SDK_ROOT         Default: ANDROID_HOME
-  ANDROID_LOCAL_JAVA_HOME  Default: /opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home
+  ANDROID_LOCAL_JAVA_HOME  Overrides JAVA_HOME when set
+  JAVA_HOME                Default: /opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home
 EOF
 }
 
@@ -37,7 +38,7 @@ case "$TASK" in
     usage
     exit 0
     ;;
-  test|assemble|all)
+  test|assemble|release|all)
     ;;
   *)
     echo "Unknown task: $TASK" >&2
@@ -76,6 +77,9 @@ case "$TASK" in
     ;;
   assemble)
     run_gradle :app:assembleDebug "${GRADLE_ARGS[@]}"
+    ;;
+  release)
+    run_gradle :app:assembleRelease "${GRADLE_ARGS[@]}"
     ;;
   all)
     run_gradle :app:testDebugUnitTest :app:assembleDebug "${GRADLE_ARGS[@]}"

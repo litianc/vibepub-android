@@ -126,7 +126,8 @@ permission error.
 
 ## Run A Visual Test
 
-Before Issue #26, there is no published managed release APK. Use an explicit
+Before [“验收并发布第一个 Release Batch”](https://github.com/litianc/vibepub-android/issues/26),
+there is no published managed release APK. Use an explicit
 stable-signed candidate already on disk:
 
 ```bash
@@ -142,7 +143,9 @@ build output, not a published GitHub Release:
 CANDIDATE_APK="$(SOURCE=artifact scripts/download-latest-android-apk.sh | tail -n 1)"
 ```
 
-Do not use the downloader's default `SOURCE=release` before Issue #26. The
+Do not use the downloader's default `SOURCE=release` before
+[“验收并发布第一个 Release Batch”](https://github.com/litianc/vibepub-android/issues/26).
+The
 release manifest still records only the legacy, unmanaged APK, while the default
 managed asset pattern has nothing valid to download.
 
