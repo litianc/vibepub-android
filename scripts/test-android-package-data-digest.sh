@@ -26,7 +26,7 @@ fi
 [[ "$1" == "-s" && "$3" == "exec-out" && "$4" == "run-as" && "$5" == "--user" && "$6" == "10" && "$8" == "sh" && "$9" == "-c" ]]
 remote_command="${10}"
 cd "${FAKE_PACKAGE_ROOT:?}"
-/bin/sh -c "$remote_command"
+/bin/bash -c "$remote_command"
 EOF
 chmod +x "$FAKE_ADB"
 
