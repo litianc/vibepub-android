@@ -70,6 +70,37 @@ Install to a connected ADB device:
 scripts/install-android-local-apk.sh --skip-build
 ```
 
+Build stable-signed Production and Staging APKs together:
+
+```bash
+STAGING_PUBLIC_BASE_URL=https://staging.example.com \
+  scripts/build-android-environment-apks.sh
+```
+
+Production is `VibePub` with package `cn.litianc.vibepub`. Staging is
+`VibePub Staging` with package `cn.litianc.vibepub.staging`. Android keeps
+their login and local data in separate package sandboxes. Production handles
+`vibepub://auth`; Staging handles `vibepub-staging://auth`.
+
+On a dedicated test device, verify simultaneous install and independent
+Staging clear/uninstall behavior without clearing or uninstalling Production:
+
+1. Install both APKs and log into both apps.
+2. Run the command with the exact device serial.
+
+```bash
+scripts/verify-android-environment-isolation.sh \
+  artifacts/android-environments/<run>/vibepub-production.apk \
+  artifacts/android-environments/<run>/vibepub-staging.apk \
+  --serial <adb-serial> \
+  --staging-api-url https://staging.example.com
+```
+
+The check stops before clearing Staging unless both real app preference files
+contain login state and both sessions pass their own `/api/me` check. Every
+package operation targets the device's active Android user. It never prints
+account values or private filenames.
+
 For repeated real-device dogfood loops, use the project skill:
 
 ```text

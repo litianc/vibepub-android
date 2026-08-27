@@ -13,8 +13,8 @@ REQUIRE_UNLOCKED="${REQUIRE_UNLOCKED:-true}"
 usage() {
   cat <<EOF
 Usage:
-  scripts/install-latest-android-apk.sh [path/to/app-debug.apk] [--serial adb-serial]
-  scripts/install-latest-android-apk.sh --serial adb-serial [path/to/app-debug.apk]
+  scripts/install-latest-android-apk.sh [path/to/VibePub-version.apk] [--serial adb-serial]
+  scripts/install-latest-android-apk.sh --serial adb-serial [path/to/VibePub-version.apk]
 
 Environment:
   ANDROID_SERIAL    Optional adb device serial, recommended when multiple

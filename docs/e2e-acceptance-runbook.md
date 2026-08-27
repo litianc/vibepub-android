@@ -82,8 +82,10 @@ All gates must pass before declaring the flow complete.
 3. Real-device Android smoke:
 
    ```bash
-   ANDROID_SERIAL=<device-serial> SKIP_INSTALL=true RESET_APP_DATA=false \
-     scripts/run-android-device-smoke.sh artifacts/apk/latest/app-debug.apk
+   APK_PATH="$(find artifacts/apk/latest -name 'VibePub-*.apk' -print -quit)"
+   ANDROID_SERIAL=<device-serial> AUTOMATION_MODE=ui-tap \
+     SKIP_INSTALL=true RESET_APP_DATA=false \
+     scripts/run-android-device-smoke.sh "$APK_PATH"
    ```
 
    Required evidence in `artifacts/android-device-visual/<run>/`:

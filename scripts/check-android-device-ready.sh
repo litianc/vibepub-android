@@ -21,7 +21,7 @@ WIRELESS_ADB_CONNECT_TARGETS="${WIRELESS_ADB_CONNECT_TARGETS:-}"
 usage() {
   cat <<EOF
 Usage:
-  scripts/check-android-device-ready.sh [path/to/app-debug.apk]
+  scripts/check-android-device-ready.sh [path/to/test.apk]
 
 Environment:
   PACKAGE_NAME  Android package. Default: cn.litianc.vibepub.
@@ -179,12 +179,12 @@ install_apk() {
   install_from_device_tmp() {
     local label="$1"
 
-    adb_cmd push "$apk_path" /data/local/tmp/vibepub-app-debug.apk \
+    adb_cmd push "$apk_path" /data/local/tmp/vibepub-app.apk \
       > "$OUT_DIR/${label}-push.txt" 2>&1
     run_with_usb_install_prompt_taps \
       "$label-pm" \
       "$OUT_DIR/${label}-pm.txt" \
-      adb_cmd shell pm install -r -t -g /data/local/tmp/vibepub-app-debug.apk
+      adb_cmd shell pm install -r -t -g /data/local/tmp/vibepub-app.apk
   }
 
   maybe_handle_signature_mismatch() {

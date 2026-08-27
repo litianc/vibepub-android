@@ -8,26 +8,30 @@ standard part of VibePub development.
 Every user-facing Android change should be verifiable on a real phone without
 installing Android Studio, the full Android SDK, or an emulator on the Mac.
 
-The standard test path is:
+The release-candidate test path is:
 
-1. Build or download an APK from GitHub Actions.
+1. Build a stable-signed candidate, or download a published managed APK after
+   [“验收并发布第一个 Release Batch”](https://github.com/litianc/vibepub-android/issues/26).
 2. Install it on a USB-connected Android test phone.
 3. Inject test backend settings.
 4. Start screen recording.
-5. Copy a prepared audio sample into the debug app's private storage.
-6. Import it as one local recording through the debug-only ADB control receiver.
-7. Enqueue the normal upload path from the app.
-8. Wait for the upload to appear in `/api/recordings`.
-9. Trigger and wait for `mining-job.yml` when `TRIGGER_MINING_JOB=true`.
+5. Use `ui-tap` to drive the normal recording UI while the phone microphone
+   hears a prepared audio sample.
+6. Enqueue the normal upload path from the app.
+7. Wait for the upload to appear in `/api/recordings`.
+8. Trigger and wait for `mining-job.yml` when `TRIGGER_MINING_JOB=true`.
    The smoke script passes the latest recording filename to the workflow so the
    mining job processes only this run's R2 inbox object instead of the whole
    shared queue.
-10. Reopen the latest recording detail page, then capture screenshots, UI dump,
+9. Reopen the latest recording detail page, then capture screenshots, UI dump,
     and logcat.
-11. Store evidence under `artifacts/android-device-visual/`.
-12. Inspect `timing.tsv` when a run feels slow; it records elapsed and total
-    seconds for install, import, upload/mining, detail assertion, and log
+10. Store evidence under `artifacts/android-device-visual/`.
+11. Inspect `timing.tsv` when a run feels slow; it records elapsed and total
+    seconds for install, recording, upload/mining, detail assertion, and log
     collection phases.
+
+The faster fixture-import path is separate. It requires a locally built debug
+APK and `debug-broadcast`; release APKs do not contain that receiver.
 
 For a quick install-only dogfood update, use:
 
@@ -63,7 +67,7 @@ Required:
 - USB debugging security settings enabled, if the phone requires it.
 - USB install enabled, if the phone restricts ADB-installed APKs.
 - The Mac authorized in the phone's USB debugging prompt.
-- Permission to install debug APKs.
+- Permission to install stable-signed release APKs and local debug test APKs.
 - Permission to clear VibePub app data during deterministic test runs.
 
 Recommended:
@@ -100,9 +104,10 @@ If uninstall/reset fails with `DELETE_FAILED_INTERNAL_ERROR`, remove the app
 manually on the phone or enable the same USB install/security options before
 running deterministic tests.
 
-The default `AUTOMATION_MODE=debug-broadcast` does not require simulated tap
-permission. It uses debug-only test receivers that are not packaged into release
-builds.
+For an explicit local debug APK, `AUTOMATION_MODE=debug-broadcast` does not
+require simulated tap permission. It uses debug-only test receivers that are not
+packaged into release builds. A downloaded release APK must use
+`AUTOMATION_MODE=ui-tap`.
 
 ### 3. Test Audio Files
 
@@ -163,14 +168,17 @@ TEST_ACCOUNT_PASSWORD=...
 
 Required:
 
-- A debug APK from GitHub Actions or a release candidate APK.
+- A stable-signed, versioned release APK for candidate install/start checks.
+- A locally built debug APK only when the debug-only fixture receiver is needed.
 
 Recommended:
 
 - For bug reproduction, keep the old APK evidence.
 - For fix verification, always test an APK built from the fix commit.
 
-Download the latest successful internal debug APK:
+After [“验收并发布第一个 Release Batch”](https://github.com/litianc/vibepub-android/issues/26)
+publishes the first managed APK, download the latest internal
+release APK:
 
 ```bash
 scripts/download-latest-android-apk.sh
@@ -181,6 +189,9 @@ The script prints the downloaded APK path under:
 ```text
 artifacts/apk/latest/
 ```
+
+Before that publication, pass the stable-signed candidate path explicitly. Do
+not describe or record the local candidate as a published GitHub Release.
 
 ### 6. Acceptance Criteria
 
@@ -194,16 +205,16 @@ For the current recording/transcript regression:
 
 ## Standard Command
 
-Recommended full end-to-end smoke test:
+Recommended full end-to-end smoke test with the local debug fixture APK:
 
 ```bash
-scripts/run-android-device-smoke.sh
+scripts/run-android-device-smoke.sh android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
 It loads `secrets/device-test.env` when present and reuses the authenticated
-session already stored in the debug app; it never injects a client credential.
-It downloads the latest successful debug APK unless an APK path is passed as the
-first argument.
+session already stored in the app; it never injects a client credential. The
+explicit local debug APK enables the fixture receiver. With no path, the command
+downloads the stable-signed versioned release APK and uses UI-tap automation.
 It also runs `scripts/check-android-device-ready.sh` before recording. By
 default it sets `TRIGGER_MINING_JOB=true`, so after the phone upload appears in
 the backend it dispatches `mining-job.yml` with `target_filename`, waits for
@@ -249,17 +260,16 @@ set +a
 APK_PATH="$(scripts/download-latest-android-apk.sh)"
 
 AUDIO_FILE="/Users/xyli/Documents/Code/revoice-project/.data/test_clips/speaker_boundary_18_48s.mp3" \
-AUTOMATION_MODE=debug-broadcast \
-DEBUG_AUDIO_MODE=import \
+AUTOMATION_MODE=ui-tap \
+DEBUG_AUDIO_MODE=speaker \
 RESET_APP_DATA=true \
-RECORD_SECONDS=15 \
+RECORD_SECONDS=20 \
 scripts/android-device-visual-test.sh "$APK_PATH"
 ```
 
-For import-mode automation, the default screen recording length is short because
-the audio fixture is copied into the app rather than played in real time. Use a
-longer `RECORD_SECONDS` only when you are explicitly capturing a manual or
-speaker-based recording flow.
+The downloaded release records the fixture through the phone microphone while
+`ui-tap` drives the normal UI. `debug-broadcast` and import mode are only for the
+explicit local debug APK shown above.
 
 ## Evidence Directory
 

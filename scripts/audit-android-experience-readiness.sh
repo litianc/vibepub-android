@@ -128,7 +128,7 @@ checklist_status_passed() {
 
 require_file "Product requirements" "docs/android-product-requirements.md"
 require_file "E2E acceptance runbook" "docs/e2e-acceptance-runbook.md"
-require_file "Latest artifact manifest" "artifacts/MANIFEST.md"
+require_file "Latest release manifest" "docs/android-release-manifest.md"
 
 echo >> "$REPORT"
 echo "## Android App Evidence" >> "$REPORT"
@@ -242,9 +242,9 @@ require_pattern \
   "docs/e2e-acceptance-runbook.md"
 
 require_pattern \
-  "Artifact manifest points at a GitHub Release APK" \
-  'Latest Version|Release Digest|github.com/litianc/vibepub-android/releases/download/.*/app-debug.apk' \
-  "artifacts/MANIFEST.md"
+  "Artifact manifest defines the versioned GitHub Release APK contract" \
+  'VibePub-<version-name>-<version-code>-<git-commit>\.apk' \
+  "docs/android-release-manifest.md"
 
 require_no_pattern \
   "User-facing Android source has no Apple/iCloud/TestFlight copy" \

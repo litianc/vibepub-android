@@ -6,15 +6,53 @@ on:
     tags:
       - "v*"
 
+concurrency:
+  group: android-release-publish
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    environment: android-release
     permissions:
       contents: write
 
     steps:
       - name: Check out
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Read published Android releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            | jq -s 'add' > "$RUNNER_TEMP/android-releases.json"
+
+      - name: Validate Android release version
+        run: |
+          node scripts/manage-android-version.mjs check
+          node scripts/manage-android-version.mjs check-releases "$RUNNER_TEMP/android-releases.json"
+
+      - name: Read Android release identity
+        id: app_version
+        run: node scripts/manage-android-version.mjs github-output "$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Verify official release tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          EXPECTED_TAG: v${{ steps.app_version.outputs.version_name }}
+        run: |
+          if [[ "$GITHUB_REF_NAME" != "$EXPECTED_TAG" ]]; then
+            echo "Release tag $GITHUB_REF_NAME does not match Android version $EXPECTED_TAG" >&2
+            exit 1
+          fi
 
       - name: Set up Java
         uses: actions/setup-java@v4
@@ -49,13 +87,8 @@ jobs:
             fi
           done
 
-          if [[ "$present" -eq 0 ]]; then
-            echo "No Android signing secrets configured; debug APK will use the runner debug key."
-            exit 0
-          fi
-
           if [[ "$present" -ne 4 ]]; then
-            echo "Android signing secrets are partially configured. Set all of ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS, and ANDROID_KEY_PASSWORD." >&2
+            echo "Stable Android signing requires all four Android signing secrets." >&2
             exit 1
           fi
 
@@ -70,10 +103,29 @@ jobs:
           echo "Configured stable Android signing for internal APKs."
 
       - name: Run automated tests
+        env:
+          ORG_GRADLE_PROJECT_VIBEPUB_GIT_COMMIT: ${{ github.sha }}
         run: gradle -p android :app:testDebugUnitTest
 
-      - name: Build debug APK
-        run: gradle -p android :app:assembleDebug
+      - name: Build release APK
+        env:
+          ORG_GRADLE_PROJECT_VIBEPUB_GIT_COMMIT: ${{ github.sha }}
+        run: gradle -p android :app:assembleRelease
+
+      - name: Prepare versioned release APK
+        env:
+          ARTIFACT_NAME: ${{ steps.app_version.outputs.artifact_name }}
+        run: |
+          mkdir -p dist
+          cp android/app/build/outputs/apk/release/app-release.apk "dist/$ARTIFACT_NAME"
+
+      - name: Verify final release APK identity
+        env:
+          ARTIFACT_NAME: ${{ steps.app_version.outputs.artifact_name }}
+        run: |
+          VIBEPUB_AAPT="$ANDROID_HOME/build-tools/36.0.0/aapt" \
+          VIBEPUB_APKSIGNER="$ANDROID_HOME/build-tools/36.0.0/apksigner" \
+            node scripts/manage-android-version.mjs verify-apk "dist/$ARTIFACT_NAME" "$GITHUB_SHA"
 
       - name: Upload Test Report
         if: always()
@@ -86,8 +138,8 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: vibepub-debug-apk
-          path: android/app/build/outputs/apk/debug/app-debug.apk
+          name: vibepub-release-apk
+          path: dist/${{ steps.app_version.outputs.artifact_name }}
           if-no-files-found: error
 
       - name: Generate Tag Name (For Internal Builds)
@@ -95,19 +147,28 @@ jobs:
         id: internal_tag
         run: echo "tag_name=build-$(date +'%Y%m%d-%H%M%S')-${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
 
+      - name: Recheck published Android releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            | jq -s 'add' > "$RUNNER_TEMP/android-releases.json"
+          node scripts/manage-android-version.mjs check-releases "$RUNNER_TEMP/android-releases.json"
+
       - name: Create Internal Release
         if: github.event_name == 'workflow_dispatch'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.internal_tag.outputs.tag_name }}
           target_commitish: ${{ github.sha }}
-          name: "Internal Build ${{ steps.internal_tag.outputs.tag_name }}"
+          name: "VibePub ${{ steps.app_version.outputs.version_name }} (${{ steps.app_version.outputs.version_code }}) - ${{ steps.app_version.outputs.git_commit }}"
           generate_release_notes: true
-          files: android/app/build/outputs/apk/debug/app-debug.apk
+          files: dist/${{ steps.app_version.outputs.artifact_name }}
 
       - name: Create Official Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
+          name: "VibePub v${{ steps.app_version.outputs.version_name }} (${{ steps.app_version.outputs.version_code }}) - ${{ steps.app_version.outputs.git_commit }}"
           generate_release_notes: true
-          files: android/app/build/outputs/apk/debug/app-debug.apk
+          files: dist/${{ steps.app_version.outputs.artifact_name }}

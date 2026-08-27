@@ -12,6 +12,11 @@ import java.util.TimeZone
 
 class SettingsScreenTest {
     @Test
+    fun appBuildIdentityShowsEmbeddedVersionAndGitCommitTogether() {
+        assertEquals("VibePub 0.2.0 (3) · 0123456789ab", appBuildIdentity("0.2.0", 3, "0123456789ab"))
+    }
+
+    @Test
     fun styleSourceDisplayTitleFallsBackForNullWechatTitles() {
         val source = StyleSourceImportSummary(
             id = "ssi_1",
@@ -311,6 +316,7 @@ class SettingsScreenTest {
         )
 
         assertTrue(text.contains("App: VibePub 0.1.0-debug (1)"))
+        assertTrue(text.contains("Git commit: unknown"))
         assertTrue(text.contains("Device ID: device-123"))
         assertTrue(text.contains("Device: Redmi Tablet"))
         assertTrue(text.contains("API host: https://api.example.com"))

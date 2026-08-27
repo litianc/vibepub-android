@@ -10,7 +10,7 @@ USE_APP_AUTH_SESSION="${USE_APP_AUTH_SESSION:-false}"
 usage() {
   cat <<EOF
 Usage:
-  scripts/run-android-device-smoke.sh [path/to/app-debug.apk]
+  scripts/run-android-device-smoke.sh [path/to/test.apk]
 
 Environment:
   DEVICE_ENV_FILE  Optional env file. Default: secrets/device-test.env.
@@ -32,8 +32,10 @@ Environment:
                    manual dispatches from the script, and auto_or_manual waits
                    first then dispatches manually as fallback. Default: auto.
 
-When no APK path is passed, the latest successful GitHub Actions debug APK is
-downloaded through scripts/download-latest-android-apk.sh.
+When no APK path is passed, the latest stable-signed, versioned GitHub Release
+APK is downloaded through scripts/download-latest-android-apk.sh. Versioned
+release APKs default to ui-tap automation; local debug APKs default to the
+debug-only broadcast receiver.
 EOF
 }
 
@@ -56,6 +58,11 @@ if [[ -z "$APK_PATH" ]]; then
   APK_PATH="$("$ROOT_DIR/scripts/download-latest-android-apk.sh" | tail -n 1)"
 fi
 
+default_automation_mode="debug-broadcast"
+if [[ "$(basename "$APK_PATH")" == VibePub-*.apk ]]; then
+  default_automation_mode="ui-tap"
+fi
+
 if [[ -z "${FILES_TOKEN:-}" && "$USE_APP_AUTH_SESSION" != "true" ]]; then
   echo "FILES_TOKEN is required. Put it in secrets/device-test.env or export it." >&2
   exit 1
@@ -73,7 +80,7 @@ REQUIRE_UNLOCKED="${REQUIRE_UNLOCKED:-true}" \
 AUDIO_FILE="${AUDIO_FILE:-$DEFAULT_AUDIO_FILE}" \
 API_BASE_URL="${API_BASE_URL:-https://vibepub.litianc.cn}" \
 FILES_TOKEN="${FILES_TOKEN:-}" \
-AUTOMATION_MODE="${AUTOMATION_MODE:-debug-broadcast}" \
+AUTOMATION_MODE="${AUTOMATION_MODE:-$default_automation_mode}" \
 RESET_APP_DATA="${RESET_APP_DATA:-$(if [[ "$USE_APP_AUTH_SESSION" == "true" ]]; then printf false; else printf true; fi)}" \
 SKIP_INSTALL="${SKIP_INSTALL:-false}" \
 RECORD_SECONDS="${RECORD_SECONDS:-15}" \

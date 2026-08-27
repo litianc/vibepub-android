@@ -627,7 +627,11 @@ fun SettingsScreen(
                     SettingsItem(
                         iconContent = { SettingsIcon(Color(0xFFF2F2F7)) { Icon(Icons.Default.ContentCopy, contentDescription = null) } },
                         title = "版本",
-                        subtitle = "VibePub ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})",
+                        subtitle = appBuildIdentity(
+                            BuildConfig.VERSION_NAME,
+                            BuildConfig.VERSION_CODE,
+                            BuildConfig.GIT_COMMIT,
+                        ),
                         value = "Android",
                         onClick = {},
                     )
@@ -1954,6 +1958,7 @@ private suspend fun buildDiagnostics(context: android.content.Context, preferenc
         }
         formatDiagnostics(
             appVersion = "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})",
+            gitCommit = BuildConfig.GIT_COMMIT,
             deviceId = Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID).orEmpty()
                 .ifBlank { "unknown" },
             deviceName = "${Build.MANUFACTURER} ${Build.MODEL}",
@@ -1974,6 +1979,7 @@ private suspend fun buildDiagnostics(context: android.content.Context, preferenc
 
 internal fun formatDiagnostics(
     appVersion: String,
+    gitCommit: String = "unknown",
     deviceId: String,
     deviceName: String,
     androidVersion: String,
@@ -1996,6 +2002,7 @@ internal fun formatDiagnostics(
     val recentRecordingsText = formatRecentRecordingDiagnostics(recentRecordings)
     return """
     App: VibePub $appVersion
+    Git commit: $gitCommit
     Device ID: $deviceId
     Device: $deviceName
     Android: $androidVersion
@@ -2026,6 +2033,9 @@ internal fun formatDiagnostics(
     Latest error: ${latest?.lastError ?: "无"}
     """.trimIndent()
 }
+
+internal fun appBuildIdentity(versionName: String, versionCode: Int, gitCommit: String): String =
+    "VibePub $versionName ($versionCode) · $gitCommit"
 
 internal fun formatRecentRecordingDiagnostics(
     recordings: List<RecordingEntity>,

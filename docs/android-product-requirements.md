@@ -177,7 +177,10 @@ Backend `processingStage` should refine the info surface:
 - Completed recordings show article content and `COMPLETED`-quality status on both workbench and detail.
 - Failed recordings show a clear reason and a path to retry or fix configuration.
 - The app contains no Apple, iCloud, or TestFlight copy in user-facing Android surfaces.
-- The latest install source remains GitHub Releases, and `artifacts/MANIFEST.md` points to the current APK.
+- The latest published install source remains the legacy GitHub Release recorded
+  in `docs/android-release-manifest.md`; the managed `0.2.0 (3)` candidate becomes
+  the current published entry only after the authorized
+  [“验收并发布第一个 Release Batch” Issue](https://github.com/litianc/vibepub-android/issues/26).
 
 ## Product Risks
 
