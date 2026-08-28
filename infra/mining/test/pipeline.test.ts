@@ -252,7 +252,7 @@ describe('VibePub Cloud Pipeline', () => {
     expect(processAudioText).toHaveBeenCalledTimes(1);
   });
 
-  it('hands an eligible audio source to V3 after ASR and never enters legacy writing, image, or WeChat work', async () => {
+  it('hands an eligible audio source to V3 and leaves Article Version creation to the frozen five-agent workflow', async () => {
     const fileKey = 'users/v3_user/inbox/v3-source.mp3';
     const calls: string[] = [];
     vi.stubGlobal('fetch', vi.fn(async (input, init) => {
@@ -278,6 +278,7 @@ describe('VibePub Cloud Pipeline', () => {
 
     expect(transcribeAudioUrl).toHaveBeenCalledTimes(1);
     expect(processAudioText).not.toHaveBeenCalled();
+    expect(uploadTranscript).not.toHaveBeenCalled();
     expect(generateWechatCoverBuffer).not.toHaveBeenCalled();
     expect(getAccessToken).not.toHaveBeenCalled();
     expect(publishDraft).not.toHaveBeenCalled();

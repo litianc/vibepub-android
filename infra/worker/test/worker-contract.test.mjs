@@ -89,6 +89,8 @@ test("transcript reads prefer the current frozen run over a non-empty stale reco
         title: "当前轮标题",
         body: "当前轮正文",
         processingStage: "ARTICLE_READY",
+        versionId: "av_frozen_current",
+        versionNo: 1,
       },
       FILES_BUCKET: { async get() { return { text: async () => JSON.stringify({ rawText: "识别文本" }) }; } },
     },
@@ -99,6 +101,10 @@ test("transcript reads prefer the current frozen run over a non-empty stale reco
   const body = await response.json();
   assert.equal(body.articleTitle, "当前轮标题");
   assert.equal(body.articleContent, "当前轮正文");
+  assert.equal(body.articleVersion, 1);
+  assert.equal(body.article_version, 1);
+  assert.equal(body.articleVersionId, "av_frozen_current");
+  assert.equal(body.article_version_id, "av_frozen_current");
 });
 
 test("transcript reads rebuild a missing legacy R2 JSON from the current frozen article", async () => {
@@ -203,7 +209,10 @@ test("transcript reads support legacy recordings without a workspace_id column",
 
   assert.equal(response.status, 200);
   assert.equal(attempts, 2);
-  assert.equal((await response.json()).articleContent, "旧库正文");
+  const body = await response.json();
+  assert.equal(body.articleContent, "旧库正文");
+  assert.equal(body.articleVersion, undefined);
+  assert.equal(body.article_version, undefined);
 });
 
 test("transcript reads reject malformed R2 JSON so Android can retry", async () => {

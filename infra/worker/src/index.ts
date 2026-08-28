@@ -2446,6 +2446,8 @@ async function getTranscript(env: Env, auth: AuthContext, filename: string): Pro
   let articleTitle = normalizeOptionalString(recording.article_title);
   let articleContent = normalizeOptionalString(recording.article_content);
   let processingStage = normalizeOptionalString(recording.processing_stage);
+  let articleVersionId: string | null = null;
+  let articleVersionNo: number | null = null;
   if (publicationTenantFeatureEnabled(env, auth.userId, auth.workspaceId)) {
     try {
       const frozen = await reconcileFrozenArticleRecordingProjection(
@@ -2456,6 +2458,8 @@ async function getTranscript(env: Env, auth: AuthContext, filename: string): Pro
         articleTitle = frozen.title;
         articleContent = frozen.body;
         processingStage = frozen.processingStage;
+        articleVersionId = frozen.versionId || null;
+        articleVersionNo = frozen.versionNo || null;
       }
     } catch (error) {
       console.error("Failed to reconcile frozen article transcript projection:", error);
@@ -2475,6 +2479,12 @@ async function getTranscript(env: Env, auth: AuthContext, filename: string): Pro
   putBoth("rawText", "raw_text", normalizeOptionalString(recording.raw_text));
   putBoth("articleTitle", "article_title", articleTitle);
   putBoth("articleContent", "article_content", articleContent);
+  if (articleVersionId && articleVersionNo) {
+    merged.articleVersion = articleVersionNo;
+    merged.article_version = articleVersionNo;
+    merged.articleVersionId = articleVersionId;
+    merged.article_version_id = articleVersionId;
+  }
   putBoth("processingStage", "processing_stage", articleContent ? (processingStage || "ARTICLE_READY") : processingStage);
   putBoth("wechatUrl", "wechat_url", normalizeRemoteReference(recording.wechat_url));
   putBoth("wechatDraftId", "wechat_draft_id", normalizeRemoteReference(recording.wechat_draft_id));

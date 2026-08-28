@@ -62,6 +62,20 @@ class DetailScreenTest {
     }
 
     @Test
+    fun articleVersionReaderAcceptsNewAndCompatibleFieldNames() {
+        assertEquals(1, JSONObject("""{"articleVersion":1}""").articleVersionNumberOrNull())
+        assertEquals(2, JSONObject("""{"article_version":2}""").articleVersionNumberOrNull())
+        assertEquals("v1", articleVersionLabel(1))
+    }
+
+    @Test
+    fun oldTranscriptWithoutArticleVersionKeepsTheLabelHidden() {
+        assertEquals(null, JSONObject("""{"articleContent":"旧正文"}""").articleVersionNumberOrNull())
+        assertEquals(null, (null as JSONObject?).articleVersionNumberOrNull())
+        assertEquals("", articleVersionLabel(null))
+    }
+
+    @Test
     fun articleImagePreviewsUsePublicUrlBeforeWechatUrl() {
         val transcript = JSONObject(
             """

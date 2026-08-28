@@ -389,6 +389,7 @@ fun DetailScreen(
         val rawText = transcript.optTranscriptString("rawText", "raw_text")
             .ifBlank { currentRecording.rawTextPreview.orEmpty() }
         val generatedArticleContent = transcript.optTranscriptString("articleContent", "article_content")
+        val currentArticleVersionLabel = articleVersionLabel(transcript.articleVersionNumberOrNull())
         val articleContentSource = generatedArticleContent.ifBlank { rawText }
         val articleContent = articleContentSource
             .takeIf { it.isNotBlank() }
@@ -493,6 +494,8 @@ fun DetailScreen(
                 color = MaterialTheme.colorScheme.onSurface,
                 lineHeight = 32.sp,
             )
+
+            ArticleVersionIndicator(currentArticleVersionLabel)
 
             if (rawText.isNotBlank()) {
                 Spacer(modifier = Modifier.height(8.dp))
@@ -1567,6 +1570,35 @@ internal fun JSONObject?.optTranscriptString(vararg keys: String): String {
     return keys.firstNotNullOfOrNull { key ->
         optString(key, "").trim().blankToMissingString()
     }.orEmpty()
+}
+
+internal fun JSONObject?.articleVersionNumberOrNull(): Int? {
+    if (this == null) return null
+    return listOf("articleVersion", "article_version").firstNotNullOfOrNull { key ->
+        if (!has(key) || isNull(key)) return@firstNotNullOfOrNull null
+        val value = opt(key)
+        val number = when (value) {
+            is Number -> value.toInt()
+            is String -> value.trim().toIntOrNull()
+            null -> null
+            else -> null
+        }
+        number?.takeIf { it > 0 }
+    }
+}
+
+internal fun articleVersionLabel(version: Int?): String = version?.takeIf { it > 0 }?.let { "v$it" }.orEmpty()
+
+@Composable
+internal fun ArticleVersionIndicator(label: String) {
+    if (label.isBlank()) return
+    Spacer(modifier = Modifier.height(4.dp))
+    Text(
+        text = label,
+        modifier = Modifier.testTag("ArticleVersionLabel"),
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
 }
 
 internal fun JSONObject?.articleImagePreviews(): List<ArticleImagePreview> {

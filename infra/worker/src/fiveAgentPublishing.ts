@@ -147,6 +147,13 @@ export type FrozenArticleRecordingProjection = {
   title: string;
   body: string;
   processingStage: "ARTICLE_READY";
+  versionId?: string;
+  versionNo?: 1;
+};
+
+type FrozenArticleVersionProjection = {
+  versionId: string;
+  versionNo: 1;
 };
 
 export function visualProductionFeatureEnabled(env: EditorialRuntimeEnv, userId: string, workspaceId: string, runId?: string): boolean {
@@ -766,7 +773,7 @@ async function mirrorFrozenArticleToRecording(
   env: EditorialRuntimeEnv,
   params: Pick<FiveAgentWorkflowParams, "run_id" | "recording_id" | "user_id" | "workspace_id">,
   object: ArtifactObject,
-  options: { markRefreshed?: boolean } = {},
+  options: { markRefreshed?: boolean; createInitialVersion?: boolean } = {},
 ): Promise<FrozenArticleRecordingProjection | null> {
   if (object.envelope.kind !== "frozen_article_version") return null;
   const frozen = object.payload as FrozenArticleVersion;
@@ -781,6 +788,13 @@ async function mirrorFrozenArticleToRecording(
   // A deleted legacy recording must not invalidate the canonical artifact
   // chain. There is no Android compatibility projection left to repair.
   if (!recordingExists) return null;
+  const versionProjection = await projectInitialFrozenArticleVersion(
+    env,
+    params,
+    object,
+    frozen,
+    options.createInitialVersion === true,
+  );
   await env.DB.prepare(`UPDATE recordings SET
       article_title = ?, article_content = ?, processing_stage = 'ARTICLE_READY', error_message = NULL,
       updated_at = CASE
@@ -814,7 +828,128 @@ async function mirrorFrozenArticleToRecording(
       mirrored.processing_stage !== "ARTICLE_READY") {
     throw new EditorialRuntimeError("recording_article_projection_unavailable", "frozen article was not mirrored to the recording", 503);
   }
-  return { title: frozen.title, body: frozen.body, processingStage: "ARTICLE_READY" };
+  return {
+    title: frozen.title,
+    body: frozen.body,
+    processingStage: "ARTICLE_READY",
+    ...(versionProjection || {}),
+  };
+}
+
+async function projectInitialFrozenArticleVersion(
+  env: EditorialRuntimeEnv,
+  params: Pick<FiveAgentWorkflowParams, "run_id" | "recording_id" | "user_id" | "workspace_id">,
+  object: ArtifactObject,
+  frozen: FrozenArticleVersion,
+  create: boolean,
+): Promise<FrozenArticleVersionProjection | null> {
+  const versionId = `av_frozen_${object.envelope.payload_hash.replace(/^sha256:/, "")}`;
+  const idempotencyKey = `frozen:${object.envelope.artifact_id}`;
+  const blocksJson = artifactCanonicalJson(frozen.blocks);
+  const titleCandidatesJson = artifactCanonicalJson(frozen.title_candidates);
+  const coverTitleJson = artifactCanonicalJson(frozen.cover_title);
+  const claimLedgerJson = artifactCanonicalJson(frozen.claim_ledger);
+  const warningsJson = artifactCanonicalJson(frozen.warnings);
+  if (create) {
+    const versionInsert = env.DB.prepare(`INSERT INTO article_versions
+      (id, user_id, workspace_id, article_id, recording_id, version_no, parent_version_id,
+       source, source_job_id, source_hash, title, body, cover_json, blocks_json,
+       title_candidates_json, selected_title, cover_title_json, claim_ledger_json,
+       visual_plan_json, formatting_skill_id, formatting_skill_version, content_html_hash,
+       html_warnings_json, generation_status, idempotency_key, payload_hash, created_at)
+    VALUES (?, ?, ?, ?, ?, 1, NULL, 'initial', ?, ?, ?, ?, '{}', ?, ?, ?, ?, ?, '[]', ?, ?, ?, ?,
+      'frozen', ?, ?, ?)`)
+      .bind(
+      versionId, params.user_id, params.workspace_id, frozen.article_id, params.recording_id,
+      params.run_id, frozen.content_hash, frozen.title, frozen.body,
+      blocksJson, titleCandidatesJson, frozen.selected_title, coverTitleJson, claimLedgerJson,
+      frozen.formatting_skill.id, frozen.formatting_skill.version, frozen.html_hash,
+      warningsJson, idempotencyKey, object.envelope.payload_hash, frozen.frozen_at,
+      );
+    const stateInsert = env.DB.prepare(`INSERT INTO editorial_version_states
+        (version_id, user_id, workspace_id, article_id, recording_id, state, state_revision, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, 'content_frozen', 0, ?, ?)`)
+      .bind(
+        versionId, params.user_id, params.workspace_id, frozen.article_id, params.recording_id,
+        frozen.frozen_at, frozen.frozen_at,
+      );
+    try {
+      await env.DB.batch([versionInsert, stateInsert]);
+    } catch {
+      // A replay or another run for the same article may already own v1.
+      // The readback below decides whether this is an exact replay or a later run.
+    }
+  }
+  const version = await env.DB.prepare(`SELECT id, recording_id, version_no, source, source_job_id,
+      source_hash, title, body, cover_json, blocks_json, title_candidates_json, selected_title,
+      cover_title_json, claim_ledger_json, visual_plan_json, formatting_skill_id,
+      formatting_skill_version, content_html_hash, html_warnings_json, generation_status,
+      idempotency_key, payload_hash, created_at
+    FROM article_versions
+    WHERE user_id = ? AND workspace_id = ? AND article_id = ? AND idempotency_key = ? LIMIT 1`)
+    .bind(params.user_id, params.workspace_id, frozen.article_id, idempotencyKey)
+    .first<{
+      id: string;
+      recording_id: number;
+      version_no: number;
+      source: string;
+      source_job_id: string | null;
+      source_hash: string | null;
+      title: string;
+      body: string;
+      cover_json: string;
+      blocks_json: string;
+      title_candidates_json: string;
+      selected_title: string;
+      cover_title_json: string;
+      claim_ledger_json: string;
+      visual_plan_json: string;
+      formatting_skill_id: string | null;
+      formatting_skill_version: string | null;
+      content_html_hash: string | null;
+      html_warnings_json: string;
+      generation_status: string;
+      idempotency_key: string;
+      payload_hash: string;
+      created_at: string;
+    }>();
+  if (version && (version.id !== versionId || version.recording_id !== params.recording_id ||
+      Number(version.version_no) !== 1 || version.source !== "initial" || version.source_job_id !== params.run_id ||
+      version.source_hash !== frozen.content_hash || version.title !== frozen.title || version.body !== frozen.body ||
+      version.cover_json !== "{}" || version.blocks_json !== blocksJson ||
+      version.title_candidates_json !== titleCandidatesJson || version.selected_title !== frozen.selected_title ||
+      version.cover_title_json !== coverTitleJson || version.claim_ledger_json !== claimLedgerJson ||
+      version.visual_plan_json !== "[]" || version.formatting_skill_id !== frozen.formatting_skill.id ||
+      version.formatting_skill_version !== frozen.formatting_skill.version ||
+      version.content_html_hash !== frozen.html_hash || version.html_warnings_json !== warningsJson ||
+      version.generation_status !== "frozen" || version.payload_hash !== object.envelope.payload_hash ||
+      version.created_at !== frozen.frozen_at)) {
+    throw new EditorialRuntimeError("article_version_projection_unavailable", "frozen article version was not projected", 503);
+  }
+  if (version) {
+    const state = await env.DB.prepare(`SELECT state, state_revision FROM editorial_version_states
+      WHERE version_id = ? AND user_id = ? AND workspace_id = ? AND article_id = ? AND recording_id = ? LIMIT 1`)
+      .bind(version.id, params.user_id, params.workspace_id, frozen.article_id, params.recording_id)
+      .first<{ state: string; state_revision: number }>();
+    if (!state || state.state !== "content_frozen" || Number(state.state_revision) !== 0) {
+      throw new EditorialRuntimeError("article_version_projection_unavailable", "frozen article version state was not projected", 503);
+    }
+    return { versionId: version.id, versionNo: 1 };
+  }
+  if (!create) return null;
+
+  const initial = await env.DB.prepare(`SELECT recording_id FROM article_versions
+    WHERE user_id = ? AND workspace_id = ? AND article_id = ? AND version_no = 1 LIMIT 1`)
+    .bind(params.user_id, params.workspace_id, frozen.article_id)
+    .first<{ recording_id: number }>();
+  if (initial && initial.recording_id !== params.recording_id) {
+    throw new EditorialRuntimeError(
+      "article_version_recording_conflict",
+      "frozen article version belongs to another recording",
+      409,
+    );
+  }
+  throw new EditorialRuntimeError("article_version_projection_unavailable", "frozen article version was not projected", 503);
 }
 
 export async function reconcileFrozenArticleRecordingProjection(
@@ -1519,7 +1654,7 @@ async function persistArtifact(
     if (!currentEvent || currentDoRun.state !== targetState || currentProjection.state !== expectedProjectionState) {
       throw new EditorialRuntimeError("artifact_reconciliation_required", "Wave2B completed artifact layers do not match the target state", 503);
     }
-    await mirrorFrozenArticleToRecording(env, params, object);
+    await mirrorFrozenArticleToRecording(env, params, object, { createInitialVersion: true });
     return {
       ...metadata,
       doStateRevision: Number(currentDoRun.state_revision),
@@ -1567,7 +1702,7 @@ async function persistArtifact(
     revision_count: transition.revisionCount,
   });
   await verifyExactArtifactSet(env, coordinator, params, fullSet, fullSet.map(item => item.artifact_id), fullSet.map(item => item.artifact_id));
-  await mirrorFrozenArticleToRecording(env, params, object);
+  await mirrorFrozenArticleToRecording(env, params, object, { createInitialVersion: true });
   return { ...metadata, doStateRevision: doStateRevisionForWrite + 1, projectionRevision: currentEvent ? projectionRevisionForWrite : projection.run.state_revision };
 }
 

@@ -107,6 +107,48 @@ beforeAll(async () => {
       created_at TEXT NOT NULL,
       UNIQUE (run_id, kind, payload_hash)
     );
+    CREATE TABLE IF NOT EXISTS article_versions (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      workspace_id TEXT NOT NULL,
+      article_id TEXT NOT NULL,
+      recording_id INTEGER NOT NULL,
+      version_no INTEGER NOT NULL CHECK (version_no > 0),
+      parent_version_id TEXT,
+      source TEXT NOT NULL,
+      source_job_id TEXT,
+      source_hash TEXT,
+      title TEXT NOT NULL,
+      body TEXT NOT NULL,
+      cover_json TEXT NOT NULL,
+      blocks_json TEXT NOT NULL,
+      title_candidates_json TEXT NOT NULL,
+      selected_title TEXT NOT NULL,
+      cover_title_json TEXT NOT NULL,
+      claim_ledger_json TEXT NOT NULL,
+      visual_plan_json TEXT NOT NULL,
+      formatting_skill_id TEXT,
+      formatting_skill_version TEXT,
+      content_html_hash TEXT,
+      html_warnings_json TEXT NOT NULL,
+      generation_status TEXT NOT NULL,
+      idempotency_key TEXT NOT NULL,
+      payload_hash TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      UNIQUE(user_id, workspace_id, article_id, version_no),
+      UNIQUE(user_id, workspace_id, article_id, idempotency_key)
+    );
+    CREATE TABLE IF NOT EXISTS editorial_version_states (
+      version_id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      workspace_id TEXT NOT NULL,
+      article_id TEXT NOT NULL,
+      recording_id INTEGER NOT NULL,
+      state TEXT NOT NULL,
+      state_revision INTEGER NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
   `);
   await applySqlScript(projectionMigration);
 });
@@ -2118,12 +2160,62 @@ describe("Wave2B publishing runtime boundary", () => {
     expect(recording?.article_title).toBeTruthy();
     expect(recording?.article_content).toContain("A short synthetic paragraph.");
     expect(recording?.processing_stage).toBe("ARTICLE_READY");
+    const version = await runtimeEnv.DB.prepare(`SELECT id, recording_id, version_no, source_job_id,
+        title, body, generation_status, idempotency_key
+      FROM article_versions WHERE user_id = ? AND workspace_id = ? AND article_id = ?`)
+      .bind(userId, workspaceId, articleId)
+      .first<Record<string, unknown>>();
+    expect(version).toMatchObject({
+      recording_id: recordingId,
+      version_no: 1,
+      source_job_id: runId,
+      generation_status: "frozen",
+    });
+    expect(version?.title).toBe(recording?.article_title);
+    expect(version?.body).toBe(recording?.article_content);
+    const versionState = await runtimeEnv.DB.prepare(`SELECT state, state_revision
+      FROM editorial_version_states WHERE version_id = ?`)
+      .bind(version?.id)
+      .first<{ state: string; state_revision: number }>();
+    expect(versionState).toMatchObject({ state: "content_frozen", state_revision: 0 });
 
     await runtimeEnv.DB.prepare(`UPDATE recordings SET article_title = '旧标题', article_content = '旧正文',
       processing_stage = 'ASR' WHERE id = ? AND user_id = ? AND workspace_id = ?`)
       .bind(recordingId, userId, workspaceId).run();
     await expect(reconcileFrozenArticleRecordingProjection(testEnv, { recordingId, userId, workspaceId }))
-      .resolves.toMatchObject({ title: expect.any(String), body: expect.stringContaining("A short synthetic paragraph."), processingStage: "ARTICLE_READY" });
+      .resolves.toMatchObject({
+        title: expect.any(String),
+        body: expect.stringContaining("A short synthetic paragraph."),
+        processingStage: "ARTICLE_READY",
+        versionId: version?.id,
+        versionNo: 1,
+      });
+    await expect(reconcileFrozenArticleRecordingProjection(testEnv, { recordingId, userId, workspaceId }))
+      .resolves.toMatchObject({ versionId: version?.id, versionNo: 1 });
+    const versionCount = await runtimeEnv.DB.prepare(`SELECT count(*) AS count FROM article_versions
+      WHERE user_id = ? AND workspace_id = ? AND article_id = ?`)
+      .bind(userId, workspaceId, articleId)
+      .first<{ count: number }>();
+    expect(Number(versionCount?.count || 0)).toBe(1);
+
+    // Reconstruct a pre-#27 frozen run. Older deployments wrote the immutable
+    // artifact and recording projection, but neither Article Version row.
+    await runtimeEnv.DB.prepare(`DELETE FROM editorial_version_states WHERE version_id = ?`)
+      .bind(version?.id)
+      .run();
+    await runtimeEnv.DB.prepare(`DELETE FROM article_versions
+      WHERE user_id = ? AND workspace_id = ? AND article_id = ?`)
+      .bind(userId, workspaceId, articleId)
+      .run();
+    const legacyRead = await reconcileFrozenArticleRecordingProjection(testEnv, { recordingId, userId, workspaceId });
+    expect(legacyRead).toMatchObject({ processingStage: "ARTICLE_READY" });
+    expect(legacyRead).not.toHaveProperty("versionId");
+    expect(legacyRead).not.toHaveProperty("versionNo");
+    const postReadVersionCount = await runtimeEnv.DB.prepare(`SELECT count(*) AS count FROM article_versions
+      WHERE user_id = ? AND workspace_id = ? AND article_id = ?`)
+      .bind(userId, workspaceId, articleId)
+      .first<{ count: number }>();
+    expect(Number(postReadVersionCount?.count || 0)).toBe(0);
   });
 
   it("keeps exact artifact counts for first-round P0, one P1 revision, and second-round P1 block", async () => {
@@ -2147,6 +2239,13 @@ describe("Wave2B publishing runtime boundary", () => {
     expect(revised.reviewCalls).toBe(2);
     expect(revised.projection).toMatchObject({ state: "content_frozen", progress_percent: 62 });
     expect(revised.revisionCount).toBe(1);
+    const revisedVersions = await runtimeEnv.DB.prepare(`SELECT version_no, generation_status, body
+      FROM article_versions WHERE user_id = ? AND workspace_id = ? AND article_id = ? ORDER BY version_no`)
+      .bind(revised.userId, revised.workspaceId, revised.articleId)
+      .all<{ version_no: number; generation_status: string; body: string }>();
+    expect(revisedVersions.results).toHaveLength(1);
+    expect(revisedVersions.results[0]).toMatchObject({ version_no: 1, generation_status: "frozen" });
+    expect(revisedVersions.results[0].body).toContain("A revised synthetic paragraph.");
     expect(new Set(revised.projectionEventHashes).size).toBe(revised.projectionEventHashes.length);
     expect(new Set(revised.doEventHashes).size).toBe(revised.doEventHashes.length);
 
@@ -2874,7 +2973,7 @@ describe("Wave2B publishing runtime boundary", () => {
     expect(recording).toBeTruthy();
   });
 
-  it("reuses a verified account/article mapping across runs for update and same-content validation", async () => {
+  it("stops a second recording from taking over an article that already owns v1", async () => {
     const state = statefulWechatAdapter();
     const articleId = `runtime-wechat-mapping-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     const first = await executeSyntheticScenario("p2_pass", undefined, false, {
@@ -2883,26 +2982,16 @@ describe("Wave2B publishing runtime boundary", () => {
     expect(first.result).toMatchObject({ state: "draft_ready" });
     expect(first.wechatProviderOperations.write_draft).toBe(1);
 
-    const changed = await executeSyntheticScenario("p2_pass", undefined, false, {
-      visual: true, wechat: true, wechatState: state, wechatArticleId: articleId, wechatDraftTitle: "Mapping version two",
+    await expect(executeSyntheticScenario("p2_pass", undefined, false, {
+      visual: true, wechat: true, wechatState: state, wechatArticleId: articleId, wechatDraftTitle: "Conflicting recording",
+    })).rejects.toMatchObject({
+      code: "article_version_recording_conflict",
+      status: 409,
     });
-    expect(changed.result).toMatchObject({ state: "draft_ready" });
-    expect(changed.wechatOperations.write_draft).toBe(1);
-    expect(changed.wechatProviderOperations.write_draft).toBe(1);
     const firstMediaId = [...state.drafts.keys()][0];
     expect(firstMediaId).toBeDefined();
     expect(state.drafts.size).toBe(1);
-    expect(state.drafts.get(firstMediaId!)?.title).toBe("Mapping version two");
-
-    const same = await executeSyntheticScenario("p2_pass", undefined, false, {
-      visual: true, wechat: true, wechatState: state, wechatArticleId: articleId, wechatDraftTitle: "Mapping version two",
-    });
-    expect(same.result).toMatchObject({ state: "draft_ready" });
-    expect(same.wechatOperations).toMatchObject({ get_draft: 1, upload_image: 3 });
-    expect(same.wechatOperations.write_draft || 0).toBe(0);
-    expect(same.wechatProviderOperations.upload_image || 0).toBe(0);
-    expect(same.wechatProviderOperations.write_draft || 0).toBe(0);
-    expect(same.wechatProviderOperations.get_draft || 0).toBe(1);
+    expect(state.drafts.get(firstMediaId!)?.title).toBe("Mapping version one");
   }, 20_000);
 
   it.each(["upload", "package", "readback"] as const)("replays a completed WeChat %s receipt after its Durable Object response is lost", async (checkpoint) => {
