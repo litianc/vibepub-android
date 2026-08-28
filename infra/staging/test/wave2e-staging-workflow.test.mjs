@@ -4,6 +4,7 @@ import { test } from "node:test";
 
 const workflow = await readFile(new URL("../../../.github/workflows/wave2e-staging.yml", import.meta.url), "utf8");
 const deploymentEvidenceScript = await readFile(new URL("../record-staging-deployment-evidence.mjs", import.meta.url), "utf8");
+const readme = await readFile(new URL("../README.md", import.meta.url), "utf8");
 
 function job(name, next) {
   const start = workflow.indexOf(`  ${name}:`);
@@ -34,8 +35,15 @@ test("manual staging deploy is evidence-gated, dynamically rendered, adapter-fir
   assert.match(attestation, /environment: vibepub-staging/);
   assert.match(attestation, /manifest_sha256/);
   assert.match(attestation, /sha256sum/);
-  assert.match(workflow, /staging_d1_backup_and_additive_migrations_verified_v1/);
+  assert.match(workflow, /staging_d1_backup_and_article_version_migrations_verified_v2/);
+  assert.doesNotMatch(workflow, /staging_d1_backup_and_additive_migrations_verified_v1/);
   assert.match(attestation, /validate-staging-data-attestation/);
+  assert.match(attestation, /main_rehearsal_candidate_commit/);
+  assert.match(attestation, /main_migration_bundle_sha256/);
+  assert.match(attestation, /committedArticleFeedbackMigrationBundle/);
+  assert.match(attestation, /main_migration_bundle_sha256[^\n]+migrationBundle\.sha256/);
+  assert.match(attestation, /main_backup_copy_sha256/);
+  assert.match(attestation, /GITHUB_SHA/);
   assert.match(attestation, /No remote D1 migration is run/);
   assert.match(workflow, /capture-staging-deployment-baseline\.mjs/);
   assert.match(origin, /needs: attest-staging-data/);
@@ -75,6 +83,11 @@ test("manual staging deploy is evidence-gated, dynamically rendered, adapter-fir
   assert.doesNotMatch(workflow, /service = "writing-agent-staging"/);
   assert.doesNotMatch(deploymentEvidenceScript, /appendFile|JSON\.stringify\(evidence\)/);
   assert.match(deploymentEvidenceScript, /process\.stdout\.write\(`\$\{line\}\\n`\)/);
+});
+
+test("migration rehearsal documentation names only the current v2 contract", () => {
+  assert.match(readme, /vibepub-main-d1-migration-rehearsal\.v2/);
+  assert.doesNotMatch(readme, /vibepub-main-d1-migration-rehearsal\.v1/);
 });
 
 test("adapter secret scopes are split by deployment job and main health proves the private service bindings", () => {

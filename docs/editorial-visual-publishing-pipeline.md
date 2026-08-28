@@ -594,7 +594,10 @@ synthetic render plus five explicit generated-config Wrangler dry-runs only.
 
 Before any remote bootstrap, a protected Environment attestation must prove
 both isolated main/Writing D1 backup identifiers, the exact additive migration
-lists (main through `0011`, Writing through `0001`), and schema evidence hashes.
+lists (main through `0013`, Writing through `0001`), and schema evidence hashes.
+The main D1 evidence also binds the candidate commit to a read-only old database
+copy rehearsal that applies `0012` and `0013` twice, preserves old row counts,
+and verifies the feedback and revision constraints.
 Its manifest SHA-256 is passed to every later deploy/health job, which rejects
 TOCTOU changes; before any adapter deploy an independent protected
 `STAGING_PUBLIC_BASE_URL` must exactly equal the manifest and an account-scoped
@@ -634,3 +637,10 @@ three-operation Image ledger before provider access. It restores empty provider
 configuration afterward, while the adapter-side expiry closes the provider if
 runner cleanup is interrupted; production remains separately gated on key
 rotation and release approval.
+
+Article feedback-loop evidence uses a strict redacted contract. The actual
+candidate APK and isolated synthetic APK bind the same candidate commit and
+Staging origin. Five completed Agents produce one frozen article. v1-to-v2
+lineage, adopted and not-adopted paths, duplicate and stale behavior, old-client
+compatibility, and WeChat-only recovery must all pass. Shared evidence contains
+only hashes, bounded synthetic identifiers, counts, and booleans.
