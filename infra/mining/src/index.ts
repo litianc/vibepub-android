@@ -68,6 +68,8 @@ type StatusMetadata = {
   wechatUrl?: string;
   wechatDraftId?: string;
   errorMessage?: string | null;
+  articleVersionId?: string;
+  articleVersionNo?: number;
 };
 
 type ProfileSelection = {
@@ -94,12 +96,52 @@ type TranscriptMetadata = {
 
 type RevisionRequest = {
   revisionId?: string;
+  clientRequestId?: string;
   filename: string;
   userId?: string;
+  workspaceId?: string;
+  recordingId?: number;
+  articleId?: string;
+  parentVersionId?: string;
+  parentTitle?: string;
+  parentContent?: string;
   transcriptKey?: string;
   audioKey: string;
+  audioSha256?: string;
   createdAt?: string;
 };
+
+type VersionedRevisionRequest = RevisionRequest & Required<Pick<RevisionRequest,
+  "revisionId" | "clientRequestId" | "userId" | "workspaceId" | "recordingId" |
+  "articleId" | "parentVersionId" | "parentTitle" | "parentContent" |
+  "transcriptKey" | "audioSha256" | "createdAt"
+>>;
+
+type ArticleVersionReference = {
+  id: string;
+  versionNo: number;
+};
+
+type PreparedRevisionImage = Omit<PreparedArticleImage, "buffer"> & {
+  bufferBase64: string;
+};
+
+type PreparedRevision = {
+  schemaVersion: 1;
+  requestIdentity: Record<string, unknown>;
+  instructionText: string;
+  article: ArticleResult;
+  articleImages: PreparedRevisionImage[];
+  coverImageUrl?: string;
+  coverBase64: string;
+  preparedAt: string;
+};
+
+class VersionedRevisionWechatError extends Error {
+  constructor(readonly original: unknown) {
+    super(getErrorMessage(original));
+  }
+}
 
 export function filterTargetFiles(files: string[], targetFilename?: string, targetKey?: string): string[] {
   const exactKey = targetKey?.trim();
@@ -435,6 +477,14 @@ function optionalStringField(record: Record<string, unknown>, ...fields: string[
   return undefined;
 }
 
+function optionalNumberField(record: Record<string, unknown>, ...fields: string[]): number | undefined {
+  for (const field of fields) {
+    const value = Number(record[field]);
+    if (Number.isSafeInteger(value) && value > 0) return value;
+  }
+  return undefined;
+}
+
 function textSubmissionFromBuffer(
   key: string,
   buffer: Buffer,
@@ -511,6 +561,329 @@ function revisionFailureMessage(error: unknown): string {
   return `说话修改失败：${getErrorMessage(error).slice(0, 450)}`;
 }
 
+function preparedRevisionKey(revisionRequestKey: string): string {
+  return revisionRequestKey.endsWith(".json")
+    ? `${revisionRequestKey.slice(0, -5)}.prepared.json`
+    : `${revisionRequestKey}.prepared.json`;
+}
+
+function requireVersionedRevisionRequest(request: RevisionRequest): VersionedRevisionRequest {
+  const record = request as unknown as Record<string, unknown>;
+  const recordingId = optionalNumberField(record, "recordingId");
+  if (!recordingId) throw new Error("Revision request is missing recordingId");
+  return {
+    ...request,
+    revisionId: requiredStringField(record, "revisionId"),
+    clientRequestId: requiredStringField(record, "clientRequestId"),
+    userId: requiredStringField(record, "userId"),
+    workspaceId: requiredStringField(record, "workspaceId"),
+    recordingId,
+    articleId: requiredStringField(record, "articleId"),
+    parentVersionId: requiredStringField(record, "parentVersionId"),
+    parentTitle: requiredStringField(record, "parentTitle"),
+    parentContent: requiredStringField(record, "parentContent"),
+    transcriptKey: requiredStringField(record, "transcriptKey"),
+    audioSha256: requiredStringField(record, "audioSha256"),
+    createdAt: requiredStringField(record, "createdAt"),
+  };
+}
+
+function versionedRevisionIdentity(request: VersionedRevisionRequest): Record<string, unknown> {
+  return {
+    revisionId: request.revisionId,
+    clientRequestId: request.clientRequestId,
+    filename: request.filename,
+    userId: request.userId,
+    workspaceId: request.workspaceId,
+    recordingId: request.recordingId,
+    articleId: request.articleId,
+    parentVersionId: request.parentVersionId,
+    parentTitle: request.parentTitle,
+    parentContent: request.parentContent,
+    transcriptKey: request.transcriptKey,
+    audioKey: request.audioKey,
+    audioSha256: request.audioSha256,
+    createdAt: request.createdAt,
+  };
+}
+
+function articleRevisionApiConfig(): { baseUrl: string; token: string } {
+  const baseUrl = process.env.PUBLIC_BASE_URL?.trim().replace(/\/+$/, "");
+  const token = process.env.MINING_V3_HANDOFF_TOKEN?.trim();
+  if (!baseUrl || !token) throw new Error("PUBLIC_BASE_URL and MINING_V3_HANDOFF_TOKEN are required for versioned revisions");
+  return { baseUrl, token };
+}
+
+async function postArticleRevision(
+  revisionId: string,
+  action: "version" | "status",
+  body: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const { baseUrl, token } = articleRevisionApiConfig();
+  const response = await fetch(`${baseUrl}/api/internal/v3/article-revisions/${encodeURIComponent(revisionId)}/${action}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    body: JSON.stringify(body),
+  });
+  const payload = await response.json().catch(() => ({})) as Record<string, unknown>;
+  if (!response.ok) {
+    const code = optionalStringField(payload, "error") || `http_${response.status}`;
+    throw new Error(`Article revision ${action} failed: ${response.status} ${code}`);
+  }
+  return payload;
+}
+
+function articleVersionReference(payload: Record<string, unknown>): ArticleVersionReference {
+  const version = payload.version;
+  if (!version || typeof version !== "object" || Array.isArray(version)) {
+    throw new Error("Article revision version response is missing version");
+  }
+  const record = version as Record<string, unknown>;
+  const id = requiredStringField(record, "id");
+  const versionNo = optionalNumberField(record, "version_no", "versionNo");
+  if (!versionNo) throw new Error("Article revision version response is missing version_no");
+  return { id, versionNo };
+}
+
+function serializePreparedImages(images: PreparedArticleImage[]): PreparedRevisionImage[] {
+  return images.map(({ buffer, ...image }) => ({ ...image, bufferBase64: buffer.toString("base64") }));
+}
+
+function isMissingPreparedRevision(error: unknown): boolean {
+  const candidate = error as { name?: string; $metadata?: { httpStatusCode?: number } };
+  return candidate?.name === "NoSuchKey" || candidate?.$metadata?.httpStatusCode === 404 ||
+    getErrorMessage(error).includes("NoSuchKey");
+}
+
+async function loadPreparedRevision(
+  key: string,
+  request: VersionedRevisionRequest,
+): Promise<{ prepared: PreparedRevision; images: PreparedArticleImage[]; cover: Buffer } | null> {
+  let record: Record<string, unknown>;
+  try {
+    record = parseJsonBuffer(key, await downloadFile(key));
+  } catch (error) {
+    if (isMissingPreparedRevision(error)) return null;
+    throw error;
+  }
+  if (record.schemaVersion !== 1 ||
+      JSON.stringify(record.requestIdentity) !== JSON.stringify(versionedRevisionIdentity(request))) {
+    throw new Error("Prepared revision identity does not match its request");
+  }
+  const articleRecord = record.article;
+  if (!articleRecord || typeof articleRecord !== "object" || Array.isArray(articleRecord)) {
+    throw new Error("Prepared revision is missing article");
+  }
+  const article = articleRecord as Record<string, unknown>;
+  requiredStringField(article, "title");
+  requiredStringField(article, "content");
+  const coverBase64 = requiredStringField(record, "coverBase64");
+  const serializedImages = Array.isArray(record.articleImages) ? record.articleImages : [];
+  const images = serializedImages.map((value) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      throw new Error("Prepared revision image is invalid");
+    }
+    const image = value as Record<string, unknown>;
+    const bufferBase64 = requiredStringField(image, "bufferBase64");
+    const { bufferBase64: _bufferBase64, ...metadata } = image;
+    return { ...metadata, buffer: Buffer.from(bufferBase64, "base64") } as PreparedArticleImage;
+  });
+  return {
+    prepared: record as unknown as PreparedRevision,
+    images,
+    cover: Buffer.from(coverBase64, "base64"),
+  };
+}
+
+async function processVersionedRevisionRequest(
+  revisionRequestKey: string,
+  revisionRequest: VersionedRevisionRequest,
+): Promise<void> {
+  const { revisionId, parentVersionId, parentTitle, parentContent, userId, transcriptKey } = revisionRequest;
+  const filename = path.basename(revisionRequest.filename);
+  const fileKey = userIdFromPipelineKey(revisionRequestKey) ? `users/${userId}/inbox/${filename}` : `inbox/${filename}`;
+  const transcript = parseJsonBuffer(transcriptKey, await downloadFile(transcriptKey));
+  const rawText = optionalStringField(transcript, "rawText", "raw_text") || "";
+  const currentDraftId = optionalStringField(transcript, "wechatDraftId", "mediaId", "wechat_draft_id");
+  const currentWechatUrl = optionalStringField(transcript, "wechatUrl", "wechat_url");
+  const profileSelection = profileSelectionFromRecord(transcript);
+  const preparedKey = preparedRevisionKey(revisionRequestKey);
+  const restored = await loadPreparedRevision(preparedKey, revisionRequest);
+  let article: ArticleResult;
+  let instructionText: string;
+  let preparedImages: PreparedArticleImage[];
+  let coverBuffer: Buffer;
+  let coverImageUrl: string | undefined;
+  if (restored) {
+    article = restored.prepared.article;
+    instructionText = restored.prepared.instructionText;
+    preparedImages = restored.images;
+    coverBuffer = restored.cover;
+    coverImageUrl = restored.prepared.coverImageUrl;
+  } else {
+    await updateStatus(filename, "PROCESSING", { userId, processingStage: "ASR" });
+    const audioUrl = await createPresignedDownloadUrl(revisionRequest.audioKey);
+    instructionText = (await transcribeAudioUrl(audioUrl, path.extname(revisionRequest.audioKey).slice(1) || "m4a")).trim();
+    if (!instructionText) throw new Error("修改语音没有识别到有效文字");
+
+    await updateStatus(filename, "PROCESSING", { userId, processingStage: "REWRITING" });
+    article = await reviseArticle({
+      rawText,
+      currentTitle: parentTitle,
+      currentContent: parentContent,
+      instructionText,
+      userId,
+      workspaceId: revisionRequest.workspaceId,
+      clientJobId: `${filename}:${revisionRequest.clientRequestId}`,
+      ...profileSelection,
+    });
+    preparedImages = article.imageActions?.length
+      ? await prepareArticleImages(fileKey, article.imageActions)
+      : [];
+    const articleImages = articleImagesForTranscript(preparedImages);
+    if (articleImages.length) {
+      article = {
+        ...article,
+        content: insertArticleImagesIntoHtml(article.content, articleImages),
+        articleImages,
+      };
+    }
+    coverBuffer = await generateWechatCoverBuffer({
+      title: article.title,
+      titleLines: article.coverTitle,
+      subtitle: article.coverSubtitle,
+      imagePrompt: article.imagePrompt,
+    });
+    coverImageUrl = await saveCoverImage(fileKey, coverBuffer);
+    const prepared: PreparedRevision = {
+      schemaVersion: 1,
+      requestIdentity: versionedRevisionIdentity(revisionRequest),
+      instructionText,
+      article,
+      articleImages: serializePreparedImages(preparedImages),
+      coverImageUrl,
+      coverBase64: coverBuffer.toString("base64"),
+      preparedAt: revisionRequest.createdAt,
+    };
+    await uploadTranscript(preparedKey, JSON.stringify(prepared, null, 2));
+  }
+
+  const version = articleVersionReference(await postArticleRevision(revisionId, "version", {
+    title: article.title,
+    body: article.content,
+    cover: {
+      image_prompt: article.imagePrompt,
+      title_lines: article.coverTitle,
+      subtitle: article.coverSubtitle,
+      image_url: coverImageUrl,
+    },
+    prepared_artifact_key: preparedKey,
+  }));
+  const priorDraftError = restored && optionalStringField(transcript, "processingStage") === "DRAFT_FAILED"
+    ? optionalStringField(transcript, "errorMessage", "error_message")
+    : undefined;
+  if (priorDraftError) {
+    try {
+      await postArticleRevision(revisionId, "status", { status: "wechat_failed", error_message: priorDraftError });
+    } catch (error) {
+      throw new VersionedRevisionWechatError(error);
+    }
+  }
+  const previousHistory = Array.isArray(transcript.revisionHistory)
+    ? transcript.revisionHistory.filter((entry) => !entry || typeof entry !== "object" || (entry as Record<string, unknown>).revisionId !== revisionId)
+    : [];
+  const transcriptBase = {
+    ...transcript,
+    rawText,
+    articleTitle: article.title,
+    articleContent: article.content,
+    coverImageUrl,
+    articleImages: article.articleImages,
+    articleVersionId: version.id,
+    articleVersionNo: version.versionNo,
+    wechatDraftId: currentDraftId,
+    wechatUrl: currentWechatUrl,
+    styleProfileId: profileSelection.styleProfileId,
+    styleProfileVersion: profileSelection.styleProfileVersion,
+    layoutProfileId: profileSelection.layoutProfileId,
+    layoutProfileVersion: profileSelection.layoutProfileVersion,
+    revisionHistory: [...previousHistory, {
+      revisionId,
+      clientRequestId: revisionRequest.clientRequestId,
+      revisionRequestKey,
+      audioKey: revisionRequest.audioKey,
+      createdAt: revisionRequest.createdAt,
+      instructionText,
+      previousArticleTitle: parentTitle,
+      articleTitle: article.title,
+      articleVersionId: version.id,
+      articleVersionNo: version.versionNo,
+      updatedWechatDraft: Boolean(currentDraftId),
+    }],
+  };
+  await uploadTranscript(transcriptKey, JSON.stringify({ ...transcriptBase, processingStage: "ARTICLE_READY" }, null, 2));
+  await updateStatus(filename, "PROCESSING", {
+    userId, processingStage: "ARTICLE_READY", rawText, articleTitle: article.title,
+    articleContent: article.content, coverImageUrl, articleVersionId: version.id, articleVersionNo: version.versionNo,
+  });
+  await postArticleRevision(revisionId, "status", { status: "wechat_pending" });
+  await updateStatus(filename, "PROCESSING", {
+    userId, processingStage: "DRAFTING", rawText, articleTitle: article.title,
+    articleContent: article.content, coverImageUrl, articleVersionId: version.id, articleVersionNo: version.versionNo,
+  });
+
+  try {
+    let wechatArticle = article;
+    if (currentDraftId) {
+      const wechatConfig = await getWechatConfigForUser(userId);
+      const wxToken = await getAccessToken(wechatConfig);
+      if (preparedImages.length) {
+        const uploaded = await uploadPreparedImagesToWechat(wxToken, preparedImages, wechatConfig);
+        const wechatImages = articleImagesForTranscript(uploaded);
+        let wechatContent = article.content;
+        for (let index = 0; index < preparedImages.length; index += 1) {
+          const publicUrl = preparedImages[index]?.publicUrl;
+          const wechatUrl = uploaded[index]?.wechatUrl;
+          if (publicUrl && wechatUrl) wechatContent = wechatContent.split(publicUrl).join(wechatUrl);
+        }
+        wechatArticle = { ...article, content: wechatContent, articleImages: wechatImages };
+      }
+      await updateDraft(wxToken, currentDraftId, wechatArticle.title, wechatArticle.content, coverBuffer, wechatConfig);
+    }
+  } catch (error) {
+    const errorMessage = buildDraftFailureMessage(error);
+    await uploadTranscript(transcriptKey, JSON.stringify({
+      ...transcriptBase,
+      processingStage: "DRAFT_FAILED",
+      errorMessage,
+    }, null, 2));
+    await updateStatus(filename, "COMPLETED", {
+      userId, processingStage: "DRAFT_FAILED", rawText, articleTitle: article.title,
+      articleContent: article.content, coverImageUrl, wechatDraftId: currentDraftId,
+      wechatUrl: currentWechatUrl, errorMessage, articleVersionId: version.id, articleVersionNo: version.versionNo,
+    });
+    try {
+      await postArticleRevision(revisionId, "status", { status: "wechat_failed", error_message: errorMessage });
+    } catch (statusError) {
+      throw new VersionedRevisionWechatError(statusError);
+    }
+    throw new VersionedRevisionWechatError(error);
+  }
+  await uploadTranscript(transcriptKey, JSON.stringify({ ...transcriptBase, processingStage: "COMPLETED", errorMessage: undefined }, null, 2));
+  await updateStatus(filename, "COMPLETED", {
+    userId, processingStage: "COMPLETED", rawText, articleTitle: article.title, articleContent: article.content,
+    coverImageUrl, wechatDraftId: currentDraftId, wechatUrl: currentWechatUrl, errorMessage: null,
+    articleVersionId: version.id, articleVersionNo: version.versionNo,
+  });
+  try {
+    await postArticleRevision(revisionId, "status", { status: "completed" });
+  } catch (error) {
+    // The transcript already says COMPLETED. Keep it visible while the exact
+    // workflow replay repairs the Worker-side status.
+    throw new VersionedRevisionWechatError(error);
+  }
+}
+
 async function processRevisionRequest(revisionRequestKey: string): Promise<void> {
   console.log(`Processing article revision request: ${revisionRequestKey}`);
 
@@ -520,10 +893,18 @@ async function processRevisionRequest(revisionRequestKey: string): Promise<void>
   );
   const revisionRequest: RevisionRequest = {
     revisionId: optionalStringField(revisionRecord, "revisionId", "revision_id"),
+    clientRequestId: optionalStringField(revisionRecord, "clientRequestId", "client_request_id"),
     filename: requiredStringField(revisionRecord, "filename"),
     userId: optionalStringField(revisionRecord, "userId", "user_id"),
+    workspaceId: optionalStringField(revisionRecord, "workspaceId", "workspace_id"),
+    recordingId: optionalNumberField(revisionRecord, "recordingId", "recording_id"),
+    articleId: optionalStringField(revisionRecord, "articleId", "article_id"),
+    parentVersionId: optionalStringField(revisionRecord, "parentVersionId", "parent_version_id"),
+    parentTitle: optionalStringField(revisionRecord, "parentTitle", "parent_title"),
+    parentContent: optionalStringField(revisionRecord, "parentContent", "parent_content"),
     transcriptKey: optionalStringField(revisionRecord, "transcriptKey", "transcript_key"),
     audioKey: requiredStringField(revisionRecord, "audioKey", "audio_key"),
+    audioSha256: optionalStringField(revisionRecord, "audioSha256", "audio_sha256"),
     createdAt: optionalStringField(revisionRecord, "createdAt", "created_at"),
   };
   const filename = path.basename(revisionRequest.filename);
@@ -532,6 +913,10 @@ async function processRevisionRequest(revisionRequestKey: string): Promise<void>
   const fileKey = userIdFromPipelineKey(revisionRequestKey) ? `users/${userId}/inbox/${filename}` : `inbox/${filename}`;
 
   try {
+    if (revisionRequest.parentVersionId) {
+      await processVersionedRevisionRequest(revisionRequestKey, requireVersionedRevisionRequest(revisionRequest));
+      return;
+    }
     if (miningV3HandoffEnabled()) {
       // A V3 marker is authoritative even when a later Worker tenant rollout
       // changes. This client gate is only an opt-in compatibility switch: once
@@ -664,11 +1049,13 @@ async function processRevisionRequest(revisionRequestKey: string): Promise<void>
     console.log(`Finished article revision: ${filename}`);
   } catch (error) {
     console.error(`Failed to process article revision ${revisionRequestKey}:`, describeError(error));
-    await updateStatus(filename, "COMPLETED", {
-      userId,
-      processingStage: "REVISION_FAILED",
-      errorMessage: revisionFailureMessage(error),
-    });
+    if (!(error instanceof VersionedRevisionWechatError)) {
+      await updateStatus(filename, "COMPLETED", {
+        userId,
+        processingStage: "REVISION_FAILED",
+        errorMessage: revisionFailureMessage(error),
+      });
+    }
     throw error;
   }
 }

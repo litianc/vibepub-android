@@ -721,6 +721,287 @@ describe('VibePub Cloud Pipeline', () => {
     expect(updateDraft).not.toHaveBeenCalled();
   });
 
+  it('creates a child Article Version before updating WeChat for a versioned revision', async () => {
+    const revisionRequestKey = 'users/usr_revision/revision-requests/article/rev-versioned.json';
+    const transcriptKey = 'users/usr_revision/transcripts/article.json';
+    const stored = new Map<string, Buffer>([
+      [revisionRequestKey, Buffer.from(JSON.stringify({
+        revisionId: 'rev-versioned',
+        clientRequestId: 'client-versioned',
+        filename: 'article.m4a',
+        userId: 'usr_revision',
+        workspaceId: 'ws_revision',
+        recordingId: 29,
+        articleId: 'article_29',
+        parentVersionId: 'av_parent',
+        parentTitle: '可信旧标题',
+        parentContent: '<p>可信旧正文</p>',
+        transcriptKey,
+        audioKey: 'users/usr_revision/revision-requests/article/rev-versioned.m4a',
+        audioSha256: `sha256:${'a'.repeat(64)}`,
+        createdAt: '2026-08-29T01:00:00.000Z',
+      }))],
+      [transcriptKey, Buffer.from(JSON.stringify({
+        rawText: '原始口述',
+        articleTitle: '可能过期的标题',
+        articleContent: '<p>可能过期的正文</p>',
+        wechatDraftId: 'MEDIA_ID_PARENT',
+      }))],
+    ]);
+    const events: string[] = [];
+    process.env.REVISION_REQUEST_KEY = revisionRequestKey;
+    vi.mocked(downloadFile).mockImplementation(async key => {
+      const value = stored.get(key);
+      if (!value) throw new Error(`NoSuchKey: ${key}`);
+      return value;
+    });
+    vi.mocked(uploadTranscript).mockImplementation(async (key, value) => {
+      const stage = key.endsWith('.prepared.json') ? 'prepared' : JSON.parse(value).processingStage;
+      events.push(stage || 'transcript');
+      stored.set(key, Buffer.from(value));
+    });
+    vi.mocked(createPresignedDownloadUrl).mockResolvedValue('https://r2.example.test/revision.m4a');
+    vi.mocked(transcribeAudioUrl).mockResolvedValue('补充一个清楚的结论。');
+    vi.mocked(reviseArticleWithInstruction).mockResolvedValue({
+      title: '新版标题',
+      content: '<p>新版正文</p>',
+      imagePrompt: 'clean cover',
+      coverTitle: ['新版标题'],
+      coverSubtitle: '清楚结论',
+    });
+    vi.mocked(generateWechatCoverBuffer).mockResolvedValue(Buffer.from('versioned-cover'));
+    vi.mocked(uploadCoverImage).mockResolvedValue();
+    vi.mocked(getAccessToken).mockResolvedValue('wechat-token');
+    vi.mocked(updateDraft).mockImplementation(async () => { events.push('wechat'); });
+    vi.stubGlobal('fetch', vi.fn(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith('/api/internal/v3/article-revisions/rev-versioned/version')) {
+        events.push('version');
+        expect(init?.headers).toMatchObject({ Authorization: 'Bearer test-mining-v3-handoff-token' });
+        expect(JSON.parse(String(init?.body))).toMatchObject({
+          title: '新版标题',
+          body: '<p>新版正文</p>',
+          prepared_artifact_key: 'users/usr_revision/revision-requests/article/rev-versioned.prepared.json',
+        });
+        return { ok: true, status: 201, json: async () => ({ version: { id: 'av_child', version_no: 2 } }), text: async () => '' } as any;
+      }
+      if (url.endsWith('/api/internal/v3/article-revisions/rev-versioned/status')) {
+        return { ok: true, status: 200, json: async () => ({ ok: true }), text: async () => '' } as any;
+      }
+      if (url.includes('/api/internal/publishing-account')) {
+        return { ok: true, status: 200, json: async () => ({ publishing_account: { app_id: testWechatConfig.appId, app_secret: testWechatConfig.appSecret, proxy_url: testWechatConfig.proxyUrl } }), text: async () => '' } as any;
+      }
+      if (url.includes('/api/internal/status')) return { ok: true, status: 200, text: async () => '' } as any;
+      throw new Error(`unexpected request ${url}`);
+    }));
+
+    await expect(main()).resolves.toBeUndefined();
+
+    expect(reviseArticleWithInstruction).toHaveBeenCalledWith({
+      rawText: '原始口述',
+      currentTitle: '可信旧标题',
+      currentContent: '<p>可信旧正文</p>',
+      instructionText: '补充一个清楚的结论。',
+    });
+    expect(events.indexOf('prepared')).toBeLessThan(events.indexOf('version'));
+    expect(events.indexOf('version')).toBeLessThan(events.indexOf('ARTICLE_READY'));
+    expect(events.indexOf('ARTICLE_READY')).toBeLessThan(events.indexOf('wechat'));
+    const articleReady = [...stored.entries()].find(([key]) => key === transcriptKey)?.[1].toString('utf8') || '';
+    expect(articleReady).toContain('"articleVersionId": "av_child"');
+    expect(articleReady).toContain('"articleVersionNo": 2');
+  });
+
+  it('replays the same child and retries only WeChat from the prepared sidecar', async () => {
+    const revisionRequestKey = 'users/usr_replay/revision-requests/article/rev-replay.json';
+    const transcriptKey = 'users/usr_replay/transcripts/article.json';
+    const request = {
+      revisionId: 'rev-replay',
+      clientRequestId: 'client-replay',
+      filename: 'article.m4a',
+      userId: 'usr_replay',
+      workspaceId: 'ws_replay',
+      recordingId: 30,
+      articleId: 'article_30',
+      parentVersionId: 'av_parent',
+      parentTitle: '旧标题',
+      parentContent: '<p>第一段。</p><p>第二段。</p>',
+      transcriptKey,
+      audioKey: 'users/usr_replay/revision-requests/article/rev-replay.m4a',
+      audioSha256: `sha256:${'b'.repeat(64)}`,
+      createdAt: '2026-08-29T01:10:00.000Z',
+    };
+    const stored = new Map<string, Buffer>([
+      [revisionRequestKey, Buffer.from(JSON.stringify(request))],
+      [transcriptKey, Buffer.from(JSON.stringify({ rawText: '原始口述', wechatDraftId: 'MEDIA_PARENT' }))],
+    ]);
+    process.env.REVISION_REQUEST_KEY = revisionRequestKey;
+    vi.mocked(downloadFile).mockImplementation(async key => {
+      const value = stored.get(key);
+      if (!value) throw new Error(`NoSuchKey: ${key}`);
+      return value;
+    });
+    vi.mocked(uploadTranscript).mockImplementation(async (key, value) => { stored.set(key, Buffer.from(value)); });
+    vi.mocked(createPresignedDownloadUrl).mockResolvedValue('https://r2.example.test/replay.m4a');
+    vi.mocked(transcribeAudioUrl).mockResolvedValue('第二段后加图。');
+    const imageAction = {
+      imageId: 'replay-image', kind: 'insert_image' as const, prompt: 'clean desk', alt: '桌面',
+      anchor: { position: 'after' as const, paragraphIndex: 2 },
+    };
+    vi.mocked(reviseArticleWithInstruction).mockResolvedValue({
+      title: '新版标题', content: '<p>第一段。</p><p>第二段。</p>', imagePrompt: 'cover',
+      coverTitle: ['新版'], coverSubtitle: '', imageActions: [imageAction],
+    });
+    vi.mocked(prepareArticleImages).mockResolvedValue([{
+      ...imageAction,
+      r2Key: 'users/usr_replay/article-images/article/replay-image.png',
+      publicUrl: 'https://vibepub.example.test/api/files/replay-image.png',
+      buffer: Buffer.from('replay-image-bytes'),
+    }]);
+    vi.mocked(generateWechatCoverBuffer).mockResolvedValue(Buffer.from('replay-cover'));
+    vi.mocked(uploadCoverImage).mockResolvedValue();
+    vi.mocked(getAccessToken).mockResolvedValue('wechat-token');
+    vi.mocked(uploadWechatArticleImage).mockResolvedValue('https://mmbiz.qpic.cn/replay-image.png');
+    vi.mocked(updateDraft).mockResolvedValue();
+    let versionCalls = 0;
+    vi.stubGlobal('fetch', vi.fn(async (input) => {
+      const url = String(input);
+      if (url.endsWith('/api/internal/v3/article-revisions/rev-replay/version')) {
+        versionCalls += 1;
+        return { ok: true, status: versionCalls === 1 ? 201 : 200, json: async () => ({ version: { id: 'av_child_replay', version_no: 2 }, replayed: versionCalls > 1 }), text: async () => '' } as any;
+      }
+      if (url.endsWith('/api/internal/v3/article-revisions/rev-replay/status')) return { ok: true, status: 200, json: async () => ({ ok: true }), text: async () => '' } as any;
+      if (url.includes('/api/internal/publishing-account')) return { ok: true, status: 200, json: async () => ({ publishing_account: { app_id: testWechatConfig.appId, app_secret: testWechatConfig.appSecret, proxy_url: testWechatConfig.proxyUrl } }), text: async () => '' } as any;
+      if (url.includes('/api/internal/status')) return { ok: true, status: 200, text: async () => '' } as any;
+      throw new Error(`unexpected request ${url}`);
+    }));
+
+    await main();
+    await main();
+
+    stored.set(revisionRequestKey, Buffer.from(JSON.stringify({ ...request, parentContent: '<p>被篡改的父正文</p>' })));
+    await expect(main()).rejects.toThrow('Prepared revision identity does not match its request');
+
+    expect(versionCalls).toBe(2);
+    expect(transcribeAudioUrl).toHaveBeenCalledTimes(1);
+    expect(reviseArticleWithInstruction).toHaveBeenCalledTimes(1);
+    expect(prepareArticleImages).toHaveBeenCalledTimes(1);
+    expect(generateWechatCoverBuffer).toHaveBeenCalledTimes(1);
+    expect(uploadCoverImage).toHaveBeenCalledTimes(1);
+    expect(uploadWechatArticleImage).toHaveBeenCalledTimes(2);
+    expect(updateDraft).toHaveBeenCalledTimes(2);
+  });
+
+  it('stops before WeChat when the Worker rejects a stale parent with 409', async () => {
+    const revisionRequestKey = 'users/usr_stale/revision-requests/article/rev-stale.json';
+    const transcriptKey = 'users/usr_stale/transcripts/article.json';
+    const request = {
+      revisionId: 'rev-stale', clientRequestId: 'client-stale', filename: 'article.m4a',
+      userId: 'usr_stale', workspaceId: 'ws_stale', recordingId: 31, articleId: 'article_31',
+      parentVersionId: 'av_old', parentTitle: '旧标题', parentContent: '<p>旧正文</p>',
+      transcriptKey, audioKey: 'users/usr_stale/revision-requests/article/rev-stale.m4a',
+      audioSha256: `sha256:${'c'.repeat(64)}`, createdAt: '2026-08-29T01:20:00.000Z',
+    };
+    const stored = new Map<string, Buffer>([
+      [revisionRequestKey, Buffer.from(JSON.stringify(request))],
+      [transcriptKey, Buffer.from(JSON.stringify({ rawText: '原始口述', wechatDraftId: 'MEDIA_PARENT' }))],
+    ]);
+    process.env.REVISION_REQUEST_KEY = revisionRequestKey;
+    vi.mocked(downloadFile).mockImplementation(async key => {
+      const value = stored.get(key);
+      if (!value) throw new Error(`NoSuchKey: ${key}`);
+      return value;
+    });
+    vi.mocked(uploadTranscript).mockImplementation(async (key, value) => { stored.set(key, Buffer.from(value)); });
+    vi.mocked(createPresignedDownloadUrl).mockResolvedValue('https://r2.example.test/stale.m4a');
+    vi.mocked(transcribeAudioUrl).mockResolvedValue('修改标题。');
+    vi.mocked(reviseArticleWithInstruction).mockResolvedValue({ title: '新标题', content: '<p>新正文</p>', imagePrompt: 'cover', coverTitle: ['新标题'] });
+    vi.mocked(generateWechatCoverBuffer).mockResolvedValue(Buffer.from('stale-cover'));
+    vi.mocked(uploadCoverImage).mockResolvedValue();
+    vi.stubGlobal('fetch', vi.fn(async (input) => {
+      const url = String(input);
+      if (url.endsWith('/api/internal/v3/article-revisions/rev-stale/version')) {
+        return { ok: false, status: 409, json: async () => ({ error: 'stale_article_version' }), text: async () => 'stale_article_version' } as any;
+      }
+      if (url.includes('/api/internal/status')) return { ok: true, status: 200, text: async () => '' } as any;
+      throw new Error(`unexpected request ${url}`);
+    }));
+
+    await expect(main()).rejects.toThrow('409 stale_article_version');
+
+    expect([...stored.keys()]).toContain('users/usr_stale/revision-requests/article/rev-stale.prepared.json');
+    expect(getAccessToken).not.toHaveBeenCalled();
+    expect(uploadWechatArticleImage).not.toHaveBeenCalled();
+    expect(updateDraft).not.toHaveBeenCalled();
+  });
+
+  it('keeps v2 visible after WeChat failure and retries only WeChat on rerun', async () => {
+    const revisionRequestKey = 'users/usr_failure/revision-requests/article/rev-failure.json';
+    const transcriptKey = 'users/usr_failure/transcripts/article.json';
+    const request = {
+      revisionId: 'rev-failure', clientRequestId: 'client-failure', filename: 'article.m4a',
+      userId: 'usr_failure', workspaceId: 'ws_failure', recordingId: 32, articleId: 'article_32',
+      parentVersionId: 'av_parent', parentTitle: '旧标题', parentContent: '<p>旧正文</p>',
+      transcriptKey, audioKey: 'users/usr_failure/revision-requests/article/rev-failure.m4a',
+      audioSha256: `sha256:${'d'.repeat(64)}`, createdAt: '2026-08-29T01:30:00.000Z',
+    };
+    const stored = new Map<string, Buffer>([
+      [revisionRequestKey, Buffer.from(JSON.stringify(request))],
+      [transcriptKey, Buffer.from(JSON.stringify({ rawText: '原始口述', wechatDraftId: 'MEDIA_PARENT' }))],
+    ]);
+    const revisionStatuses: Array<Record<string, unknown>> = [];
+    process.env.REVISION_REQUEST_KEY = revisionRequestKey;
+    vi.mocked(downloadFile).mockImplementation(async key => {
+      const value = stored.get(key);
+      if (!value) throw new Error(`NoSuchKey: ${key}`);
+      return value;
+    });
+    vi.mocked(uploadTranscript).mockImplementation(async (key, value) => { stored.set(key, Buffer.from(value)); });
+    vi.mocked(createPresignedDownloadUrl).mockResolvedValue('https://r2.example.test/failure.m4a');
+    vi.mocked(transcribeAudioUrl).mockResolvedValue('补充结论。');
+    vi.mocked(reviseArticleWithInstruction).mockResolvedValue({ title: '新版标题', content: '<p>新版正文</p>', imagePrompt: 'cover', coverTitle: ['新版标题'] });
+    vi.mocked(generateWechatCoverBuffer).mockResolvedValue(Buffer.from('failure-cover'));
+    vi.mocked(uploadCoverImage).mockResolvedValue();
+    vi.mocked(getAccessToken).mockResolvedValue('wechat-token');
+    vi.mocked(updateDraft).mockRejectedValueOnce(new Error('wechat timeout')).mockResolvedValueOnce();
+    let versionCalls = 0;
+    vi.stubGlobal('fetch', vi.fn(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith('/api/internal/v3/article-revisions/rev-failure/version')) {
+        versionCalls += 1;
+        return { ok: true, status: versionCalls === 1 ? 201 : 200, json: async () => ({ version: { id: 'av_child_failure', version_no: 2 }, replayed: versionCalls > 1 }), text: async () => '' } as any;
+      }
+      if (url.endsWith('/api/internal/v3/article-revisions/rev-failure/status')) {
+        const status = JSON.parse(String(init?.body));
+        revisionStatuses.push(status);
+        if (status.status === 'wechat_failed' && revisionStatuses.filter(item => item.status === 'wechat_failed').length === 1) {
+          return { ok: false, status: 503, json: async () => ({ error: 'status_unavailable' }), text: async () => 'status_unavailable' } as any;
+        }
+        return { ok: true, status: 200, json: async () => ({ ok: true }), text: async () => '' } as any;
+      }
+      if (url.includes('/api/internal/publishing-account')) return { ok: true, status: 200, json: async () => ({ publishing_account: { app_id: testWechatConfig.appId, app_secret: testWechatConfig.appSecret, proxy_url: testWechatConfig.proxyUrl } }), text: async () => '' } as any;
+      if (url.includes('/api/internal/status')) return { ok: true, status: 200, text: async () => '' } as any;
+      throw new Error(`unexpected request ${url}`);
+    }));
+
+    await expect(main()).rejects.toThrow('503 status_unavailable');
+    const failedTranscript = JSON.parse(stored.get(transcriptKey)!.toString('utf8'));
+    expect(failedTranscript).toMatchObject({
+      articleVersionId: 'av_child_failure', articleVersionNo: 2,
+      articleTitle: '新版标题', articleContent: '<p>新版正文</p>', processingStage: 'DRAFT_FAILED',
+    });
+    expect(revisionStatuses.at(-1)).toMatchObject({ status: 'wechat_failed', error_message: expect.stringContaining('wechat timeout') });
+
+    await expect(main()).resolves.toBeUndefined();
+
+    expect(versionCalls).toBe(2);
+    expect(transcribeAudioUrl).toHaveBeenCalledTimes(1);
+    expect(reviseArticleWithInstruction).toHaveBeenCalledTimes(1);
+    expect(generateWechatCoverBuffer).toHaveBeenCalledTimes(1);
+    expect(uploadCoverImage).toHaveBeenCalledTimes(1);
+    expect(updateDraft).toHaveBeenCalledTimes(2);
+    expect(revisionStatuses.map(item => item.status)).toEqual(['wechat_pending', 'wechat_failed', 'wechat_failed', 'wechat_pending', 'completed']);
+  });
+
   it.each([undefined, 'false'])('keeps legacy revisions off the V3 client when MINING_V3_HANDOFF_ENABLED=%s', async (enabled) => {
     const revisionRequestKey = 'revision-requests/legacy-client-gate/rev.json';
     process.env.MINING_V3_HANDOFF_ENABLED = enabled;

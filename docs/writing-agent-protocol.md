@@ -448,10 +448,13 @@ MVP 支持 `kind=insert_image`，`position=start/end/before/after`，`paragraph_
 
 VibePub 收到新版文章包后负责：
 
-- 更新 transcript 中的 `articleTitle/articleContent/coverImageUrl/revisionHistory`。
+- 对带 `parentVersionId` 的修改，以请求中绑定的父 Article Version 标题和正文为写作输入，不读取可能过期的 transcript 正文。
 - 处理 `image_actions`：生成正文图、写入 `article-images/<filename>/<image_id>.png`、记录 `articleImages[]`。
-- 如果存在 `wechatDraftId`，调用公众号接口更新原草稿。
-- 把端上状态从 `REWRITING/DRAFTING` 推进到 `COMPLETED` 或 `REVISION_FAILED`。
+- 把改写结果、指令、正文图引用和封面字节写入同目录的确定性 `.prepared.json` sidecar，再调用 Worker 创建唯一 child Article Version。
+- 在调用公众号前，把 child version ID、版本号和 `ARTICLE_READY` 写入 transcript 与状态接口；如果微信失败，保留新版正文并进入 `DRAFT_FAILED`。
+- 重跑同一修改时读取 prepared sidecar，重放 Worker version 接口并只重试微信，不再次执行 ASR、写作、图片或封面生成。
+
+不带 `parentVersionId` 的旧 revision request 继续使用 legacy transcript 修改流程。
 
 ## 状态枚举
 
