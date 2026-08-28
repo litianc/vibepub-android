@@ -140,6 +140,15 @@ type StatusErrorUpdate = {
   value: string | null;
 };
 
+type ArticleFeedbackAction = "adopted" | "not_adopted";
+
+type ArticleFeedbackIdentity = {
+  recordingId: number;
+  versionId: string;
+  action: ArticleFeedbackAction;
+  payloadHash: string;
+};
+
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
@@ -487,6 +496,16 @@ export default {
             payloadHash,
             expectedStateRevision,
           ));
+    }
+
+    const feedbackFilename = recordingFilenameForSubresource(url.pathname, "/article-feedback");
+    if (request.method === "GET" && feedbackFilename) {
+      return getArticleFeedback(env, auth, feedbackFilename);
+    }
+    if (request.method === "POST" && feedbackFilename) {
+      const verified = requireVerifiedEmail(auth);
+      if (verified) return verified;
+      return createArticleFeedback(request, env, auth, feedbackFilename);
     }
 
     if (request.method === "POST" && isRecordingRevisionPath(url.pathname)) {
@@ -1456,6 +1475,214 @@ async function triggerGitHubAction(
 
 function isRecordingRevisionPath(pathname: string): boolean {
   return pathname.startsWith("/api/recordings/") && pathname.endsWith("/revisions");
+}
+
+function recordingFilenameForSubresource(pathname: string, suffix: string): string | null {
+  const prefix = "/api/recordings/";
+  if (!pathname.startsWith(prefix) || !pathname.endsWith(suffix)) return null;
+  const encoded = pathname.slice(prefix.length, -suffix.length);
+  if (!encoded) return null;
+  return safeDecodeURIComponent(encoded);
+}
+
+function staleArticleVersionResponse(): Response {
+  return json({
+    error: "stale_article_version",
+    message: "文章已有新版本，请刷新后再选择",
+  }, 409);
+}
+
+async function getArticleFeedback(env: Env, auth: AuthContext, filename: string): Promise<Response> {
+  const recording = await articleFeedbackRecording(env, auth, filename);
+  if (!recording) return json({ error: "recording_not_found" }, 404);
+
+  const versions = await articleFeedbackVersions(env, auth, recording.id);
+  const currentVersion = versions[0] || null;
+  const hasNoArticleVersion = currentVersion === null;
+  const feedback = await queryAll<Record<string, unknown>>(
+    env,
+    `SELECT server_sequence, id, version_id, action, client_event_id, occurred_at, created_at
+     FROM article_feedback_events
+     WHERE user_id = ? AND workspace_id = ? AND recording_id = ?
+     ORDER BY server_sequence ASC`,
+    [auth.userId, auth.workspaceId, recording.id],
+  );
+  const currentFeedback = currentVersion
+    ? [...feedback].reverse().find((event) => event.version_id === currentVersion.id) || null
+    : null;
+
+  return json({
+    recording_id: recording.id,
+    legacy: hasNoArticleVersion,
+    current_version: currentVersion
+      ? { id: currentVersion.id, version_no: Number(currentVersion.version_no) }
+      : null,
+    current_feedback: currentFeedback ? publicArticleFeedback(currentFeedback) : null,
+    feedback: feedback.map(publicArticleFeedback),
+  });
+}
+
+async function createArticleFeedback(
+  request: Request,
+  env: Env,
+  auth: AuthContext,
+  filename: string,
+): Promise<Response> {
+  const body = await parseJson(request);
+  const versionId = normalizeOptionalString(body?.version_id ?? body?.versionId);
+  const action = normalizeArticleFeedbackAction(body?.action);
+  const clientEventId = normalizeOptionalString(body?.client_event_id ?? body?.clientEventId);
+  if (!versionId || !action || !clientEventId || clientEventId.length > 200) {
+    return json({ error: "invalid_article_feedback" }, 400);
+  }
+
+  const recording = await articleFeedbackRecording(env, auth, filename);
+  if (!recording) return json({ error: "recording_not_found" }, 404);
+
+  const payloadHash = await sha256Hex(JSON.stringify({
+    version_id: versionId,
+    action,
+  }));
+  const existing = await articleFeedbackByClientEvent(env, auth, clientEventId);
+  if (existing) {
+    if (!articleFeedbackMatches(existing, {
+      recordingId: recording.id,
+      versionId,
+      action,
+      payloadHash,
+    })) {
+      return json({ error: "idempotency_conflict" }, 409);
+    }
+    return json({ ok: true, idempotent: true, feedback: publicArticleFeedback(existing) });
+  }
+
+  const versions = await articleFeedbackVersions(env, auth, recording.id);
+  const requestedVersion = versions.find((version) => version.id === versionId);
+  if (!requestedVersion) return json({ error: "article_version_not_found" }, 404);
+  if (versions[0]?.id !== versionId) {
+    return staleArticleVersionResponse();
+  }
+
+  const feedbackId = `feedback_${crypto.randomUUID()}`;
+  const occurredAt = nowIso();
+  const inserted = await env.DB.prepare(
+    `INSERT INTO article_feedback_events
+      (id, user_id, workspace_id, article_id, recording_id, version_id, action,
+       client_event_id, payload_hash, occurred_at)
+     SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+     WHERE ? = (
+       SELECT id FROM article_versions
+       WHERE user_id = ? AND workspace_id = ? AND recording_id = ?
+       ORDER BY version_no DESC LIMIT 1
+     )
+     ON CONFLICT(user_id, workspace_id, client_event_id) DO NOTHING`,
+  ).bind(
+    feedbackId,
+    auth.userId,
+    auth.workspaceId,
+    requestedVersion.article_id,
+    recording.id,
+    versionId,
+    action,
+    clientEventId,
+    payloadHash,
+    occurredAt,
+    versionId,
+    auth.userId,
+    auth.workspaceId,
+    recording.id,
+  ).run();
+
+  const stored = await articleFeedbackByClientEvent(env, auth, clientEventId);
+  if (!stored) {
+    const latestVersions = await articleFeedbackVersions(env, auth, recording.id);
+    if (latestVersions[0]?.id !== versionId) {
+      return staleArticleVersionResponse();
+    }
+    return json({ error: "article_feedback_write_unavailable" }, 503);
+  }
+  if (!articleFeedbackMatches(stored, {
+    recordingId: recording.id,
+    versionId,
+    action,
+    payloadHash,
+  })) {
+    return json({ error: "idempotency_conflict" }, 409);
+  }
+  return json({
+    ok: true,
+    idempotent: (inserted.meta.changes ?? 0) === 0,
+    feedback: publicArticleFeedback(stored),
+  }, (inserted.meta.changes ?? 0) === 0 ? 200 : 201);
+}
+
+async function articleFeedbackRecording(
+  env: Env,
+  auth: AuthContext,
+  filename: string,
+): Promise<{ id: number } | null> {
+  const safeName = sanitizeFileName(filename);
+  if (!safeName) return null;
+  return queryOne<{ id: number }>(
+    env,
+    `SELECT id FROM recordings WHERE user_id = ? AND filename = ? LIMIT 1`,
+    [auth.userId, safeName],
+  );
+}
+
+async function articleFeedbackVersions(
+  env: Env,
+  auth: AuthContext,
+  recordingId: number,
+): Promise<Array<{ id: string; article_id: string; version_no: number }>> {
+  return queryAll(
+    env,
+    `SELECT id, article_id, version_no FROM article_versions
+     WHERE user_id = ? AND workspace_id = ? AND recording_id = ?
+     ORDER BY version_no DESC`,
+    [auth.userId, auth.workspaceId, recordingId],
+  );
+}
+
+async function articleFeedbackByClientEvent(
+  env: Env,
+  auth: AuthContext,
+  clientEventId: string,
+): Promise<Record<string, unknown> | null> {
+  return queryOne(
+    env,
+    `SELECT server_sequence, id, user_id, workspace_id, article_id, recording_id,
+        version_id, action, client_event_id, payload_hash, occurred_at, created_at
+     FROM article_feedback_events
+     WHERE user_id = ? AND workspace_id = ? AND client_event_id = ? LIMIT 1`,
+    [auth.userId, auth.workspaceId, clientEventId],
+  );
+}
+
+function normalizeArticleFeedbackAction(value: unknown): ArticleFeedbackAction | null {
+  return value === "adopted" || value === "not_adopted" ? value : null;
+}
+
+function articleFeedbackMatches(
+  row: Record<string, unknown>,
+  identity: ArticleFeedbackIdentity,
+): boolean {
+  return Number(row.recording_id) === identity.recordingId &&
+    row.version_id === identity.versionId &&
+    row.action === identity.action &&
+    row.payload_hash === identity.payloadHash;
+}
+
+function publicArticleFeedback(row: Record<string, unknown>): Record<string, unknown> {
+  return {
+    server_sequence: Number(row.server_sequence),
+    id: row.id,
+    version_id: row.version_id,
+    action: row.action,
+    client_event_id: row.client_event_id,
+    occurred_at: row.occurred_at,
+    created_at: row.created_at,
+  };
 }
 
 async function createArticleRevision(

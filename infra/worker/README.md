@@ -12,6 +12,8 @@ Publishing/WritingAgent coordination.
 - `POST /api/uploads` - upload audio; requires `Authorization: Bearer <access token>`.
 - `GET /api/uploads` - list recent user-owned `inbox/` objects; requires session auth.
 - `GET /api/recordings` - list the current user's recording statuses and display metadata; requires session auth.
+- `GET /api/recordings/:filename/article-feedback` - read the current Article Version, current choice, and append-only choice history; requires session auth.
+- `POST /api/recordings/:filename/article-feedback` - record `adopted` or `not_adopted` for the current Article Version; requires a verified session.
 - `PUT /api/internal/status` - update mining pipeline status; requires `MINING_SERVICE_TOKEN`.
 - `POST /api/internal/mining-claims` - claim, complete, or release one mining input; internal only.
 - `GET /api/files/:key` - fetch a user-owned R2 object; requires session auth.
@@ -36,6 +38,12 @@ review while the WeChat draft step is still pending.
 creation failed after article generation.
 `cover_image_url` points at the generated WeChat cover PNG in R2 when the mining
 job has saved one; older recordings may omit it.
+
+Article feedback accepts a stable `client_event_id`. Repeating the same ID and
+payload returns the original event; changing the payload returns `409`. A new
+event for an older Article Version also returns `409` and asks the App to
+refresh. Migration `0012_article_feedback.sql` is additive and keeps every
+feedback event in server sequence; old recordings are not backfilled.
 
 ## Setup
 

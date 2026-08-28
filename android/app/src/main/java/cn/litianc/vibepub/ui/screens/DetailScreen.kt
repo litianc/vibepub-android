@@ -96,12 +96,19 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.core.content.FileProvider
 import androidx.core.content.ContextCompat
 import cn.litianc.vibepub.AppPreferences
+import cn.litianc.vibepub.ArticleFeedbackAction
+import cn.litianc.vibepub.ArticleFeedbackEventKey
+import cn.litianc.vibepub.ArticleFeedbackEventStore
+import cn.litianc.vibepub.ArticleFeedbackState
+import cn.litianc.vibepub.AuthenticatedArticleFeedbackClient
 import cn.litianc.vibepub.ArticleRevisionApi
 import cn.litianc.vibepub.ArticleRevisionRecorder
 import cn.litianc.vibepub.AuthenticatedHttpClient
 import cn.litianc.vibepub.BuildConfig
 import cn.litianc.vibepub.coverImageFileNameForRecording
 import cn.litianc.vibepub.shouldAuthorizeVibePubFileUrl
+import cn.litianc.vibepub.STALE_ARTICLE_VERSION_MESSAGE
+import cn.litianc.vibepub.submitAndConfirmArticleFeedback
 import cn.litianc.vibepub.transcriptFileNameForRecording
 import cn.litianc.vibepub.data.AppDatabase
 import cn.litianc.vibepub.data.RecordingEntity
@@ -200,6 +207,8 @@ fun DetailScreen(
 ) {
     val context = LocalContext.current
     val preferences = remember { AppPreferences(context.applicationContext) }
+    val feedbackClient = remember(preferences) { AuthenticatedArticleFeedbackClient(preferences) }
+    val feedbackEventStore = remember { ArticleFeedbackEventStore(context.applicationContext) }
     val revisionRecorder = remember { ArticleRevisionRecorder(context.applicationContext) }
     val coroutineScope = rememberCoroutineScope()
     val userId = preferences.effectiveUserId
@@ -216,6 +225,45 @@ fun DetailScreen(
     var revisionMessage by remember(filename) { mutableStateOf("") }
     var revisionStartedAtMs by remember(filename) { mutableLongStateOf(0L) }
     var revisionElapsedMs by remember(filename) { mutableLongStateOf(0L) }
+    var feedbackState by remember(userId, filename) { mutableStateOf<ArticleFeedbackState?>(null) }
+    var feedbackLoading by remember(userId, filename) { mutableStateOf(false) }
+    var feedbackInProgress by remember(userId, filename) { mutableStateOf(false) }
+    var feedbackMessage by remember(userId, filename) { mutableStateOf("") }
+    val transcriptArticleVersionId = transcript.optTranscriptString("articleVersionId", "article_version_id")
+
+    fun submitArticleFeedback(action: ArticleFeedbackAction) {
+        val version = feedbackState?.currentVersion ?: return
+        if (version.id != transcriptArticleVersionId) {
+            feedbackMessage = STALE_ARTICLE_VERSION_MESSAGE
+            onRefresh()
+            return
+        }
+        if (feedbackInProgress || feedbackState?.currentAction == action) return
+        val event = ArticleFeedbackEventKey(
+            userId = userId,
+            filename = filename,
+            versionId = version.id,
+            action = action,
+        )
+        feedbackInProgress = true
+        feedbackMessage = "正在保存..."
+        coroutineScope.launch {
+            runCatching {
+                submitAndConfirmArticleFeedback(feedbackClient, feedbackEventStore, event)
+            }.onSuccess { confirmed ->
+                feedbackState = confirmed
+                feedbackMessage = articleFeedbackStatusMessage(confirmed.currentAction)
+            }.onFailure { error ->
+                feedbackMessage = error.message ?: "保存失败，请重试"
+                feedbackState = null
+                if (error is cn.litianc.vibepub.ArticleFeedbackException && error.responseCode == 409) {
+                    feedbackState = runCatching { feedbackClient.load(filename) }.getOrNull()
+                    onRefresh()
+                }
+            }
+            feedbackInProgress = false
+        }
+    }
 
     fun startRevisionRecording(intent: ArticleRevisionIntent) {
         runCatching {
@@ -314,6 +362,26 @@ fun DetailScreen(
         recording?.processingStage,
     ) {
         transcript = loadLocalTranscript(context, filename)
+    }
+
+    LaunchedEffect(userId, filename, transcriptArticleVersionId, lastSyncAtMs) {
+        if (transcriptArticleVersionId.isBlank()) {
+            feedbackState = null
+            feedbackLoading = false
+            feedbackMessage = ""
+            return@LaunchedEffect
+        }
+        feedbackLoading = true
+        runCatching { feedbackClient.load(filename) }
+            .onSuccess { confirmed ->
+                feedbackState = confirmed
+                feedbackMessage = ""
+            }
+            .onFailure { error ->
+                feedbackState = null
+                feedbackMessage = error.message ?: "无法读取当前选择，请刷新"
+            }
+        feedbackLoading = false
     }
 
     LaunchedEffect(recording, lastSyncAtMs) {
@@ -515,6 +583,18 @@ fun DetailScreen(
             Spacer(modifier = Modifier.height(16.dp))
             ArticleReviewCard(summary = reviewSummary)
             Spacer(modifier = Modifier.height(16.dp))
+            ArticleFeedbackControls(
+                displayedVersionId = transcriptArticleVersionId,
+                serverVersionId = feedbackState?.currentVersion?.id.orEmpty(),
+                currentAction = feedbackState?.currentAction,
+                enabled = feedbackState?.currentVersion != null && !feedbackLoading,
+                inProgress = feedbackInProgress,
+                message = feedbackMessage,
+                onSelect = ::submitArticleFeedback,
+            )
+            if (transcriptArticleVersionId.isNotBlank()) {
+                Spacer(modifier = Modifier.height(16.dp))
+            }
             ArticleRevisionCard(
                 enabled = articleContentIsGenerated,
                 state = revisionUiState,
@@ -1599,6 +1679,78 @@ internal fun ArticleVersionIndicator(label: String) {
         style = MaterialTheme.typography.labelMedium,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
+}
+
+@Composable
+internal fun ArticleFeedbackControls(
+    displayedVersionId: String,
+    serverVersionId: String,
+    currentAction: ArticleFeedbackAction?,
+    inProgress: Boolean,
+    message: String,
+    onSelect: (ArticleFeedbackAction) -> Unit,
+    enabled: Boolean = true,
+) {
+    if (displayedVersionId.isBlank()) return
+    val versionsMatch = displayedVersionId == serverVersionId
+    val status = when {
+        serverVersionId.isNotBlank() && !versionsMatch -> STALE_ARTICLE_VERSION_MESSAGE
+        message.isNotBlank() -> message
+        else -> articleFeedbackStatusMessage(currentAction)
+    }
+    val controlsEnabled = enabled && versionsMatch
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("ArticleFeedbackControls"),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        shape = RoundedCornerShape(8.dp),
+    ) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text("这版文章", fontWeight = FontWeight.SemiBold)
+            Text(
+                text = status,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Button(
+                    onClick = { onSelect(ArticleFeedbackAction.ADOPTED) },
+                    enabled = controlsEnabled && !inProgress && currentAction != ArticleFeedbackAction.ADOPTED,
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("AdoptArticleVersionButton"),
+                ) {
+                    Icon(Icons.Default.TaskAlt, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("采用本版")
+                }
+                OutlinedButton(
+                    onClick = { onSelect(ArticleFeedbackAction.NOT_ADOPTED) },
+                    enabled = controlsEnabled && !inProgress && currentAction != ArticleFeedbackAction.NOT_ADOPTED,
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("NotAdoptArticleVersionButton"),
+                ) {
+                    Icon(Icons.Default.Pause, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("暂不采用")
+                }
+            }
+        }
+    }
+}
+
+internal fun articleFeedbackStatusMessage(action: ArticleFeedbackAction?): String = when (action) {
+    ArticleFeedbackAction.ADOPTED -> "已采用当前版本"
+    ArticleFeedbackAction.NOT_ADOPTED -> "已记录暂不采用"
+    null -> "请选择这版文章是否可用"
 }
 
 internal fun JSONObject?.articleImagePreviews(): List<ArticleImagePreview> {

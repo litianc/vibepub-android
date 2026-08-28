@@ -17,6 +17,171 @@ test("rejects unauthorized API requests", async () => {
   assert.equal(response.status, 401);
 });
 
+test("article feedback keeps history, replays exact events, and exposes the latest server choice", async () => {
+  const db = articleFeedbackDb();
+  const env = createEnv({ DB: db });
+  const endpoint = "https://example.test/api/recordings/voice.m4a/article-feedback";
+
+  const initial = await worker.fetch(
+    authorizedRequest(endpoint),
+    env,
+    createExecutionContext(),
+  );
+  assert.equal(initial.status, 200);
+  assert.deepEqual(await initial.json(), {
+    recording_id: 71,
+    legacy: false,
+    current_version: { id: "version_1", version_no: 1 },
+    current_feedback: null,
+    feedback: [],
+  });
+
+  const adopted = {
+    version_id: "version_1",
+    action: "adopted",
+    client_event_id: "client_adopt_1",
+  };
+  const first = await worker.fetch(
+    authorizedRequest(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(adopted),
+    }),
+    env,
+    createExecutionContext(),
+  );
+  assert.equal(first.status, 201);
+  const firstBody = await first.json();
+  assert.equal(firstBody.idempotent, false);
+  assert.equal(firstBody.feedback.action, "adopted");
+  assert.equal(firstBody.feedback.server_sequence, 1);
+
+  const replay = await worker.fetch(
+    authorizedRequest(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(adopted),
+    }),
+    env,
+    createExecutionContext(),
+  );
+  assert.equal(replay.status, 200);
+  assert.equal((await replay.json()).feedback.id, firstBody.feedback.id);
+  assert.equal(db.events.length, 1);
+
+  const conflict = await worker.fetch(
+    authorizedRequest(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...adopted, action: "not_adopted" }),
+    }),
+    env,
+    createExecutionContext(),
+  );
+  assert.equal(conflict.status, 409);
+  assert.equal(db.events.length, 1);
+
+  const changed = await worker.fetch(
+    authorizedRequest(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        version_id: "version_1",
+        action: "not_adopted",
+        client_event_id: "client_not_adopted_1",
+      }),
+    }),
+    env,
+    createExecutionContext(),
+  );
+  assert.equal(changed.status, 201);
+  assert.equal(db.events.length, 2);
+
+  const latest = await worker.fetch(
+    authorizedRequest(endpoint),
+    env,
+    createExecutionContext(),
+  );
+  assert.equal(latest.status, 200);
+  const latestBody = await latest.json();
+  assert.equal(latestBody.current_feedback.action, "not_adopted");
+  assert.equal(latestBody.current_feedback.server_sequence, 2);
+  assert.deepEqual(latestBody.feedback.map((event) => event.action), ["adopted", "not_adopted"]);
+});
+
+test("article feedback hides legacy controls and rejects a new event for a stale version", async () => {
+  const db = articleFeedbackDb();
+  const env = createEnv({ DB: db });
+
+  const legacy = await worker.fetch(
+    authorizedRequest("https://example.test/api/recordings/legacy.m4a/article-feedback"),
+    env,
+    createExecutionContext(),
+  );
+  assert.equal(legacy.status, 200);
+  assert.equal((await legacy.json()).legacy, true);
+
+  db.versions.push({
+    id: "version_2",
+    user_id: "default_user",
+    workspace_id: "vibepub-dogfood",
+    article_id: "article_1",
+    recording_id: 71,
+    version_no: 2,
+  });
+  const stale = await worker.fetch(
+    authorizedRequest("https://example.test/api/recordings/voice.m4a/article-feedback", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        version_id: "version_1",
+        action: "adopted",
+        client_event_id: "client_stale_1",
+      }),
+    }),
+    env,
+    createExecutionContext(),
+  );
+  assert.equal(stale.status, 409);
+  assert.deepEqual(await stale.json(), {
+    error: "stale_article_version",
+    message: "文章已有新版本，请刷新后再选择",
+  });
+  assert.equal(db.events.length, 0);
+});
+
+test("article feedback rejects a version that becomes stale during the insert", async () => {
+  const db = articleFeedbackDb();
+  db.beforeFeedbackInsert(() => {
+    db.versions.push({
+      id: "version_2",
+      user_id: "default_user",
+      workspace_id: "vibepub-dogfood",
+      article_id: "article_1",
+      recording_id: 71,
+      version_no: 2,
+    });
+  });
+
+  const response = await worker.fetch(
+    authorizedRequest("https://example.test/api/recordings/voice.m4a/article-feedback", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        version_id: "version_1",
+        action: "adopted",
+        client_event_id: "client_race_1",
+      }),
+    }),
+    createEnv({ DB: db }),
+    createExecutionContext(),
+  );
+
+  assert.equal(response.status, 409);
+  assert.equal((await response.json()).error, "stale_article_version");
+  assert.equal(db.events.length, 0);
+});
+
 test("transcript reads merge the generated article projection for the existing Android client", async () => {
   const db = {
     prepare(sql) {
@@ -2993,6 +3158,99 @@ function miningClaimDb() {
         });
       }
       throw new Error(`Unexpected SQL: ${sql}`);
+    },
+  };
+}
+
+function articleFeedbackDb() {
+  const recordings = new Map([
+    ["default_user:voice.m4a", { id: 71 }],
+    ["default_user:legacy.m4a", { id: 72 }],
+  ]);
+  const versions = [{
+    id: "version_1",
+    user_id: "default_user",
+    workspace_id: "vibepub-dogfood",
+    article_id: "article_1",
+    recording_id: 71,
+    version_no: 1,
+  }];
+  const events = [];
+  let feedbackInsertHook = null;
+
+  return {
+    versions,
+    events,
+    beforeFeedbackInsert(callback) {
+      feedbackInsertHook = callback;
+    },
+    prepare(sql) {
+      if (sql.includes("SELECT id FROM recordings")) {
+        return statement({
+          all: async ([userId, filename]) => {
+            const row = recordings.get(`${userId}:${filename}`);
+            return { results: row ? [row] : [] };
+          },
+        });
+      }
+      if (sql.trimStart().startsWith("SELECT") && sql.includes("FROM article_versions") && sql.includes("ORDER BY version_no DESC")) {
+        return statement({
+          all: async ([userId, workspaceId, recordingId]) => ({
+            results: versions
+              .filter((row) => row.user_id === userId && row.workspace_id === workspaceId && row.recording_id === recordingId)
+              .sort((left, right) => right.version_no - left.version_no),
+          }),
+        });
+      }
+      if (sql.includes("FROM article_feedback_events") && sql.includes("client_event_id = ?")) {
+        return statement({
+          all: async ([userId, workspaceId, clientEventId]) => ({
+            results: events.filter((row) =>
+              row.user_id === userId && row.workspace_id === workspaceId && row.client_event_id === clientEventId),
+          }),
+        });
+      }
+      if (sql.includes("FROM article_feedback_events") && sql.includes("ORDER BY server_sequence ASC")) {
+        return statement({
+          all: async ([userId, workspaceId, recordingId]) => ({
+            results: events
+              .filter((row) => row.user_id === userId && row.workspace_id === workspaceId && row.recording_id === recordingId)
+              .sort((left, right) => left.server_sequence - right.server_sequence),
+          }),
+        });
+      }
+      if (sql.includes("INSERT INTO article_feedback_events")) {
+        return statement({
+          run: async ([id, userId, workspaceId, articleId, recordingId, versionId, action, clientEventId, payloadHash, occurredAt]) => {
+            feedbackInsertHook?.();
+            feedbackInsertHook = null;
+            if (events.some((row) =>
+              row.user_id === userId && row.workspace_id === workspaceId && row.client_event_id === clientEventId)) {
+              return { meta: { changes: 0 } };
+            }
+            const current = versions
+              .filter((row) => row.user_id === userId && row.workspace_id === workspaceId && row.recording_id === recordingId)
+              .sort((left, right) => right.version_no - left.version_no)[0];
+            if (current?.id !== versionId) return { meta: { changes: 0 } };
+            events.push({
+              server_sequence: events.length + 1,
+              id,
+              user_id: userId,
+              workspace_id: workspaceId,
+              article_id: articleId,
+              recording_id: recordingId,
+              version_id: versionId,
+              action,
+              client_event_id: clientEventId,
+              payload_hash: payloadHash,
+              occurred_at: occurredAt,
+              created_at: occurredAt,
+            });
+            return { meta: { changes: 1 } };
+          },
+        });
+      }
+      throw new Error(`Unexpected article feedback SQL: ${sql}`);
     },
   };
 }

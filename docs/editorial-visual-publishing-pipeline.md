@@ -10,6 +10,8 @@ Phase 1 establishes the durable content contract for the review and visual publi
 
 `visual_plans` stores block-bound cover, illustration, and chart intents. Chart entries require `data_provenance`; generated images are planned only after content is frozen. The final renderer and WeChat uploader are responsible for replacing planned references with audited CDN metadata in later phases.
 
+`article_feedback_events` stores each adopted or not-adopted choice as a separate append-only event for the current Article Version. Its server sequence defines the active choice: the newest sequence is current, while every older event remains available for audit. A stable client event ID makes an exact retry return the original event and rejects a changed payload. New events for a non-current version are rejected so the App can refresh before acting.
+
 All three tables have composite ownership foreign keys and append-only update/delete triggers. The existing `recordings` row remains the latest-result projection and now carries `workspace_id` for new uploads and version ownership checks.
 
 Deleting a recording keeps the Android/Worker delete contract: the `recordings` projection and associated R2 objects are removed, so the item disappears from the user's list. `editorial_recording_scopes` deliberately has no FK back to `recordings`; its retained row is the recording audit tombstone that keeps ArticleVersion, Review, VisualPlan, run, and transition ownership valid after deletion. Those editorial rows remain append-only and are never deleted as a side effect of recording cleanup.
