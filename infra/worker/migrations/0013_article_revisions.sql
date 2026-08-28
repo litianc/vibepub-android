@@ -6,6 +6,7 @@ CREATE TABLE IF NOT EXISTS article_revision_requests (
   article_id TEXT NOT NULL,
   recording_id INTEGER NOT NULL,
   parent_version_id TEXT NOT NULL,
+  feedback_id TEXT NOT NULL UNIQUE,
   client_request_id TEXT NOT NULL,
   payload_hash TEXT NOT NULL,
   audio_sha256 TEXT NOT NULL,

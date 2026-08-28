@@ -2531,6 +2531,7 @@ test("versioned article revision binds the latest version and stores the Mining 
         "Content-Type": "audio/mp4",
         "X-Article-Version-Id": "version_2",
         "X-Revision-Request-Id": "client_revision_1",
+        "X-Revision-Feedback-Id": "feedback_revision_1",
         "X-Revision-Audio-Sha256": "sha256:audio_1",
       },
       body: "revision audio",
@@ -2550,17 +2551,18 @@ test("versioned article revision binds the latest version and stores the Mining 
   }, {
     parent_version_id: "version_2",
     continue_revision: { accepted: true, parent_version_id: "version_2" },
-    feedback: { action: "continue_revision" },
+    feedback: { id: "feedback_revision_1", version_id: "version_2", action: "continue_revision" },
     status: "queued",
     replayed: false,
   });
   assert.equal(state.requests.length, 1);
   assert.equal(state.requests[0].client_request_id, "client_revision_1");
+  assert.equal(state.requests[0].feedback_id, "feedback_revision_1");
   const contract = JSON.parse(String(putCalls[1].body));
   assert.deepEqual(Object.keys(contract), [
     "revisionId", "clientRequestId", "filename", "userId", "workspaceId", "recordingId",
     "articleId", "parentVersionId", "parentTitle", "parentContent", "transcriptKey",
-    "audioKey", "audioSha256", "createdAt",
+    "audioKey", "audioSha256", "feedbackId", "createdAt",
   ]);
 });
 
@@ -2695,9 +2697,21 @@ test("internal revision version creates one child and exact replay returns it", 
   const first = await worker.fetch(internalRevisionRequest(endpoint, versionBody), env, createExecutionContext());
   assert.equal(first.status, 201);
   const child = await first.json();
-  assert.deepEqual({ version_no: child.version_no, parent_version_id: child.parent_version_id, replayed: child.replayed }, {
-    version_no: 3, parent_version_id: "version_2", replayed: false,
+  assert.deepEqual(child.version, {
+    id: child.child_version_id,
+    version_no: 3,
+    parent_version_id: "version_2",
   });
+  assert.equal(child.replayed, false);
+  assert.deepEqual(state.versions[2].blocks, [{
+    block_id: "block_1",
+    kind: "paragraph",
+    order: 0,
+    text: "Revised body",
+    claim_ids: [],
+    image_ids: [],
+  }]);
+  assert.deepEqual(state.versionStates, [{ version_id: child.child_version_id, state: "content_frozen" }]);
 
   const replay = await worker.fetch(internalRevisionRequest(endpoint, { ...versionBody, body: versionBody.content }), env, createExecutionContext());
   assert.equal(replay.status, 200);
@@ -2843,7 +2857,11 @@ test("internal revision completion replays and WeChat failure preserves the pare
     revision_id: revisionId,
     parent_version_id: "version_2",
     continue_revision: { accepted: true, parent_version_id: "version_2" },
-    feedback: { action: "continue_revision" },
+    feedback: {
+      id: state.requests[0].feedback_id,
+      version_id: "version_2",
+      action: "continue_revision",
+    },
     status: "wechat_failed",
     replayed: true,
     revision_request_key: state.requests[0].request_key,
@@ -2854,6 +2872,16 @@ test("internal revision completion replays and WeChat failure preserves the pare
   assert.equal((await completed.json()).replayed, false);
   const completionReplay = await worker.fetch(internalRevisionRequest(statusEndpoint, { status: "completed" }), env, createExecutionContext());
   assert.deepEqual(await completionReplay.json(), {
+    revision_id: revisionId,
+    child_version_id: state.versions[2].id,
+    status: "completed",
+    replayed: true,
+  });
+  const delayedFailure = await worker.fetch(internalRevisionRequest(statusEndpoint, {
+    status: "wechat_failed",
+    error_message: "late timeout",
+  }), env, createExecutionContext());
+  assert.deepEqual(await delayedFailure.json(), {
     revision_id: revisionId,
     child_version_id: state.versions[2].id,
     status: "completed",
@@ -3595,6 +3623,7 @@ function articleRevisionState() {
     { id: "version_2", article_id: "article_1", recording_id: 81, version_no: 2, parent_version_id: "version_1", title: "Title 2", body: "Body 2", cover_json: "{}", cover_title_json: "[]", formatting_skill_id: null, formatting_skill_version: null },
   ];
   const requests = [];
+  const versionStates = [];
   const failures = { requestInsert: false, versionInsert: false };
   const hooks = { beforeProjectionUpdate: null };
   const db = {
@@ -3653,18 +3682,27 @@ function articleRevisionState() {
         return statement({ run: async (values) => {
           if (failures.versionInsert) throw new Error("D1 temporarily unavailable");
           const [id, userId, workspaceId, articleId, recordingId, versionNo, parentVersionId,
-            sourceJobId, sourceHash, title, body, coverJson, titleCandidatesJson, selectedTitle,
-            coverTitleJson, formattingSkillId, formattingSkillVersion, idempotencyKey, payloadHash, createdAt] = values;
+            sourceJobId, sourceHash, title, body, coverJson, blocksJson, titleCandidatesJson, selectedTitle,
+            coverTitleJson, formattingSkillId, formattingSkillVersion, contentHtmlHash,
+            idempotencyKey, payloadHash, createdAt] = values;
           if (versions.some(row => row.parent_version_id === parentVersionId)) throw new Error("UNIQUE child");
           versions.push({
             id, user_id: userId, workspace_id: workspaceId, article_id: articleId,
             recording_id: recordingId, version_no: versionNo, parent_version_id: parentVersionId,
             source_job_id: sourceJobId, source_hash: sourceHash, title, body, cover_json: coverJson,
+            blocks: JSON.parse(blocksJson),
             title_candidates_json: titleCandidatesJson, selected_title: selectedTitle,
             cover_title_json: coverTitleJson, formatting_skill_id: formattingSkillId,
-            formatting_skill_version: formattingSkillVersion, idempotency_key: idempotencyKey,
+            formatting_skill_version: formattingSkillVersion, content_html_hash: contentHtmlHash,
+            idempotency_key: idempotencyKey,
             payload_hash: payloadHash, created_at: createdAt,
           });
+          return { meta: { changes: 1 } };
+        } });
+      }
+      if (sql.includes("INSERT INTO editorial_version_states")) {
+        return statement({ run: async ([versionId, , , , , , ,]) => {
+          versionStates.push({ version_id: versionId, state: "content_frozen" });
           return { meta: { changes: 1 } };
         } });
       }
@@ -3672,7 +3710,7 @@ function articleRevisionState() {
         return statement({ run: async (values) => {
           if (failures.requestInsert) throw new Error("D1 temporarily unavailable");
           const [id, userId, workspaceId, articleId, recordingId, parentVersionId,
-            clientRequestId, payloadHash, audioSha256, audioKey, requestKey, transcriptKey,
+            feedbackId, clientRequestId, payloadHash, audioSha256, audioKey, requestKey, transcriptKey,
             status, createdAt, updatedAt] = values;
           if (requests.some(row => row.client_request_id === clientRequestId || row.parent_version_id === parentVersionId)) {
             throw new Error("UNIQUE constraint failed");
@@ -3680,6 +3718,7 @@ function articleRevisionState() {
           requests.push({
             id, user_id: userId, workspace_id: workspaceId, article_id: articleId,
             recording_id: recordingId, parent_version_id: parentVersionId,
+            feedback_id: feedbackId,
             client_request_id: clientRequestId, payload_hash: payloadHash, audio_sha256: audioSha256,
             audio_key: audioKey, request_key: requestKey, transcript_key: transcriptKey,
             status, child_version_id: null, error_message: null, created_at: createdAt, updated_at: updatedAt,
@@ -3726,6 +3765,7 @@ function articleRevisionState() {
     recording,
     versions,
     requests,
+    versionStates,
     failures,
     hooks,
     db,

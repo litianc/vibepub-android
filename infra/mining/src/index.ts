@@ -103,6 +103,7 @@ type RevisionRequest = {
   recordingId?: number;
   articleId?: string;
   parentVersionId?: string;
+  feedbackId?: string;
   parentTitle?: string;
   parentContent?: string;
   transcriptKey?: string;
@@ -113,7 +114,7 @@ type RevisionRequest = {
 
 type VersionedRevisionRequest = RevisionRequest & Required<Pick<RevisionRequest,
   "revisionId" | "clientRequestId" | "userId" | "workspaceId" | "recordingId" |
-  "articleId" | "parentVersionId" | "parentTitle" | "parentContent" |
+  "articleId" | "parentVersionId" | "feedbackId" | "parentTitle" | "parentContent" |
   "transcriptKey" | "audioSha256" | "createdAt"
 >>;
 
@@ -580,6 +581,7 @@ function requireVersionedRevisionRequest(request: RevisionRequest): VersionedRev
     recordingId,
     articleId: requiredStringField(record, "articleId"),
     parentVersionId: requiredStringField(record, "parentVersionId"),
+    feedbackId: requiredStringField(record, "feedbackId"),
     parentTitle: requiredStringField(record, "parentTitle"),
     parentContent: requiredStringField(record, "parentContent"),
     transcriptKey: requiredStringField(record, "transcriptKey"),
@@ -598,6 +600,7 @@ function versionedRevisionIdentity(request: VersionedRevisionRequest): Record<st
     recordingId: request.recordingId,
     articleId: request.articleId,
     parentVersionId: request.parentVersionId,
+    feedbackId: request.feedbackId,
     parentTitle: request.parentTitle,
     parentContent: request.parentContent,
     transcriptKey: request.transcriptKey,
@@ -900,6 +903,7 @@ async function processRevisionRequest(revisionRequestKey: string): Promise<void>
     recordingId: optionalNumberField(revisionRecord, "recordingId", "recording_id"),
     articleId: optionalStringField(revisionRecord, "articleId", "article_id"),
     parentVersionId: optionalStringField(revisionRecord, "parentVersionId", "parent_version_id"),
+    feedbackId: optionalStringField(revisionRecord, "feedbackId", "feedback_id"),
     parentTitle: optionalStringField(revisionRecord, "parentTitle", "parent_title"),
     parentContent: optionalStringField(revisionRecord, "parentContent", "parent_content"),
     transcriptKey: optionalStringField(revisionRecord, "transcriptKey", "transcript_key"),

@@ -14,7 +14,7 @@ Publishing/WritingAgent coordination.
 - `GET /api/recordings` - list the current user's recording statuses and display metadata; requires session auth.
 - `GET /api/recordings/:filename/article-feedback` - read the current Article Version, current choice, and append-only choice history; requires session auth.
 - `POST /api/recordings/:filename/article-feedback` - record `adopted` or `not_adopted` for the current Article Version; requires a verified session.
-- `POST /api/recordings/:filename/revisions` - queue an idempotent `continue_revision` request against the latest Article Version; accepts optional `X-Article-Version-Id`, `X-Revision-Request-Id`, and `X-Revision-Audio-Sha256` headers.
+- `POST /api/recordings/:filename/revisions` - queue an idempotent `continue_revision` request against the latest Article Version; accepts optional `X-Article-Version-Id`, `X-Revision-Request-Id`, `X-Revision-Feedback-Id`, and `X-Revision-Audio-Sha256` headers.
 - `POST /api/internal/v3/article-revisions/:revisionId/version` - create or replay the single child Article Version before WeChat publishing; requires `MINING_V3_HANDOFF_TOKEN`.
 - `POST /api/internal/v3/article-revisions/:revisionId/status` - persist `wechat_pending`, `completed`, or `wechat_failed`; requires `MINING_V3_HANDOFF_TOKEN`.
 - `PUT /api/internal/status` - update mining pipeline status; requires `MINING_SERVICE_TOKEN`.

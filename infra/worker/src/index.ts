@@ -1725,9 +1725,10 @@ async function createArticleRevision(
     body: string;
   }>(env, `SELECT r.id AS recording_id, v.id, v.article_id, v.version_no, v.title, v.body
     FROM recordings r
+    JOIN editorial_recording_scopes s ON s.recording_id = r.id AND s.user_id = r.user_id
     JOIN article_versions v ON v.recording_id = r.id
-      AND v.user_id = r.user_id AND v.workspace_id = r.workspace_id
-    WHERE r.user_id = ? AND r.workspace_id = ? AND r.filename = ?
+      AND v.user_id = r.user_id AND v.workspace_id = s.workspace_id
+    WHERE r.user_id = ? AND s.workspace_id = ? AND r.filename = ?
     ORDER BY v.version_no DESC LIMIT 1`, [auth.userId, auth.workspaceId, safeName]);
   if (!latest) return json({ error: "article_version_not_found" }, 409);
 
@@ -1740,17 +1741,23 @@ async function createArticleRevision(
   const audioSha256 = normalizeOptionalString(request.headers.get("X-Revision-Audio-Sha256"))
     || audioContentSha256;
   const existing = await articleRevisionRequestByClient(env, auth, clientRequestId);
+  const feedbackId = normalizeOptionalString(request.headers.get("X-Revision-Feedback-Id"))
+    || normalizeOptionalString(existing?.feedback_id)
+    || `feedback_${crypto.randomUUID()}`;
+  if (feedbackId.length > 200) return json({ error: "invalid_revision_feedback_id" }, 400);
   const requestedParentId = explicitParentId || String(existing?.parent_version_id || latest.id);
   const payloadHash = await sha256Hex(JSON.stringify({
     recording_id: latest.recording_id,
     parent_version_id: requestedParentId,
+    feedback_id: feedbackId,
     audio_sha256: audioSha256,
     audio_content_sha256: audioContentSha256,
   }));
   if (existing) {
-    if (Number(existing.recording_id) !== latest.recording_id ||
-        existing.parent_version_id !== requestedParentId || existing.payload_hash !== payloadHash ||
-        existing.audio_sha256 !== audioSha256) {
+    if (!articleRevisionRequestMatches(existing, {
+      recordingId: latest.recording_id, parentVersionId: requestedParentId,
+      feedbackId, payloadHash, audioSha256,
+    })) {
       return json({ error: "idempotency_conflict" }, 409);
     }
     if (existing.status === "queued" || existing.status === "wechat_failed") {
@@ -1782,7 +1789,8 @@ async function createArticleRevision(
   const row = {
     id: revisionId, user_id: auth.userId, workspace_id: auth.workspaceId,
     article_id: latest.article_id, recording_id: latest.recording_id,
-    parent_version_id: latest.id, client_request_id: clientRequestId, payload_hash: payloadHash,
+    parent_version_id: latest.id, feedback_id: feedbackId,
+    client_request_id: clientRequestId, payload_hash: payloadHash,
     audio_sha256: audioSha256, audio_key: audioKey, request_key: revisionRequestKey,
     transcript_key: transcriptKey, status: "queued", child_version_id: null,
     error_message: null, created_at: createdAt, updated_at: createdAt,
@@ -1790,19 +1798,22 @@ async function createArticleRevision(
   try {
     const inserted = await env.DB.prepare(`INSERT INTO article_revision_requests
       (id, user_id, workspace_id, article_id, recording_id, parent_version_id,
-       client_request_id, payload_hash, audio_sha256, audio_key, request_key, transcript_key,
+       feedback_id, client_request_id, payload_hash, audio_sha256, audio_key, request_key, transcript_key,
        status, created_at, updated_at)
-      SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+      SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
       WHERE NOT EXISTS (
         SELECT 1 FROM article_versions WHERE parent_version_id = ?
       )`)
       .bind(revisionId, auth.userId, auth.workspaceId, latest.article_id, latest.recording_id,
-        latest.id, clientRequestId, payloadHash, audioSha256, audioKey, revisionRequestKey,
+        latest.id, feedbackId, clientRequestId, payloadHash, audioSha256, audioKey, revisionRequestKey,
         transcriptKey, "queued", createdAt, createdAt, latest.id).run();
     if ((inserted.meta.changes ?? 0) === 0) return staleArticleVersionResponse();
   } catch {
     const raced = await articleRevisionRequestByClient(env, auth, clientRequestId);
-    if (raced && raced.payload_hash === payloadHash) return articleRevisionResponse(raced, true);
+    if (raced && articleRevisionRequestMatches(raced, {
+      recordingId: latest.recording_id, parentVersionId: requestedParentId,
+      feedbackId, payloadHash, audioSha256,
+    })) return articleRevisionResponse(raced, true);
     const owner = await articleRevisionRequestByParent(env, auth, latest.id);
     if (owner) return json({ error: "revision_parent_conflict" }, 409);
     return json({ error: "article_revision_write_unavailable" }, 503);
@@ -1819,6 +1830,17 @@ async function articleRevisionRequestByClient(env: Env, auth: AuthContext, clien
   return queryOne(env, `SELECT * FROM article_revision_requests
     WHERE user_id = ? AND workspace_id = ? AND client_request_id = ? LIMIT 1`,
   [auth.userId, auth.workspaceId, clientRequestId]);
+}
+
+function articleRevisionRequestMatches(
+  row: any,
+  identity: { recordingId: number; parentVersionId: string; feedbackId: string; payloadHash: string; audioSha256: string },
+): boolean {
+  return Number(row.recording_id) === identity.recordingId &&
+    row.parent_version_id === identity.parentVersionId &&
+    row.feedback_id === identity.feedbackId &&
+    row.payload_hash === identity.payloadHash &&
+    row.audio_sha256 === identity.audioSha256;
 }
 
 async function articleRevisionRequestByParent(env: Env, auth: AuthContext, parentVersionId: string): Promise<any | null> {
@@ -1868,6 +1890,7 @@ async function persistArticleRevisionArtifacts(
     transcriptKey: row.transcript_key,
     audioKey: row.audio_key,
     audioSha256: row.audio_sha256,
+    feedbackId: row.feedback_id,
     createdAt: row.created_at,
   };
   await env.FILES_BUCKET.put(String(row.request_key), JSON.stringify(contract, null, 2), {
@@ -1893,7 +1916,7 @@ function articleRevisionResponse(row: any, replayed: boolean): Response {
     revision_id: row.id,
     parent_version_id: row.parent_version_id,
     continue_revision: { accepted: true, parent_version_id: row.parent_version_id },
-    feedback: { action: "continue_revision" },
+    feedback: { id: row.feedback_id, version_id: row.parent_version_id, action: "continue_revision" },
     status: row.status,
     replayed,
     revision_request_key: row.request_key,
@@ -1936,7 +1959,7 @@ async function createArticleRevisionVersion(env: Env, revisionId: string, body: 
   }));
   const existingChild = await articleRevisionChild(env, request.parent_version_id);
   if (existingChild) {
-    if (existingChild.source_job_id !== revisionId || existingChild.payload_hash !== versionPayloadHash) {
+    if (!articleRevisionChildMatches(existingChild, revisionId, versionPayloadHash)) {
       return json({ error: "revision_version_conflict" }, 409);
     }
     await ensureArticleRevisionProjection(env, request, existingChild, title, content);
@@ -1954,6 +1977,15 @@ async function createArticleRevisionVersion(env: Env, revisionId: string, body: 
   const childId = `av_revision_${await sha256Hex(revisionId)}`;
   const createdAt = nowIso();
   const coverJson = cover === null ? String(request.parent_cover_json || "{}") : JSON.stringify(cover);
+  const blocksJson = JSON.stringify([{
+    block_id: "block_1",
+    kind: "paragraph",
+    order: 0,
+    text: content,
+    claim_ids: [],
+    image_ids: [],
+  }]);
+  const contentHtmlHash = `sha256:${await sha256Hex(content)}`;
   const child = {
     id: childId,
     version_no: Number(request.parent_version_no) + 1,
@@ -1967,13 +1999,18 @@ async function createArticleRevisionVersion(env: Env, revisionId: string, body: 
      title_candidates_json, selected_title, cover_title_json, claim_ledger_json,
      visual_plan_json, formatting_skill_id, formatting_skill_version, content_html_hash,
      html_warnings_json, generation_status, idempotency_key, payload_hash, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, 'revision', ?, ?, ?, ?, ?, '[]', ?, ?, ?, '[]', '[]',
-      ?, ?, NULL, '[]', 'frozen', ?, ?, ?)`)
+    VALUES (?, ?, ?, ?, ?, ?, ?, 'revision', ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', '[]',
+      ?, ?, ?, '[]', 'frozen', ?, ?, ?)`)
     .bind(childId, request.user_id, request.workspace_id, request.article_id, request.recording_id,
       child.version_no, request.parent_version_id, revisionId, request.audio_sha256, title, content,
-      coverJson, JSON.stringify([title]), title, String(request.parent_cover_title_json || "[]"),
+      coverJson, blocksJson, JSON.stringify([title]), title, String(request.parent_cover_title_json || "[]"),
       request.parent_formatting_skill_id, request.parent_formatting_skill_version,
-      `continue_revision:${revisionId}`, versionPayloadHash, createdAt);
+      contentHtmlHash, `continue_revision:${revisionId}`, versionPayloadHash, createdAt);
+  const stateInsert = env.DB.prepare(`INSERT INTO editorial_version_states
+    (version_id, user_id, workspace_id, article_id, recording_id, state, state_revision, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, 'content_frozen', 0, ?, ?)`)
+    .bind(childId, request.user_id, request.workspace_id, request.article_id,
+      request.recording_id, createdAt, createdAt);
   const requestUpdate = env.DB.prepare(`UPDATE article_revision_requests
     SET child_version_id = ?, status = 'wechat_pending', error_message = NULL, updated_at = ?
     WHERE id = ? AND child_version_id IS NULL`)
@@ -1981,14 +2018,17 @@ async function createArticleRevisionVersion(env: Env, revisionId: string, body: 
   const recordingUpdate = env.DB.prepare(`UPDATE recordings
     SET article_title = ?, article_content = ?, status = 'PROCESSING',
       processing_stage = 'PUBLISHING', error_message = NULL, updated_at = ?
-    WHERE id = ? AND user_id = ? AND workspace_id = ?`)
+    WHERE id = ? AND user_id = ? AND EXISTS (
+      SELECT 1 FROM editorial_recording_scopes s
+      WHERE s.recording_id = recordings.id AND s.user_id = recordings.user_id AND s.workspace_id = ?
+    )`)
     .bind(title, content, createdAt, request.recording_id, request.user_id, request.workspace_id);
   try {
-    await env.DB.batch([versionInsert, requestUpdate, recordingUpdate]);
+    await env.DB.batch([versionInsert, stateInsert, requestUpdate, recordingUpdate]);
   } catch {
     const raced = await articleRevisionChild(env, request.parent_version_id);
     if (!raced) return json({ error: "revision_version_write_unavailable" }, 503);
-    if (raced.source_job_id !== revisionId || raced.payload_hash !== versionPayloadHash) {
+    if (!articleRevisionChildMatches(raced, revisionId, versionPayloadHash)) {
       return json({ error: "revision_version_conflict" }, 409);
     }
     await ensureArticleRevisionProjection(env, request, raced, title, content);
@@ -2000,6 +2040,10 @@ async function createArticleRevisionVersion(env: Env, revisionId: string, body: 
 async function articleRevisionChild(env: Env, parentVersionId: string): Promise<any | null> {
   return queryOne(env, `SELECT id, version_no, parent_version_id, source_job_id, payload_hash
     FROM article_versions WHERE parent_version_id = ? LIMIT 1`, [parentVersionId]);
+}
+
+function articleRevisionChildMatches(child: any, revisionId: string, payloadHash: string): boolean {
+  return child.source_job_id === revisionId && child.payload_hash === payloadHash;
 }
 
 async function ensureArticleRevisionProjection(
@@ -2015,7 +2059,10 @@ async function ensureArticleRevisionProjection(
       SET child_version_id = ?, status = CASE WHEN status = 'queued' THEN 'wechat_pending' ELSE status END,
         updated_at = ? WHERE id = ?`).bind(child.id, now, request.id),
     env.DB.prepare(`UPDATE recordings SET article_title = ?, article_content = ?, updated_at = ?
-      WHERE id = ? AND user_id = ? AND workspace_id = ?
+      WHERE id = ? AND user_id = ? AND EXISTS (
+        SELECT 1 FROM editorial_recording_scopes s
+        WHERE s.recording_id = recordings.id AND s.user_id = recordings.user_id AND s.workspace_id = ?
+      )
         AND ? = (SELECT id FROM article_versions
           WHERE user_id = ? AND workspace_id = ? AND article_id = ? AND recording_id = ?
           ORDER BY version_no DESC LIMIT 1)`)
@@ -2029,6 +2076,11 @@ function articleRevisionVersionResponse(child: any, replayed: boolean, status: n
     child_version_id: child.id,
     version_no: Number(child.version_no),
     parent_version_id: child.parent_version_id,
+    version: {
+      id: child.id,
+      version_no: Number(child.version_no),
+      parent_version_id: child.parent_version_id,
+    },
     replayed,
   }, status);
 }
@@ -2043,6 +2095,14 @@ async function updateArticleRevisionStatus(env: Env, revisionId: string, body: a
   if (!row) return json({ error: "revision_not_found" }, 404);
   if (!row.child_version_id) return json({ error: "revision_version_required" }, 409);
   const normalizedError = status === "wechat_failed" ? errorMessage : null;
+  if (row.status === "completed" && status !== "completed") {
+    return json({
+      revision_id: row.id,
+      child_version_id: row.child_version_id,
+      status: row.status,
+      replayed: true,
+    });
+  }
   if (row.status === status && (row.error_message || null) === normalizedError) {
     return json({ revision_id: row.id, child_version_id: row.child_version_id, status, replayed: true });
   }

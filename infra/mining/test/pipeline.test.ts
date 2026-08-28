@@ -728,6 +728,7 @@ describe('VibePub Cloud Pipeline', () => {
       [revisionRequestKey, Buffer.from(JSON.stringify({
         revisionId: 'rev-versioned',
         clientRequestId: 'client-versioned',
+        feedbackId: 'feedback-versioned',
         filename: 'article.m4a',
         userId: 'usr_revision',
         workspaceId: 'ws_revision',
@@ -817,6 +818,7 @@ describe('VibePub Cloud Pipeline', () => {
     const request = {
       revisionId: 'rev-replay',
       clientRequestId: 'client-replay',
+      feedbackId: 'feedback-replay',
       filename: 'article.m4a',
       userId: 'usr_replay',
       workspaceId: 'ws_replay',
@@ -896,6 +898,7 @@ describe('VibePub Cloud Pipeline', () => {
     const transcriptKey = 'users/usr_stale/transcripts/article.json';
     const request = {
       revisionId: 'rev-stale', clientRequestId: 'client-stale', filename: 'article.m4a',
+      feedbackId: 'feedback-stale',
       userId: 'usr_stale', workspaceId: 'ws_stale', recordingId: 31, articleId: 'article_31',
       parentVersionId: 'av_old', parentTitle: '旧标题', parentContent: '<p>旧正文</p>',
       transcriptKey, audioKey: 'users/usr_stale/revision-requests/article/rev-stale.m4a',
@@ -939,6 +942,7 @@ describe('VibePub Cloud Pipeline', () => {
     const transcriptKey = 'users/usr_failure/transcripts/article.json';
     const request = {
       revisionId: 'rev-failure', clientRequestId: 'client-failure', filename: 'article.m4a',
+      feedbackId: 'feedback-failure',
       userId: 'usr_failure', workspaceId: 'ws_failure', recordingId: 32, articleId: 'article_32',
       parentVersionId: 'av_parent', parentTitle: '旧标题', parentContent: '<p>旧正文</p>',
       transcriptKey, audioKey: 'users/usr_failure/revision-requests/article/rev-failure.m4a',

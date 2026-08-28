@@ -19,12 +19,14 @@ data class ArticleRevisionSubmitResult(
 data class ArticleRevisionRequestIdentity(
     val articleVersionId: String,
     val requestId: String,
+    val feedbackId: String,
     val audioSha256: String,
 ) {
     val headers: Map<String, String>
         get() = mapOf(
             "X-Article-Version-Id" to articleVersionId,
             "X-Revision-Request-Id" to requestId,
+            "X-Revision-Feedback-Id" to feedbackId,
             "X-Revision-Audio-Sha256" to audioSha256,
         )
 }
@@ -51,6 +53,7 @@ fun createArticleRevisionRequestIdentity(
     return ArticleRevisionRequestIdentity(
         articleVersionId = parentVersionId.trim(),
         requestId = "revision:$requestDigest",
+        feedbackId = "feedback:$requestDigest",
         audioSha256 = audioSha256,
     )
 }

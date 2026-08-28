@@ -37,12 +37,14 @@ class ArticleRevisionApiTest {
 
         assertEquals("sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", first.audioSha256)
         assertEquals("revision:c9ace47ada2ec80d15f48bfe9d374a58248db3e236235b4e3d86ce6dcb3fb34d", first.requestId)
+        assertEquals("feedback:c9ace47ada2ec80d15f48bfe9d374a58248db3e236235b4e3d86ce6dcb3fb34d", first.feedbackId)
         assertEquals(first, retry)
         assertTrue(first.requestId.length <= 200)
         assertEquals(
             mapOf(
                 "X-Article-Version-Id" to "version_1",
                 "X-Revision-Request-Id" to first.requestId,
+                "X-Revision-Feedback-Id" to first.feedbackId,
                 "X-Revision-Audio-Sha256" to first.audioSha256,
             ),
             first.headers,
@@ -94,6 +96,7 @@ class ArticleRevisionApiTest {
 
         assertEquals("version_1", request.headers["x-article-version-id"])
         assertEquals("revision:c9ace47ada2ec80d15f48bfe9d374a58248db3e236235b4e3d86ce6dcb3fb34d", request.headers["x-revision-request-id"])
+        assertEquals("feedback:c9ace47ada2ec80d15f48bfe9d374a58248db3e236235b4e3d86ce6dcb3fb34d", request.headers["x-revision-feedback-id"])
         assertEquals("sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", request.headers["x-revision-audio-sha256"])
         assertEquals("version_1", result.parentVersionId)
     }

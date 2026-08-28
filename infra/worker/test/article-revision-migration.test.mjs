@@ -44,10 +44,10 @@ const articleFixture = `
 function requestInsert(id, clientRequestId, payloadHash) {
   return `INSERT INTO article_revision_requests
     (id, user_id, workspace_id, article_id, recording_id, parent_version_id,
-     client_request_id, payload_hash, audio_sha256, audio_key, request_key, transcript_key,
+     feedback_id, client_request_id, payload_hash, audio_sha256, audio_key, request_key, transcript_key,
      status, created_at, updated_at)
    VALUES ('${id}', 'usr_revision', 'ws_revision', 'article_revision', 81, 'version_1',
-     '${clientRequestId}', '${payloadHash}', 'sha256:audio', 'audio-key', 'request-key',
+     'feedback_${clientRequestId}', '${clientRequestId}', '${payloadHash}', 'sha256:audio', 'audio-key', 'request-key',
      'transcript-key', 'queued', '2026-08-29T00:00:01Z', '2026-08-29T00:00:01Z');`;
 }
 
