@@ -194,6 +194,27 @@ internal enum class ArticleRevisionIntent {
     ILLUSTRATION,
 }
 
+internal enum class ArticleRevisionVersionStatus {
+    LEGACY,
+    CHECKING,
+    CURRENT,
+    STALE,
+    UNAVAILABLE,
+}
+
+internal fun articleRevisionVersionStatus(
+    displayedVersionId: String,
+    serverVersionId: String,
+    serverVersionLoaded: Boolean,
+    serverVersionFailed: Boolean = false,
+): ArticleRevisionVersionStatus = when {
+    displayedVersionId.isBlank() -> ArticleRevisionVersionStatus.LEGACY
+    serverVersionFailed -> ArticleRevisionVersionStatus.UNAVAILABLE
+    !serverVersionLoaded -> ArticleRevisionVersionStatus.CHECKING
+    displayedVersionId == serverVersionId -> ArticleRevisionVersionStatus.CURRENT
+    else -> ArticleRevisionVersionStatus.STALE
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DetailScreen(
@@ -227,9 +248,40 @@ fun DetailScreen(
     var revisionElapsedMs by remember(filename) { mutableLongStateOf(0L) }
     var feedbackState by remember(userId, filename) { mutableStateOf<ArticleFeedbackState?>(null) }
     var feedbackLoading by remember(userId, filename) { mutableStateOf(false) }
+    var feedbackVersionLoaded by remember(userId, filename) { mutableStateOf(false) }
+    var feedbackVersionFailed by remember(userId, filename) { mutableStateOf(false) }
     var feedbackInProgress by remember(userId, filename) { mutableStateOf(false) }
     var feedbackMessage by remember(userId, filename) { mutableStateOf("") }
     val transcriptArticleVersionId = transcript.optTranscriptString("articleVersionId", "article_version_id")
+    val revisionVersionStatus = articleRevisionVersionStatus(
+        displayedVersionId = transcriptArticleVersionId,
+        serverVersionId = feedbackState?.currentVersion?.id.orEmpty(),
+        serverVersionLoaded = feedbackVersionLoaded,
+        serverVersionFailed = feedbackVersionFailed,
+    )
+
+    fun revisionVersionIsReady(): Boolean = when (revisionVersionStatus) {
+        ArticleRevisionVersionStatus.LEGACY,
+        ArticleRevisionVersionStatus.CURRENT,
+        -> true
+        ArticleRevisionVersionStatus.CHECKING -> {
+            revisionMessage = "正在确认当前文章版本，请稍等"
+            revisionUiState = ArticleRevisionUiState.FAILED
+            false
+        }
+        ArticleRevisionVersionStatus.STALE -> {
+            revisionMessage = "文章已有新版本，请刷新后再修改"
+            revisionUiState = ArticleRevisionUiState.FAILED
+            onRefresh()
+            false
+        }
+        ArticleRevisionVersionStatus.UNAVAILABLE -> {
+            revisionMessage = "无法确认当前文章版本，请刷新后重试"
+            revisionUiState = ArticleRevisionUiState.FAILED
+            onRefresh()
+            false
+        }
+    }
 
     fun submitArticleFeedback(action: ArticleFeedbackAction) {
         val version = feedbackState?.currentVersion ?: return
@@ -295,6 +347,7 @@ fun DetailScreen(
     }
 
     fun requestStartRevisionRecording(intent: ArticleRevisionIntent) {
+        if (!revisionVersionIsReady()) return
         pendingRevisionIntent = intent
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
             startRevisionRecording(intent)
@@ -315,16 +368,30 @@ fun DetailScreen(
             revisionUiState = ArticleRevisionUiState.FAILED
             return
         }
+        if (!revisionVersionIsReady()) {
+            recorded.file.delete()
+            return
+        }
 
         revisionUiState = ArticleRevisionUiState.UPLOADING
         revisionMessage = "正在提交修改要求..."
         coroutineScope.launch {
             runCatching {
-                ArticleRevisionApi.submitVoiceRevision(
-                    preferences = preferences,
-                    filename = currentRecording.filename,
-                    audioFile = recorded.file,
-                )
+                if (transcriptArticleVersionId.isBlank()) {
+                    ArticleRevisionApi.submitVoiceRevision(
+                        preferences = preferences,
+                        filename = currentRecording.filename,
+                        audioFile = recorded.file,
+                    )
+                } else {
+                    ArticleRevisionApi.submitVoiceRevision(
+                        preferences = preferences,
+                        effectiveUserId = userId,
+                        filename = currentRecording.filename,
+                        parentVersionId = transcriptArticleVersionId,
+                        audioFile = recorded.file,
+                    )
+                }
             }.onSuccess {
                 recorded.file.delete()
                 revisionUiState = ArticleRevisionUiState.QUEUED
@@ -365,9 +432,12 @@ fun DetailScreen(
     }
 
     LaunchedEffect(userId, filename, transcriptArticleVersionId, lastSyncAtMs) {
+        feedbackVersionLoaded = false
+        feedbackVersionFailed = false
         if (transcriptArticleVersionId.isBlank()) {
             feedbackState = null
             feedbackLoading = false
+            feedbackVersionLoaded = true
             feedbackMessage = ""
             return@LaunchedEffect
         }
@@ -376,10 +446,12 @@ fun DetailScreen(
             .onSuccess { confirmed ->
                 feedbackState = confirmed
                 feedbackMessage = ""
+                feedbackVersionLoaded = true
             }
             .onFailure { error ->
                 feedbackState = null
                 feedbackMessage = error.message ?: "无法读取当前选择，请刷新"
+                feedbackVersionFailed = true
             }
         feedbackLoading = false
     }
@@ -597,6 +669,7 @@ fun DetailScreen(
             }
             ArticleRevisionCard(
                 enabled = articleContentIsGenerated,
+                versionStatus = revisionVersionStatus,
                 state = revisionUiState,
                 intent = revisionIntent,
                 message = revisionMessage,
@@ -1214,8 +1287,9 @@ private fun ArticleReviewItemRow(item: ArticleReviewItem) {
 }
 
 @Composable
-private fun ArticleRevisionCard(
+internal fun ArticleRevisionCard(
     enabled: Boolean,
+    versionStatus: ArticleRevisionVersionStatus,
     state: ArticleRevisionUiState,
     intent: ArticleRevisionIntent,
     message: String,
@@ -1226,6 +1300,8 @@ private fun ArticleRevisionCard(
     onRefresh: () -> Unit,
 ) {
     val active = state == ArticleRevisionUiState.RECORDING || state == ArticleRevisionUiState.UPLOADING
+    val versionAllowsRevision = versionStatus == ArticleRevisionVersionStatus.LEGACY ||
+        versionStatus == ArticleRevisionVersionStatus.CURRENT
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -1263,11 +1339,16 @@ private fun ArticleRevisionCard(
                 }
             }
 
-            val helper = message.ifBlank {
-                if (enabled) {
-                    "提交后会更新这篇文章和原公众号草稿。"
-                } else {
-                    "文章生成后可用语音继续修改。"
+            val helper = when (versionStatus) {
+                ArticleRevisionVersionStatus.STALE -> "文章已有新版本，请刷新后再修改"
+                ArticleRevisionVersionStatus.CHECKING -> "正在确认当前文章版本，请稍等"
+                ArticleRevisionVersionStatus.UNAVAILABLE -> "无法确认当前文章版本，请刷新后重试"
+                else -> message.ifBlank {
+                    if (enabled) {
+                        "提交后会更新这篇文章和原公众号草稿。"
+                    } else {
+                        "文章生成后可用语音继续修改。"
+                    }
                 }
             }
             Text(
@@ -1312,31 +1393,47 @@ private fun ArticleRevisionCard(
                 }
                 ArticleRevisionUiState.FAILED,
                 ArticleRevisionUiState.IDLE -> {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    if (
+                        versionStatus == ArticleRevisionVersionStatus.STALE ||
+                        versionStatus == ArticleRevisionVersionStatus.UNAVAILABLE
                     ) {
                         Button(
-                            onClick = onStartEdit,
-                            enabled = enabled,
+                            onClick = onRefresh,
                             modifier = Modifier
-                                .weight(1f)
-                                .testTag("StartArticleRevisionButton"),
+                                .fillMaxWidth()
+                                .testTag("RefreshStaleArticleRevisionButton"),
                         ) {
-                            Icon(Icons.Default.Mic, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
                             Spacer(modifier = Modifier.width(6.dp))
-                            Text("说话修改")
+                            Text("刷新文章")
                         }
-                        OutlinedButton(
-                            onClick = onStartIllustration,
-                            enabled = enabled,
-                            modifier = Modifier
-                                .weight(1f)
-                                .testTag("StartArticleImageRevisionButton"),
+                    } else {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
-                            Icon(Icons.Default.Description, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("生成插图")
+                            Button(
+                                onClick = onStartEdit,
+                                enabled = enabled && versionAllowsRevision,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("StartArticleRevisionButton"),
+                            ) {
+                                Icon(Icons.Default.Mic, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("说话修改")
+                            }
+                            OutlinedButton(
+                                onClick = onStartIllustration,
+                                enabled = enabled && versionAllowsRevision,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("StartArticleImageRevisionButton"),
+                            ) {
+                                Icon(Icons.Default.Description, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("生成插图")
+                            }
                         }
                     }
                 }
