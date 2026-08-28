@@ -152,7 +152,7 @@ type ArticleFeedbackIdentity = {
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-  "Access-Control-Allow-Headers": "Authorization, Content-Type, X-File-Name, X-Files-Token, X-Style-Profile-Id, X-Style-Profile-Version, X-Style-Profile-Name-B64, X-Style-Profile-Description-B64, X-Style-Profile-Body-B64, X-Layout-Profile-Id, X-Layout-Profile-Version",
+  "Access-Control-Allow-Headers": "Authorization, Content-Type, X-File-Name, X-Files-Token, X-Style-Profile-Id, X-Style-Profile-Version, X-Style-Profile-Name-B64, X-Style-Profile-Description-B64, X-Style-Profile-Body-B64, X-Layout-Profile-Id, X-Layout-Profile-Version, X-Article-Version-Id, X-Revision-Request-Id, X-Revision-Audio-Sha256",
 };
 
 const MAX_INLINE_STYLE_PROFILE_BODY_CHARS = 3_000;
@@ -246,6 +246,21 @@ export default {
         return json({ error: "unauthorized" }, 401);
       }
       return handleMiningV3HandoffInternalRoute(request, env, url);
+    }
+
+    const articleRevisionInternalMatch = url.pathname.match(
+      /^\/api\/internal\/v3\/article-revisions\/([^/]+)\/(version|status)$/,
+    );
+    if (request.method === "POST" && articleRevisionInternalMatch) {
+      if (!(await isMiningV3HandoffAuthorized(request, env))) {
+        return json({ error: "unauthorized" }, 401);
+      }
+      return handleArticleRevisionInternal(
+        request,
+        env,
+        safeDecodeURIComponent(articleRevisionInternalMatch[1]),
+        articleRevisionInternalMatch[2] as "version" | "status",
+      );
     }
 
     if (!url.pathname.startsWith("/api/")) {
@@ -1701,6 +1716,55 @@ async function createArticleRevision(
     return json({ error: "missing_filename" }, 400);
   }
 
+  const latest = await queryOne<{
+    recording_id: number;
+    id: string;
+    article_id: string;
+    version_no: number;
+    title: string;
+    body: string;
+  }>(env, `SELECT r.id AS recording_id, v.id, v.article_id, v.version_no, v.title, v.body
+    FROM recordings r
+    JOIN article_versions v ON v.recording_id = r.id
+      AND v.user_id = r.user_id AND v.workspace_id = r.workspace_id
+    WHERE r.user_id = ? AND r.workspace_id = ? AND r.filename = ?
+    ORDER BY v.version_no DESC LIMIT 1`, [auth.userId, auth.workspaceId, safeName]);
+  if (!latest) return json({ error: "article_version_not_found" }, 409);
+
+  const explicitParentId = normalizeOptionalString(request.headers.get("X-Article-Version-Id"));
+  const clientRequestId = normalizeOptionalString(request.headers.get("X-Revision-Request-Id")) || `legacy_${crypto.randomUUID()}`;
+  if (clientRequestId.length > 200) return json({ error: "invalid_revision_request_id" }, 400);
+
+  const audioBytes = new Uint8Array(await request.arrayBuffer());
+  const audioContentSha256 = `sha256:${await sha256Bytes(audioBytes)}`;
+  const audioSha256 = normalizeOptionalString(request.headers.get("X-Revision-Audio-Sha256"))
+    || audioContentSha256;
+  const existing = await articleRevisionRequestByClient(env, auth, clientRequestId);
+  const requestedParentId = explicitParentId || String(existing?.parent_version_id || latest.id);
+  const payloadHash = await sha256Hex(JSON.stringify({
+    recording_id: latest.recording_id,
+    parent_version_id: requestedParentId,
+    audio_sha256: audioSha256,
+    audio_content_sha256: audioContentSha256,
+  }));
+  if (existing) {
+    if (Number(existing.recording_id) !== latest.recording_id ||
+        existing.parent_version_id !== requestedParentId || existing.payload_hash !== payloadHash ||
+        existing.audio_sha256 !== audioSha256) {
+      return json({ error: "idempotency_conflict" }, 409);
+    }
+    if (existing.status === "queued" || existing.status === "wechat_failed") {
+      const replayParent = existing.parent_version_id === latest.id
+        ? latest
+        : await articleRevisionParent(env, auth, latest.recording_id, String(existing.parent_version_id));
+      if (!replayParent) return json({ error: "revision_parent_not_found" }, 409);
+      await persistArticleRevisionArtifacts(env, auth, safeName, replayParent, existing, audioBytes, request.headers.get("content-type"));
+      dispatchArticleRevision(ctx, env, auth.userId, safeName, String(existing.request_key));
+    }
+    return articleRevisionResponse(existing, true);
+  }
+  if (requestedParentId !== latest.id) return staleArticleVersionResponse();
+
   const transcriptKey = userScopedKey(auth.userId, "transcripts", safeName.replace(/\.[^/.]+$/, ".json"));
   const transcriptObject = await env.FILES_BUCKET.get(transcriptKey);
   if (!transcriptObject) {
@@ -1710,63 +1774,282 @@ async function createArticleRevision(
     }, 409);
   }
 
-  const revisionId = crypto.randomUUID();
+  const revisionId = `revision_${crypto.randomUUID()}`;
   const createdAt = new Date().toISOString();
   const baseName = safeName.replace(/\.[^/.]+$/, "");
   const audioKey = userScopedKey(auth.userId, "revision-requests", `${baseName}/${revisionId}.m4a`);
   const revisionRequestKey = userScopedKey(auth.userId, "revision-requests", `${baseName}/${revisionId}.json`);
-  const contentType = request.headers.get("content-type") || "audio/mp4";
+  const row = {
+    id: revisionId, user_id: auth.userId, workspace_id: auth.workspaceId,
+    article_id: latest.article_id, recording_id: latest.recording_id,
+    parent_version_id: latest.id, client_request_id: clientRequestId, payload_hash: payloadHash,
+    audio_sha256: audioSha256, audio_key: audioKey, request_key: revisionRequestKey,
+    transcript_key: transcriptKey, status: "queued", child_version_id: null,
+    error_message: null, created_at: createdAt, updated_at: createdAt,
+  };
+  try {
+    const inserted = await env.DB.prepare(`INSERT INTO article_revision_requests
+      (id, user_id, workspace_id, article_id, recording_id, parent_version_id,
+       client_request_id, payload_hash, audio_sha256, audio_key, request_key, transcript_key,
+       status, created_at, updated_at)
+      SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+      WHERE NOT EXISTS (
+        SELECT 1 FROM article_versions WHERE parent_version_id = ?
+      )`)
+      .bind(revisionId, auth.userId, auth.workspaceId, latest.article_id, latest.recording_id,
+        latest.id, clientRequestId, payloadHash, audioSha256, audioKey, revisionRequestKey,
+        transcriptKey, "queued", createdAt, createdAt, latest.id).run();
+    if ((inserted.meta.changes ?? 0) === 0) return staleArticleVersionResponse();
+  } catch {
+    const raced = await articleRevisionRequestByClient(env, auth, clientRequestId);
+    if (raced && raced.payload_hash === payloadHash) return articleRevisionResponse(raced, true);
+    const owner = await articleRevisionRequestByParent(env, auth, latest.id);
+    if (owner) return json({ error: "revision_parent_conflict" }, 409);
+    return json({ error: "article_revision_write_unavailable" }, 503);
+  }
 
-  await env.FILES_BUCKET.put(audioKey, request.body, {
-    httpMetadata: { contentType },
-    customMetadata: {
-      filename: safeName,
-      revisionId,
-      userId: auth.userId,
-      workspaceId: auth.workspaceId,
-      createdAt,
-    },
-  });
-
-  await env.FILES_BUCKET.put(
-    revisionRequestKey,
-    JSON.stringify({
-      revisionId,
-      filename: safeName,
-      userId: auth.userId,
-      workspaceId: auth.workspaceId,
-      transcriptKey,
-      audioKey,
-      createdAt,
-    }, null, 2),
-    {
-      httpMetadata: { contentType: "application/json; charset=utf-8" },
-      customMetadata: {
-        filename: safeName,
-        revisionId,
-        userId: auth.userId,
-        workspaceId: auth.workspaceId,
-        createdAt,
-      },
-    },
-  );
+  await persistArticleRevisionArtifacts(env, auth, safeName, latest, row, audioBytes, request.headers.get("content-type"));
 
   await markRecordingRevisionQueued(env, auth.userId, safeName);
+  dispatchArticleRevision(ctx, env, auth.userId, safeName, revisionRequestKey);
+  return articleRevisionResponse(row, false);
+}
 
-  ctx.waitUntil(triggerGitHubAction(env, {
-    targetFilename: safeName,
+async function articleRevisionRequestByClient(env: Env, auth: AuthContext, clientRequestId: string): Promise<any | null> {
+  return queryOne(env, `SELECT * FROM article_revision_requests
+    WHERE user_id = ? AND workspace_id = ? AND client_request_id = ? LIMIT 1`,
+  [auth.userId, auth.workspaceId, clientRequestId]);
+}
+
+async function articleRevisionRequestByParent(env: Env, auth: AuthContext, parentVersionId: string): Promise<any | null> {
+  return queryOne(env, `SELECT * FROM article_revision_requests
+    WHERE user_id = ? AND workspace_id = ? AND parent_version_id = ? LIMIT 1`,
+  [auth.userId, auth.workspaceId, parentVersionId]);
+}
+
+async function articleRevisionParent(
+  env: Env,
+  auth: AuthContext,
+  recordingId: number,
+  parentVersionId: string,
+): Promise<any | null> {
+  return queryOne(env, `SELECT id, article_id, recording_id, version_no, title, body
+    FROM article_versions WHERE id = ? AND user_id = ? AND workspace_id = ? AND recording_id = ? LIMIT 1`,
+  [parentVersionId, auth.userId, auth.workspaceId, recordingId]);
+}
+
+async function persistArticleRevisionArtifacts(
+  env: Env,
+  auth: AuthContext,
+  filename: string,
+  parent: { id: string; article_id: string; recording_id: number; title: string; body: string },
+  row: any,
+  audioBytes: Uint8Array,
+  contentType: string | null,
+): Promise<void> {
+  const metadata = {
+    filename, revisionId: String(row.id), userId: auth.userId,
+    workspaceId: auth.workspaceId, createdAt: String(row.created_at),
+  };
+  await env.FILES_BUCKET.put(String(row.audio_key), audioBytes, {
+    httpMetadata: { contentType: contentType || "audio/mp4" }, customMetadata: metadata,
+  });
+  const contract = {
+    revisionId: row.id,
+    clientRequestId: row.client_request_id,
+    filename,
     userId: auth.userId,
-    revisionRequestKey,
-  }).catch((e) => {
-    console.error("Failed to trigger GitHub Action for article revision:", e);
-  }));
+    workspaceId: auth.workspaceId,
+    recordingId: parent.recording_id,
+    articleId: parent.article_id,
+    parentVersionId: parent.id,
+    parentTitle: parent.title,
+    parentContent: parent.body,
+    transcriptKey: row.transcript_key,
+    audioKey: row.audio_key,
+    audioSha256: row.audio_sha256,
+    createdAt: row.created_at,
+  };
+  await env.FILES_BUCKET.put(String(row.request_key), JSON.stringify(contract, null, 2), {
+    httpMetadata: { contentType: "application/json; charset=utf-8" }, customMetadata: metadata,
+  });
+}
 
+function dispatchArticleRevision(
+  ctx: ExecutionContext,
+  env: Env,
+  userId: string,
+  filename: string,
+  revisionRequestKey: string,
+): void {
+  ctx.waitUntil(triggerGitHubAction(env, {
+    targetFilename: filename, userId, revisionRequestKey,
+  }).catch((error) => console.error("Failed to trigger GitHub Action for article revision:", error)));
+}
+
+function articleRevisionResponse(row: any, replayed: boolean): Response {
   return json({
     ok: true,
-    status: "QUEUED",
-    revision_id: revisionId,
-    revision_request_key: revisionRequestKey,
+    revision_id: row.id,
+    parent_version_id: row.parent_version_id,
+    continue_revision: { accepted: true, parent_version_id: row.parent_version_id },
+    feedback: { action: "continue_revision" },
+    status: row.status,
+    replayed,
+    revision_request_key: row.request_key,
   }, 202);
+}
+
+async function handleArticleRevisionInternal(
+  request: Request,
+  env: Env,
+  revisionId: string,
+  action: "version" | "status",
+): Promise<Response> {
+  const body = await parseJson(request);
+  return action === "version"
+    ? createArticleRevisionVersion(env, revisionId, body)
+    : updateArticleRevisionStatus(env, revisionId, body);
+}
+
+async function createArticleRevisionVersion(env: Env, revisionId: string, body: any): Promise<Response> {
+  const title = normalizeOptionalString(body?.title);
+  const content = normalizeOptionalString(body?.body ?? body?.content);
+  if (!title || !content) return json({ error: "invalid_revision_version" }, 400);
+
+  const request = await queryOne<any>(env, `SELECT rr.*,
+      p.version_no AS parent_version_no, p.title AS parent_title, p.body AS parent_body,
+      p.cover_json AS parent_cover_json, p.cover_title_json AS parent_cover_title_json,
+      p.formatting_skill_id AS parent_formatting_skill_id,
+      p.formatting_skill_version AS parent_formatting_skill_version
+    FROM article_revision_requests rr
+    JOIN article_versions p ON p.id = rr.parent_version_id
+      AND p.user_id = rr.user_id AND p.workspace_id = rr.workspace_id
+      AND p.article_id = rr.article_id AND p.recording_id = rr.recording_id
+    WHERE rr.id = ? LIMIT 1`, [revisionId]);
+  if (!request) return json({ error: "revision_not_found" }, 404);
+
+  const cover = body?.cover ?? body?.cover_metadata ?? null;
+  const preparedArtifactKey = normalizeOptionalString(body?.prepared_artifact_key ?? body?.preparedArtifactKey);
+  const versionPayloadHash = await sha256Hex(JSON.stringify({
+    title, body: content, cover, prepared_artifact_key: preparedArtifactKey,
+  }));
+  const existingChild = await articleRevisionChild(env, request.parent_version_id);
+  if (existingChild) {
+    if (existingChild.source_job_id !== revisionId || existingChild.payload_hash !== versionPayloadHash) {
+      return json({ error: "revision_version_conflict" }, 409);
+    }
+    await ensureArticleRevisionProjection(env, request, existingChild, title, content);
+    return articleRevisionVersionResponse(existingChild, true, 200);
+  }
+
+  const latest = await queryOne<{ id: string }>(env, `SELECT id FROM article_versions
+    WHERE user_id = ? AND workspace_id = ? AND article_id = ? AND recording_id = ?
+    ORDER BY version_no DESC LIMIT 1`,
+  [request.user_id, request.workspace_id, request.article_id, request.recording_id]);
+  if (!latest || latest.id !== request.parent_version_id) {
+    return json({ error: "stale_article_version" }, 409);
+  }
+
+  const childId = `av_revision_${await sha256Hex(revisionId)}`;
+  const createdAt = nowIso();
+  const coverJson = cover === null ? String(request.parent_cover_json || "{}") : JSON.stringify(cover);
+  const child = {
+    id: childId,
+    version_no: Number(request.parent_version_no) + 1,
+    parent_version_id: request.parent_version_id,
+    source_job_id: revisionId,
+    payload_hash: versionPayloadHash,
+  };
+  const versionInsert = env.DB.prepare(`INSERT INTO article_versions
+    (id, user_id, workspace_id, article_id, recording_id, version_no, parent_version_id,
+     source, source_job_id, source_hash, title, body, cover_json, blocks_json,
+     title_candidates_json, selected_title, cover_title_json, claim_ledger_json,
+     visual_plan_json, formatting_skill_id, formatting_skill_version, content_html_hash,
+     html_warnings_json, generation_status, idempotency_key, payload_hash, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, 'revision', ?, ?, ?, ?, ?, '[]', ?, ?, ?, '[]', '[]',
+      ?, ?, NULL, '[]', 'frozen', ?, ?, ?)`)
+    .bind(childId, request.user_id, request.workspace_id, request.article_id, request.recording_id,
+      child.version_no, request.parent_version_id, revisionId, request.audio_sha256, title, content,
+      coverJson, JSON.stringify([title]), title, String(request.parent_cover_title_json || "[]"),
+      request.parent_formatting_skill_id, request.parent_formatting_skill_version,
+      `continue_revision:${revisionId}`, versionPayloadHash, createdAt);
+  const requestUpdate = env.DB.prepare(`UPDATE article_revision_requests
+    SET child_version_id = ?, status = 'wechat_pending', error_message = NULL, updated_at = ?
+    WHERE id = ? AND child_version_id IS NULL`)
+    .bind(childId, createdAt, revisionId);
+  const recordingUpdate = env.DB.prepare(`UPDATE recordings
+    SET article_title = ?, article_content = ?, status = 'PROCESSING',
+      processing_stage = 'PUBLISHING', error_message = NULL, updated_at = ?
+    WHERE id = ? AND user_id = ? AND workspace_id = ?`)
+    .bind(title, content, createdAt, request.recording_id, request.user_id, request.workspace_id);
+  try {
+    await env.DB.batch([versionInsert, requestUpdate, recordingUpdate]);
+  } catch {
+    const raced = await articleRevisionChild(env, request.parent_version_id);
+    if (!raced) return json({ error: "revision_version_write_unavailable" }, 503);
+    if (raced.source_job_id !== revisionId || raced.payload_hash !== versionPayloadHash) {
+      return json({ error: "revision_version_conflict" }, 409);
+    }
+    await ensureArticleRevisionProjection(env, request, raced, title, content);
+    return articleRevisionVersionResponse(raced, true, 200);
+  }
+  return articleRevisionVersionResponse(child, false, 201);
+}
+
+async function articleRevisionChild(env: Env, parentVersionId: string): Promise<any | null> {
+  return queryOne(env, `SELECT id, version_no, parent_version_id, source_job_id, payload_hash
+    FROM article_versions WHERE parent_version_id = ? LIMIT 1`, [parentVersionId]);
+}
+
+async function ensureArticleRevisionProjection(
+  env: Env,
+  request: any,
+  child: any,
+  title: string,
+  content: string,
+): Promise<void> {
+  const now = nowIso();
+  await env.DB.batch([
+    env.DB.prepare(`UPDATE article_revision_requests
+      SET child_version_id = ?, status = CASE WHEN status = 'queued' THEN 'wechat_pending' ELSE status END,
+        updated_at = ? WHERE id = ?`).bind(child.id, now, request.id),
+    env.DB.prepare(`UPDATE recordings SET article_title = ?, article_content = ?, updated_at = ?
+      WHERE id = ? AND user_id = ? AND workspace_id = ?
+        AND ? = (SELECT id FROM article_versions
+          WHERE user_id = ? AND workspace_id = ? AND article_id = ? AND recording_id = ?
+          ORDER BY version_no DESC LIMIT 1)`)
+      .bind(title, content, now, request.recording_id, request.user_id, request.workspace_id,
+        child.id, request.user_id, request.workspace_id, request.article_id, request.recording_id),
+  ]);
+}
+
+function articleRevisionVersionResponse(child: any, replayed: boolean, status: number): Response {
+  return json({
+    child_version_id: child.id,
+    version_no: Number(child.version_no),
+    parent_version_id: child.parent_version_id,
+    replayed,
+  }, status);
+}
+
+async function updateArticleRevisionStatus(env: Env, revisionId: string, body: any): Promise<Response> {
+  const status = normalizeOptionalString(body?.status);
+  if (status !== "wechat_pending" && status !== "completed" && status !== "wechat_failed") {
+    return json({ error: "invalid_revision_status" }, 400);
+  }
+  const errorMessage = normalizeOptionalString(body?.error_message ?? body?.errorMessage);
+  const row = await queryOne<any>(env, `SELECT * FROM article_revision_requests WHERE id = ? LIMIT 1`, [revisionId]);
+  if (!row) return json({ error: "revision_not_found" }, 404);
+  if (!row.child_version_id) return json({ error: "revision_version_required" }, 409);
+  const normalizedError = status === "wechat_failed" ? errorMessage : null;
+  if (row.status === status && (row.error_message || null) === normalizedError) {
+    return json({ revision_id: row.id, child_version_id: row.child_version_id, status, replayed: true });
+  }
+  await env.DB.prepare(`UPDATE article_revision_requests
+    SET status = ?, error_message = ?, updated_at = ? WHERE id = ?`)
+    .bind(status, normalizedError, nowIso(), revisionId).run();
+  return json({ revision_id: row.id, child_version_id: row.child_version_id, status, replayed: false });
 }
 
 async function markRecordingRevisionQueued(env: Env, userId: string, filename: string): Promise<void> {
@@ -2893,7 +3176,11 @@ async function queryOne<T = unknown>(env: Env, sql: string, values: unknown[] = 
 }
 
 async function sha256Hex(value: string): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return sha256Bytes(new TextEncoder().encode(value));
+}
+
+async function sha256Bytes(value: BufferSource): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", value);
   return Array.from(new Uint8Array(digest))
     .map((byte) => byte.toString(16).padStart(2, "0"))
     .join("");

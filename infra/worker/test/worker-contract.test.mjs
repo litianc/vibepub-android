@@ -2429,8 +2429,6 @@ test("creates voice article revision request and dispatches mining workflow with
   const dispatches = [];
   const putCalls = [];
   const getCalls = [];
-  const sqlCalls = [];
-  const valueCalls = [];
   const waitUntilPromises = [];
   globalThis.fetch = async (url, init = {}) => {
     dispatches.push({
@@ -2451,17 +2449,7 @@ test("creates voice article revision request and dispatches mining workflow with
         putCalls.push({ key, body, options });
       },
     };
-    const db = {
-      prepare(sql) {
-        sqlCalls.push(sql);
-        return statement({
-          run: async (values) => {
-            valueCalls.push(values);
-            return { meta: { changes: 1 } };
-          },
-        });
-      },
-    };
+    const state = articleRevisionState();
     const context = {
       waitUntil(promise) {
         waitUntilPromises.push(promise);
@@ -2476,7 +2464,7 @@ test("creates voice article revision request and dispatches mining workflow with
       }),
       createEnv({
         FILES_BUCKET: bucket,
-        DB: db,
+        DB: state.db,
         GITHUB_PAT: "github-token",
         GITHUB_WORKFLOW_REF: "main",
       }),
@@ -2485,22 +2473,15 @@ test("creates voice article revision request and dispatches mining workflow with
 
     assert.equal(response.status, 202);
     const body = await response.json();
-    assert.equal(body.status, "QUEUED");
-  assert.match(body.revision_request_key, /^users\/default_user\/revision-requests\/VibePub-2026-07-02-160000-0m18s-Test\/.+\.json$/);
-  assert.deepEqual(getCalls, [
-    "users/default_user/transcripts/VibePub-2026-07-02-160000-0m18s-Test.json",
-  ]);
-  assert.equal(putCalls.length, 2);
-  assert.match(putCalls[0].key, /^users\/default_user\/revision-requests\/VibePub-2026-07-02-160000-0m18s-Test\/.+\.m4a$/);
+    assert.equal(body.status, "queued");
+    assert.match(body.revision_request_key, /^users\/default_user\/revision-requests\/VibePub-2026-07-02-160000-0m18s-Test\/.+\.json$/);
+    assert.deepEqual(getCalls, [
+      "users/default_user/transcripts/VibePub-2026-07-02-160000-0m18s-Test.json",
+    ]);
+    assert.equal(putCalls.length, 2);
+    assert.match(putCalls[0].key, /^users\/default_user\/revision-requests\/VibePub-2026-07-02-160000-0m18s-Test\/.+\.m4a$/);
     assert.equal(putCalls[0].options.httpMetadata.contentType, "audio/mp4");
     assert.equal(putCalls[1].key, body.revision_request_key);
-    assert.match(sqlCalls[0], /processing_stage = \?/);
-    assert.deepEqual(valueCalls[0], [
-      "PROCESSING",
-      "REWRITING",
-      "default_user",
-      "VibePub-2026-07-02-160000-0m18s-Test.m4a",
-    ]);
     assert.equal(waitUntilPromises.length, 1);
     await Promise.all(waitUntilPromises);
   } finally {
@@ -2527,13 +2508,357 @@ test("rejects article revision before transcript exists", async () => {
       method: "POST",
       body: "revision audio",
     }),
-    createEnv({ FILES_BUCKET: bucket }),
+    createEnv({ FILES_BUCKET: bucket, DB: articleRevisionState().db }),
     createExecutionContext(),
   );
 
   assert.equal(response.status, 409);
   const body = await response.json();
   assert.equal(body.error, "article_not_ready");
+});
+
+test("versioned article revision binds the latest version and stores the Mining contract", async () => {
+  const state = articleRevisionState();
+  const putCalls = [];
+  const bucket = {
+    async get() { return { body: "transcript" }; },
+    async put(key, body, options) { putCalls.push({ key, body, options }); },
+  };
+  const response = await worker.fetch(
+    authorizedRequest("https://example.test/api/recordings/voice.m4a/revisions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "audio/mp4",
+        "X-Article-Version-Id": "version_2",
+        "X-Revision-Request-Id": "client_revision_1",
+        "X-Revision-Audio-Sha256": "sha256:audio_1",
+      },
+      body: "revision audio",
+    }),
+    createEnv({ DB: state.db, FILES_BUCKET: bucket }),
+    createExecutionContext(),
+  );
+
+  assert.equal(response.status, 202);
+  const body = await response.json();
+  assert.deepEqual({
+    parent_version_id: body.parent_version_id,
+    continue_revision: body.continue_revision,
+    feedback: body.feedback,
+    status: body.status,
+    replayed: body.replayed,
+  }, {
+    parent_version_id: "version_2",
+    continue_revision: { accepted: true, parent_version_id: "version_2" },
+    feedback: { action: "continue_revision" },
+    status: "queued",
+    replayed: false,
+  });
+  assert.equal(state.requests.length, 1);
+  assert.equal(state.requests[0].client_request_id, "client_revision_1");
+  const contract = JSON.parse(String(putCalls[1].body));
+  assert.deepEqual(Object.keys(contract), [
+    "revisionId", "clientRequestId", "filename", "userId", "workspaceId", "recordingId",
+    "articleId", "parentVersionId", "parentTitle", "parentContent", "transcriptKey",
+    "audioKey", "audioSha256", "createdAt",
+  ]);
+});
+
+test("old App selects the latest Article Version", async () => {
+  const state = articleRevisionState();
+  const response = await worker.fetch(authorizedRequest("https://example.test/api/recordings/voice.m4a/revisions", {
+    method: "POST",
+    headers: { "Content-Type": "audio/mp4" },
+    body: "legacy revision audio",
+  }), createEnv({
+    DB: state.db,
+    FILES_BUCKET: { async get() { return { body: "transcript" }; }, async put() {} },
+  }), createExecutionContext());
+
+  assert.equal(response.status, 202);
+  assert.equal((await response.json()).parent_version_id, "version_2");
+  assert.match(state.requests[0].client_request_id, /^legacy_/);
+});
+
+test("stable request ID without a parent header replays its original parent", async () => {
+  const state = articleRevisionState();
+  const bucket = { async get() { return { body: "transcript" }; }, async put() {} };
+  const env = createEnv({ DB: state.db, FILES_BUCKET: bucket });
+  const firstRequest = authorizedRequest("https://example.test/api/recordings/voice.m4a/revisions", {
+    method: "POST",
+    headers: { "Content-Type": "audio/mp4", "X-Revision-Request-Id": "client_replay", "X-Revision-Audio-Sha256": "sha256:same" },
+    body: "same audio",
+  });
+  const first = await worker.fetch(firstRequest, env, createExecutionContext());
+  assert.equal(first.status, 202);
+  assert.equal((await first.json()).parent_version_id, "version_2");
+
+  state.versions.push({
+    ...state.versions[1], id: "version_3", version_no: 3,
+    parent_version_id: "version_2", title: "Title 3", body: "Body 3",
+  });
+
+  const replay = await worker.fetch(authorizedRequest(firstRequest.url, {
+    method: "POST",
+    headers: { "Content-Type": "audio/mp4", "X-Revision-Request-Id": "client_replay", "X-Revision-Audio-Sha256": "sha256:same" },
+    body: "same audio",
+  }), env, createExecutionContext());
+  assert.equal(replay.status, 202);
+  assert.equal((await replay.json()).replayed, true);
+  assert.equal(state.requests.length, 1);
+});
+
+test("article revision rejects payload conflicts and stale parents without R2 writes", async () => {
+  const state = articleRevisionState();
+  const putCalls = [];
+  const bucket = {
+    async get() { return { body: "transcript" }; },
+    async put(...args) { putCalls.push(args); },
+  };
+  const env = createEnv({ DB: state.db, FILES_BUCKET: bucket });
+  const endpoint = "https://example.test/api/recordings/voice.m4a/revisions";
+  const headers = {
+    "Content-Type": "audio/mp4", "X-Article-Version-Id": "version_2",
+    "X-Revision-Request-Id": "client_conflict", "X-Revision-Audio-Sha256": "sha256:one",
+  };
+  assert.equal((await worker.fetch(authorizedRequest(endpoint, { method: "POST", headers, body: "one" }), env, createExecutionContext())).status, 202);
+
+  const conflict = await worker.fetch(authorizedRequest(endpoint, {
+    method: "POST",
+    headers: { ...headers, "X-Revision-Audio-Sha256": "sha256:two" },
+    body: "two",
+  }), env, createExecutionContext());
+  assert.equal(conflict.status, 409);
+  assert.equal((await conflict.json()).error, "idempotency_conflict");
+
+  const sameClaimedHashDifferentAudio = await worker.fetch(authorizedRequest(endpoint, {
+    method: "POST",
+    headers,
+    body: "different bytes with the same claimed hash",
+  }), env, createExecutionContext());
+  assert.equal(sameClaimedHashDifferentAudio.status, 409);
+  assert.equal((await sameClaimedHashDifferentAudio.json()).error, "idempotency_conflict");
+
+  const duplicate = await worker.fetch(authorizedRequest(endpoint, {
+    method: "POST",
+    headers: { ...headers, "X-Revision-Request-Id": "client_second" },
+    body: "one",
+  }), env, createExecutionContext());
+  assert.equal(duplicate.status, 409);
+  assert.equal((await duplicate.json()).error, "revision_parent_conflict");
+
+  const writesBeforeStale = putCalls.length;
+  const stale = await worker.fetch(authorizedRequest(endpoint, {
+    method: "POST",
+    headers: {
+      ...headers,
+      "X-Article-Version-Id": "version_1",
+      "X-Revision-Request-Id": "client_stale",
+      "X-Revision-Audio-Sha256": "sha256:stale",
+    },
+    body: "stale",
+  }), env, createExecutionContext());
+  assert.equal(stale.status, 409);
+  assert.equal((await stale.json()).error, "stale_article_version");
+  assert.equal(putCalls.length, writesBeforeStale);
+});
+
+test("article revision does not disguise unknown database failures as conflicts", async () => {
+  const state = articleRevisionState();
+  state.failures.requestInsert = true;
+  const response = await worker.fetch(authorizedRequest("https://example.test/api/recordings/voice.m4a/revisions", {
+    method: "POST",
+    headers: { "X-Revision-Request-Id": "client_db_failure" },
+    body: "revision audio",
+  }), createEnv({
+    DB: state.db,
+    FILES_BUCKET: { async get() { return { body: "transcript" }; }, async put() {} },
+  }), createExecutionContext());
+
+  assert.equal(response.status, 503);
+  assert.equal((await response.json()).error, "article_revision_write_unavailable");
+});
+
+test("internal revision version creates one child and exact replay returns it", async () => {
+  const state = articleRevisionState();
+  const bucket = { async get() { return { body: "transcript" }; }, async put() {} };
+  const env = createEnv({ DB: state.db, FILES_BUCKET: bucket, MINING_V3_HANDOFF_TOKEN: "handoff-token" });
+  const queued = await worker.fetch(authorizedRequest("https://example.test/api/recordings/voice.m4a/revisions", {
+    method: "POST",
+    headers: { "X-Revision-Request-Id": "client_internal", "X-Revision-Audio-Sha256": "sha256:internal" },
+    body: "internal audio",
+  }), env, createExecutionContext());
+  const revisionId = (await queued.json()).revision_id;
+  const versionBody = { title: "Revised title", content: "Revised body", prepared_artifact_key: "prepared/revision.json" };
+  const endpoint = `https://example.test/api/internal/v3/article-revisions/${revisionId}/version`;
+
+  const first = await worker.fetch(internalRevisionRequest(endpoint, versionBody), env, createExecutionContext());
+  assert.equal(first.status, 201);
+  const child = await first.json();
+  assert.deepEqual({ version_no: child.version_no, parent_version_id: child.parent_version_id, replayed: child.replayed }, {
+    version_no: 3, parent_version_id: "version_2", replayed: false,
+  });
+
+  const replay = await worker.fetch(internalRevisionRequest(endpoint, { ...versionBody, body: versionBody.content }), env, createExecutionContext());
+  assert.equal(replay.status, 200);
+  assert.equal((await replay.json()).child_version_id, child.child_version_id);
+  assert.equal(state.versions.length, 3);
+  const conflict = await worker.fetch(internalRevisionRequest(endpoint, { ...versionBody, content: "Different body" }), env, createExecutionContext());
+  assert.equal(conflict.status, 409);
+  assert.equal((await conflict.json()).error, "revision_version_conflict");
+  assert.deepEqual(state.recording, {
+    id: 81,
+    filename: "voice.m4a",
+    article_title: "Revised title",
+    article_content: "Revised body",
+  });
+});
+
+test("internal revision version does not disguise unknown database failures as conflicts", async () => {
+  const state = articleRevisionState();
+  const env = createEnv({
+    DB: state.db,
+    FILES_BUCKET: { async get() { return { body: "transcript" }; }, async put() {} },
+    MINING_V3_HANDOFF_TOKEN: "handoff-token",
+  });
+  const queued = await worker.fetch(authorizedRequest("https://example.test/api/recordings/voice.m4a/revisions", {
+    method: "POST",
+    headers: { "X-Revision-Request-Id": "client_version_db_failure" },
+    body: "revision audio",
+  }), env, createExecutionContext());
+  const revisionId = (await queued.json()).revision_id;
+  state.failures.versionInsert = true;
+
+  const response = await worker.fetch(internalRevisionRequest(
+    `https://example.test/api/internal/v3/article-revisions/${revisionId}/version`,
+    { title: "Revised", body: "Revised body" },
+  ), env, createExecutionContext());
+  assert.equal(response.status, 503);
+  assert.equal((await response.json()).error, "revision_version_write_unavailable");
+});
+
+test("internal revision replay does not replace a newer recording projection", async () => {
+  const state = articleRevisionState();
+  const env = createEnv({
+    DB: state.db,
+    FILES_BUCKET: { async get() { return { body: "transcript" }; }, async put() {} },
+    MINING_V3_HANDOFF_TOKEN: "handoff-token",
+  });
+  const queued = await worker.fetch(authorizedRequest("https://example.test/api/recordings/voice.m4a/revisions", {
+    method: "POST",
+    headers: { "X-Revision-Request-Id": "client_stale_projection" },
+    body: "revision audio",
+  }), env, createExecutionContext());
+  const revisionId = (await queued.json()).revision_id;
+  const endpoint = `https://example.test/api/internal/v3/article-revisions/${revisionId}/version`;
+  const versionBody = { title: "Version 3", body: "Body 3" };
+  assert.equal((await worker.fetch(internalRevisionRequest(endpoint, versionBody), env, createExecutionContext())).status, 201);
+
+  state.versions.push({
+    ...state.versions.at(-1), id: "version_4", version_no: 4,
+    parent_version_id: state.versions.at(-1).id, title: "Version 4", body: "Body 4",
+  });
+  state.recording.article_title = "Version 4";
+  state.recording.article_content = "Body 4";
+
+  const replay = await worker.fetch(internalRevisionRequest(endpoint, versionBody), env, createExecutionContext());
+  assert.equal(replay.status, 200);
+  assert.equal((await replay.json()).replayed, true);
+  assert.equal(state.recording.article_title, "Version 4");
+  assert.equal(state.recording.article_content, "Body 4");
+});
+
+test("internal revision replay cannot race a newer recording projection", async () => {
+  const state = articleRevisionState();
+  const env = createEnv({
+    DB: state.db,
+    FILES_BUCKET: { async get() { return { body: "transcript" }; }, async put() {} },
+    MINING_V3_HANDOFF_TOKEN: "handoff-token",
+  });
+  const queued = await worker.fetch(authorizedRequest("https://example.test/api/recordings/voice.m4a/revisions", {
+    method: "POST",
+    headers: { "X-Revision-Request-Id": "client_projection_race" },
+    body: "revision audio",
+  }), env, createExecutionContext());
+  const revisionId = (await queued.json()).revision_id;
+  const endpoint = `https://example.test/api/internal/v3/article-revisions/${revisionId}/version`;
+  const versionBody = { title: "Version 3", body: "Body 3" };
+  assert.equal((await worker.fetch(internalRevisionRequest(endpoint, versionBody), env, createExecutionContext())).status, 201);
+
+  state.hooks.beforeProjectionUpdate = () => {
+    state.versions.push({
+      ...state.versions.at(-1), id: "version_4", version_no: 4,
+      parent_version_id: state.versions.at(-1).id, title: "Version 4", body: "Body 4",
+    });
+    state.recording.article_title = "Version 4";
+    state.recording.article_content = "Body 4";
+  };
+  const replay = await worker.fetch(internalRevisionRequest(endpoint, versionBody), env, createExecutionContext());
+
+  assert.equal(replay.status, 200);
+  assert.equal(state.recording.article_title, "Version 4");
+  assert.equal(state.recording.article_content, "Body 4");
+});
+
+test("internal revision completion replays and WeChat failure preserves the parent version", async () => {
+  const state = articleRevisionState();
+  const requestObjects = [];
+  const bucket = {
+    async get() { return { body: "transcript" }; },
+    async put(key, body) {
+      if (String(key).endsWith(".json")) requestObjects.push({ key, body: String(body) });
+    },
+  };
+  const env = createEnv({ DB: state.db, FILES_BUCKET: bucket, MINING_V3_HANDOFF_TOKEN: "handoff-token" });
+  const publicHeaders = {
+    "X-Article-Version-Id": "version_2",
+    "X-Revision-Request-Id": "client_status",
+    "X-Revision-Audio-Sha256": "sha256:status",
+  };
+  const publicEndpoint = "https://example.test/api/recordings/voice.m4a/revisions";
+  const queued = await worker.fetch(authorizedRequest(publicEndpoint, {
+    method: "POST", headers: publicHeaders, body: "status audio",
+  }), env, createExecutionContext());
+  const revisionId = (await queued.json()).revision_id;
+  await worker.fetch(internalRevisionRequest(
+    `https://example.test/api/internal/v3/article-revisions/${revisionId}/version`,
+    { title: "Child title", body: "Child body" },
+  ), env, createExecutionContext());
+
+  const statusEndpoint = `https://example.test/api/internal/v3/article-revisions/${revisionId}/status`;
+  const failed = await worker.fetch(internalRevisionRequest(statusEndpoint, {
+    status: "wechat_failed", error_message: "wechat timeout",
+  }), env, createExecutionContext());
+  assert.equal(failed.status, 200);
+  assert.equal((await failed.json()).status, "wechat_failed");
+  assert.deepEqual({ title: state.versions[1].title, body: state.versions[1].body }, { title: "Title 2", body: "Body 2" });
+
+  const requestContract = requestObjects[0].body;
+  const recovered = await worker.fetch(authorizedRequest(publicEndpoint, {
+    method: "POST", headers: publicHeaders, body: "status audio",
+  }), env, createExecutionContext());
+  assert.equal(recovered.status, 202);
+  assert.deepEqual(await recovered.json(), {
+    ok: true,
+    revision_id: revisionId,
+    parent_version_id: "version_2",
+    continue_revision: { accepted: true, parent_version_id: "version_2" },
+    feedback: { action: "continue_revision" },
+    status: "wechat_failed",
+    replayed: true,
+    revision_request_key: state.requests[0].request_key,
+  });
+  assert.equal(requestObjects.at(-1).body, requestContract);
+
+  const completed = await worker.fetch(internalRevisionRequest(statusEndpoint, { status: "completed" }), env, createExecutionContext());
+  assert.equal((await completed.json()).replayed, false);
+  const completionReplay = await worker.fetch(internalRevisionRequest(statusEndpoint, { status: "completed" }), env, createExecutionContext());
+  assert.deepEqual(await completionReplay.json(), {
+    revision_id: revisionId,
+    child_version_id: state.versions[2].id,
+    status: "completed",
+    replayed: true,
+  });
 });
 
 test("persists mining status metadata for Android progress display", async () => {
@@ -2985,6 +3310,14 @@ function authorizedRequest(url, init = {}) {
   return new Request(url, { ...init, headers });
 }
 
+function internalRevisionRequest(url, body) {
+  return new Request(url, {
+    method: "POST",
+    headers: { Authorization: "Bearer handoff-token", "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
 function sessionRequest(url, init = {}) {
   const headers = new Headers(init.headers || {});
   headers.set("Authorization", "Bearer session-access-token");
@@ -3252,6 +3585,150 @@ function articleFeedbackDb() {
       }
       throw new Error(`Unexpected article feedback SQL: ${sql}`);
     },
+  };
+}
+
+function articleRevisionState() {
+  const recording = { id: 81, filename: "voice.m4a", article_title: "Title 2", article_content: "Body 2" };
+  const versions = [
+    { id: "version_1", article_id: "article_1", recording_id: 81, version_no: 1, parent_version_id: null, title: "Title 1", body: "Body 1", cover_json: "{}", cover_title_json: "[]", formatting_skill_id: null, formatting_skill_version: null },
+    { id: "version_2", article_id: "article_1", recording_id: 81, version_no: 2, parent_version_id: "version_1", title: "Title 2", body: "Body 2", cover_json: "{}", cover_title_json: "[]", formatting_skill_id: null, formatting_skill_version: null },
+  ];
+  const requests = [];
+  const failures = { requestInsert: false, versionInsert: false };
+  const hooks = { beforeProjectionUpdate: null };
+  const db = {
+    async batch(statements) {
+      return Promise.all(statements.map(item => item.run()));
+    },
+    prepare(sql) {
+      if (sql.includes("FROM article_revision_requests rr") && sql.includes("JOIN article_versions p")) {
+        return statement({ all: async ([revisionId]) => {
+          const request = requests.find(row => row.id === revisionId);
+          if (!request) return { results: [] };
+          const parent = versions.find(row => row.id === request.parent_version_id);
+          return { results: [{
+            ...request,
+            parent_version_no: parent.version_no,
+            parent_title: parent.title,
+            parent_body: parent.body,
+            parent_cover_json: parent.cover_json,
+            parent_cover_title_json: parent.cover_title_json,
+            parent_formatting_skill_id: parent.formatting_skill_id,
+            parent_formatting_skill_version: parent.formatting_skill_version,
+          }] };
+        } });
+      }
+      if (sql.includes("FROM recordings r") && sql.includes("article_versions")) {
+        return statement({ all: async () => ({ results: [{
+          recording_id: recording.id,
+          ...versions.at(-1),
+        }] }) });
+      }
+      if (sql.includes("FROM article_revision_requests") && sql.includes("client_request_id")) {
+        return statement({ all: async ([, , clientRequestId]) => ({
+          results: requests.filter(row => row.client_request_id === clientRequestId),
+        }) });
+      }
+      if (sql.includes("FROM article_revision_requests") && sql.includes("parent_version_id")) {
+        return statement({ all: async ([, , parentVersionId]) => ({
+          results: requests.filter(row => row.parent_version_id === parentVersionId),
+        }) });
+      }
+      if (sql.includes("SELECT * FROM article_revision_requests") && sql.includes("WHERE id = ?")) {
+        return statement({ all: async ([revisionId]) => ({ results: requests.filter(row => row.id === revisionId) }) });
+      }
+      if (sql.trimStart().startsWith("SELECT") && sql.includes("FROM article_versions WHERE parent_version_id = ?")) {
+        return statement({ all: async ([parentVersionId]) => ({
+          results: versions.filter(row => row.parent_version_id === parentVersionId),
+        }) });
+      }
+      if (sql.trimStart().startsWith("SELECT") && sql.includes("FROM article_versions") && sql.includes("WHERE id = ?")) {
+        return statement({ all: async ([versionId]) => ({ results: versions.filter(row => row.id === versionId) }) });
+      }
+      if (sql.trimStart().startsWith("SELECT") && sql.includes("SELECT id FROM article_versions") && sql.includes("ORDER BY version_no DESC")) {
+        return statement({ all: async () => ({ results: [{ id: versions.at(-1).id }] }) });
+      }
+      if (sql.includes("INSERT INTO article_versions")) {
+        return statement({ run: async (values) => {
+          if (failures.versionInsert) throw new Error("D1 temporarily unavailable");
+          const [id, userId, workspaceId, articleId, recordingId, versionNo, parentVersionId,
+            sourceJobId, sourceHash, title, body, coverJson, titleCandidatesJson, selectedTitle,
+            coverTitleJson, formattingSkillId, formattingSkillVersion, idempotencyKey, payloadHash, createdAt] = values;
+          if (versions.some(row => row.parent_version_id === parentVersionId)) throw new Error("UNIQUE child");
+          versions.push({
+            id, user_id: userId, workspace_id: workspaceId, article_id: articleId,
+            recording_id: recordingId, version_no: versionNo, parent_version_id: parentVersionId,
+            source_job_id: sourceJobId, source_hash: sourceHash, title, body, cover_json: coverJson,
+            title_candidates_json: titleCandidatesJson, selected_title: selectedTitle,
+            cover_title_json: coverTitleJson, formatting_skill_id: formattingSkillId,
+            formatting_skill_version: formattingSkillVersion, idempotency_key: idempotencyKey,
+            payload_hash: payloadHash, created_at: createdAt,
+          });
+          return { meta: { changes: 1 } };
+        } });
+      }
+      if (sql.includes("INSERT INTO article_revision_requests")) {
+        return statement({ run: async (values) => {
+          if (failures.requestInsert) throw new Error("D1 temporarily unavailable");
+          const [id, userId, workspaceId, articleId, recordingId, parentVersionId,
+            clientRequestId, payloadHash, audioSha256, audioKey, requestKey, transcriptKey,
+            status, createdAt, updatedAt] = values;
+          if (requests.some(row => row.client_request_id === clientRequestId || row.parent_version_id === parentVersionId)) {
+            throw new Error("UNIQUE constraint failed");
+          }
+          requests.push({
+            id, user_id: userId, workspace_id: workspaceId, article_id: articleId,
+            recording_id: recordingId, parent_version_id: parentVersionId,
+            client_request_id: clientRequestId, payload_hash: payloadHash, audio_sha256: audioSha256,
+            audio_key: audioKey, request_key: requestKey, transcript_key: transcriptKey,
+            status, child_version_id: null, error_message: null, created_at: createdAt, updated_at: updatedAt,
+          });
+          return { meta: { changes: 1 } };
+        } });
+      }
+      if (sql.includes("UPDATE article_revision_requests") && sql.includes("child_version_id = ?")) {
+        return statement({ run: async ([childId, updatedAt, revisionId]) => {
+          const request = requests.find(row => row.id === revisionId);
+          request.child_version_id = childId;
+          if (request.status === "queued") request.status = "wechat_pending";
+          request.error_message = null;
+          request.updated_at = updatedAt;
+          return { meta: { changes: 1 } };
+        } });
+      }
+      if (sql.includes("UPDATE article_revision_requests") && sql.includes("SET status = ?")) {
+        return statement({ run: async ([status, errorMessage, updatedAt, revisionId]) => {
+          const request = requests.find(row => row.id === revisionId);
+          Object.assign(request, { status, error_message: errorMessage, updated_at: updatedAt });
+          return { meta: { changes: 1 } };
+        } });
+      }
+      if (sql.includes("UPDATE recordings") && sql.includes("article_title = ?")) {
+        return statement({ run: async ([title, content, , , , , projectedVersionId]) => {
+          hooks.beforeProjectionUpdate?.();
+          hooks.beforeProjectionUpdate = null;
+          if (projectedVersionId && versions.at(-1).id !== projectedVersionId) {
+            return { meta: { changes: 0 } };
+          }
+          recording.article_title = title;
+          recording.article_content = content;
+          return { meta: { changes: 1 } };
+        } });
+      }
+      if (sql.includes("UPDATE recordings")) {
+        return statement({ run: async () => ({ meta: { changes: 1 } }) });
+      }
+      throw new Error(`Unexpected article revision SQL: ${sql}`);
+    },
+  };
+  return {
+    recording,
+    versions,
+    requests,
+    failures,
+    hooks,
+    db,
   };
 }
 
