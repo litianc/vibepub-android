@@ -65,7 +65,7 @@ grep -Eq '<string name="access_token">[^<]+</string>' "$preferences"
 grep -Eq '<string name="user_id">[^<]+</string>' "$preferences"
 EOF
 
-if ! "$ADB" -s "$ANDROID_SERIAL" exec-out run-as --user "$ANDROID_USER" "$PACKAGE_NAME" sh -c \
+if ! "$ADB" -s "$ANDROID_SERIAL" exec-out run-as "$PACKAGE_NAME" --user "$ANDROID_USER" sh -c \
   "$remote_login_check" >/dev/null 2>&1; then
   echo "Package login state is missing or unreadable." >&2
   exit 1

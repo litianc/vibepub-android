@@ -6,6 +6,9 @@ PRODUCTION_PACKAGE="cn.litianc.vibepub"
 STAGING_PACKAGE="cn.litianc.vibepub.staging"
 ADB="${ADB:-${ANDROID_HOME:-/opt/homebrew/share/android-commandlinetools}/platform-tools/adb}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-$ROOT_DIR/artifacts/android-environment-isolation}"
+AUTO_CONFIRM_USB_INSTALL_PROMPT="${AUTO_CONFIRM_USB_INSTALL_PROMPT:-false}"
+USB_INSTALL_PROMPT_TIMEOUT_SECONDS="${USB_INSTALL_PROMPT_TIMEOUT_SECONDS:-20}"
+ADB_INSTALL_TIMEOUT_SECONDS="${ADB_INSTALL_TIMEOUT_SECONDS:-120}"
 
 usage() {
   cat <<EOF
@@ -13,7 +16,15 @@ Usage: scripts/verify-android-environment-isolation.sh production.apk staging.ap
 
 Installs both APKs and verifies separate Android package sandboxes. The script
 never clears or uninstalls Production. It clears and uninstalls only Staging.
+
+Set AUTO_CONFIRM_USB_INSTALL_PROMPT=true only when the selected unlocked device
+requires HyperOS/MIUI install confirmation taps. Prompt confirmation defaults
+to 20s, and each direct ADB install defaults to a 120s timeout.
 EOF
+}
+
+truthy() {
+  [[ "${1:-}" == "true" || "${1:-}" == "1" || "${1:-}" == "yes" ]]
 }
 
 if [[ "$#" -eq 1 && ( "$1" == "-h" || "$1" == "--help" ) ]]; then
@@ -123,7 +134,79 @@ require_package_state() {
 
 install_apk() {
   local apk="$1"
-  adb_cmd install --user "$android_user" -r -t "$apk"
+  local label="$2"
+  local direct_output="$EVIDENCE_DIR/install-$label-direct.txt"
+  local fallback_output="$EVIDENCE_DIR/install-$label-fallback.txt"
+  local remote_apk="/data/local/tmp/vibepub-$label.apk"
+
+  adb_cmd install --user "$android_user" -r -t "$apk" > "$direct_output" 2>&1 &
+  local direct_pid=$!
+  local direct_deadline=$((SECONDS + ADB_INSTALL_TIMEOUT_SECONDS))
+  while kill -0 "$direct_pid" >/dev/null 2>&1 && (( SECONDS < direct_deadline )); do
+    sleep 0.2
+  done
+  local direct_status=0
+  if kill -0 "$direct_pid" >/dev/null 2>&1; then
+    kill "$direct_pid" >/dev/null 2>&1 || true
+    wait "$direct_pid" >/dev/null 2>&1 || true
+    echo "Direct ADB install timed out after ${ADB_INSTALL_TIMEOUT_SECONDS}s." >> "$direct_output"
+    direct_status=124
+  else
+    wait "$direct_pid" || direct_status=$?
+  fi
+  if [[ "$direct_status" -eq 0 ]]; then
+    cat "$direct_output"
+    return 0
+  fi
+  cat "$direct_output"
+  if [[ "$direct_status" -ne 124 ]] && ! grep -q "INSTALL_FAILED_USER_RESTRICTED" "$direct_output"; then
+    return 1
+  fi
+  if ! truthy "$AUTO_CONFIRM_USB_INSTALL_PROMPT"; then
+    echo "Device confirmation is required; rerun with AUTO_CONFIRM_USB_INSTALL_PROMPT=true on the selected unlocked test device." >&2
+    return 1
+  fi
+
+  adb_cmd push "$apk" "$remote_apk" > "$EVIDENCE_DIR/install-$label-push.txt"
+  local screen_size width height tap_x tap_y
+  screen_size="$(adb_cmd shell dumpsys window displays 2>/dev/null \
+    | sed -n 's/.*cur=\([0-9][0-9]*x[0-9][0-9]*\).*/\1/p' \
+    | head -n 1 || true)"
+  if [[ -z "$screen_size" ]]; then
+    screen_size="$(adb_cmd shell wm size 2>/dev/null | sed -n 's/.*: \([0-9][0-9]*x[0-9][0-9]*\).*/\1/p' | head -n 1 || true)"
+  fi
+  width="${screen_size%x*}"
+  height="${screen_size#*x}"
+  if [[ "$width" =~ ^[0-9]+$ && "$height" =~ ^[0-9]+$ ]]; then
+    tap_x=$((width * 42 / 100))
+    tap_y=$((height * 64 / 100))
+  else
+    tap_x=1266
+    tap_y=1203
+  fi
+
+  adb_cmd shell pm install --user "$android_user" -r -t -g "$remote_apk" > "$fallback_output" 2>&1 &
+  local install_pid=$!
+  local deadline=$((SECONDS + USB_INSTALL_PROMPT_TIMEOUT_SECONDS))
+  while kill -0 "$install_pid" >/dev/null 2>&1 && (( SECONDS < deadline )); do
+    adb_cmd shell input tap "$tap_x" "$tap_y" >/dev/null 2>&1 || true
+    sleep 0.15
+  done
+  local status=0
+  if kill -0 "$install_pid" >/dev/null 2>&1; then
+    kill "$install_pid" >/dev/null 2>&1 || true
+    wait "$install_pid" >/dev/null 2>&1 || true
+    status=124
+  else
+    wait "$install_pid" || status=$?
+  fi
+  local cleanup_status=0
+  adb_cmd shell rm -f "$remote_apk" >/dev/null 2>&1 || cleanup_status=$?
+  cat "$fallback_output"
+  if [[ "$status" -ne 0 ]]; then
+    return "$status"
+  fi
+  return "$cleanup_status"
 }
 
 package_uid() {
@@ -167,7 +250,7 @@ else
   printf 'absent\n'
 fi
 EOF
-  if ! output="$(adb_cmd exec-out run-as --user "$android_user" "$package_name" sh -c \
+  if ! output="$(adb_cmd exec-out run-as "$package_name" --user "$android_user" sh -c \
     "$preference_state_command" 2>/dev/null)"; then
     return 2
   fi
@@ -180,8 +263,25 @@ package_cannot_read_other_preferences() {
   local source_package="$1"
   local target_package="$2"
   local target_data_dir="/data/user/$android_user/$target_package"
-  adb_cmd shell run-as --user "$android_user" "$source_package" sh -c \
-    "test ! -r '$target_data_dir/shared_prefs/vibepub.xml'" >/dev/null 2>&1
+  local output
+  read -r -d '' cross_package_read_command <<EOF || true
+# cross_package_read_check
+if [ -r '$target_data_dir/shared_prefs/vibepub.xml' ]; then
+  printf 'readable\n'
+else
+  printf 'unreadable\n'
+fi
+EOF
+  if ! output="$(adb_cmd exec-out run-as "$source_package" --user "$android_user" sh -c \
+    "$cross_package_read_command" 2>/dev/null)"; then
+    return 2
+  fi
+  output="${output//$'\r'/}"
+  case "$output" in
+    unreadable) return 0 ;;
+    readable) return 1 ;;
+    *) return 2 ;;
+  esac
 }
 
 if ! android_user="$(adb_cmd shell am get-current-user 2>/dev/null | tr -d '\r')"; then
@@ -192,6 +292,15 @@ if [[ ! "$android_user" =~ ^[0-9]+$ ]]; then
   echo "Could not resolve the active Android user." >&2
   exit 1
 fi
+if [[ ! "$USB_INSTALL_PROMPT_TIMEOUT_SECONDS" =~ ^[1-9][0-9]?$|^1[01][0-9]$|^120$ ]]; then
+  echo "USB_INSTALL_PROMPT_TIMEOUT_SECONDS must be an integer from 1 to 120." >&2
+  exit 1
+fi
+if [[ ! "$ADB_INSTALL_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]] ||
+  (( ADB_INSTALL_TIMEOUT_SECONDS < 1 || ADB_INSTALL_TIMEOUT_SECONDS > 300 )); then
+  echo "ADB_INSTALL_TIMEOUT_SECONDS must be an integer from 1 to 300." >&2
+  exit 1
+fi
 
 if ! production_state="$(package_installed "$PRODUCTION_PACKAGE")"; then
   echo "Could not query Production for the active Android user." >&2
@@ -200,8 +309,8 @@ fi
 production_was_installed=false
 [[ "$production_state" == "absent" ]] || production_was_installed=true
 
-install_apk "$PRODUCTION_APK" > "$EVIDENCE_DIR/install-production.txt"
-install_apk "$STAGING_APK" > "$EVIDENCE_DIR/install-staging.txt"
+install_apk "$PRODUCTION_APK" production > "$EVIDENCE_DIR/install-production.txt"
+install_apk "$STAGING_APK" staging > "$EVIDENCE_DIR/install-staging.txt"
 
 require_package_state "$PRODUCTION_PACKAGE" installed Production
 require_package_state "$STAGING_PACKAGE" installed Staging
@@ -267,7 +376,7 @@ if [[ "$production_digest_before" != "$production_digest_after_uninstall" ]]; th
   exit 1
 fi
 
-install_apk "$STAGING_APK" > "$EVIDENCE_DIR/reinstall-staging.txt"
+install_apk "$STAGING_APK" staging-final > "$EVIDENCE_DIR/reinstall-staging.txt"
 require_package_state "$PRODUCTION_PACKAGE" installed Production
 require_package_state "$STAGING_PACKAGE" installed Staging
 

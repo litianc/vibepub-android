@@ -23,7 +23,7 @@ EOF
 cat > "$TMP_DIR/adb" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-[[ "$1" == "-s" && "$3" == "exec-out" && "$4" == "run-as" && "$5" == "--user" && "$6" == "10" && "$8" == "sh" && "$9" == "-c" ]]
+[[ "$1" == "-s" && "$3" == "exec-out" && "$4" == "run-as" && "$5" == "cn.litianc.vibepub.staging" && "$6" == "--user" && "$7" == "10" && "$8" == "sh" && "$9" == "-c" ]]
 cd "${FAKE_PACKAGE_ROOT:?}"
 /bin/sh -c "${10}"
 EOF

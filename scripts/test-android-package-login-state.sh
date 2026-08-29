@@ -25,7 +25,7 @@ if [[ "${FAKE_ADB_FAIL:-false}" == "true" ]]; then
   exit 13
 fi
 
-[[ "$1" == "-s" && "$3" == "exec-out" && "$4" == "run-as" && "$5" == "--user" && "$6" == "10" && "$8" == "sh" && "$9" == "-c" ]]
+[[ "$1" == "-s" && "$3" == "exec-out" && "$4" == "run-as" && "$5" == "cn.litianc.vibepub" && "$6" == "--user" && "$7" == "10" && "$8" == "sh" && "$9" == "-c" ]]
 remote_command="${10}"
 cd "${FAKE_PACKAGE_ROOT:?}"
 /bin/sh -c "$remote_command"
