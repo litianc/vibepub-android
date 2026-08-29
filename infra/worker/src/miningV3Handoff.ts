@@ -1476,8 +1476,23 @@ async function statusByMarker(env: MiningV3HandoffEnv, marker: HandoffMarker): P
   const transcript = await existingTranscript(env, marker);
   if (!transcript) return response({ decision: "v3_pending_asr", handoff_id: marker.handoff_id });
   const run = await acceptedRunProof(env, marker, transcript);
-  if (run) return response({ decision: "accepted", handoff_id: marker.handoff_id, run_id: run.run_id, transcript_ref: transcript.transcript_ref, transcript_hash: transcript.transcript_hash });
-  return response({ decision: "v3_pending_start", handoff_id: marker.handoff_id, transcript_ref: transcript.transcript_ref, transcript_hash: transcript.transcript_hash });
+  const identity = {
+    article_id: marker.article_id,
+    user_id: marker.user_id,
+    workspace_id: marker.workspace_id,
+    source_key: marker.source_key,
+    source_hash: marker.source_hash,
+    recording_id: marker.recording_id,
+  };
+  if (run) return response({ decision: "accepted", handoff_id: marker.handoff_id, run_id: run.run_id, ...identity, transcript_ref: transcript.transcript_ref, transcript_hash: transcript.transcript_hash });
+  return response({
+    decision: "v3_pending_start",
+    handoff_id: marker.handoff_id,
+    run_id: await runId(marker, transcript),
+    ...identity,
+    transcript_ref: transcript.transcript_ref,
+    transcript_hash: transcript.transcript_hash,
+  });
 }
 
 async function startWithInvoker(

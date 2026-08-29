@@ -393,6 +393,34 @@ describe("wechat publishing adapter", () => {
     expect(selected).toBe(0); expect(bucket.puts).toBe(0); expect(provider).toBe(0);
   });
 
+  it("rejects an expired or wrong-article staging feedback canary before any side effect", async () => {
+    const configured = await configuredEnv();
+    let selected = 0; let databaseReads = 0;
+    configured.DB = { prepare: () => { databaseReads += 1; return { bind: () => ({ first: async () => null }) }; } } as unknown as D1Database;
+    configured.WECHAT_OPERATION = { getByName: () => { selected += 1; return { fetch: async () => Response.json({}) }; } } as unknown as DurableObjectNamespace;
+    configured.DEPLOY_ENVIRONMENT = "staging";
+    configured.STAGING_FEEDBACK_CANARY_MODE = "staging_article_feedback";
+    configured.STAGING_FEEDBACK_CANARY_USER_ID = "user-1";
+    configured.STAGING_FEEDBACK_CANARY_WORKSPACE_ID = "workspace-1";
+    configured.STAGING_FEEDBACK_CANARY_ARTICLE_ID = "article-approved";
+    configured.STAGING_FEEDBACK_CANARY_EXPIRES_AT = new Date(Date.now() - 1).toISOString();
+
+    const expired = await adapter.fetch(new Request("https://adapter.test/internal/v3/wechat/resolve", {
+      method: "POST", headers: { authorization: "Bearer wechat-token" },
+      body: requestBody("resolve_account", "expired-canary", 1, undefined, undefined, "article-approved"),
+    }), configured);
+    expect(expired.status).toBe(409);
+
+    configured.STAGING_FEEDBACK_CANARY_EXPIRES_AT = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+    const wrongArticle = await adapter.fetch(new Request("https://adapter.test/internal/v3/wechat/resolve", {
+      method: "POST", headers: { authorization: "Bearer wechat-token" },
+      body: requestBody("resolve_account", "wrong-article", 1, undefined, undefined, "article-other"),
+    }), configured);
+    expect(wrongArticle.status).toBe(409);
+    expect(databaseReads).toBe(0);
+    expect(selected).toBe(0);
+  });
+
   it("parses article index zero readback and never trusts a provider supplied hash", async () => {
     const instance = new WechatOperationAgent(state(), await configuredEnv());
     const mock = providerMock({ readHtml: "\r\n<p>Body</p><img src=\"https://wechat.example/body.png\"/>\r\n" }); vi.stubGlobal("fetch", mock.fetcher);

@@ -277,10 +277,24 @@ type PublicationFeatureEnv = V3TenantScopeEnv & {
   STAGING_IMAGE_CANARY_WORKSPACE_ID?: string;
   STAGING_IMAGE_CANARY_SOURCE_KEY?: string;
   STAGING_IMAGE_CANARY_EXPIRES_AT?: string;
+  STAGING_FEEDBACK_CANARY_MODE?: string;
+  STAGING_FEEDBACK_CANARY_USER_ID?: string;
+  STAGING_FEEDBACK_CANARY_WORKSPACE_ID?: string;
+  STAGING_FEEDBACK_CANARY_EXPIRES_AT?: string;
 };
 
 const STAGING_IMAGE_CANARY_MODE = "staging_single_run";
 const STAGING_IMAGE_CANARY_MAX_TTL_MS = 60 * 60 * 1000;
+
+function stagingCanarySourceAllowed(env: PublicationFeatureEnv, userId: string, workspaceId: string, sourceKey: string): boolean {
+  if (sourceKey === `users/${userId}/text-submissions/${sourceKey.split("/").at(-1)}` && !sourceKey.includes("..")) return true;
+  const feedbackExpiry = env.STAGING_FEEDBACK_CANARY_EXPIRES_AT?.trim() || "";
+  return env.STAGING_FEEDBACK_CANARY_MODE?.trim() === "staging_article_feedback" &&
+    env.STAGING_FEEDBACK_CANARY_USER_ID?.trim() === userId &&
+    env.STAGING_FEEDBACK_CANARY_WORKSPACE_ID?.trim() === workspaceId &&
+    feedbackExpiry === env.STAGING_IMAGE_CANARY_EXPIRES_AT?.trim() &&
+    sourceKey === `users/${userId}/inbox/${sourceKey.split("/").at(-1)}` && !sourceKey.includes("..");
+}
 
 function stagingImageCanaryConfigured(env: PublicationFeatureEnv): boolean {
   return [
@@ -307,7 +321,7 @@ function stagingImageCanaryBaseEnabled(
     env.STAGING_IMAGE_CANARY_USER_ID?.trim() === userId &&
     env.STAGING_IMAGE_CANARY_WORKSPACE_ID?.trim() === workspaceId &&
     /^run_v3_[a-f0-9]{64}$/.test(env.STAGING_IMAGE_CANARY_RUN_ID?.trim() || "") &&
-    sourceKey === `users/${userId}/text-submissions/${sourceKey.split("/").at(-1)}` && !sourceKey.includes("..") &&
+    stagingCanarySourceAllowed(env, userId, workspaceId, sourceKey) &&
     Number.isFinite(expiresAtMs) && new Date(expiresAtMs).toISOString() === expiresAt &&
     expiresAtMs > now && expiresAtMs <= now + STAGING_IMAGE_CANARY_MAX_TTL_MS;
 }

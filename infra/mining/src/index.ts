@@ -887,6 +887,24 @@ async function processVersionedRevisionRequest(
   }
 }
 
+export function assertStagingCanaryRevisionIdentity(revisionRequest: RevisionRequest, environment: NodeJS.ProcessEnv = process.env): void {
+  const expected = [
+    environment.STAGING_CANARY_EXPECTED_RECORDING_ID,
+    environment.STAGING_CANARY_EXPECTED_ARTICLE_ID,
+    environment.STAGING_CANARY_EXPECTED_PARENT_VERSION_ID,
+    environment.STAGING_CANARY_EXPECTED_WORKSPACE_ID,
+  ].map(value => value?.trim() || "");
+  if (!expected.some(Boolean)) return;
+  let base: URL;
+  try { base = new URL(environment.PUBLIC_BASE_URL || ""); } catch { throw new Error("staging_canary_revision_identity_invalid"); }
+  const [recordingId, articleId, parentVersionId, workspaceId] = expected;
+  if (base.protocol !== "https:" || !base.hostname.endsWith(".workers.dev") || expected.some(value => !value) ||
+      String(revisionRequest.recordingId) !== recordingId || revisionRequest.articleId !== articleId ||
+      revisionRequest.parentVersionId !== parentVersionId || revisionRequest.workspaceId !== workspaceId) {
+    throw new Error("staging_canary_revision_identity_invalid");
+  }
+}
+
 async function processRevisionRequest(revisionRequestKey: string): Promise<void> {
   console.log(`Processing article revision request: ${revisionRequestKey}`);
 
@@ -915,6 +933,7 @@ async function processRevisionRequest(revisionRequestKey: string): Promise<void>
   const userId = revisionRequest.userId || userIdForPipelineKey(revisionRequestKey);
   const transcriptKey = revisionRequest.transcriptKey || `users/${userId}/transcripts/${filename.replace(/\.[^/.]+$/, ".json")}`;
   const fileKey = userIdFromPipelineKey(revisionRequestKey) ? `users/${userId}/inbox/${filename}` : `inbox/${filename}`;
+  assertStagingCanaryRevisionIdentity(revisionRequest);
 
   try {
     if (revisionRequest.parentVersionId) {

@@ -1049,7 +1049,17 @@ describe("Mining V3 handoff Worker boundary", () => {
     await expect(miningV3HandoffTesting.acceptedRunProof(env, marker, transcript)).resolves.toBeNull();
     const status = await invoke("status", { source_key: sourceKey, handoff_id: handoff.handoff_id }, env);
     expect(status.status).toBe(200);
-    expect(await status.json()).toMatchObject({ decision: "v3_pending_start", handoff_id: handoff.handoff_id });
+    expect(await status.json()).toMatchObject({
+      decision: "v3_pending_start",
+      handoff_id: handoff.handoff_id,
+      run_id: proof.runId,
+      article_id: marker.article_id,
+      user_id: marker.user_id,
+      workspace_id: marker.workspace_id,
+      source_key: marker.source_key,
+      source_hash: marker.source_hash,
+      recording_id: marker.recording_id,
+    });
 
     state.coordinator!.run = { ...state.coordinator!.run!, manifest_hash: "sha256:" + "f".repeat(64) };
     await expect(miningV3HandoffTesting.acceptedRunProof(env, marker, transcript))

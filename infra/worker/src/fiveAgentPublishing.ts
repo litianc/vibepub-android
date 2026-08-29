@@ -4208,7 +4208,7 @@ async function callWechatOperation(
   request: Record<string, unknown>,
   createdAt: string,
 ): Promise<{ call_id: string; response: Record<string, unknown> }> {
-  if (!wechatDraftFeatureEnabled(env, params.user_id, params.workspace_id)) {
+  if (!wechatDraftFeatureEnabled(env, params.user_id, params.workspace_id, params.article_id, params.run_id)) {
     throw new EditorialRuntimeError("wechat_publishing_disabled", "WeChat draft sync is not enabled for this owner", 404);
   }
   if (typeof request.account_binding_id !== "string" ||
@@ -4587,7 +4587,7 @@ async function runWechatDraftPhaseInner(input: {
   reconciliation_cycle?: string;
 }): Promise<FiveAgentWorkflowResult> {
   const { env, coordinator, params, frozen, visual, transcript } = input;
-  if (!WECHAT_RESUMABLE_STATES.has(String(visual.state)) || !wechatDraftFeatureEnabled(env, params.user_id, params.workspace_id)) return visual;
+  if (!WECHAT_RESUMABLE_STATES.has(String(visual.state)) || !wechatDraftFeatureEnabled(env, params.user_id, params.workspace_id, params.article_id, params.run_id)) return visual;
   const currentWechatRun = await coordinator.getFiveAgentRun(params.run_id, params.user_id, params.workspace_id) as Record<string, unknown>;
   // A readback artifact can be durably mirrored to D1 while the coordinator
   // response is lost. At draft_verifying, resume only that local receipt and
@@ -5037,7 +5037,7 @@ export async function runWechatDraftPhase(input: {
   transcript: { ref: string; hash: string };
 }): Promise<FiveAgentWorkflowResult> {
   const { env, coordinator, params, visual, transcript } = input;
-  if (!wechatDraftFeatureEnabled(env, params.user_id, params.workspace_id)) return visual;
+  if (!wechatDraftFeatureEnabled(env, params.user_id, params.workspace_id, params.article_id, params.run_id)) return visual;
   const current = await coordinator.getFiveAgentRun(params.run_id, params.user_id, params.workspace_id) as Record<string, unknown>;
   const wechatLedger = await coordinator.getFiveAgentWechatLedger(params.run_id, params.user_id, params.workspace_id);
   const artifactIds = [...visual.artifact_ids, ...wechatLedger.receipt_ids];
@@ -6067,7 +6067,7 @@ export class FiveAgentPublishingWorkflow extends AgentWorkflow<EditorialCoordina
     // would risk invoking image work while only a local WeChat receipt is
     // incomplete. Each downstream WeChat artifact is itself idempotent.
     const wechatResumeState = ["visual_ready", "formatting", "visual_qa", "draft_syncing", "draft_verifying", "draft_ready", "needs_action"].includes(String(confirmedCurrentRun?.state));
-    if (wechatResumeState && wechatDraftFeatureEnabled(this.env, params.user_id, params.workspace_id)) {
+    if (wechatResumeState && wechatDraftFeatureEnabled(this.env, params.user_id, params.workspace_id, params.article_id, params.run_id)) {
       const artifacts = await coordinator.listFiveAgentArtifacts(params.run_id, params.user_id, params.workspace_id);
       const frozen = artifacts.find(item => item.kind === "frozen_article_version") as StoredArtifactMetadata | undefined;
       if (!frozen) throw new EditorialRuntimeError("frozen_artifact_not_found", "wechat replay cannot find the frozen artifact", 503);
