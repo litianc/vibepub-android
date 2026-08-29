@@ -167,7 +167,7 @@ else
   printf 'absent\n'
 fi
 EOF
-  if ! output="$(adb_cmd exec-out run-as --user "$android_user" "$package_name" sh -c \
+  if ! output="$(adb_cmd exec-out run-as "$package_name" --user "$android_user" sh -c \
     "$preference_state_command" 2>/dev/null)"; then
     return 2
   fi
@@ -180,8 +180,12 @@ package_cannot_read_other_preferences() {
   local source_package="$1"
   local target_package="$2"
   local target_data_dir="/data/user/$android_user/$target_package"
-  adb_cmd shell run-as --user "$android_user" "$source_package" sh -c \
-    "test ! -r '$target_data_dir/shared_prefs/vibepub.xml'" >/dev/null 2>&1
+  local output
+  if ! output="$(adb_cmd exec-out run-as "$source_package" --user "$android_user" sh -c \
+    "if [ ! -r '$target_data_dir/shared_prefs/vibepub.xml' ]; then printf 'isolated\\n'; else exit 1; fi" 2>/dev/null)"; then
+    return 1
+  fi
+  [[ "${output//$'\r'/}" == "isolated" ]]
 }
 
 if ! android_user="$(adb_cmd shell am get-current-user 2>/dev/null | tr -d '\r')"; then

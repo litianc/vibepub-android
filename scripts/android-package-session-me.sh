@@ -45,6 +45,12 @@ if { [[ "$ADB" == */* ]] && [[ ! -x "$ADB" ]]; } ||
   exit 1
 fi
 
+current_user="$($ADB -s "$ANDROID_SERIAL" shell am get-current-user 2>/dev/null | tr -d '\r')"
+if [[ "$current_user" != "$ANDROID_USER" ]]; then
+  echo "Selected Android user is not active." >&2
+  exit 1
+fi
+
 read -r -d '' remote_session_read <<'EOF' || true
 set -eu
 preferences=shared_prefs/vibepub.xml
@@ -61,7 +67,7 @@ read_value access_token
 read_value user_id
 EOF
 
-if ! session_data="$({ "$ADB" -s "$ANDROID_SERIAL" exec-out run-as --user "$ANDROID_USER" "$PACKAGE_NAME" sh -c "$remote_session_read"; } 2>/dev/null)"; then
+if ! session_data="$({ "$ADB" -s "$ANDROID_SERIAL" exec-out run-as "$PACKAGE_NAME" --user "$ANDROID_USER" sh -c "$remote_session_read"; } 2>/dev/null)"; then
   echo "Stored session is missing or unreadable." >&2
   exit 1
 fi

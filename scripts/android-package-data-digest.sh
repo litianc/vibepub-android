@@ -57,6 +57,12 @@ if [[ ! -x "$ADB" ]]; then
   exit 1
 fi
 
+current_user="$($ADB -s "$ANDROID_SERIAL" shell am get-current-user 2>/dev/null | tr -d '\r')"
+if [[ "$current_user" != "$ANDROID_USER" ]]; then
+  echo "Selected Android user is not active." >&2
+  exit 1
+fi
+
 redacted_manifest="$(mktemp)"
 trap 'rm -f "$redacted_manifest"' EXIT
 
@@ -74,7 +80,7 @@ done | LC_ALL=C sort | while IFS= read -r file; do
 done
 EOF
 
-if ! "$ADB" -s "$ANDROID_SERIAL" exec-out run-as --user "$ANDROID_USER" "$PACKAGE_NAME" sh -c \
+if ! "$ADB" -s "$ANDROID_SERIAL" exec-out run-as "$PACKAGE_NAME" --user "$ANDROID_USER" sh -c \
   "$remote_digest_command" > "$redacted_manifest" 2>/dev/null; then
   echo "Could not read package data for digest." >&2
   exit 1

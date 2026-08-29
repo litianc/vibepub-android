@@ -23,7 +23,11 @@ EOF
 cat > "$TMP_DIR/adb" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-[[ "$1" == "-s" && "$3" == "exec-out" && "$4" == "run-as" && "$5" == "--user" && "$6" == "10" && "$8" == "sh" && "$9" == "-c" ]]
+if [[ "$1" == "-s" && "$3" == "shell" && "$4" == "am" && "$5" == "get-current-user" ]]; then
+  echo "${FAKE_CURRENT_USER:-10}"
+  exit 0
+fi
+[[ "$1" == "-s" && "$3" == "exec-out" && "$4" == "run-as" && "$5" == "cn.litianc.vibepub.staging" && "$6" == "--user" && "$7" == "10" && "$8" == "sh" && "$9" == "-c" ]]
 cd "${FAKE_PACKAGE_ROOT:?}"
 /bin/sh -c "${10}"
 EOF
@@ -87,6 +91,11 @@ if HOME="$TMP_DIR/hostile-home" ADB="$TMP_DIR/adb" CURL="$TMP_DIR/curl" \
 fi
 if [[ -e "$TMP_DIR/curlrc-leak.txt" ]] && grep -Fq 'temporary-session-value' "$TMP_DIR/curlrc-leak.txt"; then
   echo "A hostile curlrc captured the session token." >&2
+  exit 1
+fi
+
+if FAKE_CURRENT_USER=11 validate_session >/dev/null 2>&1; then
+  echo "Session validation accepted a different Android user." >&2
   exit 1
 fi
 

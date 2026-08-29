@@ -81,15 +81,18 @@ case "$1" in
     elif [[ "$2" == "am" && "$3" == "force-stop" ]]; then
       [[ "$4" == "--user" && "$5" == "10" ]]
     elif [[ "$2" == "run-as" ]]; then
-      [[ "$3" == "--user" && "$4" == "10" ]]
+      [[ "$3" == "cn.litianc.vibepub" || "$3" == "cn.litianc.vibepub.staging" ]]
+      [[ "$4" == "--user" && "$5" == "10" && "$6" == "sh" && "$7" == "-c" ]]
       command="$8"
       [[ "$command" == *"/data/user/10/"* ]]
       [[ "$command" != *"/data/user/0/"* ]]
+      echo isolated
     fi
     ;;
   exec-out)
-    [[ "$2" == "run-as" && "$3" == "--user" && "$4" == "10" ]]
-    package="$5"
+    [[ "$2" == "run-as" ]]
+    package="$3"
+    [[ "$4" == "--user" && "$5" == "10" && "$6" == "sh" && "$7" == "-c" ]]
     command="$8"
     if [[ "$command" == *"printf 'present"* ]]; then
       if [[ "${FAKE_PREFS_QUERY_FAIL:-false}" == "true" && -e "${FAKE_STATE_DIR:?}/staging-cleared" ]]; then
@@ -103,7 +106,9 @@ case "$1" in
         printf '%s\n%s\n%s\n' 'https://staging.example.test' 'staging-session' 'staging-user'
       fi
     elif [[ "$command" == *"preferences=shared_prefs/vibepub.xml"* ]]; then
-      true
+      echo authenticated
+    elif [[ "$command" == *"printf 'isolated"* ]]; then
+      echo isolated
     else
       printf '%064d %064d\n' 0 1
     fi
@@ -144,8 +149,12 @@ fi
 grep -Fq 'install --user 10' "$TMP_DIR/adb.log"
 grep -Fq 'pm clear --user 10 cn.litianc.vibepub.staging' "$TMP_DIR/adb.log"
 grep -Fq 'pm uninstall --user 10 cn.litianc.vibepub.staging' "$TMP_DIR/adb.log"
-grep -Fq 'run-as --user 10 cn.litianc.vibepub' "$TMP_DIR/adb.log"
-grep -Fq 'run-as --user 10 cn.litianc.vibepub.staging' "$TMP_DIR/adb.log"
+grep -Fq 'run-as cn.litianc.vibepub --user 10' "$TMP_DIR/adb.log"
+grep -Fq 'run-as cn.litianc.vibepub.staging --user 10' "$TMP_DIR/adb.log"
+if grep -Fq 'run-as --user 10' "$TMP_DIR/adb.log"; then
+  echo "Isolation verifier placed --user before the package name." >&2
+  exit 1
+fi
 [[ "$(grep -c '^production$' "$TMP_DIR/http.log")" == 1 ]]
 [[ "$(grep -c '^staging$' "$TMP_DIR/http.log")" == 1 ]]
 if grep -Eq 'production-session|staging-session|production-user|staging-user' "$TMP_DIR/output.txt" "$TMP_DIR/evidence"/*/* 2>/dev/null; then

@@ -214,11 +214,18 @@ case "$1" in
     fi
     ;;
   exec-out)
-    [[ "$2" == "run-as" && "$3" == "--user" && "$4" == "10" ]]
-    package="$5"
+    [[ "$2" == "run-as" ]]
+    package="$3"
+    [[ "$4" == "--user" && "$5" == "10" && "$6" == "sh" && "$7" == "-c" ]]
     remote_command="$8"
     if [[ "$remote_command" == *"preferences=shared_prefs/vibepub.xml"* ]]; then
-      [[ "$package" == "cn.litianc.vibepub" ]]
+      if [[ "$package" == "cn.litianc.vibepub" ]]; then
+        echo authenticated
+      elif [[ "${FAKE_STAGING_LOGIN_MODE:-missing}" == "adb-error" ]]; then
+        echo "run-as: synthetic error"
+      else
+        exit 1
+      fi
     else
       printf '%064d %064d\n' 0 1
     fi
@@ -230,30 +237,36 @@ esac
 EOF
 chmod +x "$FAKE_ADB"
 
-login_output="$TMP_DIR/login-output.txt"
-if AAPT="$FAKE_AAPT" APKSIGNER="$FAKE_APKSIGNER" \
-  FAKE_PRODUCTION_CERTIFICATE_FINGERPRINT="$PINNED_FINGERPRINT" \
-  ADB="$FAKE_ADB" \
-  FAKE_ADB_LOG="$FAKE_ADB_LOG" \
-    "$ROOT_DIR/scripts/verify-android-environment-isolation.sh" \
-      "$TMP_DIR/production.apk" "$TMP_DIR/staging.apk" \
-      --serial synthetic-device \
-      --staging-api-url https://staging.example.test > "$login_output" 2>&1; then
-  echo "Isolation verifier passed while Staging was logged out." >&2
-  exit 1
-fi
+for staging_login_mode in missing adb-error; do
+  login_output="$TMP_DIR/login-output-$staging_login_mode.txt"
+  : > "$FAKE_ADB_LOG"
+  if AAPT="$FAKE_AAPT" APKSIGNER="$FAKE_APKSIGNER" \
+    FAKE_PRODUCTION_CERTIFICATE_FINGERPRINT="$PINNED_FINGERPRINT" \
+    ADB="$FAKE_ADB" \
+    FAKE_ADB_LOG="$FAKE_ADB_LOG" \
+    FAKE_STAGING_LOGIN_MODE="$staging_login_mode" \
+      "$ROOT_DIR/scripts/verify-android-environment-isolation.sh" \
+        "$TMP_DIR/production.apk" "$TMP_DIR/staging.apk" \
+        --serial synthetic-device \
+        --staging-api-url https://staging.example.test > "$login_output" 2>&1; then
+    echo "Isolation verifier passed while Staging login was invalid: $staging_login_mode." >&2
+    exit 1
+  fi
 
-grep -Fq 'Log into both Production and Staging' "$login_output" || {
-  echo "Isolation verifier did not give safe login instructions." >&2
-  exit 1
-}
-if grep -Eq 'pm clear|uninstall' "$FAKE_ADB_LOG"; then
-  echo "Isolation verifier changed Staging before both apps were logged in." >&2
-  exit 1
-fi
-if grep -Eq 'access_token|private-test-token|shared_prefs/' "$login_output"; then
-  echo "Isolation verifier exposed private login data." >&2
-  exit 1
-fi
+  grep -Fq 'Log into both Production and Staging' "$login_output" || {
+    echo "Isolation verifier did not give safe login instructions." >&2
+    exit 1
+  }
+  if grep -Eq 'pm clear|uninstall' "$FAKE_ADB_LOG"; then
+    echo "Isolation verifier changed Staging before both apps were logged in." >&2
+    exit 1
+  fi
+  if grep -Eq 'access_token|private-test-token|shared_prefs/' "$login_output"; then
+    echo "Isolation verifier exposed private login data." >&2
+    exit 1
+  fi
+  grep -Fq 'run-as cn.litianc.vibepub --user 10' "$FAKE_ADB_LOG"
+  grep -Fq 'run-as cn.litianc.vibepub.staging --user 10' "$FAKE_ADB_LOG"
+done
 
 echo "Android environment isolation safety tests passed."
