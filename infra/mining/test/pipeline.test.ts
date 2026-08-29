@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import { processAudioText, reviseArticleWithInstruction } from '../src/llm.js';
 import { generateWechatCoverBuffer } from '../src/coverRenderer.js';
 import { prepareArticleImages } from '../src/articleImages.js';
-import { getAccessToken, publishDraft, updateDraft, uploadWechatArticleImage } from '../src/wechat.js';
+import { getAccessToken, getDraftReadback, publishDraft, updateDraft, uploadWechatArticleImage } from '../src/wechat.js';
 import { createPresignedDownloadUrl, deleteFile, downloadFile, getFileMetadata, listUnprocessedFiles, uploadCoverImage, uploadTranscript } from '../src/r2.js';
 import { transcribeAudioUrl } from '../src/asr.js';
 import { assertStagingCanaryRevisionIdentity, buildArticleTranscriptPayload, filterTargetFiles, main } from '../src/index.js';
@@ -32,8 +32,10 @@ vi.mock('../src/articleImages.js', () => ({
 }));
 
 vi.mock('../src/wechat.js', () => ({
+  canonicalizeWechatDraftContent: (value: string) => value.replace(/\r\n?/g, '\n').trim(),
   publishDraft: vi.fn(),
   updateDraft: vi.fn(),
+  getDraftReadback: vi.fn(),
   getAccessToken: vi.fn(),
   uploadWechatArticleImage: vi.fn()
 }));
@@ -140,6 +142,10 @@ describe('VibePub Cloud Pipeline', () => {
     mockFetchWithPublishingAccount();
     vi.mocked(getFileMetadata).mockResolvedValue({});
     vi.mocked(prepareArticleImages).mockResolvedValue([]);
+    vi.mocked(getDraftReadback).mockImplementation(async () => {
+      const call = vi.mocked(updateDraft).mock.calls.at(-1);
+      return { mediaId: String(call?.[1] || ''), title: String(call?.[2] || ''), content: String(call?.[3] || '') };
+    });
   });
 
   afterEach(() => {
@@ -820,6 +826,19 @@ describe('VibePub Cloud Pipeline', () => {
     const articleReady = [...stored.entries()].find(([key]) => key === transcriptKey)?.[1].toString('utf8') || '';
     expect(articleReady).toContain('"articleVersionId": "av_child"');
     expect(articleReady).toContain('"articleVersionNo": 2');
+    expect(getDraftReadback).toHaveBeenCalledWith('wechat-token', 'MEDIA_ID_PARENT', testWechatConfig);
+    const completedTranscript = JSON.parse(stored.get(transcriptKey)!.toString('utf8'));
+    expect(completedTranscript.revisionHistory.at(-1)).toMatchObject({
+      revisionId: 'rev-versioned',
+      articleVersionId: 'av_child',
+      articleVersionNo: 2,
+      wechatDraftReadback: {
+        verified: true,
+        mediaIdHash: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
+        titleHash: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
+        contentHash: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
+      },
+    });
   });
 
   it('replays the same child and retries only WeChat from the prepared sidecar', async () => {
@@ -1111,7 +1130,6 @@ describe('VibePub Cloud Pipeline', () => {
       transcriptKey,
       expect.stringContaining('"instructionText": "把标题换得更直接，并补充一个结论。"'),
     );
-
     const fetchCalls = statusUpdateBodies();
     expect(fetchCalls.map(call => call.processingStage)).toEqual([
       'ASR',

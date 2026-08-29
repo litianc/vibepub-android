@@ -7,6 +7,34 @@ export type WechatConfig = {
   proxyUrl: string;
 };
 
+export type WechatDraftReadback = {
+  mediaId: string;
+  title: string;
+  content: string;
+};
+
+export function canonicalizeWechatDraftContent(value: string): string {
+  return value.replace(/\r\n?/g, "\n").trim().replace(/<img\b[^>]*\/?\s*>/gi, tag => {
+    const attributes = new Map<string, string>();
+    for (const match of tag.matchAll(/([A-Za-z_:][A-Za-z0-9_.:-]*)\s*=\s*(["'])(.*?)\2/g)) {
+      attributes.set(match[1].toLowerCase(), match[3]);
+    }
+    const source = attributes.get("data-src") || attributes.get("src");
+    if (!source) return tag;
+    let normalizedSource = source;
+    try {
+      const url = new URL(source);
+      if (/\/640$/.test(url.pathname)) url.pathname = url.pathname.replace(/\/640$/, "/0");
+      normalizedSource = url.toString();
+    } catch {
+      return tag;
+    }
+    const alt = attributes.get("alt") || "";
+    const style = attributes.get("style") || "";
+    return `<img src="${normalizedSource}" alt="${alt}" style="${style}"/>`;
+  });
+}
+
 /**
  * Gets a WeChat access token via the configured proxy
  */
@@ -140,6 +168,25 @@ export async function updateDraft(
   if (data.errcode && data.errcode !== 0) {
     throw new Error(`WeChat draft update error: ${data.errcode} - ${data.errmsg}`);
   }
+}
+
+export async function getDraftReadback(
+  accessToken: string,
+  mediaId: string,
+  config?: WechatConfig,
+): Promise<WechatDraftReadback> {
+  const wechat = resolveWechatConfig(config);
+  const url = `${wechat.proxyUrl}/cgi-bin/draft/get?access_token=${accessToken}`;
+  const response = await axios.post(url, { media_id: mediaId });
+  const data = response.data;
+  if (data.errcode && data.errcode !== 0) {
+    throw new Error(`WeChat draft readback error: ${data.errcode} - ${data.errmsg}`);
+  }
+  const article = Array.isArray(data.news_item) ? data.news_item[0] : undefined;
+  if (!article || typeof article.title !== "string" || typeof article.content !== "string") {
+    throw new Error("WeChat draft readback did not return one article");
+  }
+  return { mediaId, title: article.title, content: article.content };
 }
 
 function resolveWechatConfig(config?: WechatConfig): WechatConfig {

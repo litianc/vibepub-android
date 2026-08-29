@@ -1,0 +1,132 @@
+name: Staging Feedback Canary Watchdog
+
+on:
+  workflow_run:
+    workflows: ["Staging Article Feedback Audio Canary"]
+    types: [completed]
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vibepub-staging-deploy
+  cancel-in-progress: false
+
+jobs:
+  restore:
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.event == 'workflow_dispatch' &&
+       github.event.workflow_run.head_branch == github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: vibepub-staging
+    env:
+      STAGING_BASE_URL: ${{ vars.STAGING_PUBLIC_BASE_URL }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Read the current public canary marker
+        run: |
+          test -n "$STAGING_BASE_URL" || { echo "::error::STAGING_BASE_URL is required"; exit 1; }
+          node -e 'const fs=require("fs"),url=`${process.env.STAGING_BASE_URL}/health`;fetch(url,{redirect:"manual",signal:AbortSignal.timeout(30000)}).then(async r=>{if(r.status!==200)throw new Error("staging health unavailable");fs.writeFileSync(process.argv[1],new Uint8Array(await r.arrayBuffer()))}).catch(()=>process.exit(1))' "$RUNNER_TEMP/watchdog-health.json"
+
+      - name: Decide whether this watchdog owns the cleanup
+        id: plan
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EXPECTED_OPERATOR_RUN_ID: ${{ github.event.workflow_run.id }}
+          EXPECTED_CANDIDATE_COMMIT: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          node infra/staging/staging-feedback-canary-watchdog.mjs plan \
+            --health "$RUNNER_TEMP/watchdog-health.json" \
+            --event "$EVENT_NAME" \
+            --expected-run-id "$EXPECTED_OPERATOR_RUN_ID" \
+            --expected-candidate-commit "$EXPECTED_CANDIDATE_COMMIT" \
+            --out "$RUNNER_TEMP/watchdog-plan.json"
+          node -e 'const fs=require("fs"),p=require(process.argv[1]);fs.appendFileSync(process.env.GITHUB_OUTPUT,`restore=${p.restore===true}\ncandidate_commit=${p.candidate_commit||""}\n`)' "$RUNNER_TEMP/watchdog-plan.json"
+
+      - name: Check out the exact canary candidate
+        if: steps.plan.outputs.restore == 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.plan.outputs.candidate_commit }}
+
+      - name: Render and attest the permanent Staging baseline
+        if: steps.plan.outputs.restore == 'true'
+        env:
+          STAGING_RESOURCE_MANIFEST_JSON: ${{ secrets.STAGING_RESOURCE_MANIFEST_JSON }}
+          EXPECTED_STAGING_BASE_URL: ${{ vars.STAGING_PUBLIC_BASE_URL }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          for name in STAGING_RESOURCE_MANIFEST_JSON EXPECTED_STAGING_BASE_URL CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_API_TOKEN; do
+            test -n "${!name}" || { echo "::error::$name is required"; exit 1; }
+          done
+          printf '%s' "$STAGING_RESOURCE_MANIFEST_JSON" > "$RUNNER_TEMP/staging-resource-manifest.json"
+          node infra/staging/render-staging-config.mjs --manifest "$RUNNER_TEMP/staging-resource-manifest.json" --out-dir "$RUNNER_TEMP/safe-config" --intent deploy
+          node infra/staging/verify-staging-config.mjs --manifest "$RUNNER_TEMP/staging-resource-manifest.json" --out-dir "$RUNNER_TEMP/safe-config" --intent deploy
+          node -e 'const m=require(process.argv[1]);if(m.main.public_base_url!==process.env.EXPECTED_STAGING_BASE_URL)throw new Error("staging origin mismatch")' "$RUNNER_TEMP/staging-resource-manifest.json"
+          node infra/staging/attest-staging-origin.mjs --preflight "$RUNNER_TEMP/staging-resource-manifest.json" "$EXPECTED_STAGING_BASE_URL" "$CLOUDFLARE_ACCOUNT_ID"
+          node infra/staging/attest-staging-origin.mjs --fetch "$CLOUDFLARE_ACCOUNT_ID" "$RUNNER_TEMP/workers-subdomain.json"
+          node infra/staging/attest-staging-origin.mjs "$RUNNER_TEMP/staging-resource-manifest.json" "$EXPECTED_STAGING_BASE_URL" "$CLOUDFLARE_ACCOUNT_ID" "$RUNNER_TEMP/workers-subdomain.json"
+
+      - name: Install pinned deployment tools
+        if: steps.plan.outputs.restore == 'true'
+        run: |
+          timeout 300s npm ci --prefix infra/worker
+          timeout 300s npm ci --prefix infra/image-generation-adapter
+          timeout 300s npm ci --prefix infra/wechat-publishing-adapter
+
+      - name: Recheck the marker immediately before cleanup
+        if: steps.plan.outputs.restore == 'true'
+        run: |
+          node -e 'const fs=require("fs"),url=`${process.env.STAGING_BASE_URL}/health`;fetch(url,{redirect:"manual",signal:AbortSignal.timeout(30000)}).then(async r=>{if(r.status!==200)throw new Error("staging health unavailable");fs.writeFileSync(process.argv[1],new Uint8Array(await r.arrayBuffer()))}).catch(()=>process.exit(1))' "$RUNNER_TEMP/watchdog-recheck-health.json"
+          node infra/staging/staging-feedback-canary-watchdog.mjs recheck \
+            --health "$RUNNER_TEMP/watchdog-recheck-health.json" \
+            --plan "$RUNNER_TEMP/watchdog-plan.json" \
+            --out "$RUNNER_TEMP/watchdog-recheck.json"
+
+      - name: Restore the permanent main baseline
+        if: steps.plan.outputs.restore == 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CANDIDATE_COMMIT: ${{ steps.plan.outputs.candidate_commit }}
+        run: |
+          CLEANUP_MARKER_HASH="$(node -e 'process.stdout.write(require(process.argv[1]).marker_hash)' "$RUNNER_TEMP/watchdog-plan.json")"
+          timeout 180s npx --prefix infra/worker wrangler deploy --config "$RUNNER_TEMP/safe-config/main.wrangler.toml" --message "watchdog close staging feedback gate" --var "DEPLOY_COMMIT:${CANDIDATE_COMMIT}" --var "DEPLOY_REF:${GITHUB_REF_NAME}" --var "DEPLOYED_AT:$(date -u +%Y-%m-%dT%H:%M:%SZ)" --var "STAGING_FEEDBACK_CANARY_CLEANUP_MARKER_HASH:${CLEANUP_MARKER_HASH}"
+
+      - name: Restore the permanent image baseline
+        if: steps.plan.outputs.restore == 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CANDIDATE_COMMIT: ${{ steps.plan.outputs.candidate_commit }}
+        run: timeout 180s npx --prefix infra/image-generation-adapter wrangler deploy --config "$RUNNER_TEMP/safe-config/image.wrangler.toml" --message "watchdog close staging feedback canary" --var "DEPLOY_COMMIT:${CANDIDATE_COMMIT}" --var "DEPLOY_REF:${GITHUB_REF_NAME}" --var "DEPLOYED_AT:$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+      - name: Restore the permanent WeChat baseline
+        if: steps.plan.outputs.restore == 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CANDIDATE_COMMIT: ${{ steps.plan.outputs.candidate_commit }}
+        run: timeout 180s npx --prefix infra/wechat-publishing-adapter wrangler deploy --config "$RUNNER_TEMP/safe-config/wechat.wrangler.toml" --message "watchdog close staging feedback canary" --var "DEPLOY_COMMIT:${CANDIDATE_COMMIT}" --var "DEPLOY_REF:${GITHUB_REF_NAME}" --var "DEPLOYED_AT:$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+      - name: Remove the main cleanup marker
+        if: steps.plan.outputs.restore == 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CANDIDATE_COMMIT: ${{ steps.plan.outputs.candidate_commit }}
+        run: timeout 180s npx --prefix infra/worker wrangler deploy --config "$RUNNER_TEMP/safe-config/main.wrangler.toml" --message "watchdog finish staging feedback cleanup" --var "DEPLOY_COMMIT:${CANDIDATE_COMMIT}" --var "DEPLOY_REF:${GITHUB_REF_NAME}" --var "DEPLOYED_AT:$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+      - name: Prove the public marker is closed
+        if: steps.plan.outputs.restore == 'true'
+        run: node -e 'const url=`${process.env.STAGING_BASE_URL}/health`;fetch(url,{redirect:"manual",signal:AbortSignal.timeout(30000)}).then(async r=>{const x=await r.json();if(r.status!==200||x.staging_feedback_canary!==null)process.exit(1)}).catch(()=>process.exit(1))'
