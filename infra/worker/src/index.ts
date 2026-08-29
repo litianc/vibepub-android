@@ -103,6 +103,8 @@ export interface Env {
   STAGING_FEEDBACK_CANARY_WORKSPACE_ID?: string;
   STAGING_FEEDBACK_CANARY_ARTICLE_ID?: string;
   STAGING_FEEDBACK_CANARY_RUN_ID?: string;
+  STAGING_FEEDBACK_CANARY_OPERATOR_RUN_ID?: string;
+  STAGING_FEEDBACK_CANARY_CLEANUP_MARKER_HASH?: string;
   STAGING_FEEDBACK_CANARY_EXPIRES_AT?: string;
   WECHAT_PUBLISHING_ACCOUNT_ALLOWLIST?: string;
   WECHAT_MEDIA_URL_HOST_ALLOWLIST?: string;
@@ -200,6 +202,7 @@ export default {
         ok: true,
         service: "vibepub-api",
         version: deploymentVersion(env),
+        staging_feedback_canary: await stagingFeedbackCanaryHealth(env),
         ...(adapters ? { adapters } : {}),
       });
     }
@@ -581,6 +584,43 @@ async function handleAuthRoute(request: Request, env: Env, url: URL): Promise<Re
     return logout(request, env, auth);
   }
   return json({ error: "not_found" }, 404);
+}
+
+export async function stagingFeedbackCanaryHealth(env: Env): Promise<Record<string, unknown> | null> {
+  const cleanupMarker = env.STAGING_FEEDBACK_CANARY_CLEANUP_MARKER_HASH?.trim() || "";
+  const candidateCommit = env.DEPLOY_COMMIT?.trim() || "";
+  const configured = [
+    env.STAGING_FEEDBACK_CANARY_MODE,
+    env.STAGING_FEEDBACK_CANARY_RUN_ID,
+    env.STAGING_FEEDBACK_CANARY_OPERATOR_RUN_ID,
+    env.STAGING_FEEDBACK_CANARY_EXPIRES_AT,
+    cleanupMarker,
+  ].some(value => Boolean(value?.trim()));
+  if (!configured) return null;
+  const openConfigured = [env.STAGING_FEEDBACK_CANARY_MODE, env.STAGING_FEEDBACK_CANARY_RUN_ID,
+    env.STAGING_FEEDBACK_CANARY_OPERATOR_RUN_ID, env.STAGING_FEEDBACK_CANARY_EXPIRES_AT].some(value => Boolean(value?.trim()));
+  if (cleanupMarker) {
+    const validCleanup = env.DEPLOY_ENVIRONMENT === "staging" && !openConfigured && /^sha256:[a-f0-9]{64}$/.test(cleanupMarker) &&
+      /^[a-f0-9]{40}$/.test(candidateCommit);
+    return validCleanup
+      ? { configured: true, valid: true, operator_run_hash: cleanupMarker, candidate_commit: candidateCommit, expires_at: null, cleanup_pending: true }
+      : { configured: true, valid: false };
+  }
+  const operatorRunId = env.STAGING_FEEDBACK_CANARY_OPERATOR_RUN_ID?.trim() || "";
+  const expiresAt = env.STAGING_FEEDBACK_CANARY_EXPIRES_AT?.trim() || "";
+  const expiresAtMs = Date.parse(expiresAt);
+  const valid = env.DEPLOY_ENVIRONMENT === "staging" && env.STAGING_FEEDBACK_CANARY_MODE === "staging_article_feedback" &&
+    /^\d{1,20}$/.test(operatorRunId) && /^[a-f0-9]{40}$/.test(candidateCommit) &&
+    Number.isFinite(expiresAtMs) && new Date(expiresAtMs).toISOString() === expiresAt;
+  if (!valid) return { configured: true, valid: false };
+  return {
+    configured: true,
+    valid: true,
+    operator_run_hash: `sha256:${await sha256Hex(operatorRunId)}`,
+    candidate_commit: candidateCommit,
+    expires_at: expiresAt,
+    cleanup_pending: false,
+  };
 }
 
 async function login(request: Request, env: Env): Promise<Response> {

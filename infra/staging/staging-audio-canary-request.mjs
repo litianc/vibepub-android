@@ -40,14 +40,21 @@ function validateStatus(raw, expectedDecision, expected) {
   const allowed = new Set([
     "decision", "handoff_id", "run_id", "article_id", "user_id", "workspace_id", "source_key",
     "source_hash", "recording_id", "transcript_ref", "transcript_hash",
+    "transcript_created_at",
   ]);
   if (Object.keys(value).some(key => !allowed.has(key)) || value.decision !== expectedDecision ||
       !HANDOFF_ID.test(value.handoff_id) || !RUN_ID.test(value.run_id) || !HASH.test(value.transcript_hash) ||
       !ARTICLE_ID.test(value.article_id) || value.user_id !== expected.userId ||
       value.workspace_id !== expected.workspaceId || value.source_key !== expected.sourceKey ||
       !HASH.test(value.source_hash) || !Number.isSafeInteger(value.recording_id) || value.recording_id < 1 ||
-      typeof value.transcript_ref !== "string" || !value.transcript_ref || value.transcript_ref.length > 1024) {
+      typeof value.transcript_ref !== "string" || !value.transcript_ref || value.transcript_ref.length > 1024 ||
+      typeof value.transcript_created_at !== "string" || !Number.isFinite(Date.parse(value.transcript_created_at)) ||
+      new Date(Date.parse(value.transcript_created_at)).toISOString() !== value.transcript_created_at) {
     fail("audio_canary_status_invalid");
+  }
+  if (expected.minimumTranscriptCreatedAt !== undefined) {
+    const minimum = Date.parse(expected.minimumTranscriptCreatedAt);
+    if (!Number.isFinite(minimum) || Date.parse(value.transcript_created_at) < minimum) fail("audio_canary_status_stale");
   }
   return value;
 }
@@ -72,7 +79,8 @@ export async function readStagingAudioCanaryStatus(input) {
   if (response.status !== 200) fail("audio_canary_status_unavailable");
   let body;
   try { body = await response.json(); } catch { fail("audio_canary_status_invalid"); }
-  return validateStatus(body, input.expectedDecision, { userId: input.userId, workspaceId: input.workspaceId, sourceKey: key });
+  return validateStatus(body, input.expectedDecision, { userId: input.userId, workspaceId: input.workspaceId,
+    sourceKey: key, minimumTranscriptCreatedAt: input.minimumTranscriptCreatedAt });
 }
 
 function option(args, name) {
@@ -92,6 +100,7 @@ async function main() {
     userId: option(args, "--user-id"),
     workspaceId: option(args, "--workspace-id"),
     expectedDecision: option(args, "--expected-decision"),
+    minimumTranscriptCreatedAt: option(args, "--minimum-transcript-created-at"),
     token: process.env.MINING_V3_HANDOFF_TOKEN,
     fetchImpl: fetch,
   });

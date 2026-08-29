@@ -20,6 +20,7 @@
     "start": "tsx src/index.ts",
     "generate:cover-background": "tsx src/generateCoverBackgroundDraft.ts",
     "smoke:asr": "tsx src/smoke_asr.ts",
+    "verify:revision-readback": "tsx src/verifyRevisionReadback.ts",
     "volc:speech-service": "tsx src/activate_speech_service.ts",
     "test": "vitest run"
   }

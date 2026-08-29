@@ -4,11 +4,11 @@ import { reviseArticle, rewriteArticle } from "./writingAgent.js";
 import { generateWechatCoverBuffer } from "./coverRenderer.js";
 import { articleImagesForTranscript, insertArticleImagesIntoHtml, type ArticleImageAsset } from "./articleImageActions.js";
 import { prepareArticleImages, type PreparedArticleImage } from "./articleImages.js";
-import { getAccessToken, publishDraft, updateDraft, uploadWechatArticleImage, type WechatConfig } from "./wechat.js";
+import { canonicalizeWechatDraftContent, getAccessToken, getDraftReadback, publishDraft, updateDraft, uploadWechatArticleImage, type WechatConfig } from "./wechat.js";
 import { acceptMiningV3Handoff, decideMiningV3Route, miningV3HandoffEnabled, readMiningV3Status, type MiningV3Status } from "./v3Handoff.js";
 import path from "path";
 import { pathToFileURL } from "url";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 function describeError(error: unknown): Record<string, unknown> {
   if (typeof error !== "object" || error === null) {
@@ -795,6 +795,19 @@ async function processVersionedRevisionRequest(
   const previousHistory = Array.isArray(transcript.revisionHistory)
     ? transcript.revisionHistory.filter((entry) => !entry || typeof entry !== "object" || (entry as Record<string, unknown>).revisionId !== revisionId)
     : [];
+  const revisionHistoryEntry = {
+    revisionId,
+    clientRequestId: revisionRequest.clientRequestId,
+    revisionRequestKey,
+    audioKey: revisionRequest.audioKey,
+    createdAt: revisionRequest.createdAt,
+    instructionText,
+    previousArticleTitle: parentTitle,
+    articleTitle: article.title,
+    articleVersionId: version.id,
+    articleVersionNo: version.versionNo,
+    updatedWechatDraft: Boolean(currentDraftId),
+  };
   const transcriptBase = {
     ...transcript,
     rawText,
@@ -810,19 +823,7 @@ async function processVersionedRevisionRequest(
     styleProfileVersion: profileSelection.styleProfileVersion,
     layoutProfileId: profileSelection.layoutProfileId,
     layoutProfileVersion: profileSelection.layoutProfileVersion,
-    revisionHistory: [...previousHistory, {
-      revisionId,
-      clientRequestId: revisionRequest.clientRequestId,
-      revisionRequestKey,
-      audioKey: revisionRequest.audioKey,
-      createdAt: revisionRequest.createdAt,
-      instructionText,
-      previousArticleTitle: parentTitle,
-      articleTitle: article.title,
-      articleVersionId: version.id,
-      articleVersionNo: version.versionNo,
-      updatedWechatDraft: Boolean(currentDraftId),
-    }],
+    revisionHistory: [...previousHistory, revisionHistoryEntry],
   };
   await uploadTranscript(transcriptKey, JSON.stringify({ ...transcriptBase, processingStage: "ARTICLE_READY" }, null, 2));
   await updateStatus(filename, "PROCESSING", {
@@ -835,6 +836,7 @@ async function processVersionedRevisionRequest(
     articleContent: article.content, coverImageUrl, articleVersionId: version.id, articleVersionNo: version.versionNo,
   });
 
+  let wechatDraftReadback: Record<string, unknown> | undefined;
   try {
     let wechatArticle = article;
     if (currentDraftId) {
@@ -852,6 +854,24 @@ async function processVersionedRevisionRequest(
         wechatArticle = { ...article, content: wechatContent, articleImages: wechatImages };
       }
       await updateDraft(wxToken, currentDraftId, wechatArticle.title, wechatArticle.content, coverBuffer, wechatConfig);
+      const readback = await getDraftReadback(wxToken, currentDraftId, wechatConfig);
+      const expectedTitle = wechatArticle.title.trim();
+      const actualTitle = readback.title.trim();
+      const expectedContent = canonicalizeWechatDraftContent(wechatArticle.content);
+      const actualContent = canonicalizeWechatDraftContent(readback.content);
+      if (actualTitle !== expectedTitle || actualContent !== expectedContent) {
+        throw new Error("WeChat draft readback does not match revised article");
+      }
+      const digest = (value: string) => `sha256:${createHash("sha256").update(value).digest("hex")}`;
+      wechatDraftReadback = {
+        verified: true,
+        mediaIdHash: digest(readback.mediaId),
+        expectedTitleHash: digest(expectedTitle),
+        titleHash: digest(actualTitle),
+        expectedContentHash: digest(expectedContent),
+        contentHash: digest(actualContent),
+        verifiedAt: new Date().toISOString(),
+      };
     }
   } catch (error) {
     const errorMessage = buildDraftFailureMessage(error);
@@ -872,7 +892,13 @@ async function processVersionedRevisionRequest(
     }
     throw new VersionedRevisionWechatError(error);
   }
-  await uploadTranscript(transcriptKey, JSON.stringify({ ...transcriptBase, processingStage: "COMPLETED", errorMessage: undefined }, null, 2));
+  const completedTranscript = {
+    ...transcriptBase,
+    revisionHistory: [...previousHistory, { ...revisionHistoryEntry, wechatDraftReadback }],
+    processingStage: "COMPLETED",
+    errorMessage: undefined,
+  };
+  await uploadTranscript(transcriptKey, JSON.stringify(completedTranscript, null, 2));
   await updateStatus(filename, "COMPLETED", {
     userId, processingStage: "COMPLETED", rawText, articleTitle: article.title, articleContent: article.content,
     coverImageUrl, wechatDraftId: currentDraftId, wechatUrl: currentWechatUrl, errorMessage: null,
