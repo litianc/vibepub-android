@@ -102,8 +102,7 @@ jobs:
           cache-dependency-path: infra/mining/package-lock.json
 
       - name: Validate the exact audio or revision input
-        run: |
-          node -e 'const {PHASE,TARGET_KEY,USER_ID,WORKSPACE_ID,REVISION_REQUEST_KEY="",RECORDING_ID="",ARTICLE_ID="",PARENT_VERSION_ID=""}=process.env;const id=/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/;const audioPrefix=`users/${USER_ID}/inbox/`;const audioName=TARGET_KEY.startsWith(audioPrefix)?TARGET_KEY.slice(audioPrefix.length):"";const audio=/^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}\\.(?:m4a|mp3|wav|aac|ogg|webm)$/i;const revisionPrefix=`users/${USER_ID}/revision-requests/`;const revisionName=REVISION_REQUEST_KEY.startsWith(revisionPrefix)?REVISION_REQUEST_KEY.slice(revisionPrefix.length):"";const revision=/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}\/[A-Za-z0-9][A-Za-z0-9._:-]{0,159}\\.json$/;const revisionInvalid=!revision.test(revisionName)||REVISION_REQUEST_KEY.includes("..")||!/^\\d+$/.test(RECORDING_ID)||!id.test(ARTICLE_ID)||!id.test(PARENT_VERSION_ID);const extra=[REVISION_REQUEST_KEY,RECORDING_ID,ARTICLE_ID,PARENT_VERSION_ID].some(Boolean);if(!["transcribe","start","revision"].includes(PHASE)||!id.test(USER_ID)||!id.test(WORKSPACE_ID)||TARGET_KEY.includes("..")||!audio.test(audioName)||(PHASE==="revision"?revisionInvalid:extra))process.exit(1)'
+        run: node infra/staging/validate-staging-audio-canary-input.mjs
 
       - name: Mask the exact synthetic inputs before any deployment
         run: node -e 'const escape=v=>v.replace(/%/g,"%25").replace(/\r/g,"%0D").replace(/\n/g,"%0A");for(const value of process.argv.slice(1))if(value)console.log(`::add-mask::${escape(value)}`)' "$TARGET_KEY" "$USER_ID" "$WORKSPACE_ID" "$REVISION_REQUEST_KEY" "$RECORDING_ID" "$ARTICLE_ID" "$PARENT_VERSION_ID" "$STAGING_WECHAT_ACCOUNT_BINDING_ID"
