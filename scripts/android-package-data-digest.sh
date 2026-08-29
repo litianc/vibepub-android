@@ -74,7 +74,7 @@ done | LC_ALL=C sort | while IFS= read -r file; do
 done
 EOF
 
-if ! "$ADB" -s "$ANDROID_SERIAL" exec-out run-as --user "$ANDROID_USER" "$PACKAGE_NAME" sh -c \
+if ! "$ADB" -s "$ANDROID_SERIAL" exec-out run-as "$PACKAGE_NAME" --user "$ANDROID_USER" sh -c \
   "$remote_digest_command" > "$redacted_manifest" 2>/dev/null; then
   echo "Could not read package data for digest." >&2
   exit 1

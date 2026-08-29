@@ -214,8 +214,8 @@ case "$1" in
     fi
     ;;
   exec-out)
-    [[ "$2" == "run-as" && "$3" == "--user" && "$4" == "10" ]]
-    package="$5"
+    [[ "$2" == "run-as" && "$3" == cn.litianc.vibepub* && "$4" == "--user" && "$5" == "10" ]]
+    package="$3"
     remote_command="$8"
     if [[ "$remote_command" == *"preferences=shared_prefs/vibepub.xml"* ]]; then
       [[ "$package" == "cn.litianc.vibepub" ]]
