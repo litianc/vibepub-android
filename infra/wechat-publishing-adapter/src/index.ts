@@ -6,6 +6,12 @@ export type Env = {
   V3_TENANT_SCOPE?: string;
   WECHAT_DRAFT_SYNC_V3?: string;
   WECHAT_DRAFT_SYNC_V3_ALLOWLIST?: string;
+  DEPLOY_ENVIRONMENT?: string;
+  STAGING_FEEDBACK_CANARY_MODE?: string;
+  STAGING_FEEDBACK_CANARY_USER_ID?: string;
+  STAGING_FEEDBACK_CANARY_WORKSPACE_ID?: string;
+  STAGING_FEEDBACK_CANARY_ARTICLE_ID?: string;
+  STAGING_FEEDBACK_CANARY_EXPIRES_AT?: string;
   WECHAT_PUBLISHING_ACCOUNT_ALLOWLIST?: string;
   WECHAT_PROVIDER_BASE_URL_ALLOWLIST?: string;
   WECHAT_MEDIA_URL_HOST_ALLOWLIST?: string;
@@ -221,6 +227,28 @@ function tenantAllowed(env: Env, userId: string, workspaceId: string): boolean {
   if (scope !== "allowlist") return false;
   return (env.WECHAT_DRAFT_SYNC_V3_ALLOWLIST || "").split(",").map(value => value.trim()).filter(Boolean).includes(`${userId}:${workspaceId}`);
 }
+const STAGING_FEEDBACK_CANARY_MODE = "staging_article_feedback";
+const STAGING_FEEDBACK_CANARY_MAX_TTL_MS = 60 * 60 * 1000;
+function optionalStagingFeedbackConstraintAllows(env: Env, userId: string, workspaceId: string, articleId: string): boolean {
+  const configured = [
+    env.STAGING_FEEDBACK_CANARY_MODE,
+    env.STAGING_FEEDBACK_CANARY_USER_ID,
+    env.STAGING_FEEDBACK_CANARY_WORKSPACE_ID,
+    env.STAGING_FEEDBACK_CANARY_ARTICLE_ID,
+    env.STAGING_FEEDBACK_CANARY_EXPIRES_AT,
+  ].some(value => Boolean(value?.trim()));
+  if (!configured) return true;
+  const expiresAt = env.STAGING_FEEDBACK_CANARY_EXPIRES_AT?.trim() || "";
+  const expiresAtMs = Date.parse(expiresAt);
+  const now = Date.now();
+  return env.DEPLOY_ENVIRONMENT?.trim() === "staging" &&
+    env.STAGING_FEEDBACK_CANARY_MODE?.trim() === STAGING_FEEDBACK_CANARY_MODE &&
+    env.STAGING_FEEDBACK_CANARY_USER_ID?.trim() === userId &&
+    env.STAGING_FEEDBACK_CANARY_WORKSPACE_ID?.trim() === workspaceId &&
+    env.STAGING_FEEDBACK_CANARY_ARTICLE_ID?.trim() === articleId &&
+    Number.isFinite(expiresAtMs) && new Date(expiresAtMs).toISOString() === expiresAt &&
+    expiresAtMs > now && expiresAtMs <= now + STAGING_FEEDBACK_CANARY_MAX_TTL_MS;
+}
 function isPrivateLikeProviderHost(hostname: string): boolean {
   const host = hostname.toLowerCase();
   // Do this before allowlist matching. DNS trailing-root aliases must not let
@@ -258,8 +286,10 @@ function safeProviderBase(env: Env, value: string | null): URL {
   }
   return candidate;
 }
-function assertTenantGate(env: Env, userId: string, workspaceId: string): void {
-  if (!tenantAllowed(env, userId, workspaceId)) throw new AdapterError("wechat_publishing_account_not_allowed", 409);
+function assertTenantGate(env: Env, userId: string, workspaceId: string, articleId: string): void {
+  if (!tenantAllowed(env, userId, workspaceId) || !optionalStagingFeedbackConstraintAllows(env, userId, workspaceId, articleId)) {
+    throw new AdapterError("wechat_publishing_account_not_allowed", 409);
+  }
 }
 function wechatUrl(base: URL, path: string, query: Record<string, string> = {}): URL {
   const url = new URL(base.toString());
@@ -912,7 +942,7 @@ export class WechatOperationAgent {
   }
 
   private async resolve(input: ParsedInput): Promise<Response> {
-    assertTenantGate(this.env, input.user_id, input.workspace_id);
+    assertTenantGate(this.env, input.user_id, input.workspace_id, input.article_id);
     const account = await loadAccount(this.env, input.user_id, input.workspace_id, input.article_id);
     return json({ protocol_version: PROTOCOL, operation: "resolve_account", operation_id: input.operation_id, attempt: input.attempt, result: {
       account_binding_id: account.binding_id, config_hash: account.config_hash, receipt_hash: account.receipt_hash, version: "wechat-account-resolution.v1",
@@ -920,7 +950,7 @@ export class WechatOperationAgent {
   }
 
   private async execute(input: ParsedInput): Promise<Response> {
-    assertTenantGate(this.env, input.user_id, input.workspace_id);
+    assertTenantGate(this.env, input.user_id, input.workspace_id, input.article_id);
     assertOperationPayload(input);
     // Account resolution and receipt verification intentionally happen before
     // intent/R2/provider access. A stale receipt can never claim an operation.
@@ -984,7 +1014,7 @@ export default {
     try { raw = await request.clone().json() as Record<string, unknown>; } catch { return json({ error: { code: "invalid_json" } }, 400); }
     try {
       const input = parseBody(raw);
-      assertTenantGate(env, input.user_id, input.workspace_id);
+      assertTenantGate(env, input.user_id, input.workspace_id, input.article_id);
       // This gate deliberately runs before Durable Object selection. The DO
       // namespace is per verified account identity, never per caller-supplied
       // binding. The agent repeats the check before every intent as a second

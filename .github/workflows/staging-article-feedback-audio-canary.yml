@@ -1,0 +1,193 @@
+name: Staging Article Feedback Audio Canary
+
+on:
+  pull_request:
+    paths:
+      - "infra/mining/**"
+      - "infra/staging/**"
+      - ".github/workflows/staging-article-feedback-audio-canary.yml"
+  workflow_dispatch:
+    inputs:
+      phase:
+        description: "Bounded Staging canary phase"
+        required: true
+        type: choice
+        options:
+          - transcribe
+          - start
+          - revision
+      target_key:
+        description: "Exact isolated Staging audio R2 key"
+        required: true
+        type: string
+      user_id:
+        description: "Exact isolated Staging user"
+        required: true
+        type: string
+      workspace_id:
+        description: "Exact isolated Staging workspace"
+        required: true
+        type: string
+      revision_request_key:
+        description: "Exact revision request key; revision phase only"
+        required: false
+        type: string
+      recording_id:
+        description: "Exact recording ID; revision phase only"
+        required: false
+        type: string
+      article_id:
+        description: "Exact article ID; revision phase only"
+        required: false
+        type: string
+      parent_version_id:
+        description: "Exact v1 ID; revision phase only"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vibepub-staging-deploy
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate Staging-only audio canary contract
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require the repository default branch
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: test "$GITHUB_REF" = "refs/heads/$DEFAULT_BRANCH"
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Run credential-free contract tests
+        run: |
+          node --test infra/staging/test/staging-audio-canary-request.test.mjs
+          node --test infra/staging/test/staging-article-feedback-canary.test.mjs
+          node --test infra/staging/test/staging-article-feedback-audio-canary-workflow.test.mjs
+
+  canary:
+    name: Run one exact Staging audio phase
+    if: github.event_name == 'workflow_dispatch' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: vibepub-staging
+    env:
+      PHASE: ${{ inputs.phase }}
+      TARGET_KEY: ${{ inputs.target_key }}
+      USER_ID: ${{ inputs.user_id }}
+      WORKSPACE_ID: ${{ inputs.workspace_id }}
+      REVISION_REQUEST_KEY: ${{ inputs.revision_request_key }}
+      RECORDING_ID: ${{ inputs.recording_id }}
+      ARTICLE_ID: ${{ inputs.article_id }}
+      PARENT_VERSION_ID: ${{ inputs.parent_version_id }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: infra/mining/package-lock.json
+
+      - name: Validate the exact audio or revision input
+        run: |
+          node -e 'const {PHASE,TARGET_KEY,USER_ID,WORKSPACE_ID,REVISION_REQUEST_KEY="",RECORDING_ID="",ARTICLE_ID="",PARENT_VERSION_ID=""}=process.env;const id=/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/;const audio=new RegExp(`^users/${USER_ID}/inbox/[^/]+\\.(?:m4a|mp3|wav|aac|ogg|webm)$`,`i`);const revision=new RegExp(`^users/${USER_ID}/revision-requests/[^/]+/[^/]+\\.json$`);const revisionInvalid=!revision.test(REVISION_REQUEST_KEY)||REVISION_REQUEST_KEY.includes("..")||!/^\\d+$/.test(RECORDING_ID)||!id.test(ARTICLE_ID)||!id.test(PARENT_VERSION_ID);const extra=[REVISION_REQUEST_KEY,RECORDING_ID,ARTICLE_ID,PARENT_VERSION_ID].some(Boolean);if(!["transcribe","start","revision"].includes(PHASE)||!id.test(USER_ID)||!id.test(WORKSPACE_ID)||TARGET_KEY.includes("..")||!audio.test(TARGET_KEY)||(PHASE==="revision"?revisionInvalid:extra))process.exit(1)'
+
+      - name: Bind the protected isolated Staging resources
+        env:
+          STAGING_RESOURCE_MANIFEST_JSON: ${{ secrets.STAGING_RESOURCE_MANIFEST_JSON }}
+          EXPECTED_STAGING_BASE_URL: ${{ vars.STAGING_PUBLIC_BASE_URL }}
+        run: |
+          test -n "$STAGING_RESOURCE_MANIFEST_JSON" || { echo "::error::STAGING_RESOURCE_MANIFEST_JSON is required"; exit 1; }
+          printf '%s' "$STAGING_RESOURCE_MANIFEST_JSON" > "$RUNNER_TEMP/staging-resource-manifest.json"
+          node infra/staging/render-staging-config.mjs --manifest "$RUNNER_TEMP/staging-resource-manifest.json" --out-dir "$RUNNER_TEMP/safe-config" --intent deploy
+          node infra/staging/verify-staging-config.mjs --manifest "$RUNNER_TEMP/staging-resource-manifest.json" --out-dir "$RUNNER_TEMP/safe-config" --intent deploy
+          node -e 'const fs=require("fs"),c=require("crypto");const m=require(process.argv[1]);if(m.main.public_base_url!==process.env.EXPECTED_STAGING_BASE_URL)throw new Error("staging origin mismatch");const h=`sha256:${c.createHash("sha256").update(JSON.stringify(m)).digest("hex")}`;fs.appendFileSync(process.env.GITHUB_ENV,`STAGING_BASE_URL=${m.main.public_base_url}\nR2_BUCKET_NAME=${m.main.files_bucket}\nSTAGING_MANIFEST_HASH=${h}\n`)' "$RUNNER_TEMP/staging-resource-manifest.json"
+
+      - name: Attest the exact Staging origin to this Cloudflare account
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          for name in CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_API_TOKEN STAGING_BASE_URL; do
+            test -n "${!name}" || { echo "::error::$name is required for Staging origin attestation"; exit 1; }
+          done
+          node infra/staging/attest-staging-origin.mjs --preflight "$RUNNER_TEMP/staging-resource-manifest.json" "$STAGING_BASE_URL" "$CLOUDFLARE_ACCOUNT_ID"
+          node infra/staging/attest-staging-origin.mjs --fetch "$CLOUDFLARE_ACCOUNT_ID" "$RUNNER_TEMP/workers-subdomain.json"
+          node infra/staging/attest-staging-origin.mjs "$RUNNER_TEMP/staging-resource-manifest.json" "$STAGING_BASE_URL" "$CLOUDFLARE_ACCOUNT_ID" "$RUNNER_TEMP/workers-subdomain.json"
+          echo "STAGING_ATTESTED_BASE_URL=$STAGING_BASE_URL" >> "$GITHUB_ENV"
+
+      - name: Install the pinned Mining dependencies
+        run: npm ci --prefix infra/mining
+
+      - name: Run the bounded Staging Mining phase
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          VOLC_ASR_APPID: ${{ secrets.VOLC_ASR_APPID }}
+          VOLC_ASR_ACCESS_TOKEN: ${{ secrets.VOLC_ASR_ACCESS_TOKEN }}
+          VOLC_ASR_RESOURCE_ID: ${{ secrets.VOLC_ASR_RESOURCE_ID }}
+          GLM_API_KEY: ${{ secrets.GLM_API_KEY }}
+          GLM_BASE_URL: ${{ secrets.GLM_BASE_URL }}
+          GLM_MODEL: ${{ secrets.GLM_MODEL }}
+          GPT_IMAGE_API_KEY: ${{ secrets.GPT_IMAGE_API_KEY }}
+          GPT_IMAGE_BASE_URL: https://api.clawparty.cn/
+          GPT_IMAGE_MODEL: gpt-image-2
+          MINING_SERVICE_TOKEN: ${{ secrets.MINING_SERVICE_TOKEN }}
+          MINING_V3_HANDOFF_TOKEN: ${{ secrets.MINING_V3_HANDOFF_TOKEN }}
+          MINING_V3_HANDOFF_ENABLED: "true"
+          CLEANUP_PERMANENT_AUDIO_FAILURES: "false"
+          WRITING_AGENT_USER_ID: ${{ inputs.user_id }}
+          WRITING_AGENT_WORKSPACE_ID: ${{ inputs.workspace_id }}
+          STAGING_CANARY_EXPECTED_RECORDING_ID: ${{ inputs.recording_id }}
+          STAGING_CANARY_EXPECTED_ARTICLE_ID: ${{ inputs.article_id }}
+          STAGING_CANARY_EXPECTED_PARENT_VERSION_ID: ${{ inputs.parent_version_id }}
+          STAGING_CANARY_EXPECTED_WORKSPACE_ID: ${{ inputs.workspace_id }}
+        run: |
+          for name in CLOUDFLARE_ACCOUNT_ID R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY VOLC_ASR_APPID VOLC_ASR_ACCESS_TOKEN VOLC_ASR_RESOURCE_ID MINING_SERVICE_TOKEN MINING_V3_HANDOFF_TOKEN; do
+            test -n "${!name}" || { echo "::error::$name is required"; exit 1; }
+          done
+          set +e
+          if [ "$PHASE" = "revision" ]; then
+            PUBLIC_BASE_URL="$STAGING_ATTESTED_BASE_URL" REVISION_REQUEST_KEY="$REVISION_REQUEST_KEY" TARGET_KEY="" npm start --prefix infra/mining
+          else
+            PUBLIC_BASE_URL="$STAGING_ATTESTED_BASE_URL" REVISION_REQUEST_KEY="" TARGET_KEY="$TARGET_KEY" npm start --prefix infra/mining
+          fi
+          MINING_EXIT=$?
+          set -e
+          if [ "$PHASE" != "transcribe" ]; then
+            exit "$MINING_EXIT"
+          fi
+
+      - name: Read the exact safe handoff result
+        if: inputs.phase != 'revision'
+        env:
+          MINING_V3_HANDOFF_TOKEN: ${{ secrets.MINING_V3_HANDOFF_TOKEN }}
+          EXPECTED_DECISION: ${{ inputs.phase == 'transcribe' && 'v3_pending_start' || 'accepted' }}
+        run: |
+          node infra/staging/staging-audio-canary-request.mjs status \
+            --base-url "$STAGING_ATTESTED_BASE_URL" \
+            --source-key "$TARGET_KEY" \
+            --user-id "$USER_ID" \
+            --workspace-id "$WORKSPACE_ID" \
+            --expected-decision "$EXPECTED_DECISION" \
+            --out "$RUNNER_TEMP/staging-audio-identity.json"
+          node -e 'const x=require(process.argv[1]);if(!/^run_v3_[a-f0-9]{64}$/.test(x.run_id)||!/^handoff_v3_[a-f0-9]{64}$/.test(x.handoff_id)||!/^article_v3_[a-f0-9]{64}$/.test(x.article_id)||!/^sha256:[a-f0-9]{64}$/.test(x.source_hash)||!Number.isSafeInteger(x.recording_id))process.exit(1)' "$RUNNER_TEMP/staging-audio-identity.json"
+          node -e 'const fs=require("fs"),p=process.argv[1],x=require(p);x.candidate_commit=process.env.GITHUB_SHA;x.manifest_hash=process.env.STAGING_MANIFEST_HASH;fs.writeFileSync(p,JSON.stringify(x,null,2))' "$RUNNER_TEMP/staging-audio-identity.json"
+
+      - name: Upload the private intermediate identity
+        if: inputs.phase != 'revision'
+        uses: actions/upload-artifact@v4
+        with:
+          name: staging-audio-identity-${{ github.run_id }}
+          retention-days: 1
+          if-no-files-found: error
+          path: ${{ runner.temp }}/staging-audio-identity.json

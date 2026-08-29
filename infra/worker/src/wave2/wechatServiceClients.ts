@@ -17,9 +17,49 @@ export type WechatPublishingServiceEnv = {
   WECHAT_MEDIA_URL_HOST_ALLOWLIST?: string;
 };
 
-export function wechatDraftFeatureEnabled(env: { V3_TENANT_SCOPE?: string; WECHAT_DRAFT_SYNC_V3?: string; WECHAT_DRAFT_SYNC_V3_ALLOWLIST?: string }, userId: string, workspaceId: string): boolean {
+type WechatDraftFeatureEnv = {
+  V3_TENANT_SCOPE?: string;
+  WECHAT_DRAFT_SYNC_V3?: string;
+  WECHAT_DRAFT_SYNC_V3_ALLOWLIST?: string;
+  DEPLOY_ENVIRONMENT?: string;
+  STAGING_FEEDBACK_CANARY_MODE?: string;
+  STAGING_FEEDBACK_CANARY_USER_ID?: string;
+  STAGING_FEEDBACK_CANARY_WORKSPACE_ID?: string;
+  STAGING_FEEDBACK_CANARY_ARTICLE_ID?: string;
+  STAGING_FEEDBACK_CANARY_RUN_ID?: string;
+  STAGING_FEEDBACK_CANARY_EXPIRES_AT?: string;
+};
+
+const STAGING_FEEDBACK_CANARY_MODE = "staging_article_feedback";
+const STAGING_FEEDBACK_CANARY_MAX_TTL_MS = 60 * 60 * 1000;
+
+function optionalStagingFeedbackConstraintAllows(env: WechatDraftFeatureEnv, userId: string, workspaceId: string, articleId?: string, runId?: string): boolean {
+  const configured = [
+    env.STAGING_FEEDBACK_CANARY_MODE,
+    env.STAGING_FEEDBACK_CANARY_USER_ID,
+    env.STAGING_FEEDBACK_CANARY_WORKSPACE_ID,
+    env.STAGING_FEEDBACK_CANARY_ARTICLE_ID,
+    env.STAGING_FEEDBACK_CANARY_RUN_ID,
+    env.STAGING_FEEDBACK_CANARY_EXPIRES_AT,
+  ].some(value => Boolean(value?.trim()));
+  if (!configured) return true;
+  const expiresAt = env.STAGING_FEEDBACK_CANARY_EXPIRES_AT?.trim() || "";
+  const expiresAtMs = Date.parse(expiresAt);
+  const now = Date.now();
+  return env.DEPLOY_ENVIRONMENT?.trim() === "staging" &&
+    env.STAGING_FEEDBACK_CANARY_MODE?.trim() === STAGING_FEEDBACK_CANARY_MODE &&
+    env.STAGING_FEEDBACK_CANARY_USER_ID?.trim() === userId &&
+    env.STAGING_FEEDBACK_CANARY_WORKSPACE_ID?.trim() === workspaceId &&
+    env.STAGING_FEEDBACK_CANARY_ARTICLE_ID?.trim() === articleId &&
+    env.STAGING_FEEDBACK_CANARY_RUN_ID?.trim() === runId &&
+    Number.isFinite(expiresAtMs) && new Date(expiresAtMs).toISOString() === expiresAt &&
+    expiresAtMs > now && expiresAtMs <= now + STAGING_FEEDBACK_CANARY_MAX_TTL_MS;
+}
+
+export function wechatDraftFeatureEnabled(env: WechatDraftFeatureEnv, userId: string, workspaceId: string, articleId?: string, runId?: string): boolean {
   if (env.WECHAT_DRAFT_SYNC_V3 !== "true") return false;
-  return v3TenantAllowed(env, env.WECHAT_DRAFT_SYNC_V3_ALLOWLIST, userId, workspaceId);
+  return v3TenantAllowed(env, env.WECHAT_DRAFT_SYNC_V3_ALLOWLIST, userId, workspaceId) &&
+    optionalStagingFeedbackConstraintAllows(env, userId, workspaceId, articleId, runId);
 }
 
 export function isWechatAccountAllowed(value: string | undefined, accountBindingId: string, env: { V3_TENANT_SCOPE?: string } = {}): boolean {

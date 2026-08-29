@@ -5,7 +5,17 @@ import { prepareArticleImages } from '../src/articleImages.js';
 import { getAccessToken, publishDraft, updateDraft, uploadWechatArticleImage } from '../src/wechat.js';
 import { createPresignedDownloadUrl, deleteFile, downloadFile, getFileMetadata, listUnprocessedFiles, uploadCoverImage, uploadTranscript } from '../src/r2.js';
 import { transcribeAudioUrl } from '../src/asr.js';
-import { buildArticleTranscriptPayload, filterTargetFiles, main } from '../src/index.js';
+import { assertStagingCanaryRevisionIdentity, buildArticleTranscriptPayload, filterTargetFiles, main } from '../src/index.js';
+
+describe('Staging revision canary identity', () => {
+  const revision = { recordingId: 42, articleId: 'article_1', parentVersionId: 'av_1', workspaceId: 'workspace_1' } as any;
+  const environment = { PUBLIC_BASE_URL: 'https://vibepub-api-staging.account.workers.dev', STAGING_CANARY_EXPECTED_RECORDING_ID: '42', STAGING_CANARY_EXPECTED_ARTICLE_ID: 'article_1', STAGING_CANARY_EXPECTED_PARENT_VERSION_ID: 'av_1', STAGING_CANARY_EXPECTED_WORKSPACE_ID: 'workspace_1' } as NodeJS.ProcessEnv;
+  it('accepts only the exact Staging v1 revision identity', () => {
+    expect(() => assertStagingCanaryRevisionIdentity(revision, environment)).not.toThrow();
+    expect(() => assertStagingCanaryRevisionIdentity({ ...revision, articleId: 'article_2' }, environment)).toThrow('staging_canary_revision_identity_invalid');
+    expect(() => assertStagingCanaryRevisionIdentity(revision, { ...environment, PUBLIC_BASE_URL: 'https://vibepub.litianc.cn' })).toThrow('staging_canary_revision_identity_invalid');
+  });
+});
 
 // Mock dependencies
 vi.mock('../src/llm.js', () => ({
