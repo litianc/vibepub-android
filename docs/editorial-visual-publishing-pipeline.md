@@ -10,6 +10,8 @@ Phase 1 establishes the durable content contract for the review and visual publi
 
 `visual_plans` stores block-bound cover, illustration, and chart intents. Chart entries require `data_provenance`; generated images are planned only after content is frozen. The final renderer and WeChat uploader are responsible for replacing planned references with audited CDN metadata in later phases.
 
+`article_feedback_events` stores each adopted or not-adopted choice as a separate append-only event for the current Article Version. Its server sequence defines the active choice: the newest sequence is current, while every older event remains available for audit. A stable client event ID makes an exact retry return the original event and rejects a changed payload. New events for a non-current version are rejected so the App can refresh before acting.
+
 All three tables have composite ownership foreign keys and append-only update/delete triggers. The existing `recordings` row remains the latest-result projection and now carries `workspace_id` for new uploads and version ownership checks.
 
 Deleting a recording keeps the Android/Worker delete contract: the `recordings` projection and associated R2 objects are removed, so the item disappears from the user's list. `editorial_recording_scopes` deliberately has no FK back to `recordings`; its retained row is the recording audit tombstone that keeps ArticleVersion, Review, VisualPlan, run, and transition ownership valid after deletion. Those editorial rows remain append-only and are never deleted as a side effect of recording cleanup.
@@ -50,7 +52,7 @@ Version creation assigns the next version number from the scoped append-only his
 
 The initial request must include `article_id`, `recording_id`, `source=initial`, title, body, and a complete snapshot payload. Revisions must include `source=revision` and the parent version ID. A chart visual must include stable `block_id`, `aspect_ratio`, `alt`, and `data_provenance`.
 
-`generation_status` is server-owned and starts at `generated`; it cannot be supplied by a caller. The durable state row starts at `draft_generated`. Coordinator transitions require the current `state_revision`, validate the allowlisted state machine, and use a D1 batch CAS. The CAS update writes an opaque `transition_request_id` marker into the state row; the transition insert is conditional on that exact marker and the final batch statement clears it. A stale update therefore cannot insert a transition merely because another request already reached the target state, and the D1 batch keeps the state and transition write atomic. Replaying the same transition key/payload returns the original result; changing the payload returns `409 idempotency_conflict`. Frozen content cannot transition back to a draft state.
+For versions created through the editorial API, `generation_status` is server-owned and starts at `generated`; it cannot be supplied by a caller. Their durable state row starts at `draft_generated`. The five-Agent publishing workflow has a separate finalization path: only after the frozen artifact is committed does it atomically create the initial `v1` snapshot with `generation_status=frozen` and state `content_frozen`. Internal drafts are not product versions. Coordinator transitions require the current `state_revision`, validate the allowlisted state machine, and use a D1 batch CAS. The CAS update writes an opaque `transition_request_id` marker into the state row; the transition insert is conditional on that exact marker and the final batch statement clears it. A stale update therefore cannot insert a transition merely because another request already reached the target state, and the D1 batch keeps the state and transition write atomic. Replaying the same transition key/payload returns the original result; changing the payload returns `409 idempotency_conflict`. Frozen content cannot transition back to a draft state.
 
 The minimal `RunManifest` and `ArtifactEnvelope` contracts pin workflow, policy, agent, and skill versions. They are schema/types only in this phase; no arbitrary scripts or dynamic agents are executed.
 
@@ -592,7 +594,10 @@ synthetic render plus five explicit generated-config Wrangler dry-runs only.
 
 Before any remote bootstrap, a protected Environment attestation must prove
 both isolated main/Writing D1 backup identifiers, the exact additive migration
-lists (main through `0011`, Writing through `0001`), and schema evidence hashes.
+lists (main through `0013`, Writing through `0001`), and schema evidence hashes.
+The main D1 evidence also binds the candidate commit to a read-only old database
+copy rehearsal that applies `0012` and `0013` twice, preserves old row counts,
+and verifies the feedback and revision constraints.
 Its manifest SHA-256 is passed to every later deploy/health job, which rejects
 TOCTOU changes; before any adapter deploy an independent protected
 `STAGING_PUBLIC_BASE_URL` must exactly equal the manifest and an account-scoped
@@ -632,3 +637,10 @@ three-operation Image ledger before provider access. It restores empty provider
 configuration afterward, while the adapter-side expiry closes the provider if
 runner cleanup is interrupted; production remains separately gated on key
 rotation and release approval.
+
+Article feedback-loop evidence uses a strict redacted contract. The actual
+candidate APK and isolated synthetic APK bind the same candidate commit and
+Staging origin. Five completed Agents produce one frozen article. v1-to-v2
+lineage, adopted and not-adopted paths, duplicate and stale behavior, old-client
+compatibility, and WeChat-only recovery must all pass. Shared evidence contains
+only hashes, bounded synthetic identifiers, counts, and booleans.

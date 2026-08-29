@@ -12,6 +12,11 @@ Publishing/WritingAgent coordination.
 - `POST /api/uploads` - upload audio; requires `Authorization: Bearer <access token>`.
 - `GET /api/uploads` - list recent user-owned `inbox/` objects; requires session auth.
 - `GET /api/recordings` - list the current user's recording statuses and display metadata; requires session auth.
+- `GET /api/recordings/:filename/article-feedback` - read the current Article Version, current choice, and append-only choice history; requires session auth.
+- `POST /api/recordings/:filename/article-feedback` - record `adopted` or `not_adopted` for the current Article Version; requires a verified session.
+- `POST /api/recordings/:filename/revisions` - queue an idempotent `continue_revision` request against the latest Article Version; accepts optional `X-Article-Version-Id`, `X-Revision-Request-Id`, `X-Revision-Feedback-Id`, and `X-Revision-Audio-Sha256` headers.
+- `POST /api/internal/v3/article-revisions/:revisionId/version` - create or replay the single child Article Version before WeChat publishing; requires `MINING_V3_HANDOFF_TOKEN`.
+- `POST /api/internal/v3/article-revisions/:revisionId/status` - persist `wechat_pending`, `completed`, or `wechat_failed`; requires `MINING_V3_HANDOFF_TOKEN`.
 - `PUT /api/internal/status` - update mining pipeline status; requires `MINING_SERVICE_TOKEN`.
 - `POST /api/internal/mining-claims` - claim, complete, or release one mining input; internal only.
 - `GET /api/files/:key` - fetch a user-owned R2 object; requires session auth.
@@ -36,6 +41,24 @@ review while the WeChat draft step is still pending.
 creation failed after article generation.
 `cover_image_url` points at the generated WeChat cover PNG in R2 when the mining
 job has saved one; older recordings may omit it.
+
+Article feedback accepts a stable `client_event_id`. Repeating the same ID and
+payload returns the original event; changing the payload returns `409`. A new
+event for an older Article Version also returns `409` and asks the App to
+refresh. Migration `0012_article_feedback.sql` is additive and keeps every
+feedback event in server sequence; old recordings are not backfilled.
+
+Versioned revision requests are stored by migration `0013_article_revisions.sql`.
+The App's stable request ID is idempotent: the same ID and payload replay the
+same request, while changed payloads or stale parents return `409` before any
+R2 upload or dispatch. An old App without the new headers uses the latest
+server Article Version. Accepted responses expose `parent_version_id` and a
+top-level `continue_revision` object with `accepted: true` for Android. The
+migration also enforces one revision request and one child Article Version per
+parent, so article history remains a straight line under concurrent calls.
+Mining receives the parent snapshot and exact R2
+audio/request references, then uses the internal endpoints to create the child
+and record the final WeChat result.
 
 ## Setup
 

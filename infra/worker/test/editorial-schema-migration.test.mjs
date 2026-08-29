@@ -30,6 +30,13 @@ test("legacy recordings get a deterministic workspace scope and migration can be
   assert.equal(output.trim(), "7:usr_legacy:ws_legacy");
 });
 
+test("legacy recordings are not backfilled into article versions", () => {
+  const output = runSql(`${legacy}\n${migration}\n${migration}\n
+    SELECT (SELECT count(*) FROM recordings) || ':' ||
+           (SELECT count(*) FROM article_versions);`);
+  assert.equal(output.trim(), "1:0");
+});
+
 test("legacy recordings whose owner no longer exists do not block migration", () => {
   const orphan = `
     INSERT INTO recordings (id, user_id, filename, r2_key)

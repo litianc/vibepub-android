@@ -27,18 +27,54 @@ function deployManifest() {
 
 function dataEvidence() {
   return {
-    schema_version: "vibepub-staging-data-evidence.v1",
+    schema_version: "vibepub-staging-data-evidence.v2",
     main: {
       database_name: "vibepub-db-staging",
       database_id: "11111111-1111-4111-8111-111111111111",
-      backup_id: "d1-backup-main-20260722",
+      backup_id: "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
       applied_migrations: [
         "0001_dedupe_recordings", "0002_recording_experience_fields", "0003_recording_processing_stage",
         "0004_recording_duration_ms", "0005_recording_cover_image_url", "0006_recording_source_type",
         "0007_recording_style_profiles", "0008_multi_user_auth", "0009_mining_input_claims",
         "0010_editorial_visual_pipeline", "0011_five_agent_publication_projection",
+        "0012_article_feedback", "0013_article_revisions",
       ],
       schema_evidence_hash: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      backup_copy_sha256: "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      migration_rehearsal: {
+        schema_version: "vibepub-main-d1-migration-rehearsal.v2",
+        candidate_commit: "cccccccccccccccccccccccccccccccccccccccc",
+        migrations: ["0012_article_feedback", "0013_article_revisions"],
+        migration_bundle_sha256: "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        source_sha256: "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        schema_evidence_sha256: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        preserved_rows_sha256: "sha256:9999999999999999999999999999999999999999999999999999999999999999",
+        before_counts: {
+          users: 1, recordings: 1, article_versions: 1,
+          article_feedback_events: null, article_revision_requests: null,
+        },
+        after_counts: {
+          users: 1, recordings: 1, article_versions: 1,
+          article_feedback_events: 0, article_revision_requests: 0,
+        },
+        checks: {
+          source_unchanged: true,
+          first_apply_passed: true,
+          second_apply_passed: true,
+          old_rows_preserved: true,
+          old_rows_identical: true,
+          schema_contract_passed: true,
+          foreign_keys_passed: true,
+          duplicate_feedback_rejected: true,
+          duplicate_revision_rejected: true,
+          valid_feedback_inserted: true,
+          valid_revision_inserted: true,
+          invalid_feedback_action_rejected: true,
+          invalid_revision_status_rejected: true,
+          feedback_update_rejected: true,
+          feedback_delete_rejected: true,
+        },
+      },
     },
     writing: {
       database_name: "writing-agent-db-staging",
@@ -237,7 +273,11 @@ test("requires protected additive-D1 evidence before an approved staging deploym
   const manifest = deployManifest();
   const evidence = dataEvidence();
   const summary = validateStagingDataAttestation(manifest, evidence, STAGING_DATA_ATTESTATION);
-  assert.equal(summary.main_migrations.at(-1), "0011_five_agent_publication_projection");
+  assert.equal(summary.main_migrations.at(-1), "0013_article_revisions");
+  assert.equal(summary.main_rehearsal_candidate_commit, evidence.main.migration_rehearsal.candidate_commit);
+  assert.equal(summary.main_migration_bundle_sha256, evidence.main.migration_rehearsal.migration_bundle_sha256);
+  assert.equal(summary.main_backup_copy_sha256, evidence.main.backup_copy_sha256);
+  assert.equal(summary.main_rehearsal_schema_evidence_sha256, evidence.main.migration_rehearsal.schema_evidence_sha256);
   assert.deepEqual(summary.writing_migrations, ["0001_style_profiles"]);
 
   assert.equal(errorCode(() => validateStagingDataAttestation(manifest, evidence, "approved")), "staging_data_attestation_required");
@@ -247,6 +287,22 @@ test("requires protected additive-D1 evidence before an approved staging deploym
   const wrongMigration = dataEvidence();
   wrongMigration.main.applied_migrations.pop();
   assert.equal(errorCode(() => validateStagingDataAttestation(manifest, wrongMigration, STAGING_DATA_ATTESTATION)), "staging_data_migration_mismatch");
+
+  const failedRehearsal = dataEvidence();
+  failedRehearsal.main.migration_rehearsal.checks.second_apply_passed = false;
+  assert.equal(errorCode(() => validateStagingDataAttestation(manifest, failedRehearsal, STAGING_DATA_ATTESTATION)), "staging_data_rehearsal_invalid");
+
+  const mismatchedSchemaHash = dataEvidence();
+  mismatchedSchemaHash.main.migration_rehearsal.schema_evidence_sha256 = "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+  assert.equal(errorCode(() => validateStagingDataAttestation(manifest, mismatchedSchemaHash, STAGING_DATA_ATTESTATION)), "staging_data_rehearsal_invalid");
+
+  const mismatchedBackup = dataEvidence();
+  mismatchedBackup.main.backup_copy_sha256 = "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+  assert.equal(errorCode(() => validateStagingDataAttestation(manifest, mismatchedBackup, STAGING_DATA_ATTESTATION)), "staging_data_rehearsal_invalid");
+
+  const splicedBackupIdentity = dataEvidence();
+  splicedBackupIdentity.main.backup_id = "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+  assert.equal(errorCode(() => validateStagingDataAttestation(manifest, splicedBackupIdentity, STAGING_DATA_ATTESTATION)), "staging_data_rehearsal_invalid");
 });
 
 test("Mining readiness is schema-exact, staging-only, and binds the approved main origin and R2 bucket", () => {

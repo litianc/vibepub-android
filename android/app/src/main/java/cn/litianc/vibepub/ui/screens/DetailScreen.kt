@@ -96,12 +96,19 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.core.content.FileProvider
 import androidx.core.content.ContextCompat
 import cn.litianc.vibepub.AppPreferences
+import cn.litianc.vibepub.ArticleFeedbackAction
+import cn.litianc.vibepub.ArticleFeedbackEventKey
+import cn.litianc.vibepub.ArticleFeedbackEventStore
+import cn.litianc.vibepub.ArticleFeedbackState
+import cn.litianc.vibepub.AuthenticatedArticleFeedbackClient
 import cn.litianc.vibepub.ArticleRevisionApi
 import cn.litianc.vibepub.ArticleRevisionRecorder
 import cn.litianc.vibepub.AuthenticatedHttpClient
 import cn.litianc.vibepub.BuildConfig
 import cn.litianc.vibepub.coverImageFileNameForRecording
 import cn.litianc.vibepub.shouldAuthorizeVibePubFileUrl
+import cn.litianc.vibepub.STALE_ARTICLE_VERSION_MESSAGE
+import cn.litianc.vibepub.submitAndConfirmArticleFeedback
 import cn.litianc.vibepub.transcriptFileNameForRecording
 import cn.litianc.vibepub.data.AppDatabase
 import cn.litianc.vibepub.data.RecordingEntity
@@ -187,6 +194,27 @@ internal enum class ArticleRevisionIntent {
     ILLUSTRATION,
 }
 
+internal enum class ArticleRevisionVersionStatus {
+    LEGACY,
+    CHECKING,
+    CURRENT,
+    STALE,
+    UNAVAILABLE,
+}
+
+internal fun articleRevisionVersionStatus(
+    displayedVersionId: String,
+    serverVersionId: String,
+    serverVersionLoaded: Boolean,
+    serverVersionFailed: Boolean = false,
+): ArticleRevisionVersionStatus = when {
+    displayedVersionId.isBlank() -> ArticleRevisionVersionStatus.LEGACY
+    serverVersionFailed -> ArticleRevisionVersionStatus.UNAVAILABLE
+    !serverVersionLoaded -> ArticleRevisionVersionStatus.CHECKING
+    displayedVersionId == serverVersionId -> ArticleRevisionVersionStatus.CURRENT
+    else -> ArticleRevisionVersionStatus.STALE
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DetailScreen(
@@ -200,6 +228,8 @@ fun DetailScreen(
 ) {
     val context = LocalContext.current
     val preferences = remember { AppPreferences(context.applicationContext) }
+    val feedbackClient = remember(preferences) { AuthenticatedArticleFeedbackClient(preferences) }
+    val feedbackEventStore = remember { ArticleFeedbackEventStore(context.applicationContext) }
     val revisionRecorder = remember { ArticleRevisionRecorder(context.applicationContext) }
     val coroutineScope = rememberCoroutineScope()
     val userId = preferences.effectiveUserId
@@ -216,6 +246,76 @@ fun DetailScreen(
     var revisionMessage by remember(filename) { mutableStateOf("") }
     var revisionStartedAtMs by remember(filename) { mutableLongStateOf(0L) }
     var revisionElapsedMs by remember(filename) { mutableLongStateOf(0L) }
+    var feedbackState by remember(userId, filename) { mutableStateOf<ArticleFeedbackState?>(null) }
+    var feedbackLoading by remember(userId, filename) { mutableStateOf(false) }
+    var feedbackVersionLoaded by remember(userId, filename) { mutableStateOf(false) }
+    var feedbackVersionFailed by remember(userId, filename) { mutableStateOf(false) }
+    var feedbackInProgress by remember(userId, filename) { mutableStateOf(false) }
+    var feedbackMessage by remember(userId, filename) { mutableStateOf("") }
+    val transcriptArticleVersionId = transcript.optTranscriptString("articleVersionId", "article_version_id")
+    val revisionVersionStatus = articleRevisionVersionStatus(
+        displayedVersionId = transcriptArticleVersionId,
+        serverVersionId = feedbackState?.currentVersion?.id.orEmpty(),
+        serverVersionLoaded = feedbackVersionLoaded,
+        serverVersionFailed = feedbackVersionFailed,
+    )
+
+    fun revisionVersionIsReady(): Boolean = when (revisionVersionStatus) {
+        ArticleRevisionVersionStatus.LEGACY,
+        ArticleRevisionVersionStatus.CURRENT,
+        -> true
+        ArticleRevisionVersionStatus.CHECKING -> {
+            revisionMessage = "正在确认当前文章版本，请稍等"
+            revisionUiState = ArticleRevisionUiState.FAILED
+            false
+        }
+        ArticleRevisionVersionStatus.STALE -> {
+            revisionMessage = "文章已有新版本，请刷新后再修改"
+            revisionUiState = ArticleRevisionUiState.FAILED
+            onRefresh()
+            false
+        }
+        ArticleRevisionVersionStatus.UNAVAILABLE -> {
+            revisionMessage = "无法确认当前文章版本，请刷新后重试"
+            revisionUiState = ArticleRevisionUiState.FAILED
+            onRefresh()
+            false
+        }
+    }
+
+    fun submitArticleFeedback(action: ArticleFeedbackAction) {
+        val version = feedbackState?.currentVersion ?: return
+        if (version.id != transcriptArticleVersionId) {
+            feedbackMessage = STALE_ARTICLE_VERSION_MESSAGE
+            onRefresh()
+            return
+        }
+        if (feedbackInProgress || feedbackState?.currentAction == action) return
+        val event = ArticleFeedbackEventKey(
+            userId = userId,
+            filename = filename,
+            versionId = version.id,
+            action = action,
+        )
+        feedbackInProgress = true
+        feedbackMessage = "正在保存..."
+        coroutineScope.launch {
+            runCatching {
+                submitAndConfirmArticleFeedback(feedbackClient, feedbackEventStore, event)
+            }.onSuccess { confirmed ->
+                feedbackState = confirmed
+                feedbackMessage = articleFeedbackStatusMessage(confirmed.currentAction)
+            }.onFailure { error ->
+                feedbackMessage = error.message ?: "保存失败，请重试"
+                feedbackState = null
+                if (error is cn.litianc.vibepub.ArticleFeedbackException && error.responseCode == 409) {
+                    feedbackState = runCatching { feedbackClient.load(filename) }.getOrNull()
+                    onRefresh()
+                }
+            }
+            feedbackInProgress = false
+        }
+    }
 
     fun startRevisionRecording(intent: ArticleRevisionIntent) {
         runCatching {
@@ -247,6 +347,7 @@ fun DetailScreen(
     }
 
     fun requestStartRevisionRecording(intent: ArticleRevisionIntent) {
+        if (!revisionVersionIsReady()) return
         pendingRevisionIntent = intent
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
             startRevisionRecording(intent)
@@ -267,16 +368,30 @@ fun DetailScreen(
             revisionUiState = ArticleRevisionUiState.FAILED
             return
         }
+        if (!revisionVersionIsReady()) {
+            recorded.file.delete()
+            return
+        }
 
         revisionUiState = ArticleRevisionUiState.UPLOADING
         revisionMessage = "正在提交修改要求..."
         coroutineScope.launch {
             runCatching {
-                ArticleRevisionApi.submitVoiceRevision(
-                    preferences = preferences,
-                    filename = currentRecording.filename,
-                    audioFile = recorded.file,
-                )
+                if (transcriptArticleVersionId.isBlank()) {
+                    ArticleRevisionApi.submitVoiceRevision(
+                        preferences = preferences,
+                        filename = currentRecording.filename,
+                        audioFile = recorded.file,
+                    )
+                } else {
+                    ArticleRevisionApi.submitVoiceRevision(
+                        preferences = preferences,
+                        effectiveUserId = userId,
+                        filename = currentRecording.filename,
+                        parentVersionId = transcriptArticleVersionId,
+                        audioFile = recorded.file,
+                    )
+                }
             }.onSuccess {
                 recorded.file.delete()
                 revisionUiState = ArticleRevisionUiState.QUEUED
@@ -314,6 +429,31 @@ fun DetailScreen(
         recording?.processingStage,
     ) {
         transcript = loadLocalTranscript(context, filename)
+    }
+
+    LaunchedEffect(userId, filename, transcriptArticleVersionId, lastSyncAtMs) {
+        feedbackVersionLoaded = false
+        feedbackVersionFailed = false
+        if (transcriptArticleVersionId.isBlank()) {
+            feedbackState = null
+            feedbackLoading = false
+            feedbackVersionLoaded = true
+            feedbackMessage = ""
+            return@LaunchedEffect
+        }
+        feedbackLoading = true
+        runCatching { feedbackClient.load(filename) }
+            .onSuccess { confirmed ->
+                feedbackState = confirmed
+                feedbackMessage = ""
+                feedbackVersionLoaded = true
+            }
+            .onFailure { error ->
+                feedbackState = null
+                feedbackMessage = error.message ?: "无法读取当前选择，请刷新"
+                feedbackVersionFailed = true
+            }
+        feedbackLoading = false
     }
 
     LaunchedEffect(recording, lastSyncAtMs) {
@@ -389,6 +529,7 @@ fun DetailScreen(
         val rawText = transcript.optTranscriptString("rawText", "raw_text")
             .ifBlank { currentRecording.rawTextPreview.orEmpty() }
         val generatedArticleContent = transcript.optTranscriptString("articleContent", "article_content")
+        val currentArticleVersionLabel = articleVersionLabel(transcript.articleVersionNumberOrNull())
         val articleContentSource = generatedArticleContent.ifBlank { rawText }
         val articleContent = articleContentSource
             .takeIf { it.isNotBlank() }
@@ -494,6 +635,8 @@ fun DetailScreen(
                 lineHeight = 32.sp,
             )
 
+            ArticleVersionIndicator(currentArticleVersionLabel)
+
             if (rawText.isNotBlank()) {
                 Spacer(modifier = Modifier.height(8.dp))
                 val rawTextLabel = if (currentRecording.isTextSource()) "原始输入文字" else "原始识别结果"
@@ -512,8 +655,21 @@ fun DetailScreen(
             Spacer(modifier = Modifier.height(16.dp))
             ArticleReviewCard(summary = reviewSummary)
             Spacer(modifier = Modifier.height(16.dp))
+            ArticleFeedbackControls(
+                displayedVersionId = transcriptArticleVersionId,
+                serverVersionId = feedbackState?.currentVersion?.id.orEmpty(),
+                currentAction = feedbackState?.currentAction,
+                enabled = feedbackState?.currentVersion != null && !feedbackLoading,
+                inProgress = feedbackInProgress,
+                message = feedbackMessage,
+                onSelect = ::submitArticleFeedback,
+            )
+            if (transcriptArticleVersionId.isNotBlank()) {
+                Spacer(modifier = Modifier.height(16.dp))
+            }
             ArticleRevisionCard(
                 enabled = articleContentIsGenerated,
+                versionStatus = revisionVersionStatus,
                 state = revisionUiState,
                 intent = revisionIntent,
                 message = revisionMessage,
@@ -1131,8 +1287,9 @@ private fun ArticleReviewItemRow(item: ArticleReviewItem) {
 }
 
 @Composable
-private fun ArticleRevisionCard(
+internal fun ArticleRevisionCard(
     enabled: Boolean,
+    versionStatus: ArticleRevisionVersionStatus,
     state: ArticleRevisionUiState,
     intent: ArticleRevisionIntent,
     message: String,
@@ -1143,6 +1300,8 @@ private fun ArticleRevisionCard(
     onRefresh: () -> Unit,
 ) {
     val active = state == ArticleRevisionUiState.RECORDING || state == ArticleRevisionUiState.UPLOADING
+    val versionAllowsRevision = versionStatus == ArticleRevisionVersionStatus.LEGACY ||
+        versionStatus == ArticleRevisionVersionStatus.CURRENT
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -1180,11 +1339,16 @@ private fun ArticleRevisionCard(
                 }
             }
 
-            val helper = message.ifBlank {
-                if (enabled) {
-                    "提交后会更新这篇文章和原公众号草稿。"
-                } else {
-                    "文章生成后可用语音继续修改。"
+            val helper = when (versionStatus) {
+                ArticleRevisionVersionStatus.STALE -> "文章已有新版本，请刷新后再修改"
+                ArticleRevisionVersionStatus.CHECKING -> "正在确认当前文章版本，请稍等"
+                ArticleRevisionVersionStatus.UNAVAILABLE -> "无法确认当前文章版本，请刷新后重试"
+                else -> message.ifBlank {
+                    if (enabled) {
+                        "提交后会更新这篇文章和原公众号草稿。"
+                    } else {
+                        "文章生成后可用语音继续修改。"
+                    }
                 }
             }
             Text(
@@ -1229,31 +1393,47 @@ private fun ArticleRevisionCard(
                 }
                 ArticleRevisionUiState.FAILED,
                 ArticleRevisionUiState.IDLE -> {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    if (
+                        versionStatus == ArticleRevisionVersionStatus.STALE ||
+                        versionStatus == ArticleRevisionVersionStatus.UNAVAILABLE
                     ) {
                         Button(
-                            onClick = onStartEdit,
-                            enabled = enabled,
+                            onClick = onRefresh,
                             modifier = Modifier
-                                .weight(1f)
-                                .testTag("StartArticleRevisionButton"),
+                                .fillMaxWidth()
+                                .testTag("RefreshStaleArticleRevisionButton"),
                         ) {
-                            Icon(Icons.Default.Mic, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
                             Spacer(modifier = Modifier.width(6.dp))
-                            Text("说话修改")
+                            Text("刷新文章")
                         }
-                        OutlinedButton(
-                            onClick = onStartIllustration,
-                            enabled = enabled,
-                            modifier = Modifier
-                                .weight(1f)
-                                .testTag("StartArticleImageRevisionButton"),
+                    } else {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
-                            Icon(Icons.Default.Description, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("生成插图")
+                            Button(
+                                onClick = onStartEdit,
+                                enabled = enabled && versionAllowsRevision,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("StartArticleRevisionButton"),
+                            ) {
+                                Icon(Icons.Default.Mic, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("说话修改")
+                            }
+                            OutlinedButton(
+                                onClick = onStartIllustration,
+                                enabled = enabled && versionAllowsRevision,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("StartArticleImageRevisionButton"),
+                            ) {
+                                Icon(Icons.Default.Description, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("生成插图")
+                            }
                         }
                     }
                 }
@@ -1567,6 +1747,107 @@ internal fun JSONObject?.optTranscriptString(vararg keys: String): String {
     return keys.firstNotNullOfOrNull { key ->
         optString(key, "").trim().blankToMissingString()
     }.orEmpty()
+}
+
+internal fun JSONObject?.articleVersionNumberOrNull(): Int? {
+    if (this == null) return null
+    return listOf("articleVersion", "article_version").firstNotNullOfOrNull { key ->
+        if (!has(key) || isNull(key)) return@firstNotNullOfOrNull null
+        val value = opt(key)
+        val number = when (value) {
+            is Number -> value.toInt()
+            is String -> value.trim().toIntOrNull()
+            null -> null
+            else -> null
+        }
+        number?.takeIf { it > 0 }
+    }
+}
+
+internal fun articleVersionLabel(version: Int?): String = version?.takeIf { it > 0 }?.let { "v$it" }.orEmpty()
+
+@Composable
+internal fun ArticleVersionIndicator(label: String) {
+    if (label.isBlank()) return
+    Spacer(modifier = Modifier.height(4.dp))
+    Text(
+        text = label,
+        modifier = Modifier.testTag("ArticleVersionLabel"),
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+}
+
+@Composable
+internal fun ArticleFeedbackControls(
+    displayedVersionId: String,
+    serverVersionId: String,
+    currentAction: ArticleFeedbackAction?,
+    inProgress: Boolean,
+    message: String,
+    onSelect: (ArticleFeedbackAction) -> Unit,
+    enabled: Boolean = true,
+) {
+    if (displayedVersionId.isBlank()) return
+    val versionsMatch = displayedVersionId == serverVersionId
+    val status = when {
+        serverVersionId.isNotBlank() && !versionsMatch -> STALE_ARTICLE_VERSION_MESSAGE
+        message.isNotBlank() -> message
+        else -> articleFeedbackStatusMessage(currentAction)
+    }
+    val controlsEnabled = enabled && versionsMatch
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("ArticleFeedbackControls"),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        shape = RoundedCornerShape(8.dp),
+    ) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text("这版文章", fontWeight = FontWeight.SemiBold)
+            Text(
+                text = status,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Button(
+                    onClick = { onSelect(ArticleFeedbackAction.ADOPTED) },
+                    enabled = controlsEnabled && !inProgress && currentAction != ArticleFeedbackAction.ADOPTED,
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("AdoptArticleVersionButton"),
+                ) {
+                    Icon(Icons.Default.TaskAlt, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("采用本版")
+                }
+                OutlinedButton(
+                    onClick = { onSelect(ArticleFeedbackAction.NOT_ADOPTED) },
+                    enabled = controlsEnabled && !inProgress && currentAction != ArticleFeedbackAction.NOT_ADOPTED,
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("NotAdoptArticleVersionButton"),
+                ) {
+                    Icon(Icons.Default.Pause, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("暂不采用")
+                }
+            }
+        }
+    }
+}
+
+internal fun articleFeedbackStatusMessage(action: ArticleFeedbackAction?): String = when (action) {
+    ArticleFeedbackAction.ADOPTED -> "已采用当前版本"
+    ArticleFeedbackAction.NOT_ADOPTED -> "已记录暂不采用"
+    null -> "请选择这版文章是否可用"
 }
 
 internal fun JSONObject?.articleImagePreviews(): List<ArticleImagePreview> {

@@ -33,8 +33,10 @@ account label. The origin attestation receives no provider or internal service
 tokens.
 
 The manual workflow first requires a protected, exact attestation proving both
-isolated staging D1 backups, the additive main `0001` through `0011` and
-Writing `0001` migration lists, and schema-evidence hashes. It records the
+isolated staging D1 backups, the additive main `0001` through `0013` and
+Writing `0001` migration lists, and schema-evidence hashes. Main evidence also
+includes the strict `vibepub-main-d1-migration-rehearsal.v2` result described
+below. It records the
 approved manifest SHA-256 and serializes only protected deploy runs; every
 later job rejects a changed manifest before a remote command. Writing, Review,
 Image, WeChat, and main deploy strictly in that order. It never runs a remote
@@ -72,3 +74,53 @@ rotation.
 
 Neither synthetic rendering nor any Wrangler dry-run creates, changes, or
 deploys a Cloudflare resource.
+
+## Local Main D1 Migration Rehearsal
+
+Run the Article Version migration rehearsal against an existing SQLite copy,
+never a live D1 database:
+
+```bash
+node infra/staging/rehearse-main-d1-migrations.mjs \
+  /path/to/main-before.sqlite \
+  /path/to/main-migration-rehearsal.json
+```
+
+The CLI hashes and copies the source, then opens only its temporary copy for
+writes. It reads `0012_article_feedback` and `0013_article_revisions` from the
+candidate Git commit, applies them twice, hashes the migration bundle and
+before/after schema contract, checks foreign keys, uniqueness and append-only
+behavior, and proves old row values and counts are unchanged. It writes v2
+evidence only after every check passes. The JSON contains fixed identifiers,
+hashes, counts, and pass booleans; it contains no database path or row content.
+A malformed or unsupported copy fails closed and leaves no output artifact.
+
+`STAGING_DATA_PREPARED_EVIDENCE_JSON` uses
+`vibepub-staging-data-evidence.v2`. Its main entry must include the complete
+rehearsal JSON as `migration_rehearsal`, and `schema_evidence_hash` must equal
+the rehearsal's `schema_evidence_sha256`. `backup_copy_sha256` must equal the
+rehearsal's `source_sha256`; `backup_id` is the same content hash, so evidence
+from different backup copies cannot be combined. The protected dispatch literal is
+`staging_d1_backup_and_article_version_migrations_verified_v2`.
+
+## Article Feedback Loop Evidence
+
+After both isolated APKs finish the Staging journeys, validate the redacted
+evidence before sharing it:
+
+```bash
+node infra/staging/validate-article-feedback-loop-evidence.mjs \
+  /path/to/protected-staging-resource-manifest.json \
+  /path/to/redacted-article-feedback-evidence.json \
+  <candidate-commit-sha>
+```
+
+The validator binds the expected candidate commit and exact protected manifest origin. Account,
+D1, and R2 fingerprints are SHA-256 hashes of `account:<workers-subdomain>`,
+`main_d1:<database-id>`, `writing_d1:<database-id>`, `audio_r2:<bucket-name>`,
+and `image_r2:<bucket-name>`. It requires one candidate commit,
+hashed APK/device/resource identities, five completed Agents and one frozen
+article, v1-to-v2 lineage, adopted and not-adopted journeys, retry and stale
+request checks, old-client compatibility, and WeChat-only recovery. Fixed
+aliases replace real trace IDs. Unknown fields and private data fail closed.
+The accepted summary contains only pass counts and booleans.

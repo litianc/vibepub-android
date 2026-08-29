@@ -31,11 +31,11 @@ on:
         type: choice
         options: ["false", "true"]
       data_prepared_attestation:
-        description: "Exact literal after isolated main/writing D1 backups and additive migration/schema verification"
+        description: "Exact literal after isolated D1 backups and local 0012/0013 migration rehearsal"
         required: true
         default: "false"
         type: choice
-        options: ["false", "staging_d1_backup_and_additive_migrations_verified_v1"]
+        options: ["false", "staging_d1_backup_and_article_version_migrations_verified_v2"]
       mining_readiness_attestation:
         description: "Exact literal for unscheduled Mining readiness only; this never launches Mining"
         required: true
@@ -134,8 +134,9 @@ jobs:
             "$RUNNER_TEMP/staging-resource-manifest.json" \
             "$RUNNER_TEMP/staging-data-evidence.json" \
             "$DATA_PREPARED_ATTESTATION" | tee "$RUNNER_TEMP/staging-data-summary.json"
+          node --input-type=module -e 'import { readFileSync } from "node:fs"; import { committedArticleFeedbackMigrationBundle } from "./infra/staging/article-feedback-validation-contract.mjs"; const summary=JSON.parse(readFileSync(process.argv[1], "utf8")); const migrationBundle=committedArticleFeedbackMigrationBundle(process.cwd(), process.argv[2]); if (summary.main_rehearsal_candidate_commit !== process.argv[2] || summary.main_migration_bundle_sha256 !== migrationBundle.sha256) process.exit(1)' "$RUNNER_TEMP/staging-data-summary.json" "$GITHUB_SHA"
           echo "## Staging data preparation evidence" >> "$GITHUB_STEP_SUMMARY"
-          node -e 'const e=require(process.argv[1]); console.log(`- main D1 backup: ${e.main_backup_id}\n- main migrations: ${e.main_migrations.join(", ")}\n- main schema evidence: ${e.main_schema_evidence_hash}\n- writing D1 backup: ${e.writing_backup_id}\n- writing migrations: ${e.writing_migrations.join(", ")}\n- writing schema evidence: ${e.writing_schema_evidence_hash}`)' "$RUNNER_TEMP/staging-data-summary.json" >> "$GITHUB_STEP_SUMMARY"
+          node -e 'const e=require(process.argv[1]); console.log(`- main D1 backup: ${e.main_backup_id}\n- main backup copy: ${e.main_backup_copy_sha256}\n- main migrations: ${e.main_migrations.join(", ")}\n- main migration bundle: ${e.main_migration_bundle_sha256}\n- main schema evidence: ${e.main_schema_evidence_hash}\n- main rehearsal schema evidence: ${e.main_rehearsal_schema_evidence_sha256}\n- writing D1 backup: ${e.writing_backup_id}\n- writing migrations: ${e.writing_migrations.join(", ")}\n- writing schema evidence: ${e.writing_schema_evidence_hash}`)' "$RUNNER_TEMP/staging-data-summary.json" >> "$GITHUB_STEP_SUMMARY"
       - name: Declare no remote migration action
         run: echo "No remote D1 migration is run by this workflow; attestation proves an operator completed additive staging preparation." >> "$GITHUB_STEP_SUMMARY"
 
