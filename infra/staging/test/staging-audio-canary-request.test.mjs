@@ -74,6 +74,78 @@ test("reports a safe HTTP status without retrying a permanent rejection", async 
   assert.equal(calls, 1);
 });
 
+test("reports an allowlisted handoff error code without exposing the response body", async () => {
+  await assert.rejects(() => readStagingAudioCanaryStatus({
+    ...base,
+    expectedDecision: "v3_pending_start",
+    retryDelayMs: 0,
+    fetchImpl: async () => Response.json({
+      error: "mining_handoff_source_conflict",
+      private_detail: "must-not-appear",
+    }, { status: 409 }),
+  }), error => {
+    assert.ok(error instanceof StagingAudioCanaryRequestError);
+    assert.equal(error.code, "audio_canary_status_http_409_mining_handoff_source_conflict");
+    assert.doesNotMatch(error.message, /must-not-appear/);
+    return true;
+  });
+});
+
+test("reports the owner-conflict code returned by the status route", async () => {
+  await assert.rejects(() => readStagingAudioCanaryStatus({
+    ...base,
+    expectedDecision: "v3_pending_start",
+    retryDelayMs: 0,
+    fetchImpl: async () => Response.json({ error: "mining_handoff_owner_conflict" }, { status: 409 }),
+  }), error => error instanceof StagingAudioCanaryRequestError &&
+    error.code === "audio_canary_status_http_409_mining_handoff_owner_conflict");
+});
+
+test("hides an unknown namespaced error code", async () => {
+  await assert.rejects(() => readStagingAudioCanaryStatus({
+    ...base,
+    expectedDecision: "v3_pending_start",
+    retryDelayMs: 0,
+    fetchImpl: async () => Response.json({
+      error: "mining_handoff_private_detail_must_not_appear",
+    }, { status: 409 }),
+  }), error => error instanceof StagingAudioCanaryRequestError &&
+    error.code === "audio_canary_status_http_409");
+});
+
+test("stops reading a chunked 409 response after the safe byte limit", async () => {
+  let cancelled = false;
+  const body = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode("x".repeat(400)));
+      controller.enqueue(new TextEncoder().encode("y".repeat(400)));
+    },
+    cancel() { cancelled = true; },
+  });
+  await assert.rejects(() => readStagingAudioCanaryStatus({
+    ...base,
+    expectedDecision: "v3_pending_start",
+    retryDelayMs: 0,
+    fetchImpl: async () => new Response(body, { status: 409 }),
+  }), error => error instanceof StagingAudioCanaryRequestError &&
+    error.code === "audio_canary_status_http_409");
+  assert.equal(cancelled, true);
+});
+
+test("does not read a permanent response body unless the status is 409", async () => {
+  const response = {
+    status: 403,
+    get body() { throw new Error("must not read"); },
+  };
+  await assert.rejects(() => readStagingAudioCanaryStatus({
+    ...base,
+    expectedDecision: "v3_pending_start",
+    retryDelayMs: 0,
+    fetchImpl: async () => response,
+  }), error => error instanceof StagingAudioCanaryRequestError &&
+    error.code === "audio_canary_status_http_403");
+});
+
 test("keeps transient retries bounded even when a caller requests more", async () => {
   let calls = 0;
   await assert.rejects(() => readStagingAudioCanaryStatus({
