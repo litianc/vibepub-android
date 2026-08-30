@@ -11,6 +11,7 @@ cat > "$TMP_DIR/aapt" <<'EOF'
 set -euo pipefail
 environment="$(basename "$3" .apk)"
 if [[ "$2" == "badging" ]]; then
+  echo 'application-debuggable'
   if [[ "$environment" == "production" ]]; then
     echo "package: name='cn.litianc.vibepub' versionCode='2' versionName='test'"
     echo "application-label:'VibePub'"

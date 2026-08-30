@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PRODUCTION_PACKAGE="cn.litianc.vibepub"
 STAGING_PACKAGE="cn.litianc.vibepub.staging"
 ADB="${ADB:-${ANDROID_HOME:-/opt/homebrew/share/android-commandlinetools}/platform-tools/adb}"
+AAPT="${AAPT:-${ANDROID_HOME:-/opt/homebrew/share/android-commandlinetools}/build-tools/36.0.0/aapt}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-$ROOT_DIR/artifacts/android-environment-isolation}"
 AUTO_CONFIRM_USB_INSTALL_PROMPT="${AUTO_CONFIRM_USB_INSTALL_PROMPT:-false}"
 USB_INSTALL_PROMPT_TIMEOUT_SECONDS="${USB_INSTALL_PROMPT_TIMEOUT_SECONDS:-20}"
@@ -86,6 +87,17 @@ if [[ ! "$STAGING_API_URL" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?$ ]] ||
 fi
 
 "$ROOT_DIR/scripts/verify-android-environment-apks.sh" "$PRODUCTION_APK" "$STAGING_APK" "$STAGING_API_URL"
+
+for apk in "$PRODUCTION_APK" "$STAGING_APK"; do
+  if ! apk_badging="$("$AAPT" dump badging "$apk")"; then
+    echo "Could not inspect APK debug status: $apk" >&2
+    exit 1
+  fi
+  if ! grep -Fqx 'application-debuggable' <<< "$apk_badging"; then
+    echo "Full isolation verification requires debuggable same-source test APKs; no device changes were made." >&2
+    exit 1
+  fi
+done
 
 if [[ ! -x "$ADB" ]]; then
   echo "Android adb not found: $ADB" >&2

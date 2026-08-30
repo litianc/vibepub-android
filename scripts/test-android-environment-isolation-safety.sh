@@ -56,6 +56,7 @@ set -euo pipefail
 apk="$3"
 environment="$(basename "$apk" .apk)"
 if [[ "$2" == "badging" ]]; then
+  [[ "${FAKE_APK_DEBUGGABLE:-true}" == "true" ]] && echo 'application-debuggable'
   if [[ "$environment" == "production" ]]; then
     echo "package: name='cn.litianc.vibepub' versionCode='${FAKE_PRODUCTION_VERSION_CODE:-2}' versionName='${FAKE_PRODUCTION_VERSION_NAME:-test}'"
     echo "application-label:'VibePub'"
@@ -97,6 +98,22 @@ echo "Signer #1 certificate SHA-256 digest: $fingerprint"
 EOF
 chmod +x "$FAKE_AAPT" "$FAKE_APKSIGNER"
 PINNED_FINGERPRINT="$(tr -d '[:space:]' < "$ROOT_DIR/android/release-certificate.sha256")"
+
+rm -f "$TMP_DIR/adb-was-called"
+if FAKE_APK_DEBUGGABLE=false \
+  FAKE_PRODUCTION_CERTIFICATE_FINGERPRINT="$PINNED_FINGERPRINT" \
+  AAPT="$FAKE_AAPT" APKSIGNER="$FAKE_APKSIGNER" ADB="$FAKE_ADB" \
+  "$ROOT_DIR/scripts/verify-android-environment-isolation.sh" \
+    "$TMP_DIR/production.apk" "$TMP_DIR/staging.apk" \
+    --serial synthetic-device --staging-api-url https://staging.example.test > "$output" 2>&1; then
+  echo "Isolation verifier accepted non-debuggable APKs." >&2
+  exit 1
+fi
+grep -Fq 'requires debuggable same-source test APKs' "$output"
+[[ ! -e "$TMP_DIR/adb-was-called" ]] || {
+  echo "Isolation verifier called ADB before rejecting non-debuggable APKs." >&2
+  exit 1
+}
 
 for production_alias in \
   https://vibepub.litianc.cn. \
@@ -255,6 +272,7 @@ for staging_login_mode in missing adb-error; do
 
   grep -Fq 'Log into both Production and Staging' "$login_output" || {
     echo "Isolation verifier did not give safe login instructions." >&2
+    cat "$login_output" >&2
     exit 1
   }
   if grep -Eq 'pm clear|uninstall' "$FAKE_ADB_LOG"; then

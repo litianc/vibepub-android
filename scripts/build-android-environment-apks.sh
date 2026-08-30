@@ -6,10 +6,20 @@ RUN_ID="$(date +'%Y%m%d-%H%M%S')"
 OUT_DIR="${OUT_DIR:-$ROOT_DIR/artifacts/android-environments/$RUN_ID}"
 SIGNING_ENV_FILE="${VIBEPUB_SIGNING_ENV_FILE:-$ROOT_DIR/secrets/android-release-secrets.env}"
 KEYSTORE_FILE="${VIBEPUB_KEYSTORE_FILE:-$ROOT_DIR/secrets/vibepub-release.keystore}"
-APK_PATH="$ROOT_DIR/android/app/build/outputs/apk/release/app-release.apk"
+BUILD_VARIANT="${VIBEPUB_ANDROID_BUILD_VARIANT:-debug}"
 STAGING_API_BASE_URL="${STAGING_PUBLIC_BASE_URL:-}"
 JAVA_HOME="${ANDROID_LOCAL_JAVA_HOME:-${JAVA_HOME:-/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home}}"
 export JAVA_HOME
+
+case "$BUILD_VARIANT" in
+  debug) BUILD_COMMAND=assemble ;;
+  release) BUILD_COMMAND=release ;;
+  *)
+    echo "VIBEPUB_ANDROID_BUILD_VARIANT must be debug or release." >&2
+    exit 1
+    ;;
+esac
+APK_PATH="$ROOT_DIR/android/app/build/outputs/apk/$BUILD_VARIANT/app-$BUILD_VARIANT.apk"
 
 canonical_api_host() {
   local authority="${1#https://}"
@@ -43,7 +53,7 @@ load_stable_signing() {
 
 build_environment() {
   local environment="$1"
-  local arguments=(release "-PVIBEPUB_ENVIRONMENT=$environment")
+  local arguments=("$BUILD_COMMAND" "-PVIBEPUB_ENVIRONMENT=$environment")
   if [[ "$environment" == "staging" ]]; then
     arguments+=("-PVIBEPUB_STAGING_API_BASE_URL=$STAGING_API_BASE_URL")
   fi
@@ -67,6 +77,7 @@ cat > "$OUT_DIR/summary.md" <<EOF
 
 - Production: \`$OUT_DIR/vibepub-production.apk\`
 - Staging: \`$OUT_DIR/vibepub-staging.apk\`
+- Build variant: \`$BUILD_VARIANT\`
 - Signing: stable internal key
 - Identity check: passed
 EOF
