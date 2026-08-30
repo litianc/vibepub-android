@@ -139,9 +139,20 @@ test("transcribe and start phases require an exact safe handoff status", () => {
   assert.match(workflow, /verify:revision-readback/);
   assert.match(workflow, /revision-readback-evidence\.json/);
   assert.match(workflow, /state\.wechat_readback=readback/);
+  const bootstrapReadGate = workflow.indexOf("Open the exact bootstrap gate before reading an existing handoff");
+  const existingHandoffRead = workflow.indexOf("Read the existing exact handoff before a full feedback phase");
+  const fullGrant = workflow.indexOf("Build and verify the exact expiring feedback grant");
+  assert.ok(bootstrapReadGate > 0 && existingHandoffRead > bootstrapReadGate && fullGrant > existingHandoffRead);
+  const handoffReadGate = workflow.slice(bootstrapReadGate, existingHandoffRead);
+  assert.match(handoffReadGate, /if: inputs\.phase != 'transcribe'/);
+  assert.match(handoffReadGate, /build-bootstrap/);
+  assert.match(handoffReadGate, /handoff-read-config\/main\.wrangler\.toml/);
+  assert.match(handoffReadGate, /wrangler deploy --dry-run/);
+  assert.match(handoffReadGate, /wrangler deploy --config/);
+  assert.doesNotMatch(handoffReadGate, /image\.wrangler\.toml|wechat\.wrangler\.toml|MINING_V3_HANDOFF_TOKEN/);
 });
 
-test("every audio phase deploys one bounded grant and always restores the flag-off baseline", () => {
+test("every audio phase uses bounded grants and always restores the flag-off baseline", () => {
   assert.match(workflow, /timeout-minutes: 180/);
   assert.match(workflow, /Render the permanent flag-off rollback baseline first/);
   assert.match(workflow, /staging-article-feedback-canary\.mjs build-bootstrap/);

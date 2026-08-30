@@ -138,6 +138,47 @@ jobs:
           timeout 300s npm ci --prefix infra/image-generation-adapter
           timeout 300s npm ci --prefix infra/wechat-publishing-adapter
 
+      - name: Open the exact bootstrap gate before reading an existing handoff
+        if: inputs.phase != 'transcribe'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          node infra/staging/staging-article-feedback-canary.mjs build-bootstrap \
+            --user-id "$USER_ID" \
+            --workspace-id "$WORKSPACE_ID" \
+            --source-key "$TARGET_KEY" \
+            --candidate-commit "$GITHUB_SHA" \
+            --manifest-hash "$STAGING_MANIFEST_HASH" \
+            --canary-seed "${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}:handoff-read" \
+            --out "$RUNNER_TEMP/handoff-read-grant.json"
+          node -e 'const x=require(process.argv[1]);const escape=v=>v.replace(/%/g,"%25").replace(/\r/g,"%0D").replace(/\n/g,"%0A");for(const value of Object.values(x.scope))if(typeof value==="string"&&value)console.log(`::add-mask::${escape(value)}`)' "$RUNNER_TEMP/handoff-read-grant.json"
+          node infra/staging/staging-article-feedback-canary.mjs render \
+            --manifest "$RUNNER_TEMP/staging-resource-manifest.json" \
+            --grant "$RUNNER_TEMP/handoff-read-grant.json" \
+            --out-dir "$RUNNER_TEMP/handoff-read-config" \
+            --intent deploy
+          node infra/staging/staging-article-feedback-canary.mjs verify \
+            --manifest "$RUNNER_TEMP/staging-resource-manifest.json" \
+            --grant "$RUNNER_TEMP/handoff-read-grant.json" \
+            --out-dir "$RUNNER_TEMP/handoff-read-config" \
+            --intent deploy
+          timeout 180s npx --prefix infra/worker wrangler deploy --dry-run --config "$RUNNER_TEMP/handoff-read-config/main.wrangler.toml"
+          node infra/staging/staging-article-feedback-canary.mjs build-bootstrap \
+            --user-id "$USER_ID" \
+            --workspace-id "$WORKSPACE_ID" \
+            --source-key "$TARGET_KEY" \
+            --candidate-commit "$GITHUB_SHA" \
+            --manifest-hash "$STAGING_MANIFEST_HASH" \
+            --canary-seed "${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}:handoff-read" \
+            --out "$RUNNER_TEMP/handoff-read-grant.json"
+          node infra/staging/staging-article-feedback-canary.mjs render \
+            --manifest "$RUNNER_TEMP/staging-resource-manifest.json" \
+            --grant "$RUNNER_TEMP/handoff-read-grant.json" \
+            --out-dir "$RUNNER_TEMP/handoff-read-config" \
+            --intent deploy
+          timeout 180s npx --prefix infra/worker wrangler deploy --config "$RUNNER_TEMP/handoff-read-config/main.wrangler.toml" --message "staging feedback handoff read ${GITHUB_RUN_ID}" --var "DEPLOY_COMMIT:${GITHUB_SHA}" --var "DEPLOY_REF:${GITHUB_REF_NAME}" --var "DEPLOYED_AT:$(date -u +%Y-%m-%dT%H:%M:%SZ)" --var "STAGING_FEEDBACK_CANARY_OPERATOR_RUN_ID:${GITHUB_RUN_ID}"
+          touch "$RUNNER_TEMP/main-canary-deployed"
+
       - name: Read the existing exact handoff before a full feedback phase
         if: inputs.phase != 'transcribe'
         env:
