@@ -57,6 +57,12 @@ if [[ ! -x "$ADB" ]]; then
   exit 1
 fi
 
+current_user="$($ADB -s "$ANDROID_SERIAL" shell am get-current-user 2>/dev/null | tr -d '\r')"
+if [[ "$current_user" != "$ANDROID_USER" ]]; then
+  echo "Selected Android user is not active." >&2
+  exit 1
+fi
+
 redacted_manifest="$(mktemp)"
 trap 'rm -f "$redacted_manifest"' EXIT
 

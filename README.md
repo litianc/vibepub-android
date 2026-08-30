@@ -77,6 +77,11 @@ STAGING_PUBLIC_BASE_URL=https://staging.example.com \
   scripts/build-android-environment-apks.sh
 ```
 
+This builds debuggable same-source test APKs by default so the full package
+isolation verifier can inspect each app sandbox. Set
+`VIBEPUB_ANDROID_BUILD_VARIANT=release` only when producing non-debuggable
+distribution APKs that will not be passed to the full isolation verifier.
+
 Production is `VibePub` with package `cn.litianc.vibepub`. Staging is
 `VibePub Staging` with package `cn.litianc.vibepub.staging`. Android keeps
 their login and local data in separate package sandboxes. Production handles

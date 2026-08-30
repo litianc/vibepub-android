@@ -25,6 +25,11 @@ if [[ "${FAKE_ADB_FAIL:-false}" == "true" ]]; then
   exit 13
 fi
 
+if [[ "$1" == "-s" && "$3" == "shell" && "$4" == "am" && "$5" == "get-current-user" ]]; then
+  echo "${FAKE_CURRENT_USER:-10}"
+  exit 0
+fi
+
 [[ "$1" == "-s" && "$3" == "exec-out" && "$4" == "run-as" && "$5" == "cn.litianc.vibepub" && "$6" == "--user" && "$7" == "10" && "$8" == "sh" && "$9" == "-c" ]]
 remote_command="${10}"
 cd "${FAKE_PACKAGE_ROOT:?}"
@@ -71,6 +76,11 @@ if ADB="$FAKE_ADB" \
 fi
 if grep -Eq 'vibepub.xml|shared_prefs/' "$error_output"; then
   echo "Login-state error exposed a private filename." >&2
+  exit 1
+fi
+
+if FAKE_CURRENT_USER=11 check_login >/dev/null 2>&1; then
+  echo "Login-state check accepted a different Android user." >&2
   exit 1
 fi
 

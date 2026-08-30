@@ -57,16 +57,23 @@ if [[ ! -x "$ADB" ]]; then
   exit 1
 fi
 
+current_user="$($ADB -s "$ANDROID_SERIAL" shell am get-current-user 2>/dev/null | tr -d '\r')"
+if [[ "$current_user" != "$ANDROID_USER" ]]; then
+  echo "Selected Android user is not active." >&2
+  exit 1
+fi
+
 read -r -d '' remote_login_check <<'EOF' || true
 set -eu
 preferences=shared_prefs/vibepub.xml
 test -r "$preferences"
 grep -Eq '<string name="access_token">[^<]+</string>' "$preferences"
 grep -Eq '<string name="user_id">[^<]+</string>' "$preferences"
+printf 'authenticated\n'
 EOF
 
-if ! "$ADB" -s "$ANDROID_SERIAL" exec-out run-as "$PACKAGE_NAME" --user "$ANDROID_USER" sh -c \
-  "$remote_login_check" >/dev/null 2>&1; then
+if ! login_state="$($ADB -s "$ANDROID_SERIAL" exec-out run-as "$PACKAGE_NAME" --user "$ANDROID_USER" sh -c \
+  "$remote_login_check" 2>/dev/null)" || [[ "${login_state//$'\r'/}" != "authenticated" ]]; then
   echo "Package login state is missing or unreadable." >&2
   exit 1
 fi

@@ -11,6 +11,7 @@ cat > "$TMP_DIR/aapt" <<'EOF'
 set -euo pipefail
 environment="$(basename "$3" .apk)"
 if [[ "$2" == "badging" ]]; then
+  echo 'application-debuggable'
   if [[ "$environment" == "production" ]]; then
     echo "package: name='cn.litianc.vibepub' versionCode='2' versionName='test'"
     echo "application-label:'VibePub'"
@@ -103,7 +104,8 @@ case "$1" in
     elif [[ "$2" == "am" && "$3" == "force-stop" ]]; then
       [[ "$4" == "--user" && "$5" == "10" ]]
     elif [[ "$2" == "run-as" ]]; then
-      [[ "$3" == cn.litianc.vibepub* && "$4" == "--user" && "$5" == "10" ]]
+      [[ "$3" == "cn.litianc.vibepub" || "$3" == "cn.litianc.vibepub.staging" ]]
+      [[ "$4" == "--user" && "$5" == "10" && "$6" == "sh" && "$7" == "-c" ]]
       command="$8"
       [[ "$command" == *"/data/user/10/"* ]]
       [[ "$command" != *"/data/user/0/"* ]]
@@ -120,8 +122,10 @@ case "$1" in
     fi
     ;;
   exec-out)
-    [[ "$2" == "run-as" && "$3" == cn.litianc.vibepub* && "$4" == "--user" && "$5" == "10" ]]
+    [[ "$2" == "run-as" ]]
     package="$3"
+    [[ "$package" == "cn.litianc.vibepub" || "$package" == "cn.litianc.vibepub.staging" ]]
+    [[ "$4" == "--user" && "$5" == "10" && "$6" == "sh" && "$7" == "-c" ]]
     command="$8"
     if [[ "$command" == *"cross_package_read_check"* ]]; then
       [[ "${FAKE_CROSS_READ_QUERY_FAIL:-false}" != "true" ]] || exit 71
@@ -138,7 +142,9 @@ case "$1" in
         printf '%s\n%s\n%s\n' 'https://staging.example.test' 'staging-session' 'staging-user'
       fi
     elif [[ "$command" == *"preferences=shared_prefs/vibepub.xml"* ]]; then
-      true
+      echo authenticated
+    elif [[ "$command" == *"printf 'isolated"* ]]; then
+      echo isolated
     else
       printf '%064d %064d\n' 0 1
     fi
@@ -181,6 +187,10 @@ grep -Fq 'pm clear --user 10 cn.litianc.vibepub.staging' "$TMP_DIR/adb.log"
 grep -Fq 'pm uninstall --user 10 cn.litianc.vibepub.staging' "$TMP_DIR/adb.log"
 grep -Fq 'run-as cn.litianc.vibepub --user 10' "$TMP_DIR/adb.log"
 grep -Fq 'run-as cn.litianc.vibepub.staging --user 10' "$TMP_DIR/adb.log"
+if grep -Fq 'run-as --user 10' "$TMP_DIR/adb.log"; then
+  echo "Isolation verifier placed --user before the package name." >&2
+  exit 1
+fi
 [[ "$(grep -c '^production$' "$TMP_DIR/http.log")" == 1 ]]
 [[ "$(grep -c '^staging$' "$TMP_DIR/http.log")" == 1 ]]
 if grep -Eq 'production-session|staging-session|production-user|staging-user' "$TMP_DIR/output.txt" "$TMP_DIR/evidence"/*/* 2>/dev/null; then
