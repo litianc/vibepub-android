@@ -4,6 +4,8 @@ set -euo pipefail
 ADB="${ADB:-${ANDROID_HOME:-/opt/homebrew/share/android-commandlinetools}/platform-tools/adb}"
 CURL="${CURL:-curl}"
 JQ="${JQ:-jq}"
+SESSION_CONNECT_TIMEOUT_SECONDS=10
+SESSION_MAX_TIME_SECONDS=30
 ANDROID_SERIAL=""
 PACKAGE_NAME=""
 ANDROID_USER=""
@@ -87,7 +89,10 @@ fi
 if ! http_body="$(
   printf 'url = "%s/api/me"\nheader = "Authorization: Bearer %s"\nsilent\nshow-error\nfail-with-body\n' \
     "$EXPECTED_API_BASE_URL" "$access_token" |
-    "$CURL" -q --config - 2>/dev/null
+    "$CURL" -q \
+      --connect-timeout "$SESSION_CONNECT_TIMEOUT_SECONDS" \
+      --max-time "$SESSION_MAX_TIME_SECONDS" \
+      --config - 2>/dev/null
 )"; then
   echo "Stored session could not be validated." >&2
   exit 1

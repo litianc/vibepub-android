@@ -41,7 +41,9 @@ if [[ "${1:-}" != "-q" ]]; then
   exit 97
 fi
 shift
-[[ "$1" == "--config" && "$2" == "-" ]]
+[[ "$1" == "--connect-timeout" && "$2" == "10" ]]
+[[ "$3" == "--max-time" && "$4" == "30" ]]
+[[ "$5" == "--config" && "$6" == "-" ]]
 config="$(cat)"
 [[ "$config" == *'url = "https://staging.example.test/api/me"'* ]]
 [[ "$config" == *'header = "Authorization: Bearer temporary-session-value"'* ]]
