@@ -9,6 +9,18 @@ const HASH = /^sha256:[a-f0-9]{64}$/;
 const TRANSIENT_STATUS_CODES = new Set([404, 429, 500, 502, 503, 504]);
 const DEFAULT_STATUS_ATTEMPTS = 6;
 const DEFAULT_RETRY_DELAY_MS = 2_000;
+const SAFE_REMOTE_ERRORS = new Set([
+  "mining_handoff_recording_not_found",
+  "mining_handoff_recording_ambiguous",
+  "mining_handoff_scope_invalid",
+  "mining_handoff_marker_invalid",
+  "mining_handoff_owner_conflict",
+  "mining_handoff_source_conflict",
+  "mining_handoff_transcript_ambiguous",
+  "mining_handoff_transcript_conflict",
+  "mining_handoff_identity_conflict",
+]);
+const MAX_ERROR_BODY_BYTES = 512;
 
 export class StagingAudioCanaryRequestError extends Error {
   constructor(code, message = code) {
@@ -35,6 +47,40 @@ function sourceKey(value, userId) {
       typeof value !== "string" || value.includes("..") || value !== `users/${userId}/inbox/${value.split("/").at(-1)}` ||
       !/\.(?:m4a|mp3|wav|aac|ogg|webm)$/i.test(value)) fail("audio_canary_source_invalid");
   return value;
+}
+
+async function safeRemoteErrorCode(response) {
+  const reader = response.body?.getReader();
+  if (!reader) return null;
+  try {
+    const chunks = [];
+    let total = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > MAX_ERROR_BODY_BYTES) {
+        await reader.cancel();
+        return null;
+      }
+      chunks.push(value);
+    }
+    if (total === 0) return null;
+    const bytes = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    const body = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    const parsed = JSON.parse(body);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) &&
+      typeof parsed.error === "string" && SAFE_REMOTE_ERRORS.has(parsed.error)
+      ? parsed.error
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 function validateStatus(raw, expectedDecision, expected) {
@@ -90,7 +136,8 @@ export async function readStagingAudioCanaryStatus(input) {
     }
     if (response?.status === 200) break;
     if (response && !TRANSIENT_STATUS_CODES.has(response.status)) {
-      fail(`audio_canary_status_http_${response.status}`);
+      const remoteError = response.status === 409 ? await safeRemoteErrorCode(response) : null;
+      fail(`audio_canary_status_http_${response.status}${remoteError ? `_${remoteError}` : ""}`);
     }
     if (attempt === maxAttempts) {
       fail(response ? `audio_canary_status_http_${response.status}` : "audio_canary_status_unavailable");
