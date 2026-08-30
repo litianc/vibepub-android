@@ -208,11 +208,19 @@ test("bounds Mining time and gives protected D1 checks both Cloudflare credentia
   assert.match(workflow, /for attempt in \$\(seq 1 40\)/);
   assert.match(workflow, /for attempt in \$\(seq 1 20\)/);
   assert.match(workflow, /timeout 25s node infra\/staging\/query-staging-d1\.mjs/);
+  assert.match(workflow, /QUERY_EXIT=\$\?/);
+  assert.match(workflow, /"\$QUERY_EXIT" -eq 75/);
+  assert.match(workflow, /"\$QUERY_EXIT" -eq 124/);
+  assert.match(workflow, /test "\$QUERY_EXIT" -eq 0 \|\| exit "\$QUERY_EXIT"/);
+  assert.match(workflow, /Staging D1 read failed temporarily/);
   const startCheck = workflow.match(/- name: Wait for start to reach verified draft_ready[\s\S]*?- name: Verify revision produced v2/)?.[0] || "";
   const revisionCheck = workflow.match(/- name: Verify revision produced v2[\s\S]*?- name: Close the exact-user main gate/)?.[0] || "";
   for (const block of [startCheck, revisionCheck]) {
     assert.match(block, /CLOUDFLARE_ACCOUNT_ID: \$\{\{ secrets\.CLOUDFLARE_ACCOUNT_ID \}\}/);
     assert.match(block, /CLOUDFLARE_API_TOKEN: \$\{\{ secrets\.CLOUDFLARE_API_TOKEN \}\}/);
+    assert.match(block, /rm -f "\$RUNNER_TEMP\/(?:start|revision)-state-result\.json"/);
+    assert.match(block, /QUERY_EXIT=\$\?/);
+    assert.match(block, /test "\$QUERY_EXIT" -eq 0 \|\| exit "\$QUERY_EXIT"/);
   }
 });
 
