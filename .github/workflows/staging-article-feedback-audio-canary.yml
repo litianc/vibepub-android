@@ -381,7 +381,17 @@ jobs:
         run: |
           node -e 'const fs=require("fs"),x=require(process.argv[1]);const q=`SELECT p.state,p.progress_percent,p.error_code,p.next_action,(datetime(p.created_at)>=datetime(\x27${process.env.CANARY_DEPLOYED_AT}\x27) AND (SELECT datetime(e.created_at)>=datetime(\x27${process.env.CANARY_DEPLOYED_AT}\x27) FROM editorial_runs e WHERE e.run_id=p.run_id AND e.user_id=\x27${x.user_id}\x27 AND e.workspace_id=\x27${x.workspace_id}\x27) AND (SELECT count(*)=1 FROM article_versions v WHERE v.user_id=\x27${x.user_id}\x27 AND v.workspace_id=\x27${x.workspace_id}\x27 AND v.article_id=\x27${x.article_id}\x27 AND v.recording_id=${x.recording_id} AND v.version_no=1 AND datetime(v.created_at)>=datetime(\x27${process.env.CANARY_DEPLOYED_AT}\x27))) AS candidate_fresh,(SELECT status FROM editorial_runs e WHERE e.run_id=p.run_id AND e.user_id=\x27${x.user_id}\x27 AND e.workspace_id=\x27${x.workspace_id}\x27) AS editorial_status,(SELECT count(DISTINCT producer_agent_role) FROM editorial_artifacts a WHERE a.run_id=p.run_id AND a.user_id=\x27${x.user_id}\x27 AND a.workspace_id=\x27${x.workspace_id}\x27 AND a.producer_agent_role IN (\x27editorial_coordinator\x27,\x27writing\x27,\x27editorial_review\x27,\x27illustration\x27,\x27cover\x27)) AS completed_agent_count,(SELECT count(*) FROM article_versions v WHERE v.user_id=\x27${x.user_id}\x27 AND v.workspace_id=\x27${x.workspace_id}\x27 AND v.article_id=\x27${x.article_id}\x27 AND v.recording_id=${x.recording_id} AND v.version_no=1 AND v.parent_version_id IS NULL AND v.source=\x27initial\x27 AND v.generation_status=\x27frozen\x27) AS v1_count,(SELECT count(*) FROM recordings r WHERE r.id=${x.recording_id} AND r.user_id=\x27${x.user_id}\x27 AND r.wechat_draft_id IS NOT NULL AND r.wechat_draft_id<>\x27\x27) AS wechat_draft_count FROM publication_runs p WHERE p.run_id=\x27${x.run_id}\x27 AND p.user_id=\x27${x.user_id}\x27 AND p.workspace_id=\x27${x.workspace_id}\x27;`;fs.writeFileSync(process.argv[2],q)' "$RUNNER_TEMP/staging-audio-identity.json" "$RUNNER_TEMP/start-state.sql"
           for attempt in $(seq 1 40); do
+            rm -f "$RUNNER_TEMP/start-state-result.json"
+            set +e
             timeout 25s node infra/staging/query-staging-d1.mjs --manifest "$RUNNER_TEMP/staging-resource-manifest.json" --sql-file "$RUNNER_TEMP/start-state.sql" --out "$RUNNER_TEMP/start-state-result.json"
+            QUERY_EXIT=$?
+            set -e
+            if [ "$QUERY_EXIT" -eq 75 ] || [ "$QUERY_EXIT" -eq 124 ]; then
+              echo "Staging D1 read failed temporarily (poll $attempt/40)."
+              sleep 10
+              continue
+            fi
+            test "$QUERY_EXIT" -eq 0 || exit "$QUERY_EXIT"
             STATE="$(node -e 'const row=require(process.argv[1])?.[0]?.results?.[0];process.stdout.write(String(row?.state||""))' "$RUNNER_TEMP/start-state-result.json")"
             echo "Staging start state: $STATE (poll $attempt/40)"
             if [ "$STATE" = "draft_ready" ] || [ "$STATE" = "needs_action" ] || [ "$STATE" = "failed" ] || [ "$STATE" = "cancelled" ]; then
@@ -399,7 +409,17 @@ jobs:
         run: |
           node -e 'const fs=require("fs"),x=require(process.argv[1]);const q=`SELECT (SELECT count(*) FROM article_versions v WHERE v.user_id=\x27${x.user_id}\x27 AND v.workspace_id=\x27${x.workspace_id}\x27 AND v.article_id=\x27${x.article_id}\x27 AND v.recording_id=${x.recording_id} AND v.version_no=2 AND v.parent_version_id=\x27${process.env.PARENT_VERSION_ID}\x27 AND v.source=\x27revision\x27 AND v.generation_status=\x27frozen\x27 AND datetime(v.created_at)>=datetime(\x27${process.env.CANARY_DEPLOYED_AT}\x27)) AS v2_count,(SELECT count(*) FROM article_revision_requests rr WHERE rr.user_id=\x27${x.user_id}\x27 AND rr.workspace_id=\x27${x.workspace_id}\x27 AND rr.article_id=\x27${x.article_id}\x27 AND rr.recording_id=${x.recording_id} AND rr.parent_version_id=\x27${process.env.PARENT_VERSION_ID}\x27 AND rr.status=\x27completed\x27 AND rr.child_version_id IS NOT NULL AND datetime(rr.updated_at)>=datetime(\x27${process.env.CANARY_DEPLOYED_AT}\x27)) AS revision_completed_count,(SELECT rr.id FROM article_revision_requests rr WHERE rr.user_id=\x27${x.user_id}\x27 AND rr.workspace_id=\x27${x.workspace_id}\x27 AND rr.article_id=\x27${x.article_id}\x27 AND rr.recording_id=${x.recording_id} AND rr.parent_version_id=\x27${process.env.PARENT_VERSION_ID}\x27) AS revision_id,(SELECT rr.child_version_id FROM article_revision_requests rr WHERE rr.user_id=\x27${x.user_id}\x27 AND rr.workspace_id=\x27${x.workspace_id}\x27 AND rr.article_id=\x27${x.article_id}\x27 AND rr.recording_id=${x.recording_id} AND rr.parent_version_id=\x27${process.env.PARENT_VERSION_ID}\x27) AS child_version_id,(SELECT count(*) FROM recordings r WHERE r.id=${x.recording_id} AND r.user_id=\x27${x.user_id}\x27 AND r.wechat_draft_id IS NOT NULL AND r.wechat_draft_id<>\x27\x27) AS wechat_draft_count;`;fs.writeFileSync(process.argv[2],q)' "$RUNNER_TEMP/staging-audio-identity.json" "$RUNNER_TEMP/revision-state.sql"
           for attempt in $(seq 1 20); do
+            rm -f "$RUNNER_TEMP/revision-state-result.json"
+            set +e
             timeout 25s node infra/staging/query-staging-d1.mjs --manifest "$RUNNER_TEMP/staging-resource-manifest.json" --sql-file "$RUNNER_TEMP/revision-state.sql" --out "$RUNNER_TEMP/revision-state-result.json"
+            QUERY_EXIT=$?
+            set -e
+            if [ "$QUERY_EXIT" -eq 75 ] || [ "$QUERY_EXIT" -eq 124 ]; then
+              echo "Staging D1 read failed temporarily (revision poll $attempt/20)."
+              sleep 10
+              continue
+            fi
+            test "$QUERY_EXIT" -eq 0 || exit "$QUERY_EXIT"
             COMPLETE="$(node -e 'const row=require(process.argv[1])?.[0]?.results?.[0];process.stdout.write(String(Number(row?.v2_count)===1&&Number(row?.revision_completed_count)===1&&Number(row?.wechat_draft_count)===1))' "$RUNNER_TEMP/revision-state-result.json")"
             test "$COMPLETE" = "true" && break
             sleep 10

@@ -203,6 +203,81 @@ test("queries the exact protected staging D1 through a bounded read-only API cal
   assert.deepEqual(JSON.parse(observed.init.body), { sql: "SELECT id, state FROM publication_runs WHERE run_id = 'run_v3_test'" });
 });
 
+test("reports only bounded Cloudflare status and error codes when a D1 read fails", async () => {
+  await assert.rejects(() => queryStagingD1({
+    manifest: {
+      ...fixture,
+      mode: "deploy",
+      main: { ...fixture.main, public_base_url: "https://vibepub-api-staging.example.workers.dev" },
+    },
+    sql: "SELECT 1",
+    accountId: "a".repeat(32),
+    apiToken: "synthetic-cloudflare-token",
+    fetchImpl: async () => Response.json({
+      success: false,
+      errors: [
+        { code: 7500, message: "secret database detail" },
+        { code: "not-numeric", message: "another secret" },
+      ],
+    }, { status: 403 }),
+  }), error => {
+    assert.equal(error.code, "staging_d1_query_failed");
+    assert.equal(error.retryable, false);
+    assert.deepEqual(error.diagnostic, {
+      http_status: 403,
+      error_codes: [7500],
+      statement_success: false,
+    });
+    assert.doesNotMatch(JSON.stringify(error.diagnostic), /secret|message|token/i);
+    return true;
+  });
+});
+
+test("retries only network, timeout, throttling, and server-side D1 failures", async () => {
+  const manifest = {
+    ...fixture,
+    mode: "deploy",
+    main: { ...fixture.main, public_base_url: "https://vibepub-api-staging.example.workers.dev" },
+  };
+  const input = {
+    manifest,
+    sql: "SELECT 1",
+    accountId: "a".repeat(32),
+    apiToken: "synthetic-cloudflare-token",
+  };
+  await assert.rejects(() => queryStagingD1({
+    ...input,
+    fetchImpl: async () => { throw new Error("private network detail"); },
+  }), error => error.code === "staging_d1_query_unavailable" && error.retryable === true &&
+    !JSON.stringify(error.diagnostic).includes("private network detail"));
+  for (const status of [408, 429, 500, 503]) {
+    await assert.rejects(() => queryStagingD1({
+      ...input,
+      fetchImpl: async () => Response.json({ success: false, errors: [] }, { status }),
+    }), error => error.code === "staging_d1_query_failed" && error.retryable === true);
+  }
+  for (const status of [400, 401, 403, 404]) {
+    await assert.rejects(() => queryStagingD1({
+      ...input,
+      fetchImpl: async () => Response.json({ success: false, errors: [] }, { status }),
+    }), error => error.code === "staging_d1_query_failed" && error.retryable === false);
+  }
+  for (const [status, retryable] of [[200, true], [403, false], [503, true]]) {
+    await assert.rejects(() => queryStagingD1({
+      ...input,
+      fetchImpl: async () => new Response("not-json", { status }),
+    }), error => error.code === "staging_d1_response_unavailable" && error.retryable === retryable &&
+      error.diagnostic.http_status === status);
+  }
+  await assert.rejects(() => queryStagingD1({
+    ...input,
+    fetchImpl: async () => new Response(new ReadableStream({
+      pull(controller) { controller.error(new Error("private stream failure")); },
+    }), { status: 200 }),
+  }), error => error.code === "staging_d1_response_unavailable" && error.retryable === true &&
+    !JSON.stringify(error.diagnostic).includes("private stream failure"));
+});
+
 test("rejects mutations, comments, multiple statements, and non-deploy manifests before D1 fetch", async () => {
   const deployManifest = {
     ...fixture,

@@ -6,10 +6,12 @@ const MAX_SQL_BYTES = 64 * 1024;
 const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
 
 export class StagingD1QueryError extends Error {
-  constructor(code, message = code) {
+  constructor(code, message = code, diagnostic = undefined, retryable = false) {
     super(message);
     this.name = "StagingD1QueryError";
     this.code = code;
+    this.diagnostic = diagnostic;
+    this.retryable = retryable;
   }
 }
 
@@ -66,23 +68,50 @@ export async function queryStagingD1({ manifest, sql, accountId, apiToken, fetch
   if (!/^[a-f0-9]{32}$/i.test(accountId || "")) fail("staging_d1_account_invalid");
   if (typeof apiToken !== "string" || apiToken.length < 16) fail("staging_d1_token_missing");
 
-  const response = await fetchImpl(
-    `https://api.cloudflare.com/client/v4/accounts/${accountId}/d1/database/${database.id}/query`,
-    {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${apiToken}`,
-        "content-type": "application/json",
+  let response;
+  try {
+    response = await fetchImpl(
+      `https://api.cloudflare.com/client/v4/accounts/${accountId}/d1/database/${database.id}/query`,
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${apiToken}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ sql: statement }),
+        redirect: "error",
+        signal: AbortSignal.timeout(30_000),
       },
-      body: JSON.stringify({ sql: statement }),
-      redirect: "error",
-      signal: AbortSignal.timeout(30_000),
-    },
-  );
-  const body = await boundedJson(response);
+    );
+  } catch {
+    throw new StagingD1QueryError("staging_d1_query_unavailable", "staging_d1_query_unavailable", {
+      http_status: null,
+      error_codes: [],
+      statement_success: false,
+    }, true);
+  }
+  const retryableStatus = response.status === 408 || response.status === 429 || response.status >= 500;
+  let body;
+  try {
+    body = await boundedJson(response);
+  } catch (error) {
+    if (error instanceof StagingD1QueryError && error.code === "staging_d1_response_oversized") throw error;
+    throw new StagingD1QueryError("staging_d1_response_unavailable", "staging_d1_response_unavailable", {
+      http_status: response.status,
+      error_codes: [],
+      statement_success: false,
+    }, retryableStatus || response.status === 200);
+  }
   if (response.status !== 200 || body?.success !== true || !Array.isArray(body?.result) ||
       body.result.length !== 1 || body.result[0]?.success === false || !Array.isArray(body.result[0]?.results)) {
-    fail("staging_d1_query_failed");
+    const errorCodes = Array.isArray(body?.errors)
+      ? body.errors.map(error => error?.code).filter(code => Number.isSafeInteger(code)).slice(0, 8)
+      : [];
+    throw new StagingD1QueryError("staging_d1_query_failed", "staging_d1_query_failed", {
+      http_status: response.status,
+      error_codes: errorCodes,
+      statement_success: body?.result?.[0]?.success === true,
+    }, retryableStatus);
   }
   return body.result;
 }
@@ -117,7 +146,9 @@ export async function runStagingD1Query(argv, env = process.env) {
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   runStagingD1Query(process.argv.slice(2)).catch(error => {
     const code = error instanceof StagingD1QueryError ? error.code : "staging_d1_query_unexpected";
-    console.error(code);
-    process.exit(1);
+    console.error(JSON.stringify({ error: code, ...(error instanceof StagingD1QueryError && error.diagnostic
+      ? { diagnostic: error.diagnostic }
+      : {}) }));
+    process.exit(error instanceof StagingD1QueryError && error.retryable ? 75 : 1);
   });
 }
