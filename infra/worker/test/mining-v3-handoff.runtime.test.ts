@@ -808,7 +808,14 @@ describe("Mining V3 handoff Worker boundary", () => {
     expect(transcript.transcript_text).toBe("第一行\n第二行");
     expect(transcript.transcript_hash).toBe(await sha256(new TextEncoder().encode("第一行\n第二行")));
     const stored = bucket.objects.get(transcript.transcript_ref)!;
-    expect(stored.metadata).toEqual({ user_id: userId, workspace_id: workspaceId, source_key: sourceKey, source_hash: marker.source_hash, handoff_id: marker.handoff_id });
+    expect(stored.metadata).toEqual({
+      user_id: userId,
+      workspace_id: workspaceId,
+      source_key: sourceKey,
+      source_hash: marker.source_hash,
+      handoff_id: marker.handoff_id,
+      transcript_created_at: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
+    });
     await expect(miningV3HandoffTesting.persistTranscript(env, marker, "第一行\n第二行")).resolves.toMatchObject({ transcript_ref: transcript.transcript_ref });
     await expect(miningV3HandoffTesting.persistTranscript(env, marker, "different")).rejects.toMatchObject({ code: "mining_handoff_transcript_conflict" });
   });

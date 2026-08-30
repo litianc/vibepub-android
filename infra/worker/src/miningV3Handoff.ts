@@ -80,6 +80,7 @@ type TranscriptRef = {
   transcript_ref: string;
   transcript_hash: string;
   transcript_text: string;
+  transcript_created_at: string;
 };
 
 type TextSource = {
@@ -534,7 +535,9 @@ async function existingTranscript(env: MiningV3HandoffEnv, marker: HandoffMarker
   if (normalizeTranscript(transcriptText) !== transcriptText) {
     throw new MiningV3HandoffError("mining_handoff_transcript_conflict", 409, "stored transcript is not canonical");
   }
-  return { transcript_ref: objects[0].key, transcript_hash: actualHash, transcript_text: transcriptText };
+  const transcriptCreatedAt = metadata.transcript_created_at || objects[0].uploaded?.toISOString();
+  if (!transcriptCreatedAt) throw new MiningV3HandoffError("mining_handoff_transcript_conflict", 409, "canonical transcript creation time is missing");
+  return { transcript_ref: objects[0].key, transcript_hash: actualHash, transcript_text: transcriptText, transcript_created_at: transcriptCreatedAt };
 }
 
 async function persistTranscript(env: MiningV3HandoffEnv, marker: HandoffMarker, input: string): Promise<TranscriptRef> {
@@ -548,6 +551,7 @@ async function persistTranscript(env: MiningV3HandoffEnv, marker: HandoffMarker,
   }
   const shard = await ownerShard(marker.user_id, marker.workspace_id);
   const key = transcriptKey(shard, marker.handoff_id, transcriptHash);
+  const transcriptCreatedAt = new Date().toISOString();
   try {
     const put = await env.FILES_BUCKET.put(key, bytes, {
       onlyIf: { etagDoesNotMatch: "*" },
@@ -558,6 +562,7 @@ async function persistTranscript(env: MiningV3HandoffEnv, marker: HandoffMarker,
         source_key: marker.source_key,
         source_hash: marker.source_hash,
         handoff_id: marker.handoff_id,
+        transcript_created_at: transcriptCreatedAt,
       },
     });
     if (!put) throw new Error("conditional transcript write was not applied");
@@ -1484,7 +1489,7 @@ async function statusByMarker(env: MiningV3HandoffEnv, marker: HandoffMarker): P
     source_hash: marker.source_hash,
     recording_id: marker.recording_id,
   };
-  if (run) return response({ decision: "accepted", handoff_id: marker.handoff_id, run_id: run.run_id, ...identity, transcript_ref: transcript.transcript_ref, transcript_hash: transcript.transcript_hash });
+  if (run) return response({ decision: "accepted", handoff_id: marker.handoff_id, run_id: run.run_id, ...identity, transcript_ref: transcript.transcript_ref, transcript_hash: transcript.transcript_hash, transcript_created_at: transcript.transcript_created_at });
   return response({
     decision: "v3_pending_start",
     handoff_id: marker.handoff_id,
@@ -1492,6 +1497,7 @@ async function statusByMarker(env: MiningV3HandoffEnv, marker: HandoffMarker): P
     ...identity,
     transcript_ref: transcript.transcript_ref,
     transcript_hash: transcript.transcript_hash,
+    transcript_created_at: transcript.transcript_created_at,
   });
 }
 

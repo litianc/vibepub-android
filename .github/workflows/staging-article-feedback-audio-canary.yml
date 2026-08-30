@@ -5,7 +5,9 @@ on:
     paths:
       - "infra/mining/**"
       - "infra/staging/**"
+      - "infra/worker/**"
       - ".github/workflows/staging-article-feedback-audio-canary.yml"
+      - ".github/workflows/staging-feedback-canary-watchdog.yml"
   workflow_dispatch:
     inputs:
       phase:
@@ -77,7 +79,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     needs: validate
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 180
     environment: vibepub-staging
     env:
       PHASE: ${{ inputs.phase }}
@@ -88,6 +90,9 @@ jobs:
       RECORDING_ID: ${{ inputs.recording_id }}
       ARTICLE_ID: ${{ inputs.article_id }}
       PARENT_VERSION_ID: ${{ inputs.parent_version_id }}
+      STAGING_WECHAT_ACCOUNT_BINDING_ID: ${{ vars.STAGING_WECHAT_ACCOUNT_BINDING_ID }}
+      STAGING_WECHAT_PROVIDER_BASE_URL: ${{ vars.STAGING_WECHAT_PROVIDER_BASE_URL }}
+      STAGING_WECHAT_MEDIA_URL_HOSTS: ${{ vars.STAGING_WECHAT_MEDIA_URL_HOSTS }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -97,10 +102,12 @@ jobs:
           cache-dependency-path: infra/mining/package-lock.json
 
       - name: Validate the exact audio or revision input
-        run: |
-          node -e 'const {PHASE,TARGET_KEY,USER_ID,WORKSPACE_ID,REVISION_REQUEST_KEY="",RECORDING_ID="",ARTICLE_ID="",PARENT_VERSION_ID=""}=process.env;const id=/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/;const audio=new RegExp(`^users/${USER_ID}/inbox/[^/]+\\.(?:m4a|mp3|wav|aac|ogg|webm)$`,`i`);const revision=new RegExp(`^users/${USER_ID}/revision-requests/[^/]+/[^/]+\\.json$`);const revisionInvalid=!revision.test(REVISION_REQUEST_KEY)||REVISION_REQUEST_KEY.includes("..")||!/^\\d+$/.test(RECORDING_ID)||!id.test(ARTICLE_ID)||!id.test(PARENT_VERSION_ID);const extra=[REVISION_REQUEST_KEY,RECORDING_ID,ARTICLE_ID,PARENT_VERSION_ID].some(Boolean);if(!["transcribe","start","revision"].includes(PHASE)||!id.test(USER_ID)||!id.test(WORKSPACE_ID)||TARGET_KEY.includes("..")||!audio.test(TARGET_KEY)||(PHASE==="revision"?revisionInvalid:extra))process.exit(1)'
+        run: node infra/staging/validate-staging-audio-canary-input.mjs
 
-      - name: Bind the protected isolated Staging resources
+      - name: Mask the exact synthetic inputs before any deployment
+        run: node -e 'const escape=v=>v.replace(/%/g,"%25").replace(/\r/g,"%0D").replace(/\n/g,"%0A");for(const value of process.argv.slice(1))if(value)console.log(`::add-mask::${escape(value)}`)' "$TARGET_KEY" "$USER_ID" "$WORKSPACE_ID" "$REVISION_REQUEST_KEY" "$RECORDING_ID" "$ARTICLE_ID" "$PARENT_VERSION_ID" "$STAGING_WECHAT_ACCOUNT_BINDING_ID"
+
+      - name: Render the permanent flag-off rollback baseline first
         env:
           STAGING_RESOURCE_MANIFEST_JSON: ${{ secrets.STAGING_RESOURCE_MANIFEST_JSON }}
           EXPECTED_STAGING_BASE_URL: ${{ vars.STAGING_PUBLIC_BASE_URL }}
@@ -124,8 +131,179 @@ jobs:
           node infra/staging/attest-staging-origin.mjs "$RUNNER_TEMP/staging-resource-manifest.json" "$STAGING_BASE_URL" "$CLOUDFLARE_ACCOUNT_ID" "$RUNNER_TEMP/workers-subdomain.json"
           echo "STAGING_ATTESTED_BASE_URL=$STAGING_BASE_URL" >> "$GITHUB_ENV"
 
-      - name: Install the pinned Mining dependencies
-        run: npm ci --prefix infra/mining
+      - name: Install the pinned canary operator dependencies
+        run: |
+          timeout 300s npm ci --prefix infra/mining
+          timeout 300s npm ci --prefix infra/worker
+          timeout 300s npm ci --prefix infra/image-generation-adapter
+          timeout 300s npm ci --prefix infra/wechat-publishing-adapter
+
+      - name: Open the exact bootstrap gate before reading an existing handoff
+        if: inputs.phase != 'transcribe'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          node infra/staging/staging-article-feedback-canary.mjs build-bootstrap \
+            --user-id "$USER_ID" \
+            --workspace-id "$WORKSPACE_ID" \
+            --source-key "$TARGET_KEY" \
+            --candidate-commit "$GITHUB_SHA" \
+            --manifest-hash "$STAGING_MANIFEST_HASH" \
+            --canary-seed "${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}:handoff-read" \
+            --out "$RUNNER_TEMP/handoff-read-grant.json"
+          node -e 'const x=require(process.argv[1]);const escape=v=>v.replace(/%/g,"%25").replace(/\r/g,"%0D").replace(/\n/g,"%0A");for(const value of Object.values(x.scope))if(typeof value==="string"&&value)console.log(`::add-mask::${escape(value)}`)' "$RUNNER_TEMP/handoff-read-grant.json"
+          node infra/staging/staging-article-feedback-canary.mjs render \
+            --manifest "$RUNNER_TEMP/staging-resource-manifest.json" \
+            --grant "$RUNNER_TEMP/handoff-read-grant.json" \
+            --out-dir "$RUNNER_TEMP/handoff-read-config" \
+            --intent deploy
+          node infra/staging/staging-article-feedback-canary.mjs verify \
+            --manifest "$RUNNER_TEMP/staging-resource-manifest.json" \
+            --grant "$RUNNER_TEMP/handoff-read-grant.json" \
+            --out-dir "$RUNNER_TEMP/handoff-read-config" \
+            --intent deploy
+          timeout 180s npx --prefix infra/worker wrangler deploy --dry-run --config "$RUNNER_TEMP/handoff-read-config/main.wrangler.toml"
+          node infra/staging/staging-article-feedback-canary.mjs build-bootstrap \
+            --user-id "$USER_ID" \
+            --workspace-id "$WORKSPACE_ID" \
+            --source-key "$TARGET_KEY" \
+            --candidate-commit "$GITHUB_SHA" \
+            --manifest-hash "$STAGING_MANIFEST_HASH" \
+            --canary-seed "${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}:handoff-read" \
+            --out "$RUNNER_TEMP/handoff-read-grant.json"
+          node infra/staging/staging-article-feedback-canary.mjs render \
+            --manifest "$RUNNER_TEMP/staging-resource-manifest.json" \
+            --grant "$RUNNER_TEMP/handoff-read-grant.json" \
+            --out-dir "$RUNNER_TEMP/handoff-read-config" \
+            --intent deploy
+          node infra/staging/staging-article-feedback-canary.mjs verify \
+            --manifest "$RUNNER_TEMP/staging-resource-manifest.json" \
+            --grant "$RUNNER_TEMP/handoff-read-grant.json" \
+            --out-dir "$RUNNER_TEMP/handoff-read-config" \
+            --intent deploy
+          timeout 180s npx --prefix infra/worker wrangler deploy --config "$RUNNER_TEMP/handoff-read-config/main.wrangler.toml" --message "staging feedback handoff read ${GITHUB_RUN_ID}" --var "DEPLOY_COMMIT:${GITHUB_SHA}" --var "DEPLOY_REF:${GITHUB_REF_NAME}" --var "DEPLOYED_AT:$(date -u +%Y-%m-%dT%H:%M:%SZ)" --var "STAGING_FEEDBACK_CANARY_OPERATOR_RUN_ID:${GITHUB_RUN_ID}"
+          touch "$RUNNER_TEMP/main-canary-deployed"
+
+      - name: Read the existing exact handoff before a full feedback phase
+        if: inputs.phase != 'transcribe'
+        env:
+          MINING_V3_HANDOFF_TOKEN: ${{ secrets.MINING_V3_HANDOFF_TOKEN }}
+          EXPECTED_PREPARE_DECISION: ${{ inputs.phase == 'start' && 'v3_pending_start' || 'accepted' }}
+        run: |
+          node infra/staging/staging-audio-canary-request.mjs status \
+            --base-url "$STAGING_ATTESTED_BASE_URL" \
+            --source-key "$TARGET_KEY" \
+            --user-id "$USER_ID" \
+            --workspace-id "$WORKSPACE_ID" \
+            --expected-decision "$EXPECTED_PREPARE_DECISION" \
+            --out "$RUNNER_TEMP/staging-audio-identity.json"
+          node -e 'const fs=require("fs"),p=process.argv[1],x=require(p);if(process.env.PHASE==="revision"&&(x.recording_id!==Number(process.env.RECORDING_ID)||x.article_id!==process.env.ARTICLE_ID))throw new Error("revision identity mismatch");x.candidate_commit=process.env.GITHUB_SHA;x.manifest_hash=process.env.STAGING_MANIFEST_HASH;fs.writeFileSync(p,JSON.stringify(x,null,2))' "$RUNNER_TEMP/staging-audio-identity.json"
+
+      - name: Build and verify the exact expiring feedback grant
+        run: |
+          if [ "$PHASE" = "transcribe" ]; then
+            node infra/staging/staging-article-feedback-canary.mjs build-bootstrap \
+              --user-id "$USER_ID" \
+              --workspace-id "$WORKSPACE_ID" \
+              --source-key "$TARGET_KEY" \
+              --candidate-commit "$GITHUB_SHA" \
+              --manifest-hash "$STAGING_MANIFEST_HASH" \
+              --canary-seed "${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}:bootstrap" \
+              --out "$RUNNER_TEMP/feedback-canary-grant.json"
+          else
+            for name in STAGING_WECHAT_ACCOUNT_BINDING_ID STAGING_WECHAT_PROVIDER_BASE_URL STAGING_WECHAT_MEDIA_URL_HOSTS; do
+              test -n "${!name}" || { echo "::error::$name is required for the full feedback canary"; exit 1; }
+            done
+            node infra/staging/staging-article-feedback-canary.mjs build \
+              --identity "$RUNNER_TEMP/staging-audio-identity.json" \
+              --canary-seed "${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}:full" \
+              --account-binding-id "$STAGING_WECHAT_ACCOUNT_BINDING_ID" \
+              --provider-base-url "$STAGING_WECHAT_PROVIDER_BASE_URL" \
+              --media-url-hosts "$STAGING_WECHAT_MEDIA_URL_HOSTS" \
+              --out "$RUNNER_TEMP/feedback-canary-grant.json"
+          fi
+
+      - name: Mask generated canary identities before rendering
+        run: node -e 'const x=require(process.argv[1]),values=[];const visit=v=>{if(typeof v==="string"&&v)values.push(v);else if(v&&typeof v==="object")Object.values(v).forEach(visit)};const escape=v=>v.replace(/%/g,"%25").replace(/\r/g,"%0D").replace(/\n/g,"%0A");visit(x.scope);visit(x.wechat?.account_binding_id);visit(x.image?.provider_url);for(const value of new Set(values))console.log(`::add-mask::${escape(value)}`)' "$RUNNER_TEMP/feedback-canary-grant.json"
+
+      - name: Render and dry-run the expiring feedback grant
+        run: |
+          node infra/staging/staging-article-feedback-canary.mjs render \
+            --manifest "$RUNNER_TEMP/staging-resource-manifest.json" \
+            --grant "$RUNNER_TEMP/feedback-canary-grant.json" \
+            --out-dir "$RUNNER_TEMP/canary-config" \
+            --intent deploy
+          node infra/staging/staging-article-feedback-canary.mjs verify \
+            --manifest "$RUNNER_TEMP/staging-resource-manifest.json" \
+            --grant "$RUNNER_TEMP/feedback-canary-grant.json" \
+            --out-dir "$RUNNER_TEMP/canary-config" \
+            --intent deploy
+          timeout 180s npx --prefix infra/worker wrangler deploy --dry-run --config "$RUNNER_TEMP/canary-config/main.wrangler.toml"
+          if [ "$PHASE" != "transcribe" ]; then
+            timeout 180s npx --prefix infra/image-generation-adapter wrangler deploy --dry-run --config "$RUNNER_TEMP/canary-config/image.wrangler.toml"
+            timeout 180s npx --prefix infra/wechat-publishing-adapter wrangler deploy --dry-run --config "$RUNNER_TEMP/canary-config/wechat.wrangler.toml"
+          fi
+
+      - name: Refresh the expiring grant after dry-run
+        run: |
+          if [ "$PHASE" = "transcribe" ]; then
+            node infra/staging/staging-article-feedback-canary.mjs build-bootstrap \
+              --user-id "$USER_ID" \
+              --workspace-id "$WORKSPACE_ID" \
+              --source-key "$TARGET_KEY" \
+              --candidate-commit "$GITHUB_SHA" \
+              --manifest-hash "$STAGING_MANIFEST_HASH" \
+              --canary-seed "${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}:bootstrap" \
+              --out "$RUNNER_TEMP/feedback-canary-grant.json"
+          else
+            node infra/staging/staging-article-feedback-canary.mjs build \
+              --identity "$RUNNER_TEMP/staging-audio-identity.json" \
+              --canary-seed "${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}:full" \
+              --account-binding-id "$STAGING_WECHAT_ACCOUNT_BINDING_ID" \
+              --provider-base-url "$STAGING_WECHAT_PROVIDER_BASE_URL" \
+              --media-url-hosts "$STAGING_WECHAT_MEDIA_URL_HOSTS" \
+              --out "$RUNNER_TEMP/feedback-canary-grant.json"
+          fi
+          node infra/staging/staging-article-feedback-canary.mjs render \
+            --manifest "$RUNNER_TEMP/staging-resource-manifest.json" \
+            --grant "$RUNNER_TEMP/feedback-canary-grant.json" \
+            --out-dir "$RUNNER_TEMP/canary-config" \
+            --intent deploy
+          node infra/staging/staging-article-feedback-canary.mjs verify \
+            --manifest "$RUNNER_TEMP/staging-resource-manifest.json" \
+            --grant "$RUNNER_TEMP/feedback-canary-grant.json" \
+            --out-dir "$RUNNER_TEMP/canary-config" \
+            --intent deploy
+
+      - name: Deploy the exact-user main canary gate
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          CANARY_DEPLOYED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          timeout 180s npx --prefix infra/worker wrangler deploy --config "$RUNNER_TEMP/canary-config/main.wrangler.toml" --message "staging feedback main canary ${GITHUB_RUN_ID}" --var "DEPLOY_COMMIT:${GITHUB_SHA}" --var "DEPLOY_REF:${GITHUB_REF_NAME}" --var "DEPLOYED_AT:${CANARY_DEPLOYED_AT}" --var "STAGING_FEEDBACK_CANARY_OPERATOR_RUN_ID:${GITHUB_RUN_ID}"
+          echo "CANARY_DEPLOYED_AT=$CANARY_DEPLOYED_AT" >> "$GITHUB_ENV"
+          touch "$RUNNER_TEMP/main-canary-deployed"
+
+      - name: Deploy the exact image canary configuration
+        if: inputs.phase != 'transcribe'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          timeout 180s npx --prefix infra/image-generation-adapter wrangler deploy --config "$RUNNER_TEMP/canary-config/image.wrangler.toml" --message "staging feedback image canary ${GITHUB_RUN_ID}" --var "DEPLOY_COMMIT:${GITHUB_SHA}" --var "DEPLOY_REF:${GITHUB_REF_NAME}" --var "DEPLOYED_AT:$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          touch "$RUNNER_TEMP/image-canary-deployed"
+
+      - name: Deploy the exact WeChat canary configuration
+        if: inputs.phase != 'transcribe'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          timeout 180s npx --prefix infra/wechat-publishing-adapter wrangler deploy --config "$RUNNER_TEMP/canary-config/wechat.wrangler.toml" --message "staging feedback WeChat canary ${GITHUB_RUN_ID}" --var "DEPLOY_COMMIT:${GITHUB_SHA}" --var "DEPLOY_REF:${GITHUB_REF_NAME}" --var "DEPLOYED_AT:$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          touch "$RUNNER_TEMP/wechat-canary-deployed"
+
+      - name: Prove the exact reviewed Staging deployment is live
+        run: |
+          node -e 'const fs=require("fs"),url=`${process.env.STAGING_ATTESTED_BASE_URL}/health?adapters=1`;fetch(url,{redirect:"manual",signal:AbortSignal.timeout(30000)}).then(async r=>{if(r.status!==200)throw new Error("staging health unavailable");fs.writeFileSync(process.argv[1],new Uint8Array(await r.arrayBuffer()))}).catch(()=>process.exit(1))' "$RUNNER_TEMP/canary-health.json"
+          node infra/staging/verify-staging-health.mjs "$RUNNER_TEMP/canary-health.json" "$GITHUB_SHA" "$GITHUB_REF_NAME"
 
       - name: Run the bounded Staging Mining phase
         env:
@@ -157,12 +335,15 @@ jobs:
           done
           set +e
           if [ "$PHASE" = "revision" ]; then
-            PUBLIC_BASE_URL="$STAGING_ATTESTED_BASE_URL" REVISION_REQUEST_KEY="$REVISION_REQUEST_KEY" TARGET_KEY="" npm start --prefix infra/mining
+            timeout 1200s env PUBLIC_BASE_URL="$STAGING_ATTESTED_BASE_URL" REVISION_REQUEST_KEY="$REVISION_REQUEST_KEY" TARGET_KEY="" npm start --prefix infra/mining > "$RUNNER_TEMP/mining-private.log" 2>&1
+          elif [ "$PHASE" = "start" ]; then
+            timeout 300s env PUBLIC_BASE_URL="$STAGING_ATTESTED_BASE_URL" REVISION_REQUEST_KEY="" TARGET_KEY="$TARGET_KEY" npm start --prefix infra/mining > "$RUNNER_TEMP/mining-private.log" 2>&1
           else
-            PUBLIC_BASE_URL="$STAGING_ATTESTED_BASE_URL" REVISION_REQUEST_KEY="" TARGET_KEY="$TARGET_KEY" npm start --prefix infra/mining
+            timeout 1200s env PUBLIC_BASE_URL="$STAGING_ATTESTED_BASE_URL" REVISION_REQUEST_KEY="" TARGET_KEY="$TARGET_KEY" npm start --prefix infra/mining > "$RUNNER_TEMP/mining-private.log" 2>&1
           fi
           MINING_EXIT=$?
           set -e
+          echo "Staging Mining phase finished with exit code $MINING_EXIT."
           if [ "$PHASE" != "transcribe" ]; then
             exit "$MINING_EXIT"
           fi
@@ -173,21 +354,177 @@ jobs:
           MINING_V3_HANDOFF_TOKEN: ${{ secrets.MINING_V3_HANDOFF_TOKEN }}
           EXPECTED_DECISION: ${{ inputs.phase == 'transcribe' && 'v3_pending_start' || 'accepted' }}
         run: |
+          FRESHNESS_ARGS=()
+          if [ "$PHASE" = "transcribe" ]; then
+            FRESHNESS_ARGS=(--minimum-transcript-created-at "$CANARY_DEPLOYED_AT")
+          fi
           node infra/staging/staging-audio-canary-request.mjs status \
             --base-url "$STAGING_ATTESTED_BASE_URL" \
             --source-key "$TARGET_KEY" \
             --user-id "$USER_ID" \
             --workspace-id "$WORKSPACE_ID" \
             --expected-decision "$EXPECTED_DECISION" \
+            "${FRESHNESS_ARGS[@]}" \
             --out "$RUNNER_TEMP/staging-audio-identity.json"
           node -e 'const x=require(process.argv[1]);if(!/^run_v3_[a-f0-9]{64}$/.test(x.run_id)||!/^handoff_v3_[a-f0-9]{64}$/.test(x.handoff_id)||!/^article_v3_[a-f0-9]{64}$/.test(x.article_id)||!/^sha256:[a-f0-9]{64}$/.test(x.source_hash)||!Number.isSafeInteger(x.recording_id))process.exit(1)' "$RUNNER_TEMP/staging-audio-identity.json"
           node -e 'const fs=require("fs"),p=process.argv[1],x=require(p);x.candidate_commit=process.env.GITHUB_SHA;x.manifest_hash=process.env.STAGING_MANIFEST_HASH;fs.writeFileSync(p,JSON.stringify(x,null,2))' "$RUNNER_TEMP/staging-audio-identity.json"
 
-      - name: Upload the private intermediate identity
-        if: inputs.phase != 'revision'
+      - name: Record the completed transcribe phase
+        if: inputs.phase == 'transcribe'
+        run: printf '%s\n' '{"state":"v3_pending_start","handoff_ready":true}' > "$RUNNER_TEMP/phase-state.json"
+
+      - name: Wait for start to reach verified draft_ready
+        if: inputs.phase == 'start'
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          node -e 'const fs=require("fs"),x=require(process.argv[1]);const q=`SELECT p.state,p.progress_percent,p.error_code,p.next_action,(datetime(p.created_at)>=datetime(\x27${process.env.CANARY_DEPLOYED_AT}\x27) AND (SELECT datetime(e.created_at)>=datetime(\x27${process.env.CANARY_DEPLOYED_AT}\x27) FROM editorial_runs e WHERE e.run_id=p.run_id AND e.user_id=\x27${x.user_id}\x27 AND e.workspace_id=\x27${x.workspace_id}\x27) AND (SELECT count(*)=1 FROM article_versions v WHERE v.user_id=\x27${x.user_id}\x27 AND v.workspace_id=\x27${x.workspace_id}\x27 AND v.article_id=\x27${x.article_id}\x27 AND v.recording_id=${x.recording_id} AND v.version_no=1 AND datetime(v.created_at)>=datetime(\x27${process.env.CANARY_DEPLOYED_AT}\x27))) AS candidate_fresh,(SELECT status FROM editorial_runs e WHERE e.run_id=p.run_id AND e.user_id=\x27${x.user_id}\x27 AND e.workspace_id=\x27${x.workspace_id}\x27) AS editorial_status,(SELECT count(DISTINCT producer_agent_role) FROM editorial_artifacts a WHERE a.run_id=p.run_id AND a.user_id=\x27${x.user_id}\x27 AND a.workspace_id=\x27${x.workspace_id}\x27 AND a.producer_agent_role IN (\x27editorial_coordinator\x27,\x27writing\x27,\x27editorial_review\x27,\x27illustration\x27,\x27cover\x27)) AS completed_agent_count,(SELECT count(*) FROM article_versions v WHERE v.user_id=\x27${x.user_id}\x27 AND v.workspace_id=\x27${x.workspace_id}\x27 AND v.article_id=\x27${x.article_id}\x27 AND v.recording_id=${x.recording_id} AND v.version_no=1 AND v.parent_version_id IS NULL AND v.source=\x27initial\x27 AND v.generation_status=\x27frozen\x27) AS v1_count,(SELECT count(*) FROM recordings r WHERE r.id=${x.recording_id} AND r.user_id=\x27${x.user_id}\x27 AND r.wechat_draft_id IS NOT NULL AND r.wechat_draft_id<>\x27\x27) AS wechat_draft_count FROM publication_runs p WHERE p.run_id=\x27${x.run_id}\x27 AND p.user_id=\x27${x.user_id}\x27 AND p.workspace_id=\x27${x.workspace_id}\x27;`;fs.writeFileSync(process.argv[2],q)' "$RUNNER_TEMP/staging-audio-identity.json" "$RUNNER_TEMP/start-state.sql"
+          for attempt in $(seq 1 40); do
+            rm -f "$RUNNER_TEMP/start-state-result.json"
+            set +e
+            timeout 25s node infra/staging/query-staging-d1.mjs --manifest "$RUNNER_TEMP/staging-resource-manifest.json" --sql-file "$RUNNER_TEMP/start-state.sql" --out "$RUNNER_TEMP/start-state-result.json"
+            QUERY_EXIT=$?
+            set -e
+            if [ "$QUERY_EXIT" -eq 75 ] || [ "$QUERY_EXIT" -eq 124 ]; then
+              echo "Staging D1 read failed temporarily (poll $attempt/40)."
+              sleep 10
+              continue
+            fi
+            test "$QUERY_EXIT" -eq 0 || exit "$QUERY_EXIT"
+            STATE="$(node -e 'const row=require(process.argv[1])?.[0]?.results?.[0];process.stdout.write(String(row?.state||""))' "$RUNNER_TEMP/start-state-result.json")"
+            echo "Staging start state: $STATE (poll $attempt/40)"
+            if [ "$STATE" = "draft_ready" ] || [ "$STATE" = "needs_action" ] || [ "$STATE" = "failed" ] || [ "$STATE" = "cancelled" ]; then
+              break
+            fi
+            sleep 10
+          done
+          node -e 'const fs=require("fs"),row=require(process.argv[1])?.[0]?.results?.[0];if(!row||row.state!=="draft_ready"||Number(row.progress_percent)!==100||row.error_code!==null||row.next_action!==null||Number(row.candidate_fresh)!==1||row.editorial_status!=="completed"||Number(row.completed_agent_count)!==5||Number(row.v1_count)!==1||Number(row.wechat_draft_count)!==1)throw new Error(`start phase incomplete: ${row?.state||"missing"}`);fs.writeFileSync(process.argv[2],JSON.stringify({state:row.state,progress_percent:Number(row.progress_percent),candidate_fresh:true,editorial_status:row.editorial_status,completed_agent_count:Number(row.completed_agent_count),v1_count:Number(row.v1_count),wechat_draft_count:Number(row.wechat_draft_count)},null,2))' "$RUNNER_TEMP/start-state-result.json" "$RUNNER_TEMP/phase-state.json"
+
+      - name: Verify revision produced v2 and completed WeChat update
+        if: inputs.phase == 'revision'
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          node -e 'const fs=require("fs"),x=require(process.argv[1]);const q=`SELECT (SELECT count(*) FROM article_versions v WHERE v.user_id=\x27${x.user_id}\x27 AND v.workspace_id=\x27${x.workspace_id}\x27 AND v.article_id=\x27${x.article_id}\x27 AND v.recording_id=${x.recording_id} AND v.version_no=2 AND v.parent_version_id=\x27${process.env.PARENT_VERSION_ID}\x27 AND v.source=\x27revision\x27 AND v.generation_status=\x27frozen\x27 AND datetime(v.created_at)>=datetime(\x27${process.env.CANARY_DEPLOYED_AT}\x27)) AS v2_count,(SELECT count(*) FROM article_revision_requests rr WHERE rr.user_id=\x27${x.user_id}\x27 AND rr.workspace_id=\x27${x.workspace_id}\x27 AND rr.article_id=\x27${x.article_id}\x27 AND rr.recording_id=${x.recording_id} AND rr.parent_version_id=\x27${process.env.PARENT_VERSION_ID}\x27 AND rr.status=\x27completed\x27 AND rr.child_version_id IS NOT NULL AND datetime(rr.updated_at)>=datetime(\x27${process.env.CANARY_DEPLOYED_AT}\x27)) AS revision_completed_count,(SELECT rr.id FROM article_revision_requests rr WHERE rr.user_id=\x27${x.user_id}\x27 AND rr.workspace_id=\x27${x.workspace_id}\x27 AND rr.article_id=\x27${x.article_id}\x27 AND rr.recording_id=${x.recording_id} AND rr.parent_version_id=\x27${process.env.PARENT_VERSION_ID}\x27) AS revision_id,(SELECT rr.child_version_id FROM article_revision_requests rr WHERE rr.user_id=\x27${x.user_id}\x27 AND rr.workspace_id=\x27${x.workspace_id}\x27 AND rr.article_id=\x27${x.article_id}\x27 AND rr.recording_id=${x.recording_id} AND rr.parent_version_id=\x27${process.env.PARENT_VERSION_ID}\x27) AS child_version_id,(SELECT count(*) FROM recordings r WHERE r.id=${x.recording_id} AND r.user_id=\x27${x.user_id}\x27 AND r.wechat_draft_id IS NOT NULL AND r.wechat_draft_id<>\x27\x27) AS wechat_draft_count;`;fs.writeFileSync(process.argv[2],q)' "$RUNNER_TEMP/staging-audio-identity.json" "$RUNNER_TEMP/revision-state.sql"
+          for attempt in $(seq 1 20); do
+            rm -f "$RUNNER_TEMP/revision-state-result.json"
+            set +e
+            timeout 25s node infra/staging/query-staging-d1.mjs --manifest "$RUNNER_TEMP/staging-resource-manifest.json" --sql-file "$RUNNER_TEMP/revision-state.sql" --out "$RUNNER_TEMP/revision-state-result.json"
+            QUERY_EXIT=$?
+            set -e
+            if [ "$QUERY_EXIT" -eq 75 ] || [ "$QUERY_EXIT" -eq 124 ]; then
+              echo "Staging D1 read failed temporarily (revision poll $attempt/20)."
+              sleep 10
+              continue
+            fi
+            test "$QUERY_EXIT" -eq 0 || exit "$QUERY_EXIT"
+            COMPLETE="$(node -e 'const row=require(process.argv[1])?.[0]?.results?.[0];process.stdout.write(String(Number(row?.v2_count)===1&&Number(row?.revision_completed_count)===1&&Number(row?.wechat_draft_count)===1))' "$RUNNER_TEMP/revision-state-result.json")"
+            test "$COMPLETE" = "true" && break
+            sleep 10
+          done
+          node -e 'const fs=require("fs"),row=require(process.argv[1])?.[0]?.results?.[0],id=/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/;if(!row||Number(row.v2_count)!==1||Number(row.revision_completed_count)!==1||Number(row.wechat_draft_count)!==1||!id.test(String(row.revision_id||""))||!id.test(String(row.child_version_id||"")))throw new Error("revision phase incomplete");fs.appendFileSync(process.env.GITHUB_ENV,`REVISION_ID=${row.revision_id}\nCHILD_VERSION_ID=${row.child_version_id}\n`);fs.writeFileSync(process.argv[2],JSON.stringify({state:"revision_completed",candidate_fresh:true,v2_count:Number(row.v2_count),revision_completed_count:Number(row.revision_completed_count),wechat_draft_count:Number(row.wechat_draft_count)},null,2))' "$RUNNER_TEMP/revision-state-result.json" "$RUNNER_TEMP/phase-state.json"
+
+      - name: Verify the v2 WeChat draft readback fingerprint
+        if: inputs.phase == 'revision'
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: |
+          npm run verify:revision-readback --prefix infra/mining -- \
+            --revision-request-key "$REVISION_REQUEST_KEY" \
+            --child-version-id "$CHILD_VERSION_ID" \
+            --minimum-verified-at "$CANARY_DEPLOYED_AT" \
+            --out "$RUNNER_TEMP/revision-readback-evidence.json"
+          node -e 'const fs=require("fs"),state=require(process.argv[1]),readback=require(process.argv[2]);state.wechat_readback=readback;fs.writeFileSync(process.argv[1],JSON.stringify(state,null,2))' "$RUNNER_TEMP/phase-state.json" "$RUNNER_TEMP/revision-readback-evidence.json"
+
+      - name: Close the exact-user main gate
+        if: always()
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          test -f "$RUNNER_TEMP/safe-config/main.wrangler.toml" || exit 1
+          CLEANUP_MARKER_HASH="$(node -e 'const c=require("crypto");process.stdout.write(`sha256:${c.createHash("sha256").update(process.argv[1]).digest("hex")}`)' "$GITHUB_RUN_ID")"
+          for attempt in 1 2 3; do
+            if timeout 180s npx --prefix infra/worker wrangler deploy --config "$RUNNER_TEMP/safe-config/main.wrangler.toml" --message "close staging feedback main gate ${GITHUB_RUN_ID}" --var "DEPLOY_COMMIT:${GITHUB_SHA}" --var "DEPLOY_REF:${GITHUB_REF_NAME}" --var "DEPLOYED_AT:$(date -u +%Y-%m-%dT%H:%M:%SZ)" --var "STAGING_FEEDBACK_CANARY_CLEANUP_MARKER_HASH:${CLEANUP_MARKER_HASH}"; then
+              touch "$RUNNER_TEMP/main-gate-closed"
+              exit 0
+            fi
+            sleep $((attempt * 5))
+          done
+          exit 1
+
+      - name: Remove the image canary configuration
+        if: always()
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          test -f "$RUNNER_TEMP/safe-config/image.wrangler.toml" || exit 1
+          for attempt in 1 2 3; do
+            if timeout 180s npx --prefix infra/image-generation-adapter wrangler deploy --config "$RUNNER_TEMP/safe-config/image.wrangler.toml" --message "close staging feedback image canary ${GITHUB_RUN_ID}" --var "DEPLOY_COMMIT:${GITHUB_SHA}" --var "DEPLOY_REF:${GITHUB_REF_NAME}" --var "DEPLOYED_AT:$(date -u +%Y-%m-%dT%H:%M:%SZ)"; then
+              touch "$RUNNER_TEMP/image-cleanup-deployed"
+              exit 0
+            fi
+            sleep $((attempt * 5))
+          done
+          exit 1
+
+      - name: Remove the WeChat canary configuration
+        if: always()
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          test -f "$RUNNER_TEMP/safe-config/wechat.wrangler.toml" || exit 1
+          for attempt in 1 2 3; do
+            if timeout 180s npx --prefix infra/wechat-publishing-adapter wrangler deploy --config "$RUNNER_TEMP/safe-config/wechat.wrangler.toml" --message "close staging feedback WeChat canary ${GITHUB_RUN_ID}" --var "DEPLOY_COMMIT:${GITHUB_SHA}" --var "DEPLOY_REF:${GITHUB_REF_NAME}" --var "DEPLOYED_AT:$(date -u +%Y-%m-%dT%H:%M:%SZ)"; then
+              touch "$RUNNER_TEMP/wechat-cleanup-deployed"
+              exit 0
+            fi
+            sleep $((attempt * 5))
+          done
+          exit 1
+
+      - name: Remove the main cleanup marker
+        if: always()
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          test -f "$RUNNER_TEMP/main-gate-closed" || exit 1
+          test -f "$RUNNER_TEMP/image-cleanup-deployed" || exit 1
+          test -f "$RUNNER_TEMP/wechat-cleanup-deployed" || exit 1
+          for attempt in 1 2 3; do
+            if timeout 180s npx --prefix infra/worker wrangler deploy --config "$RUNNER_TEMP/safe-config/main.wrangler.toml" --message "finish staging feedback cleanup ${GITHUB_RUN_ID}" --var "DEPLOY_COMMIT:${GITHUB_SHA}" --var "DEPLOY_REF:${GITHUB_REF_NAME}" --var "DEPLOYED_AT:$(date -u +%Y-%m-%dT%H:%M:%SZ)"; then
+              touch "$RUNNER_TEMP/main-cleanup-deployed"
+              exit 0
+            fi
+            sleep $((attempt * 5))
+          done
+          exit 1
+
+      - name: Build redacted phase evidence
+        if: always()
+        run: |
+          node -e 'const fs=require("fs"),c=require("crypto"),identityPath=process.argv[1],statePath=process.argv[2];const x=fs.existsSync(identityPath)?JSON.parse(fs.readFileSync(identityPath,"utf8")):{};const state=fs.existsSync(statePath)?JSON.parse(fs.readFileSync(statePath,"utf8")):null;const digest=v=>typeof v==="string"&&v?`sha256:${c.createHash("sha256").update(v).digest("hex")}`:null;const out={schema_version:"vibepub-staging-feedback-phase-evidence.v1",scope:"phase_only_not_issue_acceptance",phase:process.env.PHASE,candidate_commit:process.env.GITHUB_SHA,manifest_hash:process.env.STAGING_MANIFEST_HASH||null,source_hash:x.source_hash||null,run_id_hash:digest(x.run_id),article_id_hash:digest(x.article_id),result:state,cleanup:{main:fs.existsSync(`${process.env.RUNNER_TEMP}/main-cleanup-deployed`),image:fs.existsSync(`${process.env.RUNNER_TEMP}/image-cleanup-deployed`),wechat:fs.existsSync(`${process.env.RUNNER_TEMP}/wechat-cleanup-deployed`)}};fs.writeFileSync(process.argv[3],JSON.stringify(out,null,2))' "$RUNNER_TEMP/staging-audio-identity.json" "$RUNNER_TEMP/phase-state.json" "$RUNNER_TEMP/staging-feedback-evidence.json"
+
+      - name: Upload redacted phase evidence
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: staging-audio-identity-${{ github.run_id }}
-          retention-days: 1
+          name: staging-feedback-audio-canary-${{ github.run_id }}
+          retention-days: 7
           if-no-files-found: error
-          path: ${{ runner.temp }}/staging-audio-identity.json
+          path: |
+            ${{ runner.temp }}/staging-feedback-evidence.json
+            ${{ runner.temp }}/main-cleanup-deployed
+            ${{ runner.temp }}/image-cleanup-deployed
+            ${{ runner.temp }}/wechat-cleanup-deployed
+
+      - name: Require all temporary grants to be closed
+        if: always()
+        run: |
+          test -f "$RUNNER_TEMP/main-cleanup-deployed" || { echo "::error::main Staging feedback gate was not restored"; exit 1; }
+          test -f "$RUNNER_TEMP/image-cleanup-deployed" || { echo "::error::image Staging feedback gate was not restored"; exit 1; }
+          test -f "$RUNNER_TEMP/wechat-cleanup-deployed" || { echo "::error::WeChat Staging feedback gate was not restored"; exit 1; }
+          test -f "$RUNNER_TEMP/staging-feedback-evidence.json" || { echo "::error::redacted feedback evidence is missing"; exit 1; }

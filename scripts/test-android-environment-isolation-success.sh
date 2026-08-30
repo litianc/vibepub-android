@@ -48,9 +48,19 @@ case "$1" in
   get-state) echo device ;;
   install)
     [[ "$2" == "--user" && "$3" == "10" ]]
+    if [[ "${FAKE_DIRECT_INSTALL_HANG:-false}" == "true" && "${6:-}" == *staging.apk && ! -e "${FAKE_STATE_DIR:?}/staging-installed" ]]; then
+      sleep 2
+    fi
+    if [[ "${FAKE_DIRECT_INSTALL_RESTRICTED:-false}" == "true" && "${6:-}" == *staging.apk && ! -e "${FAKE_STATE_DIR:?}/staging-installed" ]]; then
+      echo "Failure [INSTALL_FAILED_USER_RESTRICTED: Install canceled by user]" >&2
+      exit 1
+    fi
     [[ "${6:-}" == *staging.apk ]] && touch "${FAKE_STATE_DIR:?}/staging-installed"
     rm -f "${FAKE_STATE_DIR:?}/staging-cleared"
     echo Success
+    ;;
+  push)
+    echo "synthetic push"
     ;;
   shell)
     if [[ "$2" == "cmd" && "$3" == "package" && "$4" == "list" && "$5" == "packages" ]]; then
@@ -76,6 +86,18 @@ case "$1" in
       [[ "$4" == "--user" && "$5" == "10" && "$6" == "cn.litianc.vibepub.staging" ]]
       rm -f "${FAKE_STATE_DIR:?}/staging-installed"
       echo Success
+    elif [[ "$2" == "pm" && "$3" == "install" ]]; then
+      [[ "$4" == "--user" && "$5" == "10" && "$6" == "-r" && "$7" == "-t" && "$8" == "-g" ]]
+      if [[ "${FAKE_FALLBACK_INSTALL_HANG:-false}" == "true" ]]; then
+        sleep 2
+      fi
+      if [[ "${FAKE_FALLBACK_INSTALL_FAIL:-false}" == "true" ]]; then
+        echo Failure >&2
+        exit 1
+      fi
+      touch "${FAKE_STATE_DIR:?}/staging-installed"
+      rm -f "${FAKE_STATE_DIR:?}/staging-cleared"
+      echo Success
     elif [[ "$2" == "am" && "$3" == "get-current-user" ]]; then
       echo 10
     elif [[ "$2" == "am" && "$3" == "force-stop" ]]; then
@@ -86,15 +108,28 @@ case "$1" in
       command="$8"
       [[ "$command" == *"/data/user/10/"* ]]
       [[ "$command" != *"/data/user/0/"* ]]
-      echo isolated
+      [[ "${FAKE_CROSS_READABLE:-false}" != "true" ]] || exit 0
+      exit 1
+    elif [[ "$2" == "dumpsys" && "$3" == "window" && "$4" == "displays" ]]; then
+      [[ "${FAKE_DISPLAY_QUERY_FAIL:-false}" != "true" ]] || exit 72
+      echo "cur=3008x1880"
+    elif [[ "$2" == "input" && "$3" == "tap" ]]; then
+      true
+    elif [[ "$2" == "rm" && "$3" == "-f" ]]; then
+      [[ "${FAKE_REMOTE_CLEANUP_FAIL:-false}" != "true" ]] || exit 73
+      true
     fi
     ;;
   exec-out)
     [[ "$2" == "run-as" ]]
     package="$3"
+    [[ "$package" == "cn.litianc.vibepub" || "$package" == "cn.litianc.vibepub.staging" ]]
     [[ "$4" == "--user" && "$5" == "10" && "$6" == "sh" && "$7" == "-c" ]]
     command="$8"
-    if [[ "$command" == *"printf 'present"* ]]; then
+    if [[ "$command" == *"cross_package_read_check"* ]]; then
+      [[ "${FAKE_CROSS_READ_QUERY_FAIL:-false}" != "true" ]] || exit 71
+      [[ "${FAKE_CROSS_READABLE:-false}" == "true" ]] && echo readable || echo unreadable
+    elif [[ "$command" == *"printf 'present"* ]]; then
       if [[ "${FAKE_PREFS_QUERY_FAIL:-false}" == "true" && -e "${FAKE_STATE_DIR:?}/staging-cleared" ]]; then
         exit 71
       fi
@@ -159,6 +194,137 @@ fi
 [[ "$(grep -c '^staging$' "$TMP_DIR/http.log")" == 1 ]]
 if grep -Eq 'production-session|staging-session|production-user|staging-user' "$TMP_DIR/output.txt" "$TMP_DIR/evidence"/*/* 2>/dev/null; then
   echo "Isolation evidence exposed private session data." >&2
+  exit 1
+fi
+
+rm -rf "$TMP_DIR/evidence"
+rm -f "$TMP_DIR/adb.log" "$TMP_DIR/http.log" "$TMP_DIR/staging-cleared"
+touch "$TMP_DIR/staging-installed"
+if AAPT="$TMP_DIR/aapt" APKSIGNER="$TMP_DIR/apksigner" FAKE_CERTIFICATE_FINGERPRINT="$PINNED_FINGERPRINT" \
+  ADB="$TMP_DIR/adb" CURL="$TMP_DIR/curl" FAKE_HTTP_LOG="$TMP_DIR/http.log" \
+  FAKE_ADB_LOG="$TMP_DIR/adb.log" FAKE_STATE_DIR="$TMP_DIR" OUTPUT_ROOT="$TMP_DIR/evidence" \
+  FAKE_DIRECT_INSTALL_RESTRICTED=true \
+    "$ROOT_DIR/scripts/verify-android-environment-isolation.sh" \
+      "$TMP_DIR/production.apk" "$TMP_DIR/staging.apk" \
+      --serial synthetic-device --staging-api-url https://staging.example.test >"$TMP_DIR/restricted-install-disabled.txt" 2>&1; then
+  echo "Isolation verifier tapped an install prompt without explicit approval." >&2
+  exit 1
+fi
+grep -Fq 'AUTO_CONFIRM_USB_INSTALL_PROMPT=true' "$TMP_DIR/restricted-install-disabled.txt"
+if grep -Eq 'pm install|input tap' "$TMP_DIR/adb.log"; then
+  echo "Isolation verifier touched the prompt while automatic confirmation was disabled." >&2
+  exit 1
+fi
+
+rm -rf "$TMP_DIR/evidence"
+rm -f "$TMP_DIR/adb.log" "$TMP_DIR/http.log" "$TMP_DIR/staging-cleared"
+touch "$TMP_DIR/staging-installed"
+AAPT="$TMP_DIR/aapt" APKSIGNER="$TMP_DIR/apksigner" FAKE_CERTIFICATE_FINGERPRINT="$PINNED_FINGERPRINT" \
+ADB="$TMP_DIR/adb" CURL="$TMP_DIR/curl" FAKE_HTTP_LOG="$TMP_DIR/http.log" \
+FAKE_ADB_LOG="$TMP_DIR/adb.log" FAKE_STATE_DIR="$TMP_DIR" OUTPUT_ROOT="$TMP_DIR/evidence" \
+FAKE_DIRECT_INSTALL_RESTRICTED=true AUTO_CONFIRM_USB_INSTALL_PROMPT=true \
+  "$ROOT_DIR/scripts/verify-android-environment-isolation.sh" \
+    "$TMP_DIR/production.apk" "$TMP_DIR/staging.apk" \
+    --serial synthetic-device --staging-api-url https://staging.example.test >"$TMP_DIR/restricted-install.txt"
+grep -Fq 'pm install --user 10 -r -t -g /data/local/tmp/vibepub-staging-final.apk' "$TMP_DIR/adb.log"
+grep -Fq 'input tap 1263 1203' "$TMP_DIR/adb.log"
+grep -Fq 'shell rm -f /data/local/tmp/vibepub-staging-final.apk' "$TMP_DIR/adb.log"
+
+rm -rf "$TMP_DIR/evidence"
+rm -f "$TMP_DIR/adb.log" "$TMP_DIR/http.log" "$TMP_DIR/staging-cleared"
+touch "$TMP_DIR/staging-installed"
+AAPT="$TMP_DIR/aapt" APKSIGNER="$TMP_DIR/apksigner" FAKE_CERTIFICATE_FINGERPRINT="$PINNED_FINGERPRINT" \
+ADB="$TMP_DIR/adb" CURL="$TMP_DIR/curl" FAKE_HTTP_LOG="$TMP_DIR/http.log" \
+FAKE_ADB_LOG="$TMP_DIR/adb.log" FAKE_STATE_DIR="$TMP_DIR" OUTPUT_ROOT="$TMP_DIR/evidence" \
+FAKE_DIRECT_INSTALL_HANG=true AUTO_CONFIRM_USB_INSTALL_PROMPT=true ADB_INSTALL_TIMEOUT_SECONDS=1 \
+  "$ROOT_DIR/scripts/verify-android-environment-isolation.sh" \
+    "$TMP_DIR/production.apk" "$TMP_DIR/staging.apk" \
+    --serial synthetic-device --staging-api-url https://staging.example.test >"$TMP_DIR/direct-timeout-recovery.txt"
+grep -Fq 'Direct ADB install timed out after 1s.' "$TMP_DIR"/evidence/*/install-staging-final-direct.txt
+grep -Fq 'pm install --user 10 -r -t -g /data/local/tmp/vibepub-staging-final.apk' "$TMP_DIR/adb.log"
+
+rm -rf "$TMP_DIR/evidence"
+rm -f "$TMP_DIR/adb.log" "$TMP_DIR/http.log" "$TMP_DIR/staging-cleared"
+touch "$TMP_DIR/staging-installed"
+if AAPT="$TMP_DIR/aapt" APKSIGNER="$TMP_DIR/apksigner" FAKE_CERTIFICATE_FINGERPRINT="$PINNED_FINGERPRINT" \
+  ADB="$TMP_DIR/adb" CURL="$TMP_DIR/curl" FAKE_HTTP_LOG="$TMP_DIR/http.log" \
+  FAKE_ADB_LOG="$TMP_DIR/adb.log" FAKE_STATE_DIR="$TMP_DIR" OUTPUT_ROOT="$TMP_DIR/evidence" \
+  FAKE_DIRECT_INSTALL_RESTRICTED=true FAKE_REMOTE_CLEANUP_FAIL=true AUTO_CONFIRM_USB_INSTALL_PROMPT=true \
+    "$ROOT_DIR/scripts/verify-android-environment-isolation.sh" \
+      "$TMP_DIR/production.apk" "$TMP_DIR/staging.apk" \
+      --serial synthetic-device --staging-api-url https://staging.example.test >"$TMP_DIR/cleanup-failure.txt" 2>&1; then
+  echo "Isolation verifier accepted a failed remote APK cleanup." >&2
+  exit 1
+fi
+grep -Fq 'shell rm -f /data/local/tmp/vibepub-staging-final.apk' "$TMP_DIR/adb.log"
+
+rm -rf "$TMP_DIR/evidence"
+rm -f "$TMP_DIR/adb.log" "$TMP_DIR/http.log" "$TMP_DIR/staging-cleared"
+touch "$TMP_DIR/staging-installed"
+if AAPT="$TMP_DIR/aapt" APKSIGNER="$TMP_DIR/apksigner" FAKE_CERTIFICATE_FINGERPRINT="$PINNED_FINGERPRINT" \
+  ADB="$TMP_DIR/adb" CURL="$TMP_DIR/curl" FAKE_HTTP_LOG="$TMP_DIR/http.log" \
+  FAKE_ADB_LOG="$TMP_DIR/adb.log" FAKE_STATE_DIR="$TMP_DIR" OUTPUT_ROOT="$TMP_DIR/evidence" \
+  FAKE_DIRECT_INSTALL_RESTRICTED=true FAKE_FALLBACK_INSTALL_FAIL=true FAKE_DISPLAY_QUERY_FAIL=true AUTO_CONFIRM_USB_INSTALL_PROMPT=true \
+    "$ROOT_DIR/scripts/verify-android-environment-isolation.sh" \
+      "$TMP_DIR/production.apk" "$TMP_DIR/staging.apk" \
+      --serial synthetic-device --staging-api-url https://staging.example.test >"$TMP_DIR/fallback-failure.txt" 2>&1; then
+  echo "Isolation verifier accepted a failed fallback install." >&2
+  exit 1
+fi
+grep -Fq 'shell rm -f /data/local/tmp/vibepub-staging-final.apk' "$TMP_DIR/adb.log"
+grep -Fq 'input tap 1266 1203' "$TMP_DIR/adb.log"
+
+rm -rf "$TMP_DIR/evidence"
+rm -f "$TMP_DIR/adb.log" "$TMP_DIR/http.log" "$TMP_DIR/staging-cleared"
+touch "$TMP_DIR/staging-installed"
+if AAPT="$TMP_DIR/aapt" APKSIGNER="$TMP_DIR/apksigner" FAKE_CERTIFICATE_FINGERPRINT="$PINNED_FINGERPRINT" \
+  ADB="$TMP_DIR/adb" CURL="$TMP_DIR/curl" FAKE_HTTP_LOG="$TMP_DIR/http.log" \
+  FAKE_ADB_LOG="$TMP_DIR/adb.log" FAKE_STATE_DIR="$TMP_DIR" OUTPUT_ROOT="$TMP_DIR/evidence" \
+  FAKE_DIRECT_INSTALL_RESTRICTED=true FAKE_FALLBACK_INSTALL_HANG=true \
+  AUTO_CONFIRM_USB_INSTALL_PROMPT=true USB_INSTALL_PROMPT_TIMEOUT_SECONDS=1 \
+    "$ROOT_DIR/scripts/verify-android-environment-isolation.sh" \
+      "$TMP_DIR/production.apk" "$TMP_DIR/staging.apk" \
+      --serial synthetic-device --staging-api-url https://staging.example.test >"$TMP_DIR/fallback-timeout.txt" 2>&1; then
+  echo "Isolation verifier accepted a timed-out fallback install." >&2
+  exit 1
+fi
+grep -Fq 'shell rm -f /data/local/tmp/vibepub-staging-final.apk' "$TMP_DIR/adb.log"
+
+rm -rf "$TMP_DIR/evidence"
+rm -f "$TMP_DIR/adb.log" "$TMP_DIR/http.log" "$TMP_DIR/staging-cleared"
+touch "$TMP_DIR/staging-installed"
+if AAPT="$TMP_DIR/aapt" APKSIGNER="$TMP_DIR/apksigner" FAKE_CERTIFICATE_FINGERPRINT="$PINNED_FINGERPRINT" \
+  ADB="$TMP_DIR/adb" CURL="$TMP_DIR/curl" FAKE_HTTP_LOG="$TMP_DIR/http.log" \
+  FAKE_ADB_LOG="$TMP_DIR/adb.log" FAKE_STATE_DIR="$TMP_DIR" OUTPUT_ROOT="$TMP_DIR/evidence" \
+  FAKE_CROSS_READABLE=true \
+    "$ROOT_DIR/scripts/verify-android-environment-isolation.sh" \
+      "$TMP_DIR/production.apk" "$TMP_DIR/staging.apk" \
+      --serial synthetic-device --staging-api-url https://staging.example.test >"$TMP_DIR/cross-readable.txt" 2>&1; then
+  echo "Isolation verifier accepted cross-readable app preferences." >&2
+  exit 1
+fi
+grep -Fq 'login storage is not isolated' "$TMP_DIR/cross-readable.txt"
+if grep -Eq 'pm clear|pm uninstall' "$TMP_DIR/adb.log"; then
+  echo "Isolation verifier changed Staging after detecting cross-readable preferences." >&2
+  exit 1
+fi
+
+rm -rf "$TMP_DIR/evidence"
+rm -f "$TMP_DIR/adb.log" "$TMP_DIR/http.log" "$TMP_DIR/staging-cleared"
+touch "$TMP_DIR/staging-installed"
+if AAPT="$TMP_DIR/aapt" APKSIGNER="$TMP_DIR/apksigner" FAKE_CERTIFICATE_FINGERPRINT="$PINNED_FINGERPRINT" \
+  ADB="$TMP_DIR/adb" CURL="$TMP_DIR/curl" FAKE_HTTP_LOG="$TMP_DIR/http.log" \
+  FAKE_ADB_LOG="$TMP_DIR/adb.log" FAKE_STATE_DIR="$TMP_DIR" OUTPUT_ROOT="$TMP_DIR/evidence" \
+  FAKE_CROSS_READ_QUERY_FAIL=true \
+    "$ROOT_DIR/scripts/verify-android-environment-isolation.sh" \
+      "$TMP_DIR/production.apk" "$TMP_DIR/staging.apk" \
+      --serial synthetic-device --staging-api-url https://staging.example.test >"$TMP_DIR/cross-read-query-failure.txt" 2>&1; then
+  echo "Isolation verifier accepted a failed cross-package read query." >&2
+  exit 1
+fi
+grep -Fq 'login storage is not isolated' "$TMP_DIR/cross-read-query-failure.txt"
+if grep -Eq 'pm clear|pm uninstall' "$TMP_DIR/adb.log"; then
+  echo "Isolation verifier changed Staging after a failed cross-package read query." >&2
   exit 1
 fi
 

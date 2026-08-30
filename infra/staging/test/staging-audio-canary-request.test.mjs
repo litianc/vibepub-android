@@ -25,6 +25,7 @@ const status = {
   recording_id: 42,
   transcript_ref: "editorial/v3/redacted/transcript.txt",
   transcript_hash: `sha256:${"4".repeat(64)}`,
+  transcript_created_at: "2026-08-29T13:00:00.000Z",
 };
 
 test("reads one exact post-ASR staging identity without exposing the token", async () => {
@@ -56,4 +57,5 @@ test("rejects another origin, source, decision, or malformed identity before it 
   await assert.rejects(() => readStagingAudioCanaryStatus({ ...base, expectedDecision: "accepted", fetchImpl }), error => error instanceof StagingAudioCanaryRequestError);
   await assert.rejects(() => readStagingAudioCanaryStatus({ ...base, expectedDecision: "v3_pending_start", fetchImpl: async () => Response.json({ ...status, run_id: "bad" }) }), error => error instanceof StagingAudioCanaryRequestError);
   await assert.rejects(() => readStagingAudioCanaryStatus({ ...base, expectedDecision: "v3_pending_start", fetchImpl: async () => Response.json({ ...status, workspace_id: "other-workspace" }) }), error => error instanceof StagingAudioCanaryRequestError);
+  await assert.rejects(() => readStagingAudioCanaryStatus({ ...base, expectedDecision: "v3_pending_start", minimumTranscriptCreatedAt: "2026-08-29T13:01:00.000Z", fetchImpl }), error => error instanceof StagingAudioCanaryRequestError);
 });
