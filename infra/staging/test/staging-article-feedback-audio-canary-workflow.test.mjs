@@ -150,6 +150,11 @@ test("transcribe and start phases require an exact safe handoff status", () => {
   assert.match(handoffReadGate, /wrangler deploy --dry-run/);
   assert.match(handoffReadGate, /wrangler deploy --config/);
   assert.doesNotMatch(handoffReadGate, /image\.wrangler\.toml|wechat\.wrangler\.toml|MINING_V3_HANDOFF_TOKEN/);
+  const refreshedBootstrap = handoffReadGate.lastIndexOf("build-bootstrap");
+  const finalRender = handoffReadGate.lastIndexOf("staging-article-feedback-canary.mjs render");
+  const finalVerify = handoffReadGate.lastIndexOf("staging-article-feedback-canary.mjs verify");
+  const liveDeploy = handoffReadGate.lastIndexOf("wrangler deploy --config");
+  assert.ok(refreshedBootstrap < finalRender && finalRender < finalVerify && finalVerify < liveDeploy);
 });
 
 test("every audio phase uses bounded grants and always restores the flag-off baseline", () => {
