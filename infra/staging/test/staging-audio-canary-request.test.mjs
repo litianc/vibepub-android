@@ -45,6 +45,50 @@ test("reads one exact post-ASR staging identity without exposing the token", asy
   assert.doesNotMatch(JSON.stringify(result), /token/i);
 });
 
+test("retries a transient status while the deployed Worker is propagating", async () => {
+  let calls = 0;
+  const result = await readStagingAudioCanaryStatus({
+    ...base,
+    expectedDecision: "v3_pending_start",
+    retryDelayMs: 0,
+    fetchImpl: async () => {
+      calls += 1;
+      return calls === 1 ? new Response(null, { status: 503 }) : Response.json(status);
+    },
+  });
+  assert.deepEqual(result, status);
+  assert.equal(calls, 2);
+});
+
+test("reports a safe HTTP status without retrying a permanent rejection", async () => {
+  let calls = 0;
+  await assert.rejects(() => readStagingAudioCanaryStatus({
+    ...base,
+    expectedDecision: "v3_pending_start",
+    retryDelayMs: 0,
+    fetchImpl: async () => {
+      calls += 1;
+      return new Response(null, { status: 401 });
+    },
+  }), error => error instanceof StagingAudioCanaryRequestError && error.code === "audio_canary_status_http_401");
+  assert.equal(calls, 1);
+});
+
+test("keeps transient retries bounded even when a caller requests more", async () => {
+  let calls = 0;
+  await assert.rejects(() => readStagingAudioCanaryStatus({
+    ...base,
+    expectedDecision: "v3_pending_start",
+    maxAttempts: 999,
+    retryDelayMs: 0,
+    fetchImpl: async () => {
+      calls += 1;
+      return new Response(null, { status: 503 });
+    },
+  }), error => error instanceof StagingAudioCanaryRequestError && error.code === "audio_canary_status_http_503");
+  assert.equal(calls, 6);
+});
+
 test("rejects another origin, source, decision, or malformed identity before it can be used", async () => {
   let calls = 0;
   const fetchImpl = async () => { calls += 1; return Response.json(status); };
