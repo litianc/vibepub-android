@@ -6,6 +6,9 @@ const RUN_ID = /^run_v3_[a-f0-9]{64}$/;
 const HANDOFF_ID = /^handoff_v3_[a-f0-9]{64}$/;
 const ARTICLE_ID = /^article_v3_[a-f0-9]{64}$/;
 const HASH = /^sha256:[a-f0-9]{64}$/;
+const TRANSIENT_STATUS_CODES = new Set([404, 429, 500, 502, 503, 504]);
+const DEFAULT_STATUS_ATTEMPTS = 6;
+const DEFAULT_RETRY_DELAY_MS = 2_000;
 
 export class StagingAudioCanaryRequestError extends Error {
   constructor(code, message = code) {
@@ -66,17 +69,34 @@ export async function readStagingAudioCanaryStatus(input) {
   if (typeof input.workspaceId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/.test(input.workspaceId)) fail("audio_canary_workspace_invalid");
   if (input.expectedDecision !== "v3_pending_start" && input.expectedDecision !== "accepted") fail("audio_canary_decision_invalid");
   if (typeof input.token !== "string" || !input.token.trim()) fail("audio_canary_token_missing");
+  const maxAttempts = Number.isSafeInteger(input.maxAttempts) && input.maxAttempts > 0
+    ? Math.min(input.maxAttempts, DEFAULT_STATUS_ATTEMPTS)
+    : DEFAULT_STATUS_ATTEMPTS;
+  const retryDelayMs = Number.isSafeInteger(input.retryDelayMs) && input.retryDelayMs >= 0
+    ? Math.min(input.retryDelayMs, DEFAULT_RETRY_DELAY_MS)
+    : DEFAULT_RETRY_DELAY_MS;
   let response;
-  try {
-    response = await input.fetchImpl(`${baseUrl}/api/internal/v3/mining-handoffs/status`, {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${input.token}` },
-      body: JSON.stringify({ source_key: key }),
-      redirect: "error",
-      signal: AbortSignal.timeout(30_000),
-    });
-  } catch { fail("audio_canary_status_unavailable"); }
-  if (response.status !== 200) fail("audio_canary_status_unavailable");
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      response = await input.fetchImpl(`${baseUrl}/api/internal/v3/mining-handoffs/status`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${input.token}` },
+        body: JSON.stringify({ source_key: key }),
+        redirect: "error",
+        signal: AbortSignal.timeout(30_000),
+      });
+    } catch {
+      response = undefined;
+    }
+    if (response?.status === 200) break;
+    if (response && !TRANSIENT_STATUS_CODES.has(response.status)) {
+      fail(`audio_canary_status_http_${response.status}`);
+    }
+    if (attempt === maxAttempts) {
+      fail(response ? `audio_canary_status_http_${response.status}` : "audio_canary_status_unavailable");
+    }
+    await new Promise(resolve => setTimeout(resolve, retryDelayMs));
+  }
   let body;
   try { body = await response.json(); } catch { fail("audio_canary_status_invalid"); }
   return validateStatus(body, input.expectedDecision, { userId: input.userId, workspaceId: input.workspaceId,
