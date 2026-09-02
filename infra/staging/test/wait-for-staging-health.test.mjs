@@ -24,7 +24,7 @@ function health(mainDeployedAt, imageDeployedAt = imageTime, wechatDeployedAt = 
       valid: true,
       operator_run_hash: canaryMarker,
       candidate_commit: commit,
-      expires_at: "2026-09-02T04:30:00.000Z",
+      expires_at: "2099-09-02T04:30:00.000Z",
       cleanup_pending: false,
     },
     adapters: {
@@ -64,7 +64,7 @@ test("waits through stale health evidence and returns only after all canary mark
   assert.deepEqual(result.canary, {
     operator_run_hash: operatorRunHash,
     candidate_commit: commit,
-    expires_at: "2026-09-02T04:30:00.000Z",
+    expires_at: "2099-09-02T04:30:00.000Z",
     cleanup_pending: false,
   });
 });
@@ -134,6 +134,31 @@ test("does not retry a terminal health response", async () => {
       sleep: async () => {},
     }),
     /staging canary health returned terminal HTTP 403/,
+  );
+  assert.equal(calls, 1);
+});
+
+test("does not accept an expired canary even when its cached valid flag is true", async () => {
+  const payload = health(mainTime);
+  payload.staging_feedback_canary.expires_at = "2000-01-01T00:00:00.000Z";
+  let calls = 0;
+
+  await assert.rejects(
+    () => waitForStagingHealth({
+      url: "https://staging.example.test/health?adapters=1",
+      sha: commit,
+      ref,
+      expectedMainDeployedAt: mainTime,
+      expectedOperatorRunHash: operatorRunHash,
+      expectedDeploymentMarkers: { main: deploymentMarker },
+      attempts: 1,
+      fetchImpl: async () => {
+        calls += 1;
+        return Response.json(payload);
+      },
+      sleep: async () => {},
+    }),
+    /staging canary deployment evidence did not converge/,
   );
   assert.equal(calls, 1);
 });
