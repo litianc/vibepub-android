@@ -57,6 +57,7 @@ jobs:
       - name: Run focused canary, adapter, and Worker validation
         run: |
           node --test infra/staging/test/staging-https-image-canary.test.mjs
+          node --test infra/staging/test/wait-for-staging-health.test.mjs
           npm test --prefix infra/image-generation-adapter
           npm run typecheck --prefix infra/image-generation-adapter
           npm run typecheck --prefix infra/worker
@@ -152,22 +153,42 @@ jobs:
       - name: Deploy the fixed HTTPS image adapter
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: timeout 180s npx --prefix infra/image-generation-adapter wrangler deploy --config "$RUNNER_TEMP/canary-config/image.wrangler.toml" --message "staging HTTPS image canary ${GITHUB_RUN_ID}" --var "DEPLOY_COMMIT:${GITHUB_SHA}" --var "DEPLOY_REF:${GITHUB_REF_NAME}" --var "DEPLOYED_AT:$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        run: |
+          CANARY_IMAGE_DEPLOYED_AT="$(node -e 'process.stdout.write(new Date().toISOString())')"
+          CANARY_DEPLOYMENT_MARKER="$(node -e 'const c=require("crypto");process.stdout.write(`sha256:${c.createHash("sha256").update(process.argv.slice(1).join(":")).digest("hex")}`)' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "https-image")"
+          timeout 180s npx --prefix infra/image-generation-adapter wrangler deploy --config "$RUNNER_TEMP/canary-config/image.wrangler.toml" --message "staging HTTPS image canary ${GITHUB_RUN_ID}" --var "DEPLOY_COMMIT:${GITHUB_SHA}" --var "DEPLOY_REF:${GITHUB_REF_NAME}" --var "DEPLOYED_AT:${CANARY_IMAGE_DEPLOYED_AT}" --var "DEPLOYMENT_MARKER:${CANARY_DEPLOYMENT_MARKER}"
+          echo "CANARY_IMAGE_DEPLOYED_AT=$CANARY_IMAGE_DEPLOYED_AT" >> "$GITHUB_ENV"
+          echo "CANARY_DEPLOYMENT_MARKER=$CANARY_DEPLOYMENT_MARKER" >> "$GITHUB_ENV"
 
       - name: Deploy the exact-user visual main gate with WeChat off
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: timeout 180s npx --prefix infra/worker wrangler deploy --config "$RUNNER_TEMP/canary-config/main.wrangler.toml" --message "staging HTTPS image canary ${GITHUB_RUN_ID}" --var "DEPLOY_COMMIT:${GITHUB_SHA}" --var "DEPLOY_REF:${GITHUB_REF_NAME}" --var "DEPLOYED_AT:$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        run: |
+          CANARY_MAIN_DEPLOYED_AT="$(node -e 'process.stdout.write(new Date().toISOString())')"
+          timeout 180s npx --prefix infra/worker wrangler deploy --config "$RUNNER_TEMP/canary-config/main.wrangler.toml" --message "staging HTTPS image canary ${GITHUB_RUN_ID}" --var "DEPLOY_COMMIT:${GITHUB_SHA}" --var "DEPLOY_REF:${GITHUB_REF_NAME}" --var "DEPLOYED_AT:${CANARY_MAIN_DEPLOYED_AT}" --var "DEPLOYMENT_MARKER:${CANARY_DEPLOYMENT_MARKER}"
+          echo "CANARY_MAIN_DEPLOYED_AT=$CANARY_MAIN_DEPLOYED_AT" >> "$GITHUB_ENV"
 
       - name: Prove the attested origin serves this exact reviewed deployment
         run: |
-          node -e 'const fs=require("fs");const url=`${process.env.STAGING_ATTESTED_BASE_URL}/health?adapters=1`;fetch(url,{redirect:"manual",signal:AbortSignal.timeout(30000)}).then(async response=>{if(response.status!==200)throw new Error("staging health unavailable");const body=new Uint8Array(await response.arrayBuffer());if(body.byteLength>1024*1024)throw new Error("staging health oversized");fs.writeFileSync(process.argv[1],body)}).catch(()=>process.exit(1))' "$RUNNER_TEMP/canary-health.json"
-          node infra/staging/verify-staging-health.mjs "$RUNNER_TEMP/canary-health.json" "$GITHUB_SHA" "$GITHUB_REF_NAME"
+          rm -f "$RUNNER_TEMP/canary-health.json"
+          node infra/staging/wait-for-staging-health.mjs \
+            --url "$STAGING_ATTESTED_BASE_URL/health?adapters=1" \
+            --out "$RUNNER_TEMP/canary-health.json" \
+            --commit "$GITHUB_SHA" \
+            --ref "$GITHUB_REF_NAME" \
+            --expected-main-deployed-at "$CANARY_MAIN_DEPLOYED_AT" \
+            --expected-image-deployed-at "$CANARY_IMAGE_DEPLOYED_AT" \
+            --expected-deployment-marker "$CANARY_DEPLOYMENT_MARKER" \
+            --expected-image-deployment-marker "$CANARY_DEPLOYMENT_MARKER" \
+            --required-adapters image \
+            --attempts 20 \
+            --delay-ms 5000
 
       - name: Start exactly the prepared Mining V3 handoff
         env:
           MINING_V3_HANDOFF_TOKEN: ${{ secrets.MINING_V3_HANDOFF_TOKEN }}
         run: |
+          test -s "$RUNNER_TEMP/canary-health.json" || { echo "::error::verified Staging deployment evidence is missing; Mining is blocked"; exit 1; }
           node infra/staging/staging-https-image-canary-request.mjs start \
             --base-url "$STAGING_BASE_URL" \
             --canary "$RUNNER_TEMP/canary.json" \
@@ -252,6 +273,7 @@ jobs:
           retention-days: 7
           path: |
             ${{ runner.temp }}/canary.json
+            ${{ runner.temp }}/canary-health.json
             ${{ runner.temp }}/start-response.json
             ${{ runner.temp }}/canary-terminal.json
             ${{ runner.temp }}/canary-events.json

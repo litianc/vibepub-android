@@ -97,6 +97,26 @@ describe("wechat publishing adapter", () => {
     });
   });
 
+  it("returns the supplied deployment marker without exposing provider credentials", async () => {
+    const response = await adapter.fetch(new Request("https://adapter.test/health"), {
+      DEPLOY_COMMIT: "abc123",
+      DEPLOY_REF: "codex/staging",
+      DEPLOYED_AT: "2026-07-22T00:00:00.000Z",
+      DEPLOYMENT_MARKER: `sha256:${"a".repeat(64)}`,
+      WECHAT_PUBLISHING_TOKEN: "synthetic-secret",
+    } as Env);
+    expect(await response.json()).toEqual({
+      ok: true,
+      service: "wechat-publishing-adapter",
+      version: {
+        commit: "abc123",
+        ref: "codex/staging",
+        deployed_at: "2026-07-22T00:00:00.000Z",
+        deployment_marker: `sha256:${"a".repeat(64)}`,
+      },
+    });
+  });
+
   it("rejects legacy tokens before parsing JSON", async () => {
     const response = await adapter.fetch(new Request("https://adapter.test/internal/v3/wechat/upload", { method: "POST", headers: { authorization: "Bearer files-token" }, body: "not-json" }), env());
     expect(response.status).toBe(401);

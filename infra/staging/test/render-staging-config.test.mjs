@@ -376,18 +376,70 @@ test("records structurally proven deployment identifiers and requires one fully 
   assert.throws(() => captureDeploymentBaseline(1, "", "network timeout"), /wrangler deployments list failed/);
 
   const version = { commit: "a".repeat(40), ref: "codex/wave2e", deployed_at: "2026-07-22T12:00:00Z" };
+  const operatorRunHash = `sha256:${"c".repeat(64)}`;
+  const deploymentMarker = `sha256:${"e".repeat(64)}`;
+  const markedVersion = { ...version, deployment_marker: deploymentMarker };
   const health = {
     ok: true,
     service: "vibepub-api",
-    version,
+    version: markedVersion,
+    staging_feedback_canary: {
+      configured: true,
+      valid: true,
+      operator_run_hash: operatorRunHash,
+      candidate_commit: version.commit,
+      expires_at: "2026-07-22T13:00:00.000Z",
+      cleanup_pending: false,
+    },
     adapters: {
-      writing: { service: "writing-agent", version },
-      review: { service: "editorial-review-agent", version },
-      image: { service: "image-generation-adapter", version },
-      wechat: { service: "wechat-publishing-adapter", version },
+      writing: { service: "writing-agent", version: markedVersion },
+      review: { service: "editorial-review-agent", version: markedVersion },
+      image: { service: "image-generation-adapter", version: markedVersion },
+      wechat: { service: "wechat-publishing-adapter", version: markedVersion },
     },
   };
   assert.equal(verifyStagingHealth(health, version.commit, version.ref).adapters.image.commit, version.commit);
+  assert.equal(verifyStagingHealth(health, version.commit, version.ref, version.deployed_at, {
+    image: version.deployed_at,
+    wechat: version.deployed_at,
+  }, operatorRunHash, { main: deploymentMarker, adapters: { image: deploymentMarker, wechat: deploymentMarker } }).main.deployed_at, version.deployed_at);
+  const mainOnlyHealth = structuredClone(health);
+  for (const [index, role] of ["writing", "review", "image", "wechat"].entries()) {
+    mainOnlyHealth.adapters[role].version = { ...mainOnlyHealth.adapters[role].version, commit: String.fromCharCode(98 + index).repeat(40), ref: "previous-release" };
+  }
+  const mainOnlyEvidence = verifyStagingHealth(mainOnlyHealth, version.commit, version.ref, version.deployed_at, {}, operatorRunHash, { main: deploymentMarker }, []);
+  assert.equal(mainOnlyEvidence.main.commit, version.commit);
+  assert.equal(mainOnlyEvidence.adapters.image.ref, "previous-release");
+  assert.deepEqual(mainOnlyEvidence.canary, {
+    operator_run_hash: operatorRunHash,
+    candidate_commit: version.commit,
+    expires_at: "2026-07-22T13:00:00.000Z",
+    cleanup_pending: false,
+  });
+  assert.throws(
+    () => verifyStagingHealth(health, version.commit, version.ref, undefined, {}, undefined, {}, ["unknown"]),
+    /staging required adapter set is invalid/,
+  );
+  assert.throws(
+    () => verifyStagingHealth(health, version.commit, version.ref, "2026-07-22T12:00:01Z"),
+    /staging main deployment marker is stale/,
+  );
+  health.adapters.image.version = { ...version, deployed_at: "2026-07-22T11:59:59.999Z" };
+  assert.throws(
+    () => verifyStagingHealth(health, version.commit, version.ref, version.deployed_at, { image: version.deployed_at }),
+    /staging image adapter deployment marker is stale/,
+  );
+  health.adapters.image.version = version;
+  health.staging_feedback_canary.operator_run_hash = `sha256:${"d".repeat(64)}`;
+  assert.throws(
+    () => verifyStagingHealth(health, version.commit, version.ref, version.deployed_at, {}, operatorRunHash),
+    /staging main canary marker is stale/,
+  );
+  health.staging_feedback_canary.operator_run_hash = operatorRunHash;
+  assert.throws(
+    () => verifyStagingHealth(health, version.commit, version.ref, version.deployed_at, {}, operatorRunHash, { main: `sha256:${"f".repeat(64)}` }),
+    /staging main deployment marker is stale/,
+  );
   health.adapters.wechat.version = { ...version, commit: "b".repeat(40) };
   assert.throws(() => verifyStagingHealth(health, version.commit, version.ref), /wechat adapter/);
   health.adapters.wechat.version = version;
