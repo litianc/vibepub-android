@@ -63,7 +63,8 @@ export function verifyStagingHealth(
         canary.configured !== true || canary.valid !== true ||
         canary.operator_run_hash !== expectedOperatorRunHash ||
         canary.candidate_commit !== sha || typeof canary.expires_at !== "string" ||
-        Number.isNaN(Date.parse(canary.expires_at)) || canary.cleanup_pending !== false) {
+        Number.isNaN(Date.parse(canary.expires_at)) || Date.parse(canary.expires_at) <= Date.now() ||
+        canary.cleanup_pending !== false) {
       throw new Error("staging main canary marker is stale");
     }
   }

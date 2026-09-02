@@ -388,7 +388,7 @@ test("records structurally proven deployment identifiers and requires one fully 
       valid: true,
       operator_run_hash: operatorRunHash,
       candidate_commit: version.commit,
-      expires_at: "2026-07-22T13:00:00.000Z",
+      expires_at: "2099-07-22T13:00:00.000Z",
       cleanup_pending: false,
     },
     adapters: {
@@ -413,7 +413,7 @@ test("records structurally proven deployment identifiers and requires one fully 
   assert.deepEqual(mainOnlyEvidence.canary, {
     operator_run_hash: operatorRunHash,
     candidate_commit: version.commit,
-    expires_at: "2026-07-22T13:00:00.000Z",
+    expires_at: "2099-07-22T13:00:00.000Z",
     cleanup_pending: false,
   });
   assert.throws(
