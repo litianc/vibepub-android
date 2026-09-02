@@ -73,6 +73,7 @@ jobs:
           node --test infra/staging/test/staging-audio-canary-request.test.mjs
           node --test infra/staging/test/staging-article-feedback-canary.test.mjs
           node --test infra/staging/test/staging-article-feedback-audio-canary-workflow.test.mjs
+          node --test infra/staging/test/wait-for-staging-health.test.mjs
 
   canary:
     name: Run one exact Staging audio phase
@@ -279,9 +280,13 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
-          CANARY_DEPLOYED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          timeout 180s npx --prefix infra/worker wrangler deploy --config "$RUNNER_TEMP/canary-config/main.wrangler.toml" --message "staging feedback main canary ${GITHUB_RUN_ID}" --var "DEPLOY_COMMIT:${GITHUB_SHA}" --var "DEPLOY_REF:${GITHUB_REF_NAME}" --var "DEPLOYED_AT:${CANARY_DEPLOYED_AT}" --var "STAGING_FEEDBACK_CANARY_OPERATOR_RUN_ID:${GITHUB_RUN_ID}"
+          CANARY_DEPLOYED_AT="$(node -e 'process.stdout.write(new Date().toISOString())')"
+          CANARY_OPERATOR_RUN_HASH="$(node -e 'const c=require("crypto");process.stdout.write(`sha256:${c.createHash("sha256").update(process.argv[1]).digest("hex")}`)' "$GITHUB_RUN_ID")"
+          CANARY_DEPLOYMENT_MARKER="$(node -e 'const c=require("crypto");process.stdout.write(`sha256:${c.createHash("sha256").update(process.argv.slice(1).join(":")).digest("hex")}`)' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$PHASE")"
+          timeout 180s npx --prefix infra/worker wrangler deploy --config "$RUNNER_TEMP/canary-config/main.wrangler.toml" --message "staging feedback main canary ${GITHUB_RUN_ID}" --var "DEPLOY_COMMIT:${GITHUB_SHA}" --var "DEPLOY_REF:${GITHUB_REF_NAME}" --var "DEPLOYED_AT:${CANARY_DEPLOYED_AT}" --var "DEPLOYMENT_MARKER:${CANARY_DEPLOYMENT_MARKER}" --var "STAGING_FEEDBACK_CANARY_OPERATOR_RUN_ID:${GITHUB_RUN_ID}"
           echo "CANARY_DEPLOYED_AT=$CANARY_DEPLOYED_AT" >> "$GITHUB_ENV"
+          echo "CANARY_OPERATOR_RUN_HASH=$CANARY_OPERATOR_RUN_HASH" >> "$GITHUB_ENV"
+          echo "CANARY_DEPLOYMENT_MARKER=$CANARY_DEPLOYMENT_MARKER" >> "$GITHUB_ENV"
           touch "$RUNNER_TEMP/main-canary-deployed"
 
       - name: Deploy the exact image canary configuration
@@ -289,7 +294,9 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
-          timeout 180s npx --prefix infra/image-generation-adapter wrangler deploy --config "$RUNNER_TEMP/canary-config/image.wrangler.toml" --message "staging feedback image canary ${GITHUB_RUN_ID}" --var "DEPLOY_COMMIT:${GITHUB_SHA}" --var "DEPLOY_REF:${GITHUB_REF_NAME}" --var "DEPLOYED_AT:$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          CANARY_IMAGE_DEPLOYED_AT="$(node -e 'process.stdout.write(new Date().toISOString())')"
+          timeout 180s npx --prefix infra/image-generation-adapter wrangler deploy --config "$RUNNER_TEMP/canary-config/image.wrangler.toml" --message "staging feedback image canary ${GITHUB_RUN_ID}" --var "DEPLOY_COMMIT:${GITHUB_SHA}" --var "DEPLOY_REF:${GITHUB_REF_NAME}" --var "DEPLOYED_AT:${CANARY_IMAGE_DEPLOYED_AT}" --var "DEPLOYMENT_MARKER:${CANARY_DEPLOYMENT_MARKER}"
+          echo "CANARY_IMAGE_DEPLOYED_AT=$CANARY_IMAGE_DEPLOYED_AT" >> "$GITHUB_ENV"
           touch "$RUNNER_TEMP/image-canary-deployed"
 
       - name: Deploy the exact WeChat canary configuration
@@ -297,13 +304,37 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
-          timeout 180s npx --prefix infra/wechat-publishing-adapter wrangler deploy --config "$RUNNER_TEMP/canary-config/wechat.wrangler.toml" --message "staging feedback WeChat canary ${GITHUB_RUN_ID}" --var "DEPLOY_COMMIT:${GITHUB_SHA}" --var "DEPLOY_REF:${GITHUB_REF_NAME}" --var "DEPLOYED_AT:$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          CANARY_WECHAT_DEPLOYED_AT="$(node -e 'process.stdout.write(new Date().toISOString())')"
+          timeout 180s npx --prefix infra/wechat-publishing-adapter wrangler deploy --config "$RUNNER_TEMP/canary-config/wechat.wrangler.toml" --message "staging feedback WeChat canary ${GITHUB_RUN_ID}" --var "DEPLOY_COMMIT:${GITHUB_SHA}" --var "DEPLOY_REF:${GITHUB_REF_NAME}" --var "DEPLOYED_AT:${CANARY_WECHAT_DEPLOYED_AT}" --var "DEPLOYMENT_MARKER:${CANARY_DEPLOYMENT_MARKER}"
+          echo "CANARY_WECHAT_DEPLOYED_AT=$CANARY_WECHAT_DEPLOYED_AT" >> "$GITHUB_ENV"
           touch "$RUNNER_TEMP/wechat-canary-deployed"
 
       - name: Prove the exact reviewed Staging deployment is live
         run: |
-          node -e 'const fs=require("fs"),url=`${process.env.STAGING_ATTESTED_BASE_URL}/health?adapters=1`;fetch(url,{redirect:"manual",signal:AbortSignal.timeout(30000)}).then(async r=>{if(r.status!==200)throw new Error("staging health unavailable");fs.writeFileSync(process.argv[1],new Uint8Array(await r.arrayBuffer()))}).catch(()=>process.exit(1))' "$RUNNER_TEMP/canary-health.json"
-          node infra/staging/verify-staging-health.mjs "$RUNNER_TEMP/canary-health.json" "$GITHUB_SHA" "$GITHUB_REF_NAME"
+          rm -f "$RUNNER_TEMP/canary-health.json"
+          HEALTH_ARGS=(
+            --url "$STAGING_ATTESTED_BASE_URL/health?adapters=1"
+            --out "$RUNNER_TEMP/canary-health.json"
+            --commit "$GITHUB_SHA"
+            --ref "$GITHUB_REF_NAME"
+            --expected-main-deployed-at "$CANARY_DEPLOYED_AT"
+            --expected-operator-run-hash "$CANARY_OPERATOR_RUN_HASH"
+            --expected-deployment-marker "$CANARY_DEPLOYMENT_MARKER"
+            --attempts 20
+            --delay-ms 5000
+          )
+          if [ "$PHASE" != "transcribe" ]; then
+            HEALTH_ARGS+=(
+              --required-adapters "writing,review,image,wechat"
+              --expected-image-deployed-at "$CANARY_IMAGE_DEPLOYED_AT"
+              --expected-wechat-deployed-at "$CANARY_WECHAT_DEPLOYED_AT"
+              --expected-image-deployment-marker "$CANARY_DEPLOYMENT_MARKER"
+              --expected-wechat-deployment-marker "$CANARY_DEPLOYMENT_MARKER"
+            )
+          else
+            HEALTH_ARGS+=(--required-adapters none)
+          fi
+          node infra/staging/wait-for-staging-health.mjs "${HEALTH_ARGS[@]}"
 
       - name: Run the bounded Staging Mining phase
         env:
@@ -330,6 +361,7 @@ jobs:
           STAGING_CANARY_EXPECTED_PARENT_VERSION_ID: ${{ inputs.parent_version_id }}
           STAGING_CANARY_EXPECTED_WORKSPACE_ID: ${{ inputs.workspace_id }}
         run: |
+          test -s "$RUNNER_TEMP/canary-health.json" || { echo "::error::verified Staging deployment evidence is missing; Mining is blocked"; exit 1; }
           for name in CLOUDFLARE_ACCOUNT_ID R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY VOLC_ASR_APPID VOLC_ASR_ACCESS_TOKEN VOLC_ASR_RESOURCE_ID MINING_SERVICE_TOKEN MINING_V3_HANDOFF_TOKEN; do
             test -n "${!name}" || { echo "::error::$name is required"; exit 1; }
           done
@@ -517,6 +549,7 @@ jobs:
           if-no-files-found: error
           path: |
             ${{ runner.temp }}/staging-feedback-evidence.json
+            ${{ runner.temp }}/canary-health.json
             ${{ runner.temp }}/main-cleanup-deployed
             ${{ runner.temp }}/image-cleanup-deployed
             ${{ runner.temp }}/wechat-cleanup-deployed

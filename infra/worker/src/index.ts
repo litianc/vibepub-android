@@ -58,6 +58,7 @@ export interface Env {
   DEPLOY_COMMIT?: string;
   DEPLOY_REF?: string;
   DEPLOYED_AT?: string;
+  DEPLOYMENT_MARKER?: string;
   WRITING_AGENT_BASE_URL?: string;
   WRITING_AGENT_TOKEN?: string;
   REVIEW_AGENT_BASE_URL?: string;
@@ -3378,11 +3379,14 @@ function json(body: unknown, status = 200, extraHeaders: Record<string, string> 
 }
 
 function deploymentVersion(env: Env): Record<string, string | null> {
-  return {
+  const version: Record<string, string | null> = {
     commit: metadataValue(env.DEPLOY_COMMIT),
     ref: metadataValue(env.DEPLOY_REF),
     deployed_at: metadataValue(env.DEPLOYED_AT),
   };
+  const deploymentMarker = metadataValue(env.DEPLOYMENT_MARKER);
+  if (deploymentMarker) version.deployment_marker = deploymentMarker;
+  return version;
 }
 
 const ADAPTER_HEALTH_SERVICES = {
@@ -3408,11 +3412,14 @@ async function collectAdapterHealth(env: Env): Promise<Record<keyof typeof ADAPT
       throw new Error("adapter health response invalid");
     }
     const version = payload.version as Record<string, unknown>;
-    const normalized = {
+    const normalized: Record<string, string | null> = {
       commit: typeof version.commit === "string" ? version.commit : null,
       ref: typeof version.ref === "string" ? version.ref : null,
       deployed_at: typeof version.deployed_at === "string" ? version.deployed_at : null,
     };
+    if (typeof version.deployment_marker === "string" && version.deployment_marker.trim()) {
+      normalized.deployment_marker = version.deployment_marker;
+    }
     return [role, { service: expected.service, version: normalized }] as const;
   }));
   return Object.fromEntries(entries) as unknown as Record<keyof typeof ADAPTER_HEALTH_SERVICES, AdapterHealth>;

@@ -148,6 +148,26 @@ describe("controlled visual adapter", () => {
     });
   });
 
+  it("returns the supplied deployment marker without exposing provider credentials", async () => {
+    const response = await adapter.fetch(new Request("https://adapter.test/health"), {
+      DEPLOY_COMMIT: "abc123",
+      DEPLOY_REF: "codex/staging",
+      DEPLOYED_AT: "2026-07-22T00:00:00.000Z",
+      DEPLOYMENT_MARKER: `sha256:${"a".repeat(64)}`,
+      GPT_IMAGE_API_KEY: "synthetic-secret",
+    } as any);
+    expect(await response.json()).toEqual({
+      ok: true,
+      service: "image-generation-adapter",
+      version: {
+        commit: "abc123",
+        ref: "codex/staging",
+        deployed_at: "2026-07-22T00:00:00.000Z",
+        deployment_marker: `sha256:${"a".repeat(64)}`,
+      },
+    });
+  });
+
   it("authenticates before parsing JSON and accepts only Authorization Bearer", async () => {
     const response = await adapter.fetch(request("/internal/v3/visual/plan", "wrong-token", "not-json"), env());
     expect(response.status).toBe(401);

@@ -21,6 +21,7 @@ export type Env = {
   DEPLOY_COMMIT?: string;
   DEPLOY_REF?: string;
   DEPLOYED_AT?: string;
+  DEPLOYMENT_MARKER?: string;
 };
 
 type Operation = "resolve_account" | "upload_image" | "write_draft" | "get_draft" | "find_draft";
@@ -132,9 +133,16 @@ export class AdapterError extends Error {
 
 function json(value: unknown, status = 200): Response { return Response.json(value, { status }); }
 
-function deploymentVersion(env: Pick<Env, "DEPLOY_COMMIT" | "DEPLOY_REF" | "DEPLOYED_AT">) {
+function deploymentVersion(env: Pick<Env, "DEPLOY_COMMIT" | "DEPLOY_REF" | "DEPLOYED_AT" | "DEPLOYMENT_MARKER">) {
   const value = (input: string | undefined) => input?.trim() || null;
-  return { commit: value(env.DEPLOY_COMMIT), ref: value(env.DEPLOY_REF), deployed_at: value(env.DEPLOYED_AT) };
+  const version: Record<string, string | null> = {
+    commit: value(env.DEPLOY_COMMIT),
+    ref: value(env.DEPLOY_REF),
+    deployed_at: value(env.DEPLOYED_AT),
+  };
+  const deploymentMarker = value(env.DEPLOYMENT_MARKER);
+  if (deploymentMarker) version.deployment_marker = deploymentMarker;
+  return version;
 }
 export function canonical(value: unknown): string {
   if (value === undefined) return "null";

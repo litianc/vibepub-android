@@ -443,12 +443,14 @@ test("Mining V3 handoff accepts only its dedicated bearer before dispatch", asyn
 });
 
 test("health check exposes deploy version metadata", async () => {
+  const deploymentMarker = `sha256:${"a".repeat(64)}`;
   const response = await worker.fetch(
     new Request("https://example.test/health"),
     createEnv({
       DEPLOY_COMMIT: "abc1234",
       DEPLOY_REF: "main",
       DEPLOYED_AT: "2026-07-10T05:32:00Z",
+      DEPLOYMENT_MARKER: deploymentMarker,
     }),
     createExecutionContext(),
   );
@@ -461,17 +463,19 @@ test("health check exposes deploy version metadata", async () => {
     commit: "abc1234",
     ref: "main",
     deployed_at: "2026-07-10T05:32:00Z",
+    deployment_marker: deploymentMarker,
   });
 });
 
 test("main health aggregates private adapter version evidence without provider work", async () => {
+  const deploymentMarker = `sha256:${"b".repeat(64)}`;
   const adapter = (service) => ({
     async fetch(request) {
       assert.equal(new URL(request.url).pathname, "/health");
       return Response.json({
         ok: true,
         service,
-        version: { commit: "abc1234", ref: "staging", deployed_at: "2026-07-22T10:00:00Z" },
+        version: { commit: "abc1234", ref: "staging", deployed_at: "2026-07-22T10:00:00Z", deployment_marker: deploymentMarker },
       });
     },
   });
@@ -489,6 +493,7 @@ test("main health aggregates private adapter version evidence without provider w
   const body = await response.json();
   assert.deepEqual(Object.keys(body.adapters).sort(), ["image", "review", "wechat", "writing"]);
   assert.equal(body.adapters.wechat.version.commit, "abc1234");
+  assert.equal(body.adapters.image.version.deployment_marker, deploymentMarker);
 });
 
 test("main health fails closed when a private adapter health response is unavailable", async () => {

@@ -29,6 +29,7 @@ test("staging audio mining binds exact isolated resources and never receives Pro
   assert.match(workflow, /MINING_V3_HANDOFF_ENABLED: "true"/);
   assert.match(workflow, /CLEANUP_PERMANENT_AUDIO_FAILURES: "false"/);
   assert.match(workflow, /validate-staging-audio-canary-input\.mjs/);
+  assert.match(workflow, /wait-for-staging-health\.test\.mjs/);
   assert.doesNotMatch(workflow, /vibepub\.litianc\.cn|WECHAT_APP_ID|WECHAT_APP_SECRET|WECHAT_PROXY|GITHUB_PAT|FILES_TOKEN/);
 });
 
@@ -227,6 +228,29 @@ test("bounds Mining time and gives protected D1 checks both Cloudflare credentia
 test("full feedback grants are release-bound and use protected Staging WeChat policy values", () => {
   assert.match(workflow, /candidate_commit=process\.env\.GITHUB_SHA/);
   assert.match(workflow, /manifest_hash=process\.env\.STAGING_MANIFEST_HASH/);
+  assert.match(workflow, /CANARY_DEPLOYED_AT=.*toISOString/);
+  assert.match(workflow, /CANARY_OPERATOR_RUN_HASH=.*sha256/);
+  assert.match(workflow, /CANARY_DEPLOYMENT_MARKER=.*GITHUB_RUN_ATTEMPT.*PHASE/);
+  assert.match(workflow, /--var "DEPLOYMENT_MARKER:\$\{CANARY_DEPLOYMENT_MARKER\}"/);
+  assert.match(workflow, /CANARY_IMAGE_DEPLOYED_AT=.*toISOString/);
+  assert.match(workflow, /CANARY_WECHAT_DEPLOYED_AT=.*toISOString/);
+  assert.match(workflow, /wait-for-staging-health\.mjs/);
+  assert.match(workflow, /--expected-main-deployed-at "\$CANARY_DEPLOYED_AT"/);
+  assert.match(workflow, /--expected-operator-run-hash "\$CANARY_OPERATOR_RUN_HASH"/);
+  assert.match(workflow, /--expected-deployment-marker "\$CANARY_DEPLOYMENT_MARKER"/);
+  assert.match(workflow, /--expected-image-deployed-at "\$CANARY_IMAGE_DEPLOYED_AT"/);
+  assert.match(workflow, /--expected-wechat-deployed-at "\$CANARY_WECHAT_DEPLOYED_AT"/);
+  assert.match(workflow, /--expected-image-deployment-marker "\$CANARY_DEPLOYMENT_MARKER"/);
+  assert.match(workflow, /--expected-wechat-deployment-marker "\$CANARY_DEPLOYMENT_MARKER"/);
+  assert.match(workflow, /--required-adapters "writing,review,image,wechat"/);
+  assert.match(workflow, /--attempts 20/);
+  const deploymentProof = workflow.indexOf("Prove the exact reviewed Staging deployment is live");
+  const miningPhase = workflow.indexOf("Run the bounded Staging Mining phase");
+  assert.ok(deploymentProof > 0 && miningPhase > deploymentProof);
+  const miningBlock = workflow.slice(miningPhase, workflow.indexOf("Close the exact-user main gate", miningPhase));
+  assert.match(miningBlock, /test -s "\$RUNNER_TEMP\/canary-health\.json"/);
+  assert.match(miningBlock, /verified Staging deployment evidence is missing; Mining is blocked/);
+  assert.doesNotMatch(miningBlock, /if: always\(\)/);
   assert.match(workflow, /STAGING_WECHAT_ACCOUNT_BINDING_ID/);
   assert.match(workflow, /STAGING_WECHAT_PROVIDER_BASE_URL/);
   assert.match(workflow, /STAGING_WECHAT_MEDIA_URL_HOSTS/);
@@ -234,6 +258,17 @@ test("full feedback grants are release-bound and use protected Staging WeChat po
   assert.match(workflow, /--provider-base-url "\$STAGING_WECHAT_PROVIDER_BASE_URL"/);
   assert.match(workflow, /--media-url-hosts "\$STAGING_WECHAT_MEDIA_URL_HOSTS"/);
   assert.doesNotMatch(workflow, /WECHAT_APP_ID|WECHAT_APP_SECRET|GITHUB_PAT|FILES_TOKEN/);
+});
+
+test("transcribe proves only the exact main gate while full phases also prove image and WeChat", () => {
+  const imageDeploy = workflow.match(/- name: Deploy the exact image canary configuration[\s\S]*?- name: Deploy the exact WeChat canary configuration/)?.[0] || "";
+  const wechatDeploy = workflow.match(/- name: Deploy the exact WeChat canary configuration[\s\S]*?- name: Prove the exact reviewed Staging deployment is live/)?.[0] || "";
+  const healthProof = workflow.match(/- name: Prove the exact reviewed Staging deployment is live[\s\S]*?- name: Run the bounded Staging Mining phase/)?.[0] || "";
+  assert.match(imageDeploy, /if: inputs\.phase != 'transcribe'/);
+  assert.match(wechatDeploy, /if: inputs\.phase != 'transcribe'/);
+  assert.match(healthProof, /--expected-deployment-marker "\$CANARY_DEPLOYMENT_MARKER"/);
+  assert.match(healthProof, /if \[ "\$PHASE" != "transcribe" \]; then[\s\S]*--expected-image-deployment-marker[\s\S]*--expected-wechat-deployment-marker/);
+  assert.match(healthProof, /if \[ "\$PHASE" != "transcribe" \]; then[\s\S]*--required-adapters "writing,review,image,wechat"[\s\S]*else[\s\S]*--required-adapters none/);
 });
 
 test("shared phase evidence is redacted and cannot be mistaken for final Issue acceptance", () => {
@@ -244,5 +279,6 @@ test("shared phase evidence is redacted and cannot be mistaken for final Issue a
   assert.ok(upload);
   assert.doesNotMatch(upload, /staging-audio-identity\.json/);
   assert.doesNotMatch(upload, /feedback-canary-grant\.json/);
+  assert.match(upload, /canary-health\.json/);
   assert.doesNotMatch(workflow, /article_content|raw_text|transcript_ref/);
 });
